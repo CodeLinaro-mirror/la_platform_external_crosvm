@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use libc;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -12,7 +11,7 @@ use virtio_sys::{VHOST_VSOCK_SET_GUEST_CID, VHOST_VSOCK_SET_RUNNING};
 
 use super::{ioctl_result, Error, Result, Vhost};
 
-static DEVICE: &'static str = "/dev/vhost-vsock";
+static DEVICE: &str = "/dev/vhost-vsock";
 
 /// Handle for running VHOST_VSOCK ioctls.
 pub struct Vsock {

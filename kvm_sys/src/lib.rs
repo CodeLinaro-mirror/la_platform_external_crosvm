@@ -8,9 +8,6 @@
 
 use sys_util::{ioctl_io_nr, ioctl_ior_nr, ioctl_iow_nr, ioctl_iowr_nr};
 
-// Somehow this one gets missed by bindgen
-pub const KVM_EXIT_IO_OUT: ::std::os::raw::c_uint = 1;
-
 // Each of the below modules defines ioctls specific to their platform.
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -21,7 +18,6 @@ pub mod x86 {
     pub use crate::bindings::*;
     use sys_util::{ioctl_ior_nr, ioctl_iow_nr, ioctl_iowr_nr};
 
-    ioctl_iow_nr!(KVM_SET_GSI_ROUTING, KVMIO, 0x6a, kvm_irq_routing);
     ioctl_iowr_nr!(KVM_GET_MSR_INDEX_LIST, KVMIO, 0x02, kvm_msr_list);
     ioctl_iowr_nr!(KVM_GET_SUPPORTED_CPUID, KVMIO, 0x05, kvm_cpuid2);
     ioctl_iowr_nr!(KVM_GET_EMULATED_CPUID, KVMIO, 0x09, kvm_cpuid2);
@@ -47,6 +43,7 @@ pub mod x86 {
     ioctl_iow_nr!(KVM_SET_XSAVE, KVMIO, 0xa5, kvm_xsave);
     ioctl_ior_nr!(KVM_GET_XCRS, KVMIO, 0xa6, kvm_xcrs);
     ioctl_iow_nr!(KVM_SET_XCRS, KVMIO, 0xa7, kvm_xcrs);
+    ioctl_iowr_nr!(KVM_GET_SUPPORTED_HV_CPUID, KVMIO, 0xc1, kvm_cpuid2);
 }
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -98,6 +95,7 @@ ioctl_iow_nr!(
     kvm_coalesced_mmio_zone
 );
 ioctl_ior_nr!(KVM_ASSIGN_PCI_DEVICE, KVMIO, 0x69, kvm_assigned_pci_dev);
+ioctl_iow_nr!(KVM_SET_GSI_ROUTING, KVMIO, 0x6a, kvm_irq_routing);
 ioctl_iow_nr!(KVM_ASSIGN_DEV_IRQ, KVMIO, 0x70, kvm_assigned_irq);
 ioctl_io_nr!(KVM_REINJECT_CONTROL, KVMIO, 0x71);
 ioctl_iow_nr!(KVM_DEASSIGN_PCI_DEVICE, KVMIO, 0x72, kvm_assigned_pci_dev);

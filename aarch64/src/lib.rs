@@ -11,16 +11,17 @@ use std::io;
 use std::os::unix::io::FromRawFd;
 use std::sync::Arc;
 
-use arch::{RunnableLinuxVm, VmComponents, VmImage};
-use devices::{
-    get_serial_tty_string, Bus, BusError, PciConfigMmio, PciDevice, PciInterruptPin,
-    SerialParameters,
+use arch::{
+    get_serial_cmdline, GetSerialCmdlineError, RunnableLinuxVm, SerialHardware, SerialParameters,
+    VmComponents, VmImage,
 };
-use io_jail::Minijail;
+use devices::{Bus, BusError, PciAddress, PciConfigMmio, PciDevice, PciInterruptPin};
+use minijail::Minijail;
 use remain::sorted;
 use resources::SystemAllocator;
 use sync::Mutex;
 use sys_util::{EventFd, GuestAddress, GuestMemory, GuestMemoryError};
+use vm_control::VmIrqRequestSocket;
 
 use kvm::*;
 use kvm_sys::kvm_device_attr;
@@ -44,6 +45,7 @@ const AARCH64_AXI_BASE: u64 = 0x40000000;
 // address space.
 const AARCH64_GIC_DIST_BASE: u64 = AARCH64_AXI_BASE - AARCH64_GIC_DIST_SIZE;
 const AARCH64_GIC_CPUI_BASE: u64 = AARCH64_GIC_DIST_BASE - AARCH64_GIC_CPUI_SIZE;
+const AARCH64_GIC_REDIST_SIZE: u64 = 0x20000;
 
 // This is the minimum number of SPI interrupts aligned to 32 + 32 for the
 // PPI (16) and GSI (16).
@@ -107,6 +109,9 @@ const AARCH64_MMIO_SIZE: u64 = 0x100000;
 // Virtio devices start at SPI interrupt number 3
 const AARCH64_IRQ_BASE: u32 = 3;
 
+// PMU PPI interrupt, same as qemu
+const AARCH64_PMU_IRQ: u32 = 7;
+
 #[sorted]
 #[derive(Debug)]
 pub enum Error {
@@ -122,6 +127,7 @@ pub enum Error {
     CreateSocket(io::Error),
     CreateVcpu(sys_util::Error),
     CreateVm(sys_util::Error),
+    GetSerialCmdline(GetSerialCmdlineError),
     InitrdLoadFailure(arch::LoadImageError),
     KernelLoadFailure(arch::LoadImageError),
     KernelMissing,
@@ -154,6 +160,7 @@ impl Display for Error {
             CreateSocket(e) => write!(f, "failed to create socket: {}", e),
             CreateVcpu(e) => write!(f, "failed to create VCPU: {}", e),
             CreateVm(e) => write!(f, "failed to create vm: {}", e),
+            GetSerialCmdline(e) => write!(f, "failed to get serial cmdline: {}", e),
             InitrdLoadFailure(e) => write!(f, "initrd cound not be loaded: {}", e),
             KernelLoadFailure(e) => write!(f, "kernel cound not be loaded: {}", e),
             KernelMissing => write!(f, "aarch64 requires a kernel"),
@@ -194,7 +201,9 @@ impl arch::LinuxArch for AArch64 {
     fn build_vm<F, E>(
         mut components: VmComponents,
         _split_irqchip: bool,
-        serial_parameters: &BTreeMap<u8, SerialParameters>,
+        _ioapic_device_socket: VmIrqRequestSocket,
+        serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
+        serial_jail: Option<Minijail>,
         create_devices: F,
     ) -> Result<RunnableLinuxVm>
     where
@@ -229,17 +238,31 @@ impl arch::LinuxArch for AArch64 {
 
         let vcpu_affinity = components.vcpu_affinity;
 
-        let irq_chip = Self::create_irq_chip(&vm)?;
+        let (irq_chip, is_gicv3) = Self::create_irq_chip(&vm, vcpu_count as u64)?;
+
+        let mut use_pmu = true;
+        for vcpu in &vcpus {
+            use_pmu &= vcpu.arm_pmu_init(AARCH64_PMU_IRQ as u64 + 16).is_ok();
+        }
 
         let mut mmio_bus = devices::Bus::new();
 
         let exit_evt = EventFd::new().map_err(Error::CreateEventFd)?;
 
+        // Event used by PMDevice to notify crosvm that
+        // guest OS is trying to suspend.
+        let suspend_evt = EventFd::new().map_err(Error::CreateEventFd)?;
+
         let pci_devices = create_devices(&mem, &mut vm, &mut resources, &exit_evt)
             .map_err(|e| Error::CreateDevices(Box::new(e)))?;
-        let (pci, pci_irqs, pid_debug_label_map) =
-            arch::generate_pci_root(pci_devices, &mut mmio_bus, &mut resources, &mut vm)
-                .map_err(Error::CreatePciRoot)?;
+        let (pci, pci_irqs, pid_debug_label_map) = arch::generate_pci_root(
+            pci_devices,
+            &mut None,
+            &mut mmio_bus,
+            &mut resources,
+            &mut vm,
+        )
+        .map_err(Error::CreatePciRoot)?;
         let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci)));
 
         // ARM doesn't really use the io bus like x86, so just create an empty bus.
@@ -249,11 +272,12 @@ impl arch::LinuxArch for AArch64 {
 
         let com_evt_1_3 = EventFd::new().map_err(Error::CreateEventFd)?;
         let com_evt_2_4 = EventFd::new().map_err(Error::CreateEventFd)?;
-        let (stdio_serial_num, stdio_serial) = arch::add_serial_devices(
+        arch::add_serial_devices(
             &mut mmio_bus,
             &com_evt_1_3,
             &com_evt_2_4,
-            &serial_parameters,
+            serial_parameters,
+            serial_jail,
         )
         .map_err(Error::CreateSerialDevices)?;
 
@@ -271,7 +295,9 @@ impl arch::LinuxArch for AArch64 {
             )
             .map_err(Error::RegisterPci)?;
 
-        let mut cmdline = Self::get_base_linux_cmdline(stdio_serial_num);
+        let mut cmdline = Self::get_base_linux_cmdline();
+        get_serial_cmdline(&mut cmdline, serial_parameters, "mmio")
+            .map_err(Error::GetSerialCmdline)?;
         for param in components.extra_kernel_params {
             cmdline.insert_str(&param).map_err(Error::Cmdline)?;
         }
@@ -296,20 +322,24 @@ impl arch::LinuxArch for AArch64 {
             pci_irqs,
             components.android_fstab,
             kernel_end,
+            is_gicv3,
+            use_pmu,
         )?;
 
         Ok(RunnableLinuxVm {
             vm,
             kvm,
             resources,
-            stdio_serial,
             exit_evt,
             vcpus,
             vcpu_affinity,
             irq_chip,
+            split_irqchip: None,
+            gsi_relay: None,
             io_bus,
             mmio_bus,
             pid_debug_label_map,
+            suspend_evt,
         })
     }
 }
@@ -321,9 +351,11 @@ impl AArch64 {
         vcpu_count: u32,
         cmdline: &CStr,
         initrd_file: Option<File>,
-        pci_irqs: Vec<(u32, PciInterruptPin)>,
+        pci_irqs: Vec<(PciAddress, u32, PciInterruptPin)>,
         android_fstab: Option<File>,
         kernel_end: u64,
+        is_gicv3: bool,
+        use_pmu: bool,
     ) -> Result<()> {
         let initrd = match initrd_file {
             Some(initrd_file) => {
@@ -339,7 +371,7 @@ impl AArch64 {
             }
             None => None,
         };
-        let (pci_device_base, pci_device_size) = Self::get_device_addr_base_size(mem_size);
+        let (pci_device_base, pci_device_size) = Self::get_high_mmio_base_size(mem_size);
         fdt::create_fdt(
             AARCH64_FDT_MAX_SIZE as usize,
             mem,
@@ -351,6 +383,8 @@ impl AArch64 {
             cmdline,
             initrd,
             android_fstab,
+            is_gicv3,
+            use_pmu,
         )
         .map_err(Error::CreateFdt)?;
         Ok(())
@@ -362,29 +396,25 @@ impl AArch64 {
         Ok(mem)
     }
 
-    fn get_device_addr_base_size(mem_size: u64) -> (u64, u64) {
+    fn get_high_mmio_base_size(mem_size: u64) -> (u64, u64) {
         let base = AARCH64_PHYS_MEM_START + mem_size;
         let size = u64::max_value() - base;
         (base, size)
     }
 
     /// This returns a base part of the kernel command for this architecture
-    fn get_base_linux_cmdline(stdio_serial_num: Option<u8>) -> kernel_cmdline::Cmdline {
+    fn get_base_linux_cmdline() -> kernel_cmdline::Cmdline {
         let mut cmdline = kernel_cmdline::Cmdline::new(sys_util::pagesize());
-        if stdio_serial_num.is_some() {
-            let tty_string = get_serial_tty_string(stdio_serial_num.unwrap());
-            cmdline.insert("console", &tty_string).unwrap();
-        }
         cmdline.insert_str("panic=-1").unwrap();
         cmdline
     }
 
     /// Returns a system resource allocator.
     fn get_resource_allocator(mem_size: u64, gpu_allocation: bool) -> SystemAllocator {
-        let (device_addr_base, device_addr_size) = Self::get_device_addr_base_size(mem_size);
+        let (high_mmio_base, high_mmio_size) = Self::get_high_mmio_base_size(mem_size);
         SystemAllocator::builder()
-            .add_device_addresses(device_addr_base, device_addr_size)
-            .add_mmio_addresses(AARCH64_MMIO_BASE, AARCH64_MMIO_SIZE)
+            .add_high_mmio_addresses(high_mmio_base, high_mmio_size)
+            .add_low_mmio_addresses(AARCH64_MMIO_BASE, AARCH64_MMIO_SIZE)
             .create_allocator(AARCH64_IRQ_BASE, gpu_allocation)
             .unwrap()
     }
@@ -414,11 +444,14 @@ impl AArch64 {
     /// # Arguments
     ///
     /// * `vm` - the vm object
-    fn create_irq_chip(vm: &Vm) -> Result<Option<File>> {
+    /// * `vcpu_count` - the number of vCPUs
+    fn create_irq_chip(vm: &Vm, vcpu_count: u64) -> Result<(Option<File>, bool)> {
         let cpu_if_addr: u64 = AARCH64_GIC_CPUI_BASE;
         let dist_if_addr: u64 = AARCH64_GIC_DIST_BASE;
+        let redist_addr: u64 = dist_if_addr - (AARCH64_GIC_REDIST_SIZE * vcpu_count);
         let raw_cpu_if_addr = &cpu_if_addr as *const u64;
         let raw_dist_if_addr = &dist_if_addr as *const u64;
+        let raw_redist_addr = &redist_addr as *const u64;
 
         let cpu_if_attr = kvm_device_attr {
             group: kvm_sys::KVM_DEV_ARM_VGIC_GRP_ADDR,
@@ -426,19 +459,40 @@ impl AArch64 {
             addr: raw_cpu_if_addr as u64,
             flags: 0,
         };
-        let dist_attr = kvm_device_attr {
+        let redist_attr = kvm_device_attr {
             group: kvm_sys::KVM_DEV_ARM_VGIC_GRP_ADDR,
-            attr: kvm_sys::KVM_VGIC_V2_ADDR_TYPE_DIST as u64,
-            addr: raw_dist_if_addr as u64,
+            attr: kvm_sys::KVM_VGIC_V3_ADDR_TYPE_REDIST as u64,
+            addr: raw_redist_addr as u64,
             flags: 0,
         };
+        let mut dist_attr = kvm_device_attr {
+            group: kvm_sys::KVM_DEV_ARM_VGIC_GRP_ADDR,
+            addr: raw_dist_if_addr as u64,
+            attr: 0,
+            flags: 0,
+        };
+
         let mut kcd = kvm_sys::kvm_create_device {
-            type_: kvm_sys::kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V2,
+            type_: kvm_sys::kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3,
             fd: 0,
             flags: 0,
         };
-        vm.create_device(&mut kcd)
-            .map_err(|e| Error::CreateGICFailure(e))?;
+
+        let mut cpu_redist_attr = redist_attr;
+        let mut is_gicv3 = true;
+        dist_attr.attr = kvm_sys::KVM_VGIC_V3_ADDR_TYPE_DIST as u64;
+        if vm.create_device(&mut kcd).is_err() {
+            is_gicv3 = false;
+            cpu_redist_attr = cpu_if_attr;
+            kcd.type_ = kvm_sys::kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V2;
+            dist_attr.attr = kvm_sys::KVM_VGIC_V2_ADDR_TYPE_DIST as u64;
+            vm.create_device(&mut kcd)
+                .map_err(|e| Error::CreateGICFailure(e))?;
+        }
+
+        let is_gicv3 = is_gicv3;
+        let cpu_redist_attr = cpu_redist_attr;
+        let dist_attr = dist_attr;
 
         // Safe because the kernel is passing us an FD back inside
         // the struct after we successfully did the create_device ioctl
@@ -446,7 +500,7 @@ impl AArch64 {
 
         // Safe because we allocated the struct that's being passed in
         let ret = unsafe {
-            sys_util::ioctl_with_ref(&vgic_fd, kvm_sys::KVM_SET_DEVICE_ATTR(), &cpu_if_attr)
+            sys_util::ioctl_with_ref(&vgic_fd, kvm_sys::KVM_SET_DEVICE_ATTR(), &cpu_redist_attr)
         };
         if ret != 0 {
             return Err(Error::CreateGICFailure(sys_util::Error::new(ret)));
@@ -492,12 +546,12 @@ impl AArch64 {
         if ret != 0 {
             return Err(Error::SetDeviceAttr(sys_util::Error::new(ret)));
         }
-        Ok(Some(vgic_fd))
+        Ok((Some(vgic_fd), is_gicv3))
     }
 
     fn configure_vcpu(
         guest_mem: &GuestMemory,
-        _kvm: &Kvm,
+        kvm: &Kvm,
         vm: &Vm,
         vcpu: &Vcpu,
         cpu_id: u64,
@@ -512,8 +566,10 @@ impl AArch64 {
         vm.arm_preferred_target(&mut kvi)
             .map_err(Error::ReadPreferredTarget)?;
 
-        // TODO(sonnyrao): need to verify this feature is supported by host kernel
         kvi.features[0] |= 1 << kvm_sys::KVM_ARM_VCPU_PSCI_0_2;
+        if kvm.check_extension(Cap::ArmPmuV3) {
+            kvi.features[0] |= 1 << kvm_sys::KVM_ARM_VCPU_PMU_V3;
+        }
 
         // Non-boot cpus are powered off initially
         if cpu_id > 0 {

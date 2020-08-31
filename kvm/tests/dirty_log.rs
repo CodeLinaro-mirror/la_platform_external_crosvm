@@ -18,7 +18,7 @@ fn test_run() {
     let mem_size = 0x10000;
     let load_addr = GuestAddress(0x1000);
     let guest_mem = GuestMemory::new(&[]).unwrap();
-    let mut mem = SharedMemory::new(None).expect("failed to create shared memory");
+    let mut mem = SharedMemory::anon().expect("failed to create shared memory");
     mem.set_size(mem_size)
         .expect("failed to set shared memory size");
     let mmap =
@@ -43,17 +43,20 @@ fn test_run() {
     vcpu_regs.rbx = 0x12;
     vcpu.set_regs(&vcpu_regs).expect("set regs failed");
     let slot = vm
-        .add_device_memory(
+        .add_memory_region(
             GuestAddress(0),
-            MemoryMapping::from_fd(&mem, mem_size as usize)
-                .expect("failed to create memory mapping"),
+            Box::new(
+                MemoryMapping::from_fd(&mem, mem_size as usize)
+                    .expect("failed to create memory mapping"),
+            ),
             false,
             true,
         )
         .expect("failed to register memory");
 
+    let runnable_vcpu = vcpu.to_runnable(None).unwrap();
     loop {
-        match vcpu.run().expect("run failed") {
+        match runnable_vcpu.run().expect("run failed") {
             VcpuExit::Hlt => break,
             r => panic!("unexpected exit reason: {:?}", r),
         }

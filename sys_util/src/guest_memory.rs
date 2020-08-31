@@ -4,14 +4,16 @@
 
 //! Track memory regions that are mapped to the guest VM.
 
-use std::ffi::CStr;
+use std::convert::AsRef;
+use std::convert::TryFrom;
 use std::fmt::{self, Display};
+use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::Arc;
 
 use crate::guest_address::GuestAddress;
-use crate::mmap::{self, MemoryMapping};
+use crate::mmap::{self, MappedRegion, MemoryMapping};
 use crate::shm::{MemfdSeals, SharedMemory};
 use crate::{errno, pagesize};
 use data_model::volatile_memory::*;
@@ -19,16 +21,20 @@ use data_model::DataInit;
 
 #[derive(Debug)]
 pub enum Error {
+    DescriptorChainOverflow,
     InvalidGuestAddress(GuestAddress),
     MemoryAccess(GuestAddress, mmap::Error),
     MemoryMappingFailed(mmap::Error),
     MemoryRegionOverlap,
+    MemoryRegionTooLarge(u64),
     MemoryNotAligned,
     MemoryCreationFailed(errno::Error),
     MemorySetSizeFailed(errno::Error),
     MemoryAddSealsFailed(errno::Error),
     ShortWrite { expected: usize, completed: usize },
     ShortRead { expected: usize, completed: usize },
+    SplitOutOfBounds(usize),
+    VolatileMemoryAccess(VolatileMemoryError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -39,12 +45,17 @@ impl Display for Error {
         use self::Error::*;
 
         match self {
+            DescriptorChainOverflow => write!(
+                f,
+                "the combined length of all the buffers in a DescriptorChain is too large"
+            ),
             InvalidGuestAddress(addr) => write!(f, "invalid guest address {}", addr),
             MemoryAccess(addr, e) => {
                 write!(f, "invalid guest memory access at addr={}: {}", addr, e)
             }
             MemoryMappingFailed(e) => write!(f, "failed to map guest memory: {}", e),
             MemoryRegionOverlap => write!(f, "memory regions overlap"),
+            MemoryRegionTooLarge(size) => write!(f, "memory region size {} is too large", size),
             MemoryNotAligned => write!(f, "memfd regions must be page aligned"),
             MemoryCreationFailed(_) => write!(f, "failed to create memfd region"),
             MemorySetSizeFailed(e) => write!(f, "failed to set memfd region size: {}", e),
@@ -65,6 +76,8 @@ impl Display for Error {
                 "incomplete read of {} instead of {} bytes",
                 completed, expected,
             ),
+            SplitOutOfBounds(off) => write!(f, "DescriptorChain split is out of bounds: {}", off),
+            VolatileMemoryAccess(e) => e.fmt(f),
         }
     }
 }
@@ -72,14 +85,22 @@ impl Display for Error {
 struct MemoryRegion {
     mapping: MemoryMapping,
     guest_base: GuestAddress,
-    memfd_offset: usize,
+    memfd_offset: u64,
 }
 
-fn region_end(region: &MemoryRegion) -> GuestAddress {
-    // unchecked_add is safe as the region bounds were checked when it was created.
-    region
-        .guest_base
-        .unchecked_add(region.mapping.size() as u64)
+impl MemoryRegion {
+    fn start(&self) -> GuestAddress {
+        self.guest_base
+    }
+
+    fn end(&self) -> GuestAddress {
+        // unchecked_add is safe as the region bounds were checked when it was created.
+        self.guest_base.unchecked_add(self.mapping.size() as u64)
+    }
+
+    fn contains(&self, addr: GuestAddress) -> bool {
+        addr >= self.guest_base && addr < self.end()
+    }
 }
 
 /// Tracks a memory region and where it is mapped in the guest, along with a shm
@@ -87,15 +108,18 @@ fn region_end(region: &MemoryRegion) -> GuestAddress {
 #[derive(Clone)]
 pub struct GuestMemory {
     regions: Arc<Vec<MemoryRegion>>,
-    memfd: Option<Arc<SharedMemory>>,
+    memfd: Arc<SharedMemory>,
 }
 
 impl AsRawFd for GuestMemory {
     fn as_raw_fd(&self) -> RawFd {
-        match &self.memfd {
-            Some(memfd) => memfd.as_raw_fd(),
-            None => panic!("GuestMemory is not backed by a memfd"),
-        }
+        self.memfd.as_raw_fd()
+    }
+}
+
+impl AsRef<SharedMemory> for GuestMemory {
+    fn as_ref(&self) -> &SharedMemory {
+        &self.memfd
     }
 }
 
@@ -118,9 +142,7 @@ impl GuestMemory {
         seals.set_grow_seal();
         seals.set_seal_seal();
 
-        let mut memfd =
-            SharedMemory::new(Some(CStr::from_bytes_with_nul(b"crosvm_guest\0").unwrap()))
-                .map_err(Error::MemoryCreationFailed)?;
+        let mut memfd = SharedMemory::named("crosvm_guest").map_err(Error::MemoryCreationFailed)?;
         memfd
             .set_size(aligned_size)
             .map_err(Error::MemorySetSizeFailed)?;
@@ -136,19 +158,7 @@ impl GuestMemory {
     pub fn new(ranges: &[(GuestAddress, u64)]) -> Result<GuestMemory> {
         // Create memfd
 
-        // TODO(prilik) remove optional memfd once parallel CQ lands (crbug.com/942183).
-        // Many classic CQ builders run old kernels without memfd support, resulting in test
-        // failures. It's less effort to introduce this temporary optional path than to
-        // manually mark all affected tests as ignore.
-        let memfd = match GuestMemory::create_memfd(ranges) {
-            Err(Error::MemoryCreationFailed { .. }) => {
-                warn!("GuestMemory is not backed by a memfd");
-                None
-            }
-            Err(e) => return Err(e),
-            Ok(memfd) => Some(memfd),
-        };
-
+        let memfd = GuestMemory::create_memfd(ranges)?;
         // Create memory regions
         let mut regions = Vec::<MemoryRegion>::new();
         let mut offset = 0;
@@ -164,27 +174,22 @@ impl GuestMemory {
                 }
             }
 
-            let mapping = match &memfd {
-                Some(memfd) => MemoryMapping::from_fd_offset(memfd, range.1 as usize, offset),
-                None => MemoryMapping::new(range.1 as usize),
-            }
-            .map_err(Error::MemoryMappingFailed)?;
-
+            let size =
+                usize::try_from(range.1).map_err(|_| Error::MemoryRegionTooLarge(range.1))?;
+            let mapping = MemoryMapping::from_fd_offset(&memfd, size, offset)
+                .map_err(Error::MemoryMappingFailed)?;
             regions.push(MemoryRegion {
                 mapping,
                 guest_base: range.0,
                 memfd_offset: offset,
             });
 
-            offset += range.1 as usize;
+            offset += size as u64;
         }
 
         Ok(GuestMemory {
             regions: Arc::new(regions),
-            memfd: match memfd {
-                Some(memfd) => Some(Arc::new(memfd)),
-                None => None,
-            },
+            memfd: Arc::new(memfd),
         })
     }
 
@@ -204,8 +209,8 @@ impl GuestMemory {
     pub fn end_addr(&self) -> GuestAddress {
         self.regions
             .iter()
-            .max_by_key(|region| region.guest_base)
-            .map_or(GuestAddress(0), |region| region_end(region))
+            .max_by_key(|region| region.start())
+            .map_or(GuestAddress(0), MemoryRegion::end)
     }
 
     /// Returns the total size of memory in bytes.
@@ -218,13 +223,26 @@ impl GuestMemory {
 
     /// Returns true if the given address is within the memory range available to the guest.
     pub fn address_in_range(&self, addr: GuestAddress) -> bool {
-        addr < self.end_addr()
+        self.regions.iter().any(|region| region.contains(addr))
+    }
+
+    /// Returns true if the given range (start, end) is overlap with the memory range
+    /// available to the guest.
+    pub fn range_overlap(&self, start: GuestAddress, end: GuestAddress) -> bool {
+        self.regions
+            .iter()
+            .any(|region| region.start() < end && start < region.end())
     }
 
     /// Returns the address plus the offset if it is in range.
     pub fn checked_offset(&self, addr: GuestAddress, offset: u64) -> Option<GuestAddress> {
-        addr.checked_add(offset)
-            .and_then(|a| if a < self.end_addr() { Some(a) } else { None })
+        addr.checked_add(offset).and_then(|a| {
+            if self.address_in_range(a) {
+                Some(a)
+            } else {
+                None
+            }
+        })
     }
 
     /// Returns the size of the memory region in bytes.
@@ -251,12 +269,12 @@ impl GuestMemory {
     ///  * memfd_offset: usize
     pub fn with_regions<F, E>(&self, mut cb: F) -> result::Result<(), E>
     where
-        F: FnMut(usize, GuestAddress, usize, usize, usize) -> result::Result<(), E>,
+        F: FnMut(usize, GuestAddress, usize, usize, u64) -> result::Result<(), E>,
     {
         for (index, region) in self.regions.iter().enumerate() {
             cb(
                 index,
-                region.guest_base,
+                region.start(),
                 region.mapping.size(),
                 region.mapping.as_ptr() as usize,
                 region.memfd_offset,
@@ -431,6 +449,61 @@ impl GuestMemory {
         })
     }
 
+    /// Returns a `VolatileSlice` of `len` bytes starting at `addr`. Returns an error if the slice
+    /// is not a subset of this `GuestMemory`.
+    ///
+    /// # Examples
+    /// * Write `99` to 30 bytes starting at guest address 0x1010.
+    ///
+    /// ```
+    /// # use sys_util::{GuestAddress, GuestMemory, GuestMemoryError, MemoryMapping};
+    /// # fn test_volatile_slice() -> Result<(), GuestMemoryError> {
+    /// #   let start_addr = GuestAddress(0x1000);
+    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)])?;
+    ///     let vslice = gm.get_slice_at_addr(GuestAddress(0x1010), 30)?;
+    ///     vslice.write_bytes(99);
+    /// #   Ok(())
+    /// # }
+    /// ```
+    pub fn get_slice_at_addr(&self, addr: GuestAddress, len: usize) -> Result<VolatileSlice> {
+        self.regions
+            .iter()
+            .find(|region| region.contains(addr))
+            .ok_or(Error::InvalidGuestAddress(addr))
+            .and_then(|region| {
+                // The cast to a usize is safe here because we know that `region.contains(addr)` and
+                // it's not possible for a memory region to be larger than what fits in a usize.
+                region
+                    .mapping
+                    .get_slice(addr.offset_from(region.start()) as usize, len)
+                    .map_err(Error::VolatileMemoryAccess)
+            })
+    }
+
+    /// Returns a `VolatileRef` to an object at `addr`. Returns Ok(()) if the object fits, or Err if
+    /// it extends past the end.
+    ///
+    /// # Examples
+    /// * Get a &u64 at offset 0x1010.
+    ///
+    /// ```
+    /// # use sys_util::{GuestAddress, GuestMemory, GuestMemoryError, MemoryMapping};
+    /// # fn test_ref_u64() -> Result<(), GuestMemoryError> {
+    /// #   let start_addr = GuestAddress(0x1000);
+    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)])?;
+    ///     gm.write_obj_at_addr(47u64, GuestAddress(0x1010))?;
+    ///     let vref = gm.get_ref_at_addr::<u64>(GuestAddress(0x1010))?;
+    ///     assert_eq!(vref.load(), 47u64);
+    /// #   Ok(())
+    /// # }
+    /// ```
+    pub fn get_ref_at_addr<T: DataInit>(&self, addr: GuestAddress) -> Result<VolatileRef<T>> {
+        let buf = self.get_slice_at_addr(addr, size_of::<T>())?;
+        // Safe because we have know that `buf` is at least `size_of::<T>()` bytes and that the
+        // returned reference will not outlive this `GuestMemory`.
+        Ok(unsafe { VolatileRef::new(buf.as_mut_ptr() as *mut T) })
+    }
+
     /// Reads data from a file descriptor and writes it to guest memory.
     ///
     /// # Arguments
@@ -460,7 +533,7 @@ impl GuestMemory {
     pub fn read_to_memory(
         &self,
         guest_addr: GuestAddress,
-        src: &AsRawFd,
+        src: &dyn AsRawFd,
         count: usize,
     ) -> Result<()> {
         self.do_in_region(guest_addr, move |mapping, offset| {
@@ -497,7 +570,7 @@ impl GuestMemory {
     pub fn write_from_memory(
         &self,
         guest_addr: GuestAddress,
-        dst: &AsRawFd,
+        dst: &dyn AsRawFd,
         count: usize,
     ) -> Result<()> {
         self.do_in_region(guest_addr, move |mapping, offset| {
@@ -539,28 +612,47 @@ impl GuestMemory {
     where
         F: FnOnce(&MemoryMapping, usize) -> Result<T>,
     {
-        for region in self.regions.iter() {
-            if guest_addr >= region.guest_base && guest_addr < region_end(region) {
-                return cb(
+        self.regions
+            .iter()
+            .find(|region| region.contains(guest_addr))
+            .ok_or(Error::InvalidGuestAddress(guest_addr))
+            .and_then(|region| {
+                cb(
                     &region.mapping,
-                    guest_addr.offset_from(region.guest_base) as usize,
-                );
-            }
-        }
-        Err(Error::InvalidGuestAddress(guest_addr))
+                    guest_addr.offset_from(region.start()) as usize,
+                )
+            })
     }
-}
 
-impl VolatileMemory for GuestMemory {
-    fn get_slice(&self, offset: u64, count: u64) -> VolatileMemoryResult<VolatileSlice> {
-        for region in self.regions.iter() {
-            if offset >= region.guest_base.0 && offset < region_end(region).0 {
-                return region
-                    .mapping
-                    .get_slice(offset - region.guest_base.0, count);
-            }
-        }
-        Err(VolatileMemoryError::OutOfBounds { addr: offset })
+    /// Convert a GuestAddress into an offset within self.memfd.
+    ///
+    /// Due to potential gaps within GuestMemory, it is helpful to know the
+    /// offset within the memfd where a given address is found. This offset
+    /// can then be passed to another process mapping the memfd to read data
+    /// starting at that address.
+    ///
+    /// # Arguments
+    /// * `guest_addr` - Guest address to convert.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use sys_util::{GuestAddress, GuestMemory};
+    /// let addr_a = GuestAddress(0x1000);
+    /// let addr_b = GuestAddress(0x8000);
+    /// let mut gm = GuestMemory::new(&vec![
+    ///     (addr_a, 0x2000),
+    ///     (addr_b, 0x3000)]).expect("failed to create GuestMemory");
+    /// let offset = gm.offset_from_base(GuestAddress(0x9500))
+    ///                .expect("failed to get offset");
+    /// assert_eq!(offset, 0x3500);
+    /// ```
+    pub fn offset_from_base(&self, guest_addr: GuestAddress) -> Result<u64> {
+        self.regions
+            .iter()
+            .find(|region| region.contains(guest_addr))
+            .ok_or(Error::InvalidGuestAddress(guest_addr))
+            .map(|region| region.memfd_offset + guest_addr.offset_from(region.start()))
     }
 }
 
@@ -593,6 +685,33 @@ mod tests {
     }
 
     #[test]
+    fn region_hole() {
+        let start_addr1 = GuestAddress(0x0);
+        let start_addr2 = GuestAddress(0x4000);
+        let gm = GuestMemory::new(&vec![(start_addr1, 0x2000), (start_addr2, 0x2000)]).unwrap();
+        assert_eq!(gm.address_in_range(GuestAddress(0x1000)), true);
+        assert_eq!(gm.address_in_range(GuestAddress(0x3000)), false);
+        assert_eq!(gm.address_in_range(GuestAddress(0x5000)), true);
+        assert_eq!(gm.address_in_range(GuestAddress(0x6000)), false);
+        assert_eq!(gm.address_in_range(GuestAddress(0x6000)), false);
+        assert_eq!(
+            gm.range_overlap(GuestAddress(0x1000), GuestAddress(0x3000)),
+            true
+        );
+        assert_eq!(
+            gm.range_overlap(GuestAddress(0x3000), GuestAddress(0x4000)),
+            false
+        );
+        assert_eq!(
+            gm.range_overlap(GuestAddress(0x3000), GuestAddress(0x7000)),
+            true
+        );
+        assert!(gm.checked_offset(GuestAddress(0x1000), 0x1000).is_none());
+        assert!(gm.checked_offset(GuestAddress(0x5000), 0x800).is_some());
+        assert!(gm.checked_offset(GuestAddress(0x5000), 0x1000).is_none());
+    }
+
+    #[test]
     fn test_read_u64() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
@@ -620,8 +739,11 @@ mod tests {
         gm.write_obj_at_addr(val1, GuestAddress(0x500)).unwrap();
         gm.write_obj_at_addr(val2, GuestAddress(0x1000 + 32))
             .unwrap();
-        let num1: u64 = gm.get_ref(0x500).unwrap().load();
-        let num2: u64 = gm.get_ref(0x1000 + 32).unwrap().load();
+        let num1: u64 = gm.get_ref_at_addr(GuestAddress(0x500)).unwrap().load();
+        let num2: u64 = gm
+            .get_ref_at_addr(GuestAddress(0x1000 + 32))
+            .unwrap()
+            .load();
         assert_eq!(val1, num1);
         assert_eq!(val2, num2);
     }
@@ -634,8 +756,10 @@ mod tests {
 
         let val1: u64 = 0xaa55aa55aa55aa55;
         let val2: u64 = 0x55aa55aa55aa55aa;
-        gm.get_ref(0x500).unwrap().store(val1);
-        gm.get_ref(0x1000 + 32).unwrap().store(val2);
+        gm.get_ref_at_addr(GuestAddress(0x500)).unwrap().store(val1);
+        gm.get_ref_at_addr(GuestAddress(0x1000 + 32))
+            .unwrap()
+            .store(val2);
         let num1: u64 = gm.read_obj_from_addr(GuestAddress(0x500)).unwrap();
         let num2: u64 = gm.read_obj_from_addr(GuestAddress(0x1000 + 32)).unwrap();
         assert_eq!(val1, num1);

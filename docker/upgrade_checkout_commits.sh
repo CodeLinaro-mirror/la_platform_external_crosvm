@@ -11,6 +11,8 @@ remotes=(
     "https://chromium.googlesource.com/chromiumos/third_party/tpm2"
     "https://chromium.googlesource.com/chromiumos/platform2"
     "https://chromium.googlesource.com/chromiumos/third_party/adhd"
+    "https://gitlab.freedesktop.org/mesa/drm.git/"
+    "https://android.googlesource.com/platform/external/minijail"
 )
 
 keys=(
@@ -19,6 +21,8 @@ keys=(
     "TPM2_COMMIT"
     "PLATFORM2_COMMIT"
     "ADHD_COMMIT"
+    "DRM_COMMIT"
+    "MINIJAIL_COMMIT"
 )
 
 for (( i=0; i<${#remotes[*]}; ++i)); do

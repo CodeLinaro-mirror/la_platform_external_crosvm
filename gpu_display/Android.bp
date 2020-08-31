@@ -5,18 +5,22 @@
 //   does not generate cc_library module yet
 //   does not generate wayland_protocol_codegen module yet
 
-rust_library_host_rlib {
+rust_library_host {
     name: "libgpu_display",
     defaults: ["crosvm_defaults"],
     crate_name: "gpu_display",
     srcs: ["src/lib.rs"],
-
-    rlibs: [
+    rustlibs: [
         "libdata_model",
         "liblibc",
+        "liblinux_input_sys",
         "libsys_util",
     ],
-    static_libs: ["libdisplay_wl"],
+    static_libs: [
+        "libdisplay_wl",
+        "libwayland_client",
+        "libffi",
+    ],
 }
 
 cc_library_host_static {
@@ -33,7 +37,7 @@ cc_library_host_static {
 
 wayland_protocol_codegen {
     name: "gpu_display_protocol_sources",
-    cmd: "$(location wayland_scanner) code < $(in) > $(out)",
+    cmd: "$(location wayland_scanner) private-code < $(in) > $(out)",
     suffix: ".c",
     srcs: [
         "protocol/aura-shell.xml",

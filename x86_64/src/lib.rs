@@ -35,6 +35,7 @@ unsafe impl data_model::DataInit for mpspec::mpc_table {}
 unsafe impl data_model::DataInit for mpspec::mpc_lintsrc {}
 unsafe impl data_model::DataInit for mpspec::mpf_intel {}
 
+mod acpi;
 mod bzimage;
 mod cpuid;
 mod gdt;
@@ -53,24 +54,37 @@ use std::mem;
 use std::sync::Arc;
 
 use crate::bootparam::boot_params;
-use arch::{RunnableLinuxVm, VmComponents, VmImage};
-use devices::{get_serial_tty_string, PciConfigIo, PciDevice, PciInterruptPin, SerialParameters};
-use io_jail::Minijail;
+use acpi_tables::aml::Aml;
+use acpi_tables::sdt::SDT;
+use arch::{
+    get_serial_cmdline, GetSerialCmdlineError, RunnableLinuxVm, SerialHardware, SerialParameters,
+    VmComponents, VmImage,
+};
+use devices::split_irqchip_common::GsiRelay;
+use devices::{
+    Ioapic, PciAddress, PciConfigIo, PciDevice, PciInterruptPin, Pic, IOAPIC_BASE_ADDRESS,
+    IOAPIC_MEM_LENGTH_BYTES,
+};
 use kvm::*;
+use minijail::Minijail;
 use remain::sorted;
 use resources::SystemAllocator;
 use sync::Mutex;
 use sys_util::{Clock, EventFd, GuestAddress, GuestMemory, GuestMemoryError};
+use vm_control::VmIrqRequestSocket;
 
 #[sorted]
 #[derive(Debug)]
 pub enum Error {
+    AllocateIOResouce(resources::Error),
+    AllocateIrq,
     CloneEventFd(sys_util::Error),
     Cmdline(kernel_cmdline::Error),
     ConfigureSystem,
     CreateDevices(Box<dyn StdError>),
     CreateEventFd(sys_util::Error),
     CreateFdt(arch::fdt::Error),
+    CreateIoapicDevice(sys_util::Error),
     CreateIrqChip(sys_util::Error),
     CreateKvm(sys_util::Error),
     CreatePciRoot(arch::DeviceRegistrationError),
@@ -81,12 +95,15 @@ pub enum Error {
     CreateVcpu(sys_util::Error),
     CreateVm(sys_util::Error),
     E820Configuration,
+    EnableSplitIrqchip(sys_util::Error),
+    GetSerialCmdline(GetSerialCmdlineError),
     KernelOffsetPastEnd,
     LoadBios(io::Error),
     LoadBzImage(bzimage::Error),
     LoadCmdline(kernel_loader::Error),
     LoadInitrd(arch::LoadImageError),
     LoadKernel(kernel_loader::Error),
+    Pstore(arch::pstore::Error),
     RegisterIrqfd(sys_util::Error),
     RegisterVsock(arch::DeviceRegistrationError),
     SetLint(interrupts::Error),
@@ -110,12 +127,15 @@ impl Display for Error {
 
         #[sorted]
         match self {
+            AllocateIOResouce(e) => write!(f, "error allocating IO resource: {}", e),
+            AllocateIrq => write!(f, "error allocating a single irq"),
             CloneEventFd(e) => write!(f, "unable to clone an EventFd: {}", e),
             Cmdline(e) => write!(f, "the given kernel command line was invalid: {}", e),
             ConfigureSystem => write!(f, "error configuring the system"),
             CreateDevices(e) => write!(f, "error creating devices: {}", e),
             CreateEventFd(e) => write!(f, "unable to make an EventFd: {}", e),
             CreateFdt(e) => write!(f, "failed to create fdt: {}", e),
+            CreateIoapicDevice(e) => write!(f, "failed to create IOAPIC device: {}", e),
             CreateIrqChip(e) => write!(f, "failed to create irq chip: {}", e),
             CreateKvm(e) => write!(f, "failed to open /dev/kvm: {}", e),
             CreatePciRoot(e) => write!(f, "failed to create a PCI root hub: {}", e),
@@ -126,12 +146,15 @@ impl Display for Error {
             CreateVcpu(e) => write!(f, "failed to create VCPU: {}", e),
             CreateVm(e) => write!(f, "failed to create VM: {}", e),
             E820Configuration => write!(f, "invalid e820 setup params"),
+            EnableSplitIrqchip(e) => write!(f, "failed to enable split irqchip: {}", e),
+            GetSerialCmdline(e) => write!(f, "failed to get serial cmdline: {}", e),
             KernelOffsetPastEnd => write!(f, "the kernel extends past the end of RAM"),
             LoadBios(e) => write!(f, "error loading bios: {}", e),
             LoadBzImage(e) => write!(f, "error loading kernel bzImage: {}", e),
             LoadCmdline(e) => write!(f, "error loading command line: {}", e),
             LoadInitrd(e) => write!(f, "error loading initrd: {}", e),
             LoadKernel(e) => write!(f, "error loading Kernel: {}", e),
+            Pstore(e) => write!(f, "failed to allocate pstore region: {}", e),
             RegisterIrqfd(e) => write!(f, "error registering an IrqFd: {}", e),
             RegisterVsock(e) => write!(f, "error registering virtual socket device: {}", e),
             SetLint(e) => write!(f, "failed to set interrupts: {}", e),
@@ -157,8 +180,11 @@ impl std::error::Error for Error {}
 pub struct X8664arch;
 
 const BOOT_STACK_POINTER: u64 = 0x8000;
-const MEM_32BIT_GAP_SIZE: u64 = (768 << 20);
-const FIRST_ADDR_PAST_32BITS: u64 = (1 << 32);
+// Make sure it align to 256MB for MTRR convenient
+const MEM_32BIT_GAP_SIZE: u64 = 768 << 20;
+const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
+const END_ADDR_BEFORE_32BITS: u64 = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE;
+const MMIO_SIZE: u64 = MEM_32BIT_GAP_SIZE - 0x8000000;
 const KERNEL_64BIT_ENTRY_OFFSET: u64 = 0x200;
 const ZERO_PAGE_OFFSET: u64 = 0x7000;
 /// The x86 reset vector for i386+ and x86_64 puts the processor into an "unreal mode" where it
@@ -172,7 +198,16 @@ const CMDLINE_OFFSET: u64 = 0x20000;
 const CMDLINE_MAX_SIZE: u64 = KERNEL_START_OFFSET - CMDLINE_OFFSET;
 const X86_64_SERIAL_1_3_IRQ: u32 = 4;
 const X86_64_SERIAL_2_4_IRQ: u32 = 3;
-const X86_64_IRQ_BASE: u32 = 5;
+// X86_64_SCI_IRQ is used to fill the ACPI FACP table.
+// The sci_irq number is better to be a legacy
+// IRQ number which is less than 16(actually most of the
+// platforms have fixed IRQ number 9). So we can
+// reserve the IRQ number 5 for SCI and let the
+// the other devices starts from next.
+pub const X86_64_SCI_IRQ: u32 = 5;
+// So the IRQ_BASE start from SCI_IRQ + 1
+pub const X86_64_IRQ_BASE: u32 = X86_64_SCI_IRQ + 1;
+const ACPI_HI_RSDP_WINDOW_BASE: u64 = 0x000E0000;
 
 fn configure_system(
     guest_mem: &GuestMemory,
@@ -181,10 +216,11 @@ fn configure_system(
     cmdline_addr: GuestAddress,
     cmdline_size: usize,
     num_cpus: u8,
-    pci_irqs: Vec<(u32, PciInterruptPin)>,
+    pci_irqs: Vec<(PciAddress, u32, PciInterruptPin)>,
     setup_data: Option<GuestAddress>,
     initrd: Option<(GuestAddress, usize)>,
     mut params: boot_params,
+    acpi_dev_resource: acpi::ACPIDevResource,
 ) -> Result<()> {
     const EBDA_START: u64 = 0x0009fc00;
     const KERNEL_BOOT_FLAG_MAGIC: u16 = 0xaa55;
@@ -192,7 +228,7 @@ fn configure_system(
     const KERNEL_LOADER_OTHER: u8 = 0xff;
     const KERNEL_MIN_ALIGNMENT_BYTES: u32 = 0x1000000; // Must be non-zero.
     let first_addr_past_32bits = GuestAddress(FIRST_ADDR_PAST_32BITS);
-    let end_32bit_gap_start = GuestAddress(FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE);
+    let end_32bit_gap_start = GuestAddress(END_ADDR_BEFORE_32BITS);
 
     // Note that this puts the mptable at 0x0 in guest physical memory.
     mptable::setup_mptable(guest_mem, num_cpus, pci_irqs).map_err(Error::SetupMptable)?;
@@ -247,6 +283,13 @@ fn configure_system(
     guest_mem
         .write_obj_at_addr(params, zero_page_addr)
         .map_err(|_| Error::ZeroPageSetup)?;
+
+    if let Some(rsdp_addr) =
+        acpi::create_acpi_tables(guest_mem, num_cpus, X86_64_SCI_IRQ, acpi_dev_resource)
+    {
+        params.acpi_rsdp_addr = rsdp_addr.0;
+    }
+
     Ok(())
 }
 
@@ -272,7 +315,7 @@ fn add_e820_entry(params: &mut boot_params, addr: u64, size: u64, mem_type: u32)
 fn arch_memory_regions(size: u64, has_bios: bool) -> Vec<(GuestAddress, u64)> {
     let mem_end = GuestAddress(size);
     let first_addr_past_32bits = GuestAddress(FIRST_ADDR_PAST_32BITS);
-    let end_32bit_gap_start = GuestAddress(FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE);
+    let end_32bit_gap_start = GuestAddress(END_ADDR_BEFORE_32BITS);
 
     let mut regions = Vec::new();
     if mem_end < end_32bit_gap_start {
@@ -282,16 +325,13 @@ fn arch_memory_regions(size: u64, has_bios: bool) -> Vec<(GuestAddress, u64)> {
         }
     } else {
         regions.push((GuestAddress(0), end_32bit_gap_start.offset()));
-        if mem_end > first_addr_past_32bits {
-            let region_start = if has_bios {
-                GuestAddress(BIOS_START)
-            } else {
-                first_addr_past_32bits
-            };
-            regions.push((region_start, mem_end.offset_from(first_addr_past_32bits)));
-        } else if has_bios {
+        if has_bios {
             regions.push((GuestAddress(BIOS_START), BIOS_LEN as u64));
         }
+        regions.push((
+            first_addr_past_32bits,
+            mem_end.offset_from(end_32bit_gap_start),
+        ));
     }
 
     regions
@@ -303,7 +343,9 @@ impl arch::LinuxArch for X8664arch {
     fn build_vm<F, E>(
         mut components: VmComponents,
         split_irqchip: bool,
-        serial_parameters: &BTreeMap<u8, SerialParameters>,
+        ioapic_device_socket: VmIrqRequestSocket,
+        serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
+        serial_jail: Option<Minijail>,
         create_devices: F,
     ) -> Result<RunnableLinuxVm>
     where
@@ -315,13 +357,13 @@ impl arch::LinuxArch for X8664arch {
         ) -> std::result::Result<Vec<(Box<dyn PciDevice>, Option<Minijail>)>, E>,
         E: StdError + 'static,
     {
-        let mut resources =
-            Self::get_resource_allocator(components.memory_size, components.wayland_dmabuf);
         let has_bios = match components.vm_image {
             VmImage::Bios(_) => true,
             _ => false,
         };
         let mem = Self::setup_memory(components.memory_size, has_bios)?;
+        let mut resources = Self::get_resource_allocator(&mem, components.wayland_dmabuf);
+
         let kvm = Kvm::new().map_err(Error::CreateKvm)?;
         let mut vm = Self::create_vm(&kvm, split_irqchip, mem.clone())?;
 
@@ -329,16 +371,15 @@ impl arch::LinuxArch for X8664arch {
         let mut vcpus = Vec::with_capacity(vcpu_count as usize);
         for cpu_id in 0..vcpu_count {
             let vcpu = Vcpu::new(cpu_id as libc::c_ulong, &kvm, &vm).map_err(Error::CreateVcpu)?;
-            if let VmImage::Kernel(_) = components.vm_image {
-                Self::configure_vcpu(
-                    vm.get_memory(),
-                    &kvm,
-                    &vm,
-                    &vcpu,
-                    cpu_id as u64,
-                    vcpu_count as u64,
-                )?;
-            }
+            Self::configure_vcpu(
+                vm.get_memory(),
+                &kvm,
+                &vm,
+                &vcpu,
+                cpu_id as u64,
+                vcpu_count as u64,
+                &components.vm_image,
+            )?;
             vcpus.push(vcpu);
         }
 
@@ -350,30 +391,118 @@ impl arch::LinuxArch for X8664arch {
 
         let exit_evt = EventFd::new().map_err(Error::CreateEventFd)?;
 
+        let (split_irqchip, mut gsi_relay) = if split_irqchip {
+            let gsi_relay = GsiRelay::new();
+            let pic = Arc::new(Mutex::new(Pic::new()));
+            let ioapic = Arc::new(Mutex::new(
+                Ioapic::new(&mut vm, ioapic_device_socket).map_err(Error::CreateIoapicDevice)?,
+            ));
+            mmio_bus
+                .insert(
+                    ioapic.clone(),
+                    IOAPIC_BASE_ADDRESS,
+                    IOAPIC_MEM_LENGTH_BYTES,
+                    false,
+                )
+                .unwrap();
+            (Some((pic, ioapic)), Some(gsi_relay))
+        } else {
+            (None, None)
+        };
         let pci_devices = create_devices(&mem, &mut vm, &mut resources, &exit_evt)
             .map_err(|e| Error::CreateDevices(Box::new(e)))?;
-        let (pci, pci_irqs, pid_debug_label_map) =
-            arch::generate_pci_root(pci_devices, &mut mmio_bus, &mut resources, &mut vm)
-                .map_err(Error::CreatePciRoot)?;
+        let (pci, pci_irqs, pid_debug_label_map) = arch::generate_pci_root(
+            pci_devices,
+            &mut gsi_relay,
+            &mut mmio_bus,
+            &mut resources,
+            &mut vm,
+        )
+        .map_err(Error::CreatePciRoot)?;
         let pci_bus = Arc::new(Mutex::new(PciConfigIo::new(pci)));
+
+        // Event used to notify crosvm that guest OS is trying to suspend.
+        let suspend_evt = EventFd::new().map_err(Error::CreateEventFd)?;
 
         let mut io_bus = Self::setup_io_bus(
             &mut vm,
-            split_irqchip,
+            &mut gsi_relay,
             exit_evt.try_clone().map_err(Error::CloneEventFd)?,
             Some(pci_bus.clone()),
             components.memory_size,
         )?;
 
-        let (stdio_serial_num, stdio_serial) =
-            Self::setup_serial_devices(&mut vm, &mut io_bus, &serial_parameters)?;
+        Self::setup_serial_devices(
+            &mut vm,
+            &mut io_bus,
+            &mut gsi_relay,
+            serial_parameters,
+            serial_jail,
+        )?;
+
+        let acpi_dev_resource = Self::setup_acpi_devices(
+            &mut io_bus,
+            &mut resources,
+            suspend_evt.try_clone().map_err(Error::CloneEventFd)?,
+            components.acpi_sdts,
+        )?;
+
+        let ramoops_region = match components.pstore {
+            Some(pstore) => Some(
+                arch::pstore::create_memory_region(&mut vm, &mut resources, &pstore)
+                    .map_err(Error::Pstore)?,
+            ),
+            None => None,
+        };
+
+        let gsi_relay = if let Some((pic, ioapic)) = &split_irqchip {
+            io_bus.insert(pic.clone(), 0x20, 0x2, true).unwrap();
+            io_bus.insert(pic.clone(), 0xa0, 0x2, true).unwrap();
+            io_bus.insert(pic.clone(), 0x4d0, 0x2, true).unwrap();
+
+            let mut irq_num = resources.allocate_irq().unwrap();
+            while irq_num < kvm::NUM_IOAPIC_PINS as u32 {
+                irq_num = resources.allocate_irq().unwrap();
+            }
+
+            // This will never fail because gsi_relay is Some iff split_irqchip is Some.
+            let gsi_relay = Arc::new(gsi_relay.unwrap());
+            pic.lock().register_relay(gsi_relay.clone());
+            ioapic.lock().register_relay(gsi_relay.clone());
+            Some(gsi_relay)
+        } else {
+            None
+        };
 
         match components.vm_image {
             VmImage::Bios(ref mut bios) => Self::load_bios(&mem, bios)?,
             VmImage::Kernel(ref mut kernel_image) => {
-                let mut cmdline = Self::get_base_linux_cmdline(stdio_serial_num);
+                let mut cmdline = Self::get_base_linux_cmdline();
+
+                get_serial_cmdline(&mut cmdline, serial_parameters, "io")
+                    .map_err(Error::GetSerialCmdline)?;
+
                 for param in components.extra_kernel_params {
                     cmdline.insert_str(&param).map_err(Error::Cmdline)?;
+                }
+
+                // It seems that default record_size is only 4096 byte even if crosvm allocates
+                // more memory. It means that one crash can only 4096 byte.
+                // Set record_size and console_size to 1/4 of allocated memory size.
+                // This configulation is same as the host.
+                if let Some(ramoops_region) = ramoops_region {
+                    let ramoops_opts = [
+                        ("mem_address", ramoops_region.address),
+                        ("mem_size", ramoops_region.size as u64),
+                        ("console_size", (ramoops_region.size / 4) as u64),
+                        ("record_size", (ramoops_region.size / 4) as u64),
+                        ("dump_oops", 1_u64),
+                    ];
+                    for (name, val) in &ramoops_opts {
+                        cmdline
+                            .insert_str(format!("ramoops.{}={:#x}", name, val))
+                            .map_err(Error::Cmdline)?;
+                    }
                 }
 
                 // separate out load_kernel from other setup to get a specific error for
@@ -390,6 +519,7 @@ impl arch::LinuxArch for X8664arch {
                     components.android_fstab,
                     kernel_end,
                     params,
+                    acpi_dev_resource,
                 )?;
             }
         }
@@ -397,14 +527,16 @@ impl arch::LinuxArch for X8664arch {
             vm,
             kvm,
             resources,
-            stdio_serial,
             exit_evt,
             vcpus,
             vcpu_affinity,
             irq_chip,
+            split_irqchip,
+            gsi_relay,
             io_bus,
             mmio_bus,
             pid_debug_label_map,
+            suspend_evt,
         })
     }
 }
@@ -470,10 +602,11 @@ impl X8664arch {
         vcpu_count: u32,
         cmdline: &CStr,
         initrd_file: Option<File>,
-        pci_irqs: Vec<(u32, PciInterruptPin)>,
+        pci_irqs: Vec<(PciAddress, u32, PciInterruptPin)>,
         android_fstab: Option<File>,
         kernel_end: u64,
         params: boot_params,
+        acpi_dev_resource: acpi::ACPIDevResource,
     ) -> Result<()> {
         kernel_loader::load_cmdline(mem, GuestAddress(CMDLINE_OFFSET), cmdline)
             .map_err(Error::LoadCmdline)?;
@@ -535,6 +668,7 @@ impl X8664arch {
             setup_data,
             initrd,
             params,
+            acpi_dev_resource,
         )?;
         Ok(())
     }
@@ -547,12 +681,28 @@ impl X8664arch {
     /// * `split_irqchip` - Whether to use a split IRQ chip.
     /// * `mem` - The memory to be used by the guest.
     fn create_vm(kvm: &Kvm, split_irqchip: bool, mem: GuestMemory) -> Result<Vm> {
-        let vm = Vm::new(&kvm, mem).map_err(Error::CreateVm)?;
+        let mut vm = Vm::new(&kvm, mem).map_err(Error::CreateVm)?;
         let tss_addr = GuestAddress(0xfffbd000);
         vm.set_tss_addr(tss_addr).map_err(Error::SetTssAddr)?;
         if !split_irqchip {
             vm.create_pit().map_err(Error::CreatePit)?;
             vm.create_irq_chip().map_err(Error::CreateIrqChip)?;
+        } else {
+            vm.enable_split_irqchip()
+                .map_err(Error::EnableSplitIrqchip)?;
+            for i in 0..kvm::NUM_IOAPIC_PINS {
+                // Add dummy MSI routes to replace the default IRQChip routes.
+                let route = IrqRoute {
+                    gsi: i as u32,
+                    source: IrqSource::Msi {
+                        address: 0,
+                        data: 0,
+                    },
+                };
+                // Safe to ignore errors because errors are caused by the default routes and dummy
+                // MSI routes will always be registered.
+                let _ = vm.add_irq_route_entry(route);
+            }
         }
         Ok(vm)
     }
@@ -580,39 +730,34 @@ impl X8664arch {
         Ok(None)
     }
 
-    /// This returns the first page frame number for use by the balloon driver.
+    /// This returns the start address of high mmio
     ///
     /// # Arguments
     ///
-    /// * `mem_size` - the size in bytes of physical ram for the guest
-    fn get_base_dev_pfn(mem_size: u64) -> u64 {
+    /// * mem: The memory to be used by the guest
+    fn get_high_mmio_base(mem: &GuestMemory) -> u64 {
         // Put device memory at a 2MB boundary after physical memory or 4gb, whichever is greater.
-        const MB: u64 = 1024 * 1024;
-        const GB: u64 = 1024 * MB;
-        let mem_size_round_2mb = (mem_size + 2 * MB - 1) / (2 * MB) * (2 * MB);
-        std::cmp::max(mem_size_round_2mb, 4 * GB) / sys_util::pagesize() as u64
+        const MB: u64 = 1 << 20;
+        const GB: u64 = 1 << 30;
+        let ram_end_round_2mb = (mem.end_addr().offset() + 2 * MB - 1) / (2 * MB) * (2 * MB);
+        std::cmp::max(ram_end_round_2mb, 4 * GB)
     }
 
     /// This returns a minimal kernel command for this architecture
-    fn get_base_linux_cmdline(stdio_serial_num: Option<u8>) -> kernel_cmdline::Cmdline {
+    fn get_base_linux_cmdline() -> kernel_cmdline::Cmdline {
         let mut cmdline = kernel_cmdline::Cmdline::new(CMDLINE_MAX_SIZE as usize);
-        if stdio_serial_num.is_some() {
-            let tty_string = get_serial_tty_string(stdio_serial_num.unwrap());
-            cmdline.insert("console", &tty_string).unwrap();
-        }
-        cmdline.insert_str("noacpi reboot=k panic=-1").unwrap();
+        cmdline.insert_str("pci=noacpi reboot=k panic=-1").unwrap();
 
         cmdline
     }
 
     /// Returns a system resource allocator.
-    fn get_resource_allocator(mem_size: u64, gpu_allocation: bool) -> SystemAllocator {
-        const MMIO_BASE: u64 = 0xe0000000;
-        let device_addr_start = Self::get_base_dev_pfn(mem_size) * sys_util::pagesize() as u64;
+    fn get_resource_allocator(mem: &GuestMemory, gpu_allocation: bool) -> SystemAllocator {
+        let high_mmio_start = Self::get_high_mmio_base(mem);
         SystemAllocator::builder()
             .add_io_addresses(0xc000, 0x10000)
-            .add_mmio_addresses(MMIO_BASE, 0x100000)
-            .add_device_addresses(device_addr_start, u64::max_value() - device_addr_start)
+            .add_low_mmio_addresses(END_ADDR_BEFORE_32BITS, MMIO_SIZE)
+            .add_high_mmio_addresses(high_mmio_start, u64::max_value() - high_mmio_start)
             .create_allocator(X86_64_IRQ_BASE, gpu_allocation)
             .unwrap()
     }
@@ -622,16 +767,16 @@ impl X8664arch {
     /// # Arguments
     ///
     /// * - `vm` the vm object
-    /// * - `split_irqchip`: whether to use a split IRQ chip (i.e. userspace PIT/PIC/IOAPIC)
+    /// * - `gsi_relay`: only valid for split IRQ chip (i.e. userspace PIT/PIC/IOAPIC)
     /// * - `exit_evt` - the event fd object which should receive exit events
     /// * - `mem_size` - the size in bytes of physical ram for the guest
     fn setup_io_bus(
-        vm: &mut Vm,
-        split_irqchip: bool,
+        _vm: &mut Vm,
+        gsi_relay: &mut Option<GsiRelay>,
         exit_evt: EventFd,
         pci: Option<Arc<Mutex<devices::PciConfigIo>>>,
         mem_size: u64,
-    ) -> Result<(devices::Bus)> {
+    ) -> Result<devices::Bus> {
         struct NoDevice;
         impl devices::BusDevice for NoDevice {
             fn debug_label(&self) -> String {
@@ -641,7 +786,7 @@ impl X8664arch {
 
         let mut io_bus = devices::Bus::new();
 
-        let mem_gap_start = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE;
+        let mem_gap_start = END_ADDR_BEFORE_32BITS;
         let mem_below_4g = std::cmp::min(mem_gap_start, mem_size);
         let mem_above_4g = mem_size.saturating_sub(FIRST_ADDR_PAST_32BITS);
 
@@ -653,19 +798,13 @@ impl X8664arch {
                 false,
             )
             .unwrap();
-        io_bus
-            .insert(
-                Arc::new(Mutex::new(devices::I8042Device::new(
-                    exit_evt.try_clone().map_err(Error::CloneEventFd)?,
-                ))),
-                0x061,
-                0x4,
-                false,
-            )
-            .unwrap();
 
         let nul_device = Arc::new(Mutex::new(NoDevice));
-        if split_irqchip {
+        let i8042 = Arc::new(Mutex::new(devices::I8042Device::new(
+            exit_evt.try_clone().map_err(Error::CloneEventFd)?,
+        )));
+
+        if let Some(gsi_relay) = gsi_relay {
             let pit_evt = EventFd::new().map_err(Error::CreateEventFd)?;
             let pit = Arc::new(Mutex::new(
                 devices::Pit::new(
@@ -674,14 +813,15 @@ impl X8664arch {
                 )
                 .map_err(Error::CreatePitDevice)?,
             ));
-            // Reserve from 0x40 to 0x61 (the speaker).
-            io_bus.insert(pit.clone(), 0x040, 0x22, false).unwrap();
-            vm.register_irqfd(&pit_evt, 0)
-                .map_err(Error::RegisterIrqfd)?;
+            io_bus.insert(pit.clone(), 0x040, 0x8, true).unwrap();
+            io_bus.insert(pit.clone(), 0x061, 0x1, true).unwrap();
+            io_bus.insert(i8042, 0x062, 0x3, true).unwrap();
+            gsi_relay.register_irqfd(pit_evt, 0);
         } else {
             io_bus
                 .insert(nul_device.clone(), 0x040, 0x8, false)
                 .unwrap(); // ignore pit
+            io_bus.insert(i8042, 0x061, 0x4, true).unwrap();
         }
 
         io_bus
@@ -703,6 +843,57 @@ impl X8664arch {
         Ok(io_bus)
     }
 
+    /// Sets up the acpi devices for this platform and
+    /// return the resources which is used to set the ACPI tables.
+    ///
+    /// # Arguments
+    ///
+    /// * - `io_bus` the I/O bus to add the devices to
+    /// * - `resources` the SystemAllocator to allocate IO and MMIO for acpi
+    ///                devices.
+    /// * - `suspend_evt` - the event fd object which used to suspend the vm
+    fn setup_acpi_devices(
+        io_bus: &mut devices::Bus,
+        resources: &mut SystemAllocator,
+        suspend_evt: EventFd,
+        sdts: Vec<SDT>,
+    ) -> Result<acpi::ACPIDevResource> {
+        // The AML data for the acpi devices
+        let mut amls = Vec::new();
+
+        let pm_alloc = resources.get_anon_alloc();
+        let pm_iobase = match resources.io_allocator() {
+            Some(io) => io
+                .allocate_with_align(
+                    devices::acpi::ACPIPM_RESOURCE_LEN as u64,
+                    pm_alloc,
+                    "ACPIPM".to_string(),
+                    devices::acpi::ACPIPM_RESOURCE_LEN as u64,
+                )
+                .map_err(Error::AllocateIOResouce)?,
+            None => 0x600,
+        };
+
+        let pmresource = devices::ACPIPMResource::new(suspend_evt);
+        Aml::to_aml_bytes(&pmresource, &mut amls);
+        let pm = Arc::new(Mutex::new(pmresource));
+        io_bus
+            .insert(
+                pm.clone(),
+                pm_iobase as u64,
+                devices::acpi::ACPIPM_RESOURCE_LEN as u64,
+                false,
+            )
+            .unwrap();
+        io_bus.notify_on_resume(pm);
+
+        Ok(acpi::ACPIDevResource {
+            amls,
+            pm_iobase,
+            sdts,
+        })
+    }
+
     /// Sets up the serial devices for this platform. Returns the serial port number and serial
     /// device to be used for stdout
     ///
@@ -710,25 +901,38 @@ impl X8664arch {
     ///
     /// * - `vm` the vm object
     /// * - `io_bus` the I/O bus to add the devices to
+    /// * - `gsi_relay`: only valid for split IRQ chip (i.e. userspace PIT/PIC/IOAPIC)
     /// * - `serial_parmaters` - definitions for how the serial devices should be configured
     fn setup_serial_devices(
         vm: &mut Vm,
         io_bus: &mut devices::Bus,
-        serial_parameters: &BTreeMap<u8, SerialParameters>,
-    ) -> Result<(Option<u8>, Option<Arc<Mutex<devices::Serial>>>)> {
+        gsi_relay: &mut Option<GsiRelay>,
+        serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
+        serial_jail: Option<Minijail>,
+    ) -> Result<()> {
         let com_evt_1_3 = EventFd::new().map_err(Error::CreateEventFd)?;
         let com_evt_2_4 = EventFd::new().map_err(Error::CreateEventFd)?;
 
-        let (stdio_serial_num, stdio_serial) =
-            arch::add_serial_devices(io_bus, &com_evt_1_3, &com_evt_2_4, &serial_parameters)
-                .map_err(Error::CreateSerialDevices)?;
+        arch::add_serial_devices(
+            io_bus,
+            &com_evt_1_3,
+            &com_evt_2_4,
+            &serial_parameters,
+            serial_jail,
+        )
+        .map_err(Error::CreateSerialDevices)?;
 
-        vm.register_irqfd(&com_evt_1_3, X86_64_SERIAL_1_3_IRQ)
-            .map_err(Error::RegisterIrqfd)?;
-        vm.register_irqfd(&com_evt_2_4, X86_64_SERIAL_2_4_IRQ)
-            .map_err(Error::RegisterIrqfd)?;
+        if let Some(gsi_relay) = gsi_relay {
+            gsi_relay.register_irqfd(com_evt_1_3, X86_64_SERIAL_1_3_IRQ as usize);
+            gsi_relay.register_irqfd(com_evt_2_4, X86_64_SERIAL_2_4_IRQ as usize);
+        } else {
+            vm.register_irqfd(&com_evt_1_3, X86_64_SERIAL_1_3_IRQ)
+                .map_err(Error::RegisterIrqfd)?;
+            vm.register_irqfd(&com_evt_2_4, X86_64_SERIAL_2_4_IRQ)
+                .map_err(Error::RegisterIrqfd)?;
+        }
 
-        Ok((stdio_serial_num, stdio_serial))
+        Ok(())
     }
 
     /// Configures the vcpu and should be called once per vcpu from the vcpu's thread.
@@ -736,13 +940,12 @@ impl X8664arch {
     /// # Arguments
     ///
     /// * `guest_mem` - The memory to be used by the guest.
-    /// * `kernel_load_offset` - Offset in bytes from `guest_mem` at which the
-    ///                          kernel starts.
     /// * `kvm` - The /dev/kvm object that created vcpu.
     /// * `vm` - The VM object associated with this VCPU.
     /// * `vcpu` - The VCPU object to configure.
     /// * `cpu_id` - The id of the given `vcpu`.
     /// * `num_cpus` - Number of virtual CPUs the guest will have.
+    /// * `image_type` - Type of image being run on vcpu
     fn configure_vcpu(
         guest_mem: &GuestMemory,
         kvm: &Kvm,
@@ -750,23 +953,26 @@ impl X8664arch {
         vcpu: &Vcpu,
         cpu_id: u64,
         num_cpus: u64,
+        image_type: &VmImage,
     ) -> Result<()> {
-        let kernel_load_addr = GuestAddress(KERNEL_START_OFFSET);
         cpuid::setup_cpuid(kvm, vcpu, cpu_id, num_cpus).map_err(Error::SetupCpuid)?;
-        regs::setup_msrs(vcpu).map_err(Error::SetupMsrs)?;
-        let kernel_end = guest_mem
-            .checked_offset(kernel_load_addr, KERNEL_64BIT_ENTRY_OFFSET)
-            .ok_or(Error::KernelOffsetPastEnd)?;
-        regs::setup_regs(
-            vcpu,
-            (kernel_end).offset() as u64,
-            BOOT_STACK_POINTER as u64,
-            ZERO_PAGE_OFFSET as u64,
-        )
-        .map_err(Error::SetupRegs)?;
-        regs::setup_fpu(vcpu).map_err(Error::SetupFpu)?;
-        regs::setup_sregs(guest_mem, vcpu).map_err(Error::SetupSregs)?;
-        interrupts::set_lint(vcpu).map_err(Error::SetLint)?;
+        if let VmImage::Kernel(_) = image_type {
+            let kernel_load_addr = GuestAddress(KERNEL_START_OFFSET);
+            regs::setup_msrs(vcpu, END_ADDR_BEFORE_32BITS).map_err(Error::SetupMsrs)?;
+            let kernel_end = guest_mem
+                .checked_offset(kernel_load_addr, KERNEL_64BIT_ENTRY_OFFSET)
+                .ok_or(Error::KernelOffsetPastEnd)?;
+            regs::setup_regs(
+                vcpu,
+                (kernel_end).offset() as u64,
+                BOOT_STACK_POINTER as u64,
+                ZERO_PAGE_OFFSET as u64,
+            )
+            .map_err(Error::SetupRegs)?;
+            regs::setup_fpu(vcpu).map_err(Error::SetupFpu)?;
+            regs::setup_sregs(guest_mem, vcpu).map_err(Error::SetupSregs)?;
+            interrupts::set_lint(vcpu).map_err(Error::SetLint)?;
+        }
         Ok(())
     }
 }
@@ -803,8 +1009,10 @@ mod tests {
     #[test]
     fn regions_gt_4gb_bios() {
         let regions = arch_memory_regions((1u64 << 32) + 0x8000, /* has_bios */ true);
-        assert_eq!(2, regions.len());
+        assert_eq!(3, regions.len());
         assert_eq!(GuestAddress(0), regions[0].0);
         assert_eq!(GuestAddress(BIOS_START), regions[1].0);
+        assert_eq!(BIOS_LEN as u64, regions[1].1);
+        assert_eq!(GuestAddress(1u64 << 32), regions[2].0);
     }
 }
