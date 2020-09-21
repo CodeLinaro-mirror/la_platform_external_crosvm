@@ -2,15 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
-}
-
 #[cfg(feature = "plugin")]
-pub mod plugin;
+pub extern crate crosvm_plugin_proto as plugin;
 
 #[cfg(feature = "trunks")]
-pub use generated::trunks;
+pub mod trunks;
 
 #[cfg(feature = "composite-disk")]
-pub use generated::cdisk_spec;
+pub extern crate cdisk_spec_proto as cdisk_spec;
