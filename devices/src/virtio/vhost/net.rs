@@ -5,20 +5,20 @@
 use std::mem;
 use std::net::Ipv4Addr;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 use std::thread;
 
-use net_sys;
 use net_util::{MacAddress, TapT};
 
-use ::vhost::NetT as VhostNetT;
 use sys_util::{error, warn, EventFd, GuestMemory};
-use virtio_sys::{vhost, virtio_net};
+use vhost::NetT as VhostNetT;
+use virtio_sys::virtio_net;
 
+use super::control_socket::*;
 use super::worker::Worker;
 use super::{Error, Result};
-use crate::virtio::{Queue, VirtioDevice, TYPE_NET};
+use crate::pci::MsixStatus;
+use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_NET};
+use msg_socket::{MsgReceiver, MsgSender};
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 2;
@@ -27,11 +27,14 @@ const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES];
 pub struct Net<T: TapT, U: VhostNetT<T>> {
     workers_kill_evt: Option<EventFd>,
     kill_evt: EventFd,
+    worker_thread: Option<thread::JoinHandle<(Worker<U>, T)>>,
     tap: Option<T>,
     vhost_net_handle: Option<U>,
-    vhost_interrupt: Option<EventFd>,
+    vhost_interrupt: Option<Vec<EventFd>>,
     avail_features: u64,
     acked_features: u64,
+    request_socket: Option<VhostDevRequestSocket>,
+    response_socket: Option<VhostDevResponseSocket>,
 }
 
 impl<T, U> Net<T, U>
@@ -49,7 +52,7 @@ where
     ) -> Result<Net<T, U>> {
         let kill_evt = EventFd::new().map_err(Error::CreateKillEventFd)?;
 
-        let tap: T = T::new(true).map_err(Error::TapOpen)?;
+        let tap: T = T::new(true, false).map_err(Error::TapOpen)?;
         tap.set_ip_addr(ip_addr).map_err(Error::TapSetIp)?;
         tap.set_netmask(netmask).map_err(Error::TapSetNetmask)?;
         tap.set_mac_address(mac_addr)
@@ -76,19 +79,29 @@ where
             | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO4
             | 1 << virtio_net::VIRTIO_NET_F_HOST_UFO
             | 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF
-            | 1 << vhost::VIRTIO_RING_F_INDIRECT_DESC
-            | 1 << vhost::VIRTIO_RING_F_EVENT_IDX
-            | 1 << vhost::VIRTIO_F_NOTIFY_ON_EMPTY
-            | 1 << vhost::VIRTIO_F_VERSION_1;
+            | 1 << virtio_sys::vhost::VIRTIO_RING_F_INDIRECT_DESC
+            | 1 << virtio_sys::vhost::VIRTIO_RING_F_EVENT_IDX
+            | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY
+            | 1 << virtio_sys::vhost::VIRTIO_F_VERSION_1;
+
+        let mut vhost_interrupt = Vec::new();
+        for _ in 0..NUM_QUEUES {
+            vhost_interrupt.push(EventFd::new().map_err(Error::VhostIrqCreate)?);
+        }
+
+        let (request_socket, response_socket) = create_control_sockets();
 
         Ok(Net {
             workers_kill_evt: Some(kill_evt.try_clone().map_err(Error::CloneKillEventFd)?),
             kill_evt,
+            worker_thread: None,
             tap: Some(tap),
             vhost_net_handle: Some(vhost_net_handle),
-            vhost_interrupt: Some(EventFd::new().map_err(Error::VhostIrqCreate)?),
+            vhost_interrupt: Some(vhost_interrupt),
             avail_features,
             acked_features: 0u64,
+            request_socket,
+            response_socket,
         })
     }
 }
@@ -103,6 +116,10 @@ where
         if self.workers_kill_evt.is_none() {
             // Ignore the result because there is nothing we can do about it.
             let _ = self.kill_evt.write(1);
+        }
+
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let _ = worker_thread.join();
         }
     }
 }
@@ -124,11 +141,22 @@ where
         }
 
         if let Some(vhost_interrupt) = &self.vhost_interrupt {
-            keep_fds.push(vhost_interrupt.as_raw_fd());
+            for vhost_int in vhost_interrupt.iter() {
+                keep_fds.push(vhost_int.as_raw_fd());
+            }
         }
 
         if let Some(workers_kill_evt) = &self.workers_kill_evt {
             keep_fds.push(workers_kill_evt.as_raw_fd());
+        }
+        keep_fds.push(self.kill_evt.as_raw_fd());
+
+        if let Some(request_socket) = &self.request_socket {
+            keep_fds.push(request_socket.as_raw_fd());
+        }
+
+        if let Some(response_socket) = &self.response_socket {
+            keep_fds.push(response_socket.as_raw_fd());
         }
 
         keep_fds
@@ -163,9 +191,7 @@ where
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt_evt: EventFd,
-        interrupt_resample_evt: EventFd,
-        status: Arc<AtomicUsize>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<EventFd>,
     ) {
@@ -179,6 +205,11 @@ where
                 if let Some(vhost_interrupt) = self.vhost_interrupt.take() {
                     if let Some(kill_evt) = self.workers_kill_evt.take() {
                         let acked_features = self.acked_features;
+                        let socket = if self.response_socket.is_some() {
+                            self.response_socket.take()
+                        } else {
+                            None
+                        };
                         let worker_result = thread::Builder::new()
                             .name("vhost_net".to_string())
                             .spawn(move || {
@@ -186,44 +217,141 @@ where
                                     queues,
                                     vhost_net_handle,
                                     vhost_interrupt,
-                                    status,
-                                    interrupt_evt,
-                                    interrupt_resample_evt,
+                                    interrupt,
                                     acked_features,
+                                    kill_evt,
+                                    socket,
                                 );
                                 let activate_vqs = |handle: &U| -> Result<()> {
                                     for idx in 0..NUM_QUEUES {
                                         handle
-                                            .set_backend(idx, &tap)
+                                            .set_backend(idx, Some(&tap))
+                                            .map_err(Error::VhostNetSetBackend)?;
+                                    }
+                                    Ok(())
+                                };
+                                let cleanup_vqs = |handle: &U| -> Result<()> {
+                                    for idx in 0..NUM_QUEUES {
+                                        handle
+                                            .set_backend(idx, None)
                                             .map_err(Error::VhostNetSetBackend)?;
                                     }
                                     Ok(())
                                 };
                                 let result =
-                                    worker.run(queue_evts, QUEUE_SIZES, kill_evt, activate_vqs);
+                                    worker.run(queue_evts, QUEUE_SIZES, activate_vqs, cleanup_vqs);
                                 if let Err(e) = result {
                                     error!("net worker thread exited with error: {}", e);
                                 }
+                                (worker, tap)
                             });
 
-                        if let Err(e) = worker_result {
-                            error!("failed to spawn vhost_net worker: {}", e);
-                            return;
+                        match worker_result {
+                            Err(e) => {
+                                error!("failed to spawn vhost_net worker: {}", e);
+                                return;
+                            }
+                            Ok(join_handle) => {
+                                self.worker_thread = Some(join_handle);
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    fn on_device_sandboxed(&mut self) {
+        // ignore the error but to log the error. We don't need to do
+        // anything here because when activate, the other vhost set up
+        // will be failed to stop the activate thread.
+        if let Some(vhost_net_handle) = &self.vhost_net_handle {
+            match vhost_net_handle.set_owner() {
+                Ok(_) => {}
+                Err(e) => error!("{}: failed to set owner: {:?}", self.debug_label(), e),
+            }
+        }
+    }
+
+    fn control_notify(&self, behavior: MsixStatus) {
+        if self.worker_thread.is_none() || self.request_socket.is_none() {
+            return;
+        }
+        if let Some(socket) = &self.request_socket {
+            match behavior {
+                MsixStatus::EntryChanged(index) => {
+                    if let Err(e) = socket.send(&VhostDevRequest::MsixEntryChanged(index)) {
+                        error!(
+                            "{} failed to send VhostMsixEntryChanged request for entry {}: {:?}",
+                            self.debug_label(),
+                            index,
+                            e
+                        );
+                        return;
+                    }
+                    if let Err(e) = socket.recv() {
+                        error!("{} failed to receive VhostMsixEntryChanged response for entry {}: {:?}", self.debug_label(), index, e);
+                    }
+                }
+                MsixStatus::Changed => {
+                    if let Err(e) = socket.send(&VhostDevRequest::MsixChanged) {
+                        error!(
+                            "{} failed to send VhostMsixChanged request: {:?}",
+                            self.debug_label(),
+                            e
+                        );
+                        return;
+                    }
+                    if let Err(e) = socket.recv() {
+                        error!(
+                            "{} failed to receive VhostMsixChanged response {:?}",
+                            self.debug_label(),
+                            e
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn reset(&mut self) -> bool {
+        // Only kill the child if it claimed its eventfd.
+        if self.workers_kill_evt.is_none() && self.kill_evt.write(1).is_err() {
+            error!("{}: failed to notify the kill event", self.debug_label());
+            return false;
+        }
+
+        if let Some(worker_thread) = self.worker_thread.take() {
+            match worker_thread.join() {
+                Err(_) => {
+                    error!("{}: failed to get back resources", self.debug_label());
+                    return false;
+                }
+                Ok((worker, tap)) => {
+                    self.vhost_net_handle = Some(worker.vhost_handle);
+                    self.tap = Some(tap);
+                    self.vhost_interrupt = Some(worker.vhost_interrupt);
+                    self.workers_kill_evt = Some(worker.kill_evt);
+                    self.response_socket = worker.response_socket;
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use ::vhost::net::fakes::FakeNet;
+    use crate::virtio::VIRTIO_MSI_NO_VECTOR;
     use net_util::fakes::FakeTap;
     use std::result;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
     use sys_util::{GuestAddress, GuestMemory, GuestMemoryError};
+    use vhost::net::fakes::FakeNet;
 
     fn create_guest_memory() -> result::Result<GuestMemory, GuestMemoryError> {
         let start_addr1 = GuestAddress(0x0);
@@ -275,9 +403,13 @@ pub mod tests {
         // Just testing that we don't panic, for now
         net.activate(
             guest_memory,
-            EventFd::new().unwrap(),
-            EventFd::new().unwrap(),
-            Arc::new(AtomicUsize::new(0)),
+            Interrupt::new(
+                Arc::new(AtomicUsize::new(0)),
+                EventFd::new().unwrap(),
+                EventFd::new().unwrap(),
+                None,
+                VIRTIO_MSI_NO_VECTOR,
+            ),
             vec![Queue::new(1)],
             vec![EventFd::new().unwrap()],
         );

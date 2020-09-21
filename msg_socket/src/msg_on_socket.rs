@@ -2,19 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod slice;
+mod tuple;
+
 use std::fmt::{self, Display};
 use std::fs::File;
+use std::mem::{size_of, transmute_copy, MaybeUninit};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::result;
+use std::sync::Arc;
 
 use data_model::*;
+use slice::{slice_read_helper, slice_write_helper};
+use sync::Mutex;
 use sys_util::{Error as SysError, EventFd};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 /// An error during transaction or serialization/deserialization.
 pub enum MsgError {
+    /// Error adding a waker for async read.
+    AddingWaker(cros_async::Error),
     /// Error while sending a request or response.
     Send(SysError),
     /// Error while receiving a request or response.
@@ -24,10 +33,14 @@ pub enum MsgError {
     /// There was not the expected amount of data when receiving a message. The inner
     /// value is how much data is expected and how much data was actually received.
     BadRecvSize { expected: usize, actual: usize },
+    /// There was no data received when the socket `recv`-ed.
+    RecvZero,
     /// There was no associated file descriptor received for a request that expected it.
     ExpectFd,
     /// There was some associated file descriptor received but not used when deserialize.
     NotExpectFd,
+    /// Failed to set flags on the file descriptor.
+    SettingFdFlags(SysError),
     /// Trying to serialize/deserialize, but fd buffer size is too small. This typically happens
     /// when max_fd_count() returns a value that is too small.
     WrongFdBufferSize,
@@ -43,6 +56,7 @@ impl Display for MsgError {
         use self::MsgError::*;
 
         match self {
+            AddingWaker(e) => write!(f, "failed to add a waker: {}", e),
             Send(e) => write!(f, "failed to send request or response: {}", e),
             Recv(e) => write!(f, "failed to receive request or response: {}", e),
             InvalidType => write!(f, "invalid type"),
@@ -51,8 +65,10 @@ impl Display for MsgError {
                 "wrong amount of data received; expected {} bytes; got {} bytes",
                 expected, actual
             ),
+            RecvZero => write!(f, "received zero data"),
             ExpectFd => write!(f, "missing associated file descriptor for request"),
             NotExpectFd => write!(f, "unexpected file descriptor is unused"),
+            SettingFdFlags(e) => write!(f, "failed setting flags on the message FD: {}", e),
             WrongFdBufferSize => write!(f, "fd buffer size too small"),
             WrongMsgBufferSize => write!(f, "msg buffer size too small"),
         }
@@ -84,10 +100,24 @@ impl Display for MsgError {
 /// Thus, read/write functions always the return correct count of fds in this variant. There will be
 /// no padding in fd_buffer.
 pub trait MsgOnSocket: Sized {
+    // `true` if this structure can potentially serialize fds.
+    fn uses_fd() -> bool {
+        false
+    }
+
+    // Returns `Some(size)` if this structure always has a fixed size.
+    fn fixed_size() -> Option<usize> {
+        None
+    }
+
     /// Size of message in bytes.
-    fn msg_size() -> usize;
-    /// Max possible fd count in this type.
-    fn max_fd_count() -> usize {
+    fn msg_size(&self) -> usize {
+        Self::fixed_size().unwrap()
+    }
+
+    /// Number of FDs in this message. This must be overridden if `uses_fd()` returns true.
+    fn fd_count(&self) -> usize {
+        assert!(!Self::uses_fd());
         0
     }
     /// Returns (self, fd read count).
@@ -97,13 +127,14 @@ pub trait MsgOnSocket: Sized {
     ///     2. write_to_buffer is implemented correctly(put valid fds into the buffer, has no padding,
     ///        return correct count).
     unsafe fn read_from_buffer(buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)>;
+
     /// Serialize self to buffers.
     fn write_to_buffer(&self, buffer: &mut [u8], fds: &mut [RawFd]) -> MsgResult<usize>;
 }
 
 impl MsgOnSocket for SysError {
-    fn msg_size() -> usize {
-        u32::msg_size()
+    fn fixed_size() -> Option<usize> {
+        Some(size_of::<u32>())
     }
     unsafe fn read_from_buffer(buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
         let (v, size) = u32::read_from_buffer(buffer, fds)?;
@@ -115,35 +146,23 @@ impl MsgOnSocket for SysError {
     }
 }
 
-impl MsgOnSocket for RawFd {
-    fn msg_size() -> usize {
-        0
-    }
-    fn max_fd_count() -> usize {
-        1
-    }
-    unsafe fn read_from_buffer(_buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
-        if fds.is_empty() {
-            return Err(MsgError::ExpectFd);
-        }
-        Ok((fds[0], 1))
-    }
-    fn write_to_buffer(&self, _buffer: &mut [u8], fds: &mut [RawFd]) -> MsgResult<usize> {
-        if fds.is_empty() {
-            return Err(MsgError::WrongFdBufferSize);
-        }
-        fds[0] = *self;
-        Ok(1)
-    }
-}
-
 impl<T: MsgOnSocket> MsgOnSocket for Option<T> {
-    fn msg_size() -> usize {
-        T::msg_size() + 1
+    fn uses_fd() -> bool {
+        T::uses_fd()
     }
 
-    fn max_fd_count() -> usize {
-        T::max_fd_count()
+    fn msg_size(&self) -> usize {
+        match self {
+            Some(v) => v.msg_size() + 1,
+            None => 1,
+        }
+    }
+
+    fn fd_count(&self) -> usize {
+        match self {
+            Some(v) => v.fd_count(),
+            None => 0,
+        }
     }
 
     unsafe fn read_from_buffer(buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
@@ -171,13 +190,53 @@ impl<T: MsgOnSocket> MsgOnSocket for Option<T> {
     }
 }
 
-impl MsgOnSocket for () {
-    fn msg_size() -> usize {
-        0
+impl<T: MsgOnSocket> MsgOnSocket for Mutex<T> {
+    fn uses_fd() -> bool {
+        T::uses_fd()
     }
 
-    fn max_fd_count() -> usize {
-        0
+    fn msg_size(&self) -> usize {
+        self.lock().msg_size()
+    }
+
+    fn fd_count(&self) -> usize {
+        self.lock().fd_count()
+    }
+
+    unsafe fn read_from_buffer(buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
+        T::read_from_buffer(buffer, fds).map(|(v, count)| (Mutex::new(v), count))
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8], fds: &mut [RawFd]) -> MsgResult<usize> {
+        self.lock().write_to_buffer(buffer, fds)
+    }
+}
+
+impl<T: MsgOnSocket> MsgOnSocket for Arc<T> {
+    fn uses_fd() -> bool {
+        T::uses_fd()
+    }
+
+    fn msg_size(&self) -> usize {
+        (**self).msg_size()
+    }
+
+    fn fd_count(&self) -> usize {
+        (**self).fd_count()
+    }
+
+    unsafe fn read_from_buffer(buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
+        T::read_from_buffer(buffer, fds).map(|(v, count)| (Arc::new(v), count))
+    }
+
+    fn write_to_buffer(&self, buffer: &mut [u8], fds: &mut [RawFd]) -> MsgResult<usize> {
+        (**self).write_to_buffer(buffer, fds)
+    }
+}
+
+impl MsgOnSocket for () {
+    fn fixed_size() -> Option<usize> {
+        Some(0)
     }
 
     unsafe fn read_from_buffer(_buffer: &[u8], _fds: &[RawFd]) -> MsgResult<(Self, usize)> {
@@ -192,20 +251,23 @@ impl MsgOnSocket for () {
 macro_rules! rawfd_impl {
     ($type:ident) => {
         impl MsgOnSocket for $type {
-            fn msg_size() -> usize {
+            fn uses_fd() -> bool {
+                true
+            }
+            fn msg_size(&self) -> usize {
                 0
             }
-            fn max_fd_count() -> usize {
+            fn fd_count(&self) -> usize {
                 1
             }
             unsafe fn read_from_buffer(_buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
                 if fds.len() < 1 {
                     return Err(MsgError::ExpectFd);
                 }
-                Ok(($type::from_raw_fd(fds[0].clone()), 1))
+                Ok(($type::from_raw_fd(fds[0]), 1))
             }
             fn write_to_buffer(&self, _buffer: &mut [u8], fds: &mut [RawFd]) -> MsgResult<usize> {
-                if fds.len() < 1 {
+                if fds.is_empty() {
                     return Err(MsgError::WrongFdBufferSize);
                 }
                 fds[0] = self.as_raw_fd();
@@ -224,27 +286,13 @@ rawfd_impl!(UdpSocket);
 rawfd_impl!(UnixListener);
 rawfd_impl!(UnixDatagram);
 
-// Converts a slice into an array of fixed size inferred from by the return value. Panics if the
-// slice is too small, but will tolerate slices that are too large.
-fn slice_to_array<T, O>(s: &[T]) -> O
-where
-    T: Copy,
-    O: Default + AsMut<[T]>,
-{
-    let mut o = O::default();
-    let o_slice = o.as_mut();
-    let len = o_slice.len();
-    o_slice.copy_from_slice(&s[..len]);
-    o
-}
-
 // usize could be different sizes on different targets. We always use u64.
 impl MsgOnSocket for usize {
-    fn msg_size() -> usize {
-        std::mem::size_of::<u64>()
+    fn msg_size(&self) -> usize {
+        size_of::<u64>()
     }
     unsafe fn read_from_buffer(buffer: &[u8], _fds: &[RawFd]) -> MsgResult<(Self, usize)> {
-        if buffer.len() < std::mem::size_of::<u64>() {
+        if buffer.len() < size_of::<u64>() {
             return Err(MsgError::WrongMsgBufferSize);
         }
         let t = u64::from_le_bytes(slice_to_array(buffer));
@@ -252,22 +300,22 @@ impl MsgOnSocket for usize {
     }
 
     fn write_to_buffer(&self, buffer: &mut [u8], _fds: &mut [RawFd]) -> MsgResult<usize> {
-        if buffer.len() < std::mem::size_of::<u64>() {
+        if buffer.len() < size_of::<u64>() {
             return Err(MsgError::WrongMsgBufferSize);
         }
         let t: Le64 = (*self as u64).into();
-        buffer[0..Self::msg_size()].copy_from_slice(t.as_slice());
+        buffer[0..self.msg_size()].copy_from_slice(t.as_slice());
         Ok(0)
     }
 }
 
 // Encode bool as a u8 of value 0 or 1
 impl MsgOnSocket for bool {
-    fn msg_size() -> usize {
-        std::mem::size_of::<u8>()
+    fn msg_size(&self) -> usize {
+        size_of::<u8>()
     }
     unsafe fn read_from_buffer(buffer: &[u8], _fds: &[RawFd]) -> MsgResult<(Self, usize)> {
-        if buffer.len() < std::mem::size_of::<u8>() {
+        if buffer.len() < size_of::<u8>() {
             return Err(MsgError::WrongMsgBufferSize);
         }
         let t: u8 = buffer[0];
@@ -278,7 +326,7 @@ impl MsgOnSocket for bool {
         }
     }
     fn write_to_buffer(&self, buffer: &mut [u8], _fds: &mut [RawFd]) -> MsgResult<usize> {
-        if buffer.len() < std::mem::size_of::<u8>() {
+        if buffer.len() < size_of::<u8>() {
             return Err(MsgError::WrongMsgBufferSize);
         }
         buffer[0] = *self as u8;
@@ -289,11 +337,12 @@ impl MsgOnSocket for bool {
 macro_rules! le_impl {
     ($type:ident, $native_type:ident) => {
         impl MsgOnSocket for $type {
-            fn msg_size() -> usize {
-                std::mem::size_of::<$native_type>()
+            fn fixed_size() -> Option<usize> {
+                Some(size_of::<$native_type>())
             }
+
             unsafe fn read_from_buffer(buffer: &[u8], _fds: &[RawFd]) -> MsgResult<(Self, usize)> {
-                if buffer.len() < std::mem::size_of::<$native_type>() {
+                if buffer.len() < size_of::<$native_type>() {
                     return Err(MsgError::WrongMsgBufferSize);
                 }
                 let t = $native_type::from_le_bytes(slice_to_array(buffer));
@@ -301,11 +350,11 @@ macro_rules! le_impl {
             }
 
             fn write_to_buffer(&self, buffer: &mut [u8], _fds: &mut [RawFd]) -> MsgResult<usize> {
-                if buffer.len() < std::mem::size_of::<$native_type>() {
+                if buffer.len() < size_of::<$native_type>() {
                     return Err(MsgError::WrongMsgBufferSize);
                 }
                 let t: $native_type = self.clone().into();
-                buffer[0..Self::msg_size()].copy_from_slice(&t.to_le_bytes());
+                buffer[0..self.msg_size()].copy_from_slice(&t.to_le_bytes());
                 Ok(0)
             }
         }
@@ -321,34 +370,79 @@ le_impl!(Le16, u16);
 le_impl!(Le32, u32);
 le_impl!(Le64, u64);
 
+fn simple_read<T: MsgOnSocket>(buffer: &[u8], offset: &mut usize) -> MsgResult<T> {
+    assert!(!T::uses_fd());
+    // Safety for T::read_from_buffer depends on the given FDs being valid, but we pass no FDs.
+    let (v, _) = unsafe { T::read_from_buffer(&buffer[*offset..], &[])? };
+    *offset += v.msg_size();
+    Ok(v)
+}
+
+fn simple_write<T: MsgOnSocket>(v: T, buffer: &mut [u8], offset: &mut usize) -> MsgResult<()> {
+    assert!(!T::uses_fd());
+    v.write_to_buffer(&mut buffer[*offset..], &mut [])?;
+    *offset += v.msg_size();
+    Ok(())
+}
+
+// Converts a slice into an array of fixed size inferred from by the return value. Panics if the
+// slice is too small, but will tolerate slices that are too large.
+fn slice_to_array<T, O>(s: &[T]) -> O
+where
+    T: Copy,
+    O: Default + AsMut<[T]>,
+{
+    let mut o = O::default();
+    let o_slice = o.as_mut();
+    let len = o_slice.len();
+    o_slice.copy_from_slice(&s[..len]);
+    o
+}
+
 macro_rules! array_impls {
     ($N:expr, $t: ident $($ts:ident)*)
     => {
         impl<T: MsgOnSocket + Clone> MsgOnSocket for [T; $N] {
-            fn msg_size() -> usize {
-                T::msg_size() * $N
+            fn uses_fd() -> bool {
+                T::uses_fd()
             }
-            fn max_fd_count() -> usize {
-                T::max_fd_count() * $N
+
+            fn fixed_size() -> Option<usize> {
+                Some(T::fixed_size()? * $N)
             }
-            unsafe fn read_from_buffer(buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
-                if buffer.len() < Self::msg_size() {
-                    return Err(MsgError::WrongMsgBufferSize);
+
+            fn msg_size(&self) -> usize {
+                match T::fixed_size() {
+                    Some(s) => s * $N,
+                    None => self.iter().map(|i| i.msg_size()).sum::<usize>() + size_of::<u64>() * $N
                 }
-                let mut offset = 0usize;
-                let mut fd_offset = 0usize;
-                let ($t, fd_size) =
-                    T::read_from_buffer(&buffer[offset..], &fds[fd_offset..])?;
-                offset += T::msg_size();
-                fd_offset += fd_size;
-                $(
-                    let ($ts, fd_size) =
-                        T::read_from_buffer(&buffer[offset..], &fds[fd_offset..])?;
-                    offset += T::msg_size();
-                    fd_offset += fd_size;
-                    )*
-                assert_eq!(offset, Self::msg_size());
-                Ok(([$t, $($ts),*], fd_offset))
+            }
+
+            fn fd_count(&self) -> usize {
+                if T::uses_fd() {
+                    self.iter().map(|i| i.fd_count()).sum()
+                } else {
+                    0
+                }
+            }
+
+            unsafe fn read_from_buffer(buffer: &[u8], fds: &[RawFd]) -> MsgResult<(Self, usize)> {
+                // Taken from the canonical example of initializing an array, the `assume_init` can
+                // be assumed safe because the array elements (`MaybeUninit<T>` in this case)
+                // themselves don't require initializing.
+                let mut msgs: [MaybeUninit<T>; $N] =  MaybeUninit::uninit().assume_init();
+
+                let fd_count = slice_read_helper(buffer, fds, &mut msgs)?;
+
+                // Also taken from the canonical example, we initialized every member of the array
+                // in the first loop of this function, so it is safe to `transmute_copy` the array
+                // of `MaybeUninit` data to plain data. Although `transmute`, which checks the
+                // types' sizes, would have been preferred in this code, the compiler complains with
+                // "cannot transmute between types of different sizes, or dependently-sized types."
+                // Because this function operates on generic data, the type is "dependently-sized"
+                // and so the compiler will not check that the size of the input and output match.
+                // See this issue for details: https://github.com/rust-lang/rust/issues/61956
+                Ok((transmute_copy::<_, [T; $N]>(&msgs), fd_count))
             }
 
             fn write_to_buffer(
@@ -356,19 +450,33 @@ macro_rules! array_impls {
                 buffer: &mut [u8],
                 fds: &mut [RawFd],
                 ) -> MsgResult<usize> {
-                if buffer.len() < Self::msg_size() {
-                    return Err(MsgError::WrongMsgBufferSize);
-                }
-                let mut offset = 0usize;
-                let mut fd_offset = 0usize;
-                for idx in 0..$N {
-                    let fd_size = self[idx].clone().write_to_buffer(&mut buffer[offset..],
-                                                            &mut fds[fd_offset..])?;
-                    offset += T::msg_size();
-                    fd_offset += fd_size;
-                }
+                slice_write_helper(self, buffer, fds)
+            }
+        }
+        #[cfg(test)]
+        mod $t {
+            use super::MsgOnSocket;
 
-                Ok(fd_offset)
+            #[test]
+            fn read_write_option_array() {
+                type ArrayType = [Option<u32>; $N];
+                let array = [Some($N); $N];
+                let mut buffer = vec![0; array.msg_size()];
+                array.write_to_buffer(&mut buffer, &mut []).unwrap();
+                let read_array = unsafe { ArrayType::read_from_buffer(&buffer, &[]) }.unwrap().0;
+
+                assert!(array.iter().eq(read_array.iter()));
+            }
+
+            #[test]
+            fn read_write_fixed() {
+                type ArrayType = [u32; $N];
+                let mut buffer = vec![0; <ArrayType>::fixed_size().unwrap()];
+                let array = [$N as u32; $N];
+                array.write_to_buffer(&mut buffer, &mut []).unwrap();
+                let read_array = unsafe { ArrayType::read_from_buffer(&buffer, &[]) }.unwrap().0;
+
+                assert!(array.iter().eq(read_array.iter()));
             }
         }
         array_impls!(($N - 1), $($ts)*);
@@ -377,9 +485,9 @@ macro_rules! array_impls {
 }
 
 array_impls! {
-    32, tmp1 tmp2 tmp3 tmp4 tmp5 tmp6 tmp7 tmp8 tmp9 tmp10 tmp11 tmp12 tmp13 tmp14 tmp15 tmp16
+    64, tmp1 tmp2 tmp3 tmp4 tmp5 tmp6 tmp7 tmp8 tmp9 tmp10 tmp11 tmp12 tmp13 tmp14 tmp15 tmp16
         tmp17 tmp18 tmp19 tmp20 tmp21 tmp22 tmp23 tmp24 tmp25 tmp26 tmp27 tmp28 tmp29 tmp30 tmp31
-        tmp32
+        tmp32 tmp33 tmp34 tmp35 tmp36 tmp37 tmp38 tmp39 tmp40 tmp41 tmp42 tmp43 tmp44 tmp45 tmp46
+        tmp47 tmp48 tmp49 tmp50 tmp51 tmp52 tmp53 tmp54 tmp55 tmp56 tmp57 tmp58 tmp59 tmp60 tmp61
+        tmp62 tmp63 tmp64
 }
-
-// TODO(jkwang) Define MsgOnSocket for tuple?

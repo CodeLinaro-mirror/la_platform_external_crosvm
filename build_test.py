@@ -26,21 +26,34 @@ AARCH64_TRIPLE = os.getenv('AARCH64_TRIPLE', 'aarch64-cros-linux-gnu')
 X86_64_TRIPLE = os.getenv('X86_64_TRIPLE', 'x86_64-cros-linux-gnu')
 
 TEST_MODULES_PARALLEL = [
+    'arch',
+    'assertions',
+    'bit_field',
     'crosvm',
     'data_model',
+    'devices',
+    'disk',
+    'enumn',
+    'kernel_cmdline',
     'kernel_loader',
     'kvm',
     'kvm_sys',
+    'msg_socket',
     'net_sys',
     'net_util',
+    'qcow_utils',
+    'rand_ish',
+    'resources',
+    'sync',
     'syscall_defines',
+    'tpm2',
     'vhost',
     'virtio_sys',
+    'vm_control',
     'x86_64',
 ]
 
 TEST_MODULES_SERIAL = [
-    'io_jail',
     'sys_util',
 ]
 
@@ -146,10 +159,20 @@ def check_build(sysroot, triple, kind, test_it, clean):
 
   is_release = kind == 'release'
 
+  # The pkgconfig dir could be in either lib or lib64 depending on the target.
+  # Rather than checking to see which one is valid, just add both and let
+  # pkg-config search.
+  libdir = os.path.join(sysroot, 'usr', 'lib', 'pkgconfig')
+  lib64dir = os.path.join(sysroot, 'usr', 'lib64', 'pkgconfig')
+
   env = os.environ.copy()
   env['TARGET_CC'] = '%s-clang'%triple
   env['SYSROOT'] = sysroot
   env['CARGO_TARGET_DIR'] = target_path
+  env['PKG_CONFIG_ALLOW_CROSS'] = '1'
+  env['PKG_CONFIG_LIBDIR'] = libdir + ':' + lib64dir
+  env['PKG_CONFIG_SYSROOT_DIR'] = sysroot
+  env['RUSTFLAGS'] = '-C linker=' + env['TARGET_CC']
 
   if test_it:
     if not test_target(triple, is_release, env):

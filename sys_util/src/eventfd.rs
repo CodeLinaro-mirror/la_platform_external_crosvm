@@ -2,21 +2,35 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::fs::File;
 use std::mem;
+use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::ptr;
+use std::time::Duration;
 
-use libc::{c_void, dup, eventfd, read, write};
+use libc::{c_void, dup, eventfd, read, write, POLLIN};
 
-use crate::{errno_result, Result};
+use crate::{
+    errno_result, AsRawDescriptor, FromRawDescriptor, IntoRawDescriptor, RawDescriptor, Result,
+    SafeDescriptor,
+};
 
 /// A safe wrapper around a Linux eventfd (man 2 eventfd).
 ///
 /// An eventfd is useful because it is sendable across processes and can be used for signaling in
 /// and out of the KVM API. They can also be polled like any other file descriptor.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct EventFd {
-    eventfd: File,
+    eventfd: SafeDescriptor,
+}
+
+/// Wrapper around the return value of doing a read on an EventFd which distinguishes between
+/// getting a valid count of the number of times the eventfd has been written to and timing out
+/// waiting for the count to be non-zero.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EventReadResult {
+    Count(u64),
+    Timeout,
 }
 
 impl EventFd {
@@ -31,7 +45,7 @@ impl EventFd {
         // This is safe because we checked ret for success and know the kernel gave us an fd that we
         // own.
         Ok(EventFd {
-            eventfd: unsafe { File::from_raw_fd(ret) },
+            eventfd: unsafe { SafeDescriptor::from_raw_descriptor(ret) },
         })
     }
 
@@ -70,18 +84,68 @@ impl EventFd {
         Ok(buf)
     }
 
+    /// Blocks for a maximum of `timeout` duration until the the eventfd's count is non-zero. If
+    /// a timeout does not occur then the count is returned as a EventReadResult::Count(count),
+    /// and the count is reset to 0. If a timeout does occur then this function will return
+    /// EventReadResult::Timeout.
+    pub fn read_timeout(&mut self, timeout: Duration) -> Result<EventReadResult> {
+        let mut pfd = libc::pollfd {
+            fd: self.as_raw_descriptor(),
+            events: POLLIN,
+            revents: 0,
+        };
+        // Safe because we are zero-initializing a struct with only primitive member fields.
+        let mut timeoutspec: libc::timespec = unsafe { mem::zeroed() };
+        timeoutspec.tv_sec = timeout.as_secs() as libc::time_t;
+        // nsec always fits in i32 because subsec_nanos is defined to be less than one billion.
+        let nsec = timeout.subsec_nanos() as i32;
+        timeoutspec.tv_nsec = libc::c_long::from(nsec);
+        // Safe because this only modifies |pfd| and we check the return value
+        let ret = unsafe {
+            libc::ppoll(
+                &mut pfd as *mut libc::pollfd,
+                1,
+                &timeoutspec,
+                ptr::null_mut(),
+            )
+        };
+        if ret < 0 {
+            return errno_result();
+        }
+
+        // no return events (revents) means we got a timeout
+        if pfd.revents == 0 {
+            return Ok(EventReadResult::Timeout);
+        }
+
+        let mut buf = 0u64;
+        // This is safe because we made this fd and the pointer we pass can not overflow because
+        // we give the syscall's size parameter properly.
+        let ret = unsafe {
+            libc::read(
+                self.as_raw_descriptor(),
+                &mut buf as *mut _ as *mut c_void,
+                mem::size_of::<u64>(),
+            )
+        };
+        if ret < 0 {
+            return errno_result();
+        }
+        Ok(EventReadResult::Count(buf))
+    }
+
     /// Clones this EventFd, internally creating a new file descriptor. The new EventFd will share
     /// the same underlying count within the kernel.
     pub fn try_clone(&self) -> Result<EventFd> {
         // This is safe because we made this fd and properly check that it returns without error.
-        let ret = unsafe { dup(self.as_raw_fd()) };
+        let ret = unsafe { dup(self.as_raw_descriptor()) };
         if ret < 0 {
             return errno_result();
         }
         // This is safe because we checked ret for success and know the kernel gave us an fd that we
         // own.
         Ok(EventFd {
-            eventfd: unsafe { File::from_raw_fd(ret) },
+            eventfd: unsafe { SafeDescriptor::from_raw_descriptor(ret) },
         })
     }
 }
@@ -92,17 +156,67 @@ impl AsRawFd for EventFd {
     }
 }
 
+impl AsRawDescriptor for EventFd {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        self.eventfd.as_raw_descriptor()
+    }
+}
+
 impl FromRawFd for EventFd {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         EventFd {
-            eventfd: File::from_raw_fd(fd),
+            eventfd: SafeDescriptor::from_raw_descriptor(fd),
         }
     }
 }
 
 impl IntoRawFd for EventFd {
     fn into_raw_fd(self) -> RawFd {
-        self.eventfd.into_raw_fd()
+        self.eventfd.into_raw_descriptor()
+    }
+}
+
+/// An `EventFd` wrapper which triggers when it goes out of scope.
+///
+/// If the underlying `EventFd` fails to trigger during drop, a panic is triggered instead.
+pub struct ScopedEvent(EventFd);
+
+impl ScopedEvent {
+    /// Creates a new `ScopedEvent` which triggers when it goes out of scope.
+    pub fn new() -> Result<ScopedEvent> {
+        Ok(EventFd::new()?.into())
+    }
+}
+
+impl From<EventFd> for ScopedEvent {
+    fn from(e: EventFd) -> Self {
+        Self(e)
+    }
+}
+
+impl From<ScopedEvent> for EventFd {
+    fn from(scoped_event: ScopedEvent) -> Self {
+        // Rust doesn't allow moving out of types with a Drop implementation, so we have to use
+        // something that copies instead of moves. This is safe because we prevent the drop of
+        // `scoped_event` using `mem::forget`, so the underlying `EventFd` will not experience a
+        // double-drop.
+        let evt = unsafe { ptr::read(&scoped_event.0) };
+        mem::forget(scoped_event);
+        evt
+    }
+}
+
+impl Deref for ScopedEvent {
+    type Target = EventFd;
+
+    fn deref(&self) -> &EventFd {
+        &self.0
+    }
+}
+
+impl Drop for ScopedEvent {
+    fn drop(&mut self) {
+        self.write(1).expect("failed to trigger scoped event");
     }
 }
 
@@ -128,5 +242,30 @@ mod tests {
         let evt_clone = evt.try_clone().unwrap();
         evt.write(923).unwrap();
         assert_eq!(evt_clone.read(), Ok(923));
+    }
+
+    #[test]
+    fn scoped_event() {
+        let scoped_evt = ScopedEvent::new().unwrap();
+        let evt_clone: EventFd = scoped_evt.try_clone().unwrap();
+        drop(scoped_evt);
+        assert_eq!(evt_clone.read(), Ok(1));
+    }
+
+    #[test]
+    fn eventfd_from_scoped_event() {
+        let scoped_evt = ScopedEvent::new().unwrap();
+        let evt: EventFd = scoped_evt.into();
+        evt.write(1).unwrap();
+    }
+
+    #[test]
+    fn timeout() {
+        let mut evt = EventFd::new().expect("failed to create eventfd");
+        assert_eq!(
+            evt.read_timeout(Duration::from_millis(1))
+                .expect("failed to read from eventfd with timeout"),
+            EventReadResult::Timeout
+        );
     }
 }

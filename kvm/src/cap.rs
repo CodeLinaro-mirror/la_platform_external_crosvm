@@ -118,4 +118,6 @@ pub enum Cap {
     PpcEnableHcall = KVM_CAP_PPC_ENABLE_HCALL,
     CheckExtensionVm = KVM_CAP_CHECK_EXTENSION_VM,
     S390UserSigp = KVM_CAP_S390_USER_SIGP,
+    ImmediateExit = KVM_CAP_IMMEDIATE_EXIT,
+    ArmPmuV3 = KVM_CAP_ARM_PMU_V3,
 }

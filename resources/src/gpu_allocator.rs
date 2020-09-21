@@ -8,10 +8,7 @@ use std::fs::File;
 #[cfg(feature = "wl-dmabuf")]
 use libc::EINVAL;
 
-#[cfg(feature = "wl-dmabuf")]
-use gpu_buffer;
 use msg_socket::MsgOnSocket;
-use sys_util;
 
 #[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq)]
@@ -111,7 +108,8 @@ impl GpuMemoryAllocator for GpuBufferDevice {
 }
 
 #[cfg(feature = "wl-dmabuf")]
-pub fn create_gpu_memory_allocator() -> Result<Option<Box<GpuMemoryAllocator>>, GpuAllocatorError> {
+pub fn create_gpu_memory_allocator(
+) -> Result<Option<Box<dyn GpuMemoryAllocator>>, GpuAllocatorError> {
     let undesired: &[&str] = &["vgem", "pvr"];
     let fd = gpu_buffer::rendernode::open_device(undesired)
         .map_err(|_| GpuAllocatorError::OpenGpuBufferDevice)?;

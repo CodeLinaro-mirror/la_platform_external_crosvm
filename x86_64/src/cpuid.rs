@@ -2,11 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::arch::x86_64::{__cpuid, __cpuid_count};
 use std::fmt::{self, Display};
 use std::result;
-
-use kvm;
-use sys_util;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -28,29 +26,22 @@ impl Display for Error {
     }
 }
 
-// This function is implemented in C because stable rustc does not
-// support inline assembly.
-extern "C" {
-    fn host_cpuid(
-        func: u32,
-        func2: u32,
-        rEax: *mut u32,
-        rEbx: *mut u32,
-        rEcx: *mut u32,
-        rEdx: *mut u32,
-    ) -> ();
-}
-
 // CPUID bits in ebx, ecx, and edx.
 const EBX_CLFLUSH_CACHELINE: u32 = 8; // Flush a cache line size.
 const EBX_CLFLUSH_SIZE_SHIFT: u32 = 8; // Bytes flushed when executing CLFLUSH.
 const EBX_CPU_COUNT_SHIFT: u32 = 16; // Index of this CPU.
 const EBX_CPUID_SHIFT: u32 = 24; // Index of this CPU.
 const ECX_EPB_SHIFT: u32 = 3; // "Energy Performance Bias" bit.
+const ECX_TSC_DEADLINE_TIMER_SHIFT: u32 = 24; // TSC deadline mode of APIC timer
 const ECX_HYPERVISOR_SHIFT: u32 = 31; // Flag to be set when the cpu is running on a hypervisor.
 const EDX_HTT_SHIFT: u32 = 28; // Hyper Threading Enabled.
 
-fn filter_cpuid(cpu_id: u64, cpu_count: u64, kvm_cpuid: &mut kvm::CpuId) -> Result<()> {
+fn filter_cpuid(
+    cpu_id: u64,
+    cpu_count: u64,
+    kvm_cpuid: &mut kvm::CpuId,
+    kvm: &kvm::Kvm,
+) -> Result<()> {
     let entries = kvm_cpuid.mut_entries_slice();
 
     for entry in entries {
@@ -60,6 +51,9 @@ fn filter_cpuid(cpu_id: u64, cpu_count: u64, kvm_cpuid: &mut kvm::CpuId) -> Resu
                 if entry.index == 0 {
                     entry.ecx |= 1 << ECX_HYPERVISOR_SHIFT;
                 }
+                if kvm.check_extension(kvm::Cap::TscDeadlineTimer) {
+                    entry.ecx |= 1 << ECX_TSC_DEADLINE_TIMER_SHIFT;
+                }
                 entry.ebx = (cpu_id << EBX_CPUID_SHIFT) as u32
                     | (EBX_CLFLUSH_CACHELINE << EBX_CLFLUSH_SIZE_SHIFT);
                 if cpu_count > 1 {
@@ -68,25 +62,19 @@ fn filter_cpuid(cpu_id: u64, cpu_count: u64, kvm_cpuid: &mut kvm::CpuId) -> Resu
                 }
             }
             2 | 0x80000005 | 0x80000006 => unsafe {
-                host_cpuid(
-                    entry.function,
-                    0,
-                    &mut entry.eax as *mut u32,
-                    &mut entry.ebx as *mut u32,
-                    &mut entry.ecx as *mut u32,
-                    &mut entry.edx as *mut u32,
-                );
+                let result = __cpuid(entry.function);
+                entry.eax = result.eax;
+                entry.ebx = result.ebx;
+                entry.ecx = result.ecx;
+                entry.edx = result.edx;
             },
             4 => {
                 unsafe {
-                    host_cpuid(
-                        entry.function,
-                        entry.index,
-                        &mut entry.eax as *mut u32,
-                        &mut entry.ebx as *mut u32,
-                        &mut entry.ecx as *mut u32,
-                        &mut entry.edx as *mut u32,
-                    );
+                    let result = __cpuid_count(entry.function, entry.index);
+                    entry.eax = result.eax;
+                    entry.ebx = result.ebx;
+                    entry.ecx = result.ecx;
+                    entry.edx = result.edx;
                 }
                 entry.eax &= !0xFC000000;
             }
@@ -115,10 +103,23 @@ pub fn setup_cpuid(kvm: &kvm::Kvm, vcpu: &kvm::Vcpu, cpu_id: u64, nrcpus: u64) -
         .get_supported_cpuid()
         .map_err(Error::GetSupportedCpusFailed)?;
 
-    filter_cpuid(cpu_id, nrcpus, &mut kvm_cpuid)?;
+    filter_cpuid(cpu_id, nrcpus, &mut kvm_cpuid, kvm)?;
 
     vcpu.set_cpuid2(&kvm_cpuid)
         .map_err(Error::SetSupportedCpusFailed)
+}
+
+/// get host cpu max physical address bits
+pub fn phy_max_address_bits() -> u32 {
+    let mut phys_bits: u32 = 36;
+
+    let highest_ext_function = unsafe { __cpuid(0x80000000) };
+    if highest_ext_function.eax >= 0x80000008 {
+        let addr_size = unsafe { __cpuid(0x80000008) };
+        phys_bits = addr_size.eax & 0xff;
+    }
+
+    phys_bits
 }
 
 #[cfg(test)]
@@ -128,13 +129,14 @@ mod tests {
     #[test]
     fn feature_and_vendor_name() {
         let mut cpuid = kvm::CpuId::new(2);
+        let kvm = kvm::Kvm::new().unwrap();
 
         let entries = cpuid.mut_entries_slice();
         entries[0].function = 0;
         entries[1].function = 1;
         entries[1].ecx = 0x10;
         entries[1].edx = 0;
-        assert_eq!(Ok(()), filter_cpuid(1, 2, &mut cpuid));
+        assert_eq!(Ok(()), filter_cpuid(1, 2, &mut cpuid, &kvm));
 
         let entries = cpuid.mut_entries_slice();
         assert_eq!(entries[0].function, 0);

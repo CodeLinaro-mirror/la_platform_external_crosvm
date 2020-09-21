@@ -4,6 +4,8 @@
 
 pub mod android;
 pub mod fdt;
+pub mod pstore;
+pub mod serial;
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
@@ -11,22 +13,37 @@ use std::fmt::{self, Display};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use acpi_tables::sdt::SDT;
+use devices::split_irqchip_common::GsiRelay;
 use devices::virtio::VirtioDevice;
 use devices::{
-    Bus, BusDevice, BusError, PciDevice, PciDeviceError, PciInterruptPin, PciRoot, ProxyDevice,
-    Serial, SerialParameters, DEFAULT_SERIAL_PARAMS, SERIAL_ADDR,
+    Bus, BusDevice, BusError, PciAddress, PciDevice, PciDeviceError, PciInterruptPin, PciRoot,
+    ProxyDevice,
 };
-use io_jail::Minijail;
 use kvm::{IoeventAddress, Kvm, Vcpu, Vm};
+use minijail::Minijail;
 use resources::SystemAllocator;
 use sync::Mutex;
 use sys_util::{syslog, EventFd, GuestAddress, GuestMemory, GuestMemoryError};
+use vm_control::VmIrqRequestSocket;
+
+pub use serial::{
+    add_serial_devices, get_serial_cmdline, set_default_serial_parameters, GetSerialCmdlineError,
+    SerialHardware, SerialParameters, SerialType, SERIAL_ADDR,
+};
 
 pub enum VmImage {
     Kernel(File),
     Bios(File),
+}
+
+#[derive(Clone)]
+pub struct Pstore {
+    pub path: PathBuf,
+    pub size: u32,
 }
 
 /// Holds the pieces needed to build a VM. Passed to `build_vm` in the `LinuxArch` trait below to
@@ -37,9 +54,11 @@ pub struct VmComponents {
     pub vcpu_affinity: Vec<usize>,
     pub vm_image: VmImage,
     pub android_fstab: Option<File>,
+    pub pstore: Option<Pstore>,
     pub initrd_image: Option<File>,
     pub extra_kernel_params: Vec<String>,
     pub wayland_dmabuf: bool,
+    pub acpi_sdts: Vec<SDT>,
 }
 
 /// Holds the elements needed to run a Linux VM. Created by `build_vm`.
@@ -47,14 +66,16 @@ pub struct RunnableLinuxVm {
     pub vm: Vm,
     pub kvm: Kvm,
     pub resources: SystemAllocator,
-    pub stdio_serial: Option<Arc<Mutex<Serial>>>,
     pub exit_evt: EventFd,
     pub vcpus: Vec<Vcpu>,
     pub vcpu_affinity: Vec<usize>,
     pub irq_chip: Option<File>,
+    pub split_irqchip: Option<(Arc<Mutex<devices::Pic>>, Arc<Mutex<devices::Ioapic>>)>,
+    pub gsi_relay: Option<Arc<GsiRelay>>,
     pub io_bus: Bus,
     pub mmio_bus: Bus,
     pub pid_debug_label_map: BTreeMap<u32, String>,
+    pub suspend_evt: EventFd,
 }
 
 /// The device and optional jail.
@@ -79,7 +100,9 @@ pub trait LinuxArch {
     fn build_vm<F, E>(
         components: VmComponents,
         split_irqchip: bool,
-        serial_parameters: &BTreeMap<u8, SerialParameters>,
+        ioapic_device_socket: VmIrqRequestSocket,
+        serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
+        serial_jail: Option<Minijail>,
         create_devices: F,
     ) -> Result<RunnableLinuxVm, Self::Error>
     where
@@ -101,12 +124,16 @@ pub enum DeviceRegistrationError {
     AllocateDeviceAddrs(PciDeviceError),
     /// Could not allocate an IRQ number.
     AllocateIrq,
-    /// Could not create the mmio device to wrap a VirtioDevice.
-    CreateMmioDevice(sys_util::Error),
-    //  Unable to create serial device from serial parameters
-    CreateSerialDevice(devices::SerialError),
+    // Unable to create a pipe.
+    CreatePipe(sys_util::Error),
+    // Unable to create serial device from serial parameters
+    CreateSerialDevice(serial::Error),
+    /// Could not clone an event fd.
+    EventFdClone(sys_util::Error),
     /// Could not create an event fd.
     EventFdCreate(sys_util::Error),
+    /// Missing a required serial device.
+    MissingRequiredSerialDevice(u8),
     /// Could not add a device to the mmio bus.
     MmioInsert(BusError),
     /// Failed to register ioevent with VM.
@@ -133,10 +160,12 @@ impl Display for DeviceRegistrationError {
             AllocateIoAddrs(e) => write!(f, "Allocating IO addresses: {}", e),
             AllocateDeviceAddrs(e) => write!(f, "Allocating device addresses: {}", e),
             AllocateIrq => write!(f, "Allocating IRQ number"),
-            CreateMmioDevice(e) => write!(f, "failed to create mmio device: {}", e),
+            CreatePipe(e) => write!(f, "failed to create pipe: {}", e),
             CreateSerialDevice(e) => write!(f, "failed to create serial device: {}", e),
             Cmdline(e) => write!(f, "unable to add device to kernel command line: {}", e),
+            EventFdClone(e) => write!(f, "failed to clone eventfd: {}", e),
             EventFdCreate(e) => write!(f, "failed to create eventfd: {}", e),
+            MissingRequiredSerialDevice(n) => write!(f, "missing required serial device {}", n),
             MmioInsert(e) => write!(f, "failed to add to mmio bus: {}", e),
             RegisterIoevent(e) => write!(f, "failed to register ioevent to VM: {}", e),
             RegisterIrqfd(e) => write!(f, "failed to register irq eventfd to VM: {}", e),
@@ -153,17 +182,29 @@ impl Display for DeviceRegistrationError {
 /// Creates a root PCI device for use by this Vm.
 pub fn generate_pci_root(
     devices: Vec<(Box<dyn PciDevice>, Option<Minijail>)>,
+    gsi_relay: &mut Option<GsiRelay>,
     mmio_bus: &mut Bus,
     resources: &mut SystemAllocator,
     vm: &mut Vm,
-) -> Result<(PciRoot, Vec<(u32, PciInterruptPin)>, BTreeMap<u32, String>), DeviceRegistrationError>
-{
+) -> Result<
+    (
+        PciRoot,
+        Vec<(PciAddress, u32, PciInterruptPin)>,
+        BTreeMap<u32, String>,
+    ),
+    DeviceRegistrationError,
+> {
     let mut root = PciRoot::new();
     let mut pci_irqs = Vec::new();
     let mut pid_labels = BTreeMap::new();
     for (dev_idx, (mut device, jail)) in devices.into_iter().enumerate() {
-        // Only support one bus.
-        device.assign_bus_dev(0, dev_idx as u8);
+        // Auto assign PCI device numbers starting from 1
+        let address = PciAddress {
+            bus: 0,
+            dev: 1 + dev_idx as u8,
+            func: 0,
+        };
+        device.assign_address(address);
 
         let mut keep_fds = device.keep_fds();
         syslog::push_fds(&mut keep_fds);
@@ -178,14 +219,26 @@ pub fn generate_pci_root(
             1 => PciInterruptPin::IntB,
             2 => PciInterruptPin::IntC,
             3 => PciInterruptPin::IntD,
-            _ => panic!(""), // Obviously not possible, but the compiler is not smart enough.
+            _ => unreachable!(), // Obviously not possible, but the compiler is not smart enough.
         };
-        vm.register_irqfd_resample(&irqfd, &irq_resample_fd, irq_num)
-            .map_err(DeviceRegistrationError::RegisterIrqfd)?;
+        if let Some(relay) = gsi_relay {
+            relay.register_irqfd_resample(
+                irqfd
+                    .try_clone()
+                    .map_err(DeviceRegistrationError::EventFdClone)?,
+                irq_resample_fd
+                    .try_clone()
+                    .map_err(DeviceRegistrationError::EventFdClone)?,
+                irq_num as usize,
+            );
+        } else {
+            vm.register_irqfd_resample(&irqfd, &irq_resample_fd, irq_num)
+                .map_err(DeviceRegistrationError::RegisterIrqfd)?;
+        }
         keep_fds.push(irqfd.as_raw_fd());
         keep_fds.push(irq_resample_fd.as_raw_fd());
         device.assign_irq(irqfd, irq_resample_fd, irq_num, pci_irq_pin);
-        pci_irqs.push((dev_idx as u32, pci_irq_pin));
+        pci_irqs.push((address, irq_num, pci_irq_pin));
 
         let ranges = device
             .allocate_io_bars(resources)
@@ -211,7 +264,7 @@ pub fn generate_pci_root(
             device.on_sandboxed();
             Arc::new(Mutex::new(device))
         };
-        root.add_device(arced_dev.clone());
+        root.add_device(address, arced_dev.clone());
         for range in &ranges {
             mmio_bus
                 .insert(arced_dev.clone(), range.0, range.1, true)
@@ -225,57 +278,6 @@ pub fn generate_pci_root(
         }
     }
     Ok((root, pci_irqs, pid_labels))
-}
-
-/// Adds serial devices to the provided bus based on the serial parameters given. Returns the serial
-///  port number and serial device to be used for stdout if defined.
-///
-/// # Arguments
-///
-/// * `io_bus` - Bus to add the devices to
-/// * `com_evt_1_3` - eventfd for com1 and com3
-/// * `com_evt_1_4` - eventfd for com2 and com4
-/// * `io_bus` - Bus to add the devices to
-/// * `serial_parameters` - definitions of serial parameter configuationis. If a setting is not
-///     provided for a port, then it will use the default configuation.
-pub fn add_serial_devices(
-    io_bus: &mut Bus,
-    com_evt_1_3: &EventFd,
-    com_evt_2_4: &EventFd,
-    serial_parameters: &BTreeMap<u8, SerialParameters>,
-) -> Result<(Option<u8>, Option<Arc<Mutex<Serial>>>), DeviceRegistrationError> {
-    let mut stdio_serial_num = None;
-    let mut stdio_serial = None;
-
-    for x in 0..=3 {
-        let com_evt = match x {
-            0 => com_evt_1_3,
-            1 => com_evt_2_4,
-            2 => com_evt_1_3,
-            3 => com_evt_2_4,
-            _ => com_evt_1_3,
-        };
-
-        let param = serial_parameters
-            .get(&(x + 1))
-            .unwrap_or(&DEFAULT_SERIAL_PARAMS[x as usize]);
-
-        let com = Arc::new(Mutex::new(
-            param
-                .create_serial_device(&com_evt)
-                .map_err(DeviceRegistrationError::CreateSerialDevice)?,
-        ));
-        io_bus
-            .insert(com.clone(), SERIAL_ADDR[x as usize], 0x8, false)
-            .unwrap();
-
-        if param.console {
-            stdio_serial_num = Some(x + 1);
-            stdio_serial = Some(com.clone());
-        }
-    }
-
-    Ok((stdio_serial_num, stdio_serial))
 }
 
 /// Errors for image loading.
