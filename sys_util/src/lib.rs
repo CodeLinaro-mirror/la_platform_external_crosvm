@@ -4,8 +4,15 @@
 
 //! Small system utility modules for usage by other modules.
 
-pub mod affinity;
 mod alloc;
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+use android as target_os;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as target_os;
 #[macro_use]
 pub mod handle_eintr;
 #[macro_use]
@@ -21,14 +28,13 @@ mod external_mapping;
 mod file_flags;
 pub mod file_traits;
 mod fork;
-mod guest_address;
-pub mod guest_memory;
 mod mmap;
 pub mod net;
 mod passwd;
 mod poll;
 mod priority;
 mod raw_fd;
+pub mod sched;
 mod seek_hole;
 mod shm;
 pub mod signal;
@@ -39,7 +45,6 @@ mod terminal;
 mod timerfd;
 mod write_zeroes;
 
-pub use crate::affinity::*;
 pub use crate::alloc::LayoutAllocation;
 pub use crate::capabilities::drop_capabilities;
 pub use crate::clock::{Clock, FakeClock};
@@ -49,14 +54,13 @@ pub use crate::eventfd::*;
 pub use crate::external_mapping::*;
 pub use crate::file_flags::*;
 pub use crate::fork::*;
-pub use crate::guest_address::*;
-pub use crate::guest_memory::*;
 pub use crate::ioctl::*;
 pub use crate::mmap::*;
 pub use crate::passwd::*;
 pub use crate::poll::*;
 pub use crate::priority::*;
 pub use crate::raw_fd::*;
+pub use crate::sched::*;
 pub use crate::shm::*;
 pub use crate::signal::*;
 pub use crate::signalfd::*;
@@ -72,7 +76,6 @@ pub use crate::file_traits::{
     AsRawFds, FileAllocate, FileGetLen, FileReadWriteAtVolatile, FileReadWriteVolatile, FileSetLen,
     FileSync,
 };
-pub use crate::guest_memory::Error as GuestMemoryError;
 pub use crate::mmap::Error as MmapError;
 pub use crate::seek_hole::SeekHole;
 pub use crate::signalfd::Error as SignalFdError;
@@ -296,6 +299,35 @@ pub fn pipe(close_on_exec: bool) -> Result<(File, File)> {
     }
 }
 
+/// Sets the pipe signified with fd to `size`.
+///
+/// Returns the new size of the pipe or an error if the OS fails to set the pipe size.
+pub fn set_pipe_size(fd: RawFd, size: usize) -> Result<usize> {
+    // Safe because fcntl with the `F_SETPIPE_SZ` arg doesn't touch memory.
+    let ret = unsafe { fcntl(fd, libc::F_SETPIPE_SZ, size as c_int) };
+    if ret < 0 {
+        return errno_result();
+    }
+    Ok(ret as usize)
+}
+
+/// Test-only function used to create a pipe that is full. The pipe is created, has its size set to
+/// the minimum and then has that much data written to it. Use `new_pipe_full` to test handling of
+/// blocking `write` calls in unit tests.
+pub fn new_pipe_full() -> Result<(File, File)> {
+    use std::io::Write;
+
+    let (rx, mut tx) = pipe(true)?;
+    // The smallest allowed size of a pipe is the system page size on linux.
+    let page_size = set_pipe_size(tx.as_raw_fd(), round_up_to_page_size(1))?;
+
+    // Fill the pipe with page_size zeros so the next write call will block.
+    let buf = vec![0u8; page_size];
+    tx.write_all(&buf)?;
+
+    Ok((rx, tx))
+}
+
 /// Used to attempt to clean up a named pipe after it is no longer used.
 pub struct UnlinkUnixDatagram(pub UnixDatagram);
 impl AsRef<UnixDatagram> for UnlinkUnixDatagram {
@@ -397,4 +429,22 @@ pub fn add_fd_flags(fd: RawFd, set_flags: c_int) -> Result<()> {
 pub fn clear_fd_flags(fd: RawFd, clear_flags: c_int) -> Result<()> {
     let start_flags = get_fd_flags(fd)?;
     set_fd_flags(fd, start_flags & !clear_flags)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn pipe_size_and_fill() {
+        let (_rx, mut tx) = new_pipe_full().expect("Failed to pipe");
+
+        // To  check that setting the size worked, set the descriptor to non blocking and check that
+        // write returns an error.
+        add_fd_flags(tx.as_raw_fd(), libc::O_NONBLOCK).expect("Failed to set tx non blocking");
+        tx.write(&[0u8; 8])
+            .expect_err("Write after fill didn't fail");
+    }
 }

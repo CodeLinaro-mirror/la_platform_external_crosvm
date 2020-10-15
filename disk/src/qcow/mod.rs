@@ -6,13 +6,13 @@ mod qcow_raw_file;
 mod refcount;
 mod vec_cache;
 
-use data_model::{VolatileMemory, VolatileSlice};
-use libc::{EINVAL, ENOSPC, ENOTSUP};
-use remain::sorted;
-use sys_util::{
+use base::{
     error, AsRawFds, FileAllocate, FileReadWriteAtVolatile, FileReadWriteVolatile, FileSetLen,
     FileSync, PunchHole, SeekHole, WriteZeroesAt,
 };
+use data_model::{VolatileMemory, VolatileSlice};
+use libc::{EINVAL, ENOSPC, ENOTSUP};
+use remain::sorted;
 
 use std::cmp::{max, min};
 use std::fmt::{self, Display};
@@ -1761,9 +1761,9 @@ fn div_round_up_u32(dividend: u32, divisor: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base::{SharedMemory, WriteZeroes};
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
-    use sys_util::{SharedMemory, WriteZeroes};
 
     fn valid_header() -> Vec<u8> {
         vec![
@@ -1816,7 +1816,7 @@ mod tests {
         let shm = SharedMemory::anon().unwrap();
         let mut disk_file: File = shm.into();
         disk_file.write_all(&header).unwrap();
-        disk_file.set_len(0x1_0000_0000).unwrap();
+        disk_file.set_len(0x8000_0000).unwrap();
         disk_file.seek(SeekFrom::Start(0)).unwrap();
         disk_file
     }
@@ -2487,19 +2487,19 @@ mod tests {
         with_default_file(1024 * 1024 * 1024 * 256, |mut qcow_file| {
             const NUM_BLOCKS: usize = 555;
             const BLOCK_SIZE: usize = 0x1_0000;
-            const OFFSET: usize = 0x1_0000_0020;
+            const OFFSET: u64 = 0x1_0000_0020;
             let data = [0x55u8; BLOCK_SIZE];
             let mut readback = [0u8; BLOCK_SIZE];
             for i in 0..NUM_BLOCKS {
-                let seek_offset = OFFSET + i * BLOCK_SIZE;
+                let seek_offset = OFFSET + (i as u64) * (BLOCK_SIZE as u64);
                 qcow_file
-                    .seek(SeekFrom::Start(seek_offset as u64))
+                    .seek(SeekFrom::Start(seek_offset))
                     .expect("Failed to seek.");
                 let nwritten = qcow_file.write(&data).expect("Failed to write test data.");
                 assert_eq!(nwritten, BLOCK_SIZE);
                 // Read back the data to check it was written correctly.
                 qcow_file
-                    .seek(SeekFrom::Start(seek_offset as u64))
+                    .seek(SeekFrom::Start(seek_offset))
                     .expect("Failed to seek.");
                 let nread = qcow_file.read(&mut readback).expect("Failed to read.");
                 assert_eq!(nread, BLOCK_SIZE);
@@ -2516,9 +2516,9 @@ mod tests {
             }
             // Check the data again after the writes have happened.
             for i in 0..NUM_BLOCKS {
-                let seek_offset = OFFSET + i * BLOCK_SIZE;
+                let seek_offset = OFFSET + (i as u64) * (BLOCK_SIZE as u64);
                 qcow_file
-                    .seek(SeekFrom::Start(seek_offset as u64))
+                    .seek(SeekFrom::Start(seek_offset))
                     .expect("Failed to seek.");
                 let nread = qcow_file.read(&mut readback).expect("Failed to read.");
                 assert_eq!(nread, BLOCK_SIZE);

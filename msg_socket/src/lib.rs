@@ -8,8 +8,8 @@ use std::io::{IoSlice, Result};
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
 
+use base::{handle_eintr, net::UnixSeqpacket, Error as SysError, ScmSocket};
 use cros_async::PollOrRing;
-use sys_util::{handle_eintr, net::UnixSeqpacket, Error as SysError, ScmSocket};
 
 pub use crate::msg_on_socket::*;
 pub use msg_on_socket_derive::*;
@@ -164,11 +164,11 @@ pub trait MsgReceiver: AsRef<UnixSeqpacket> {
             }
         };
 
-        if msg_buffer.len() == 0 && Self::M::fixed_size() != Some(0) {
-            return Err(MsgError::RecvZero);
-        }
-
         if let Some(fixed_size) = Self::M::fixed_size() {
+            if msg_buffer.len() == 0 && fixed_size != 0 {
+                return Err(MsgError::RecvZero);
+            }
+
             if fixed_size != msg_buffer.len() {
                 return Err(MsgError::BadRecvSize {
                     expected: fixed_size,

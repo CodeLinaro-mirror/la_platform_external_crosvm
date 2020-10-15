@@ -4,8 +4,8 @@
 
 //! Crate for displaying simple surfaces and GPU buffers over wayland.
 
+extern crate base;
 extern crate data_model;
-extern crate sys_util;
 
 #[path = "dwl.rs"]
 mod dwl;
@@ -21,10 +21,10 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
+use base::{round_up_to_page_size, MemoryMapping, SharedMemory};
 use data_model::VolatileMemory;
-use sys_util::{round_up_to_page_size, MemoryMapping, SharedMemory};
 
-const BUFFER_COUNT: usize = 2;
+const BUFFER_COUNT: usize = 3;
 const BYTES_PER_PIXEL: u32 = 4;
 
 struct DwlContext(*mut dwl_context);
@@ -85,11 +85,11 @@ impl Surface {
 /// The user of `GpuDisplay` can use `AsRawFd` to poll on the compositor connection's file
 /// descriptor. When the connection is readable, `dispatch_events` can be called to process it.
 pub struct DisplayWl {
-    ctx: DwlContext,
     dmabufs: HashMap<u32, DwlDmabuf>,
     dmabuf_next_id: u32,
     surfaces: HashMap<u32, Surface>,
     surface_next_id: u32,
+    ctx: DwlContext,
 }
 
 impl DisplayWl {
@@ -124,11 +124,11 @@ impl DisplayWl {
         }
 
         Ok(DisplayWl {
-            ctx,
             dmabufs: Default::default(),
             dmabuf_next_id: 0,
             surfaces: Default::default(),
             surface_next_id: 0,
+            ctx,
         })
     }
 
