@@ -432,7 +432,6 @@ impl arch::LinuxArch for X8664arch {
                 for param in components.extra_kernel_params {
                     cmdline.insert_str(&param).map_err(Error::Cmdline)?;
                 }
-
                 // It seems that default record_size is only 4096 byte even if crosvm allocates
                 // more memory. It means that one crash can only 4096 byte.
                 // Set record_size and console_size to 1/4 of allocated memory size.
@@ -481,6 +480,7 @@ impl arch::LinuxArch for X8664arch {
             mmio_bus,
             pid_debug_label_map,
             suspend_evt,
+            rt_cpus: components.rt_cpus,
         })
     }
 
@@ -707,9 +707,19 @@ impl X8664arch {
 
         let mut io_bus = devices::Bus::new();
 
-        let mem_gap_start = END_ADDR_BEFORE_32BITS;
-        let mem_below_4g = std::cmp::min(mem_gap_start, mem_size);
-        let mem_above_4g = mem_size.saturating_sub(END_ADDR_BEFORE_32BITS);
+        let mem_regions = arch_memory_regions(mem_size, false);
+
+        let mem_below_4g = mem_regions
+            .iter()
+            .filter(|r| r.0.offset() < FIRST_ADDR_PAST_32BITS)
+            .map(|r| r.1)
+            .sum();
+
+        let mem_above_4g = mem_regions
+            .iter()
+            .filter(|r| r.0.offset() >= FIRST_ADDR_PAST_32BITS)
+            .map(|r| r.1)
+            .sum();
 
         io_bus
             .insert(
