@@ -20,12 +20,12 @@ use std::sync::Arc;
 use libc::{EINVAL, EIO, ENODEV};
 
 use base::{
-    error, Error as SysError, EventFd, ExternalMapping, MappedRegion, MemoryMapping, MmapError,
-    Result,
+    error, AsRawDescriptor, Error as SysError, Event, ExternalMapping, MappedRegion, MemoryMapping,
+    MmapError, RawDescriptor, Result,
 };
 use hypervisor::{IrqRoute, IrqSource, Vm};
 use msg_socket::{MsgError, MsgOnSocket, MsgReceiver, MsgResult, MsgSender, MsgSocket};
-use resources::{Alloc, GpuMemoryDesc, MmioType, SystemAllocator};
+use resources::{Alloc, GpuMemoryDesc, SystemAllocator};
 use sync::Mutex;
 use vm_memory::GuestAddress;
 
@@ -37,15 +37,22 @@ pub enum MaybeOwnedFd {
     /// Owned by this enum variant, and will be destructed automatically if not moved out.
     Owned(File),
     /// A file descriptor borrwed by this enum.
-    Borrowed(RawFd),
+    Borrowed(RawDescriptor),
 }
 
+impl AsRawDescriptor for MaybeOwnedFd {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        match self {
+            MaybeOwnedFd::Owned(f) => f.as_raw_descriptor(),
+            MaybeOwnedFd::Borrowed(descriptor) => *descriptor,
+        }
+    }
+}
+
+// TODO(mikehoyle): Remove this in favor of just AsRawDescriptor
 impl AsRawFd for MaybeOwnedFd {
     fn as_raw_fd(&self) -> RawFd {
-        match self {
-            MaybeOwnedFd::Owned(f) => f.as_raw_fd(),
-            MaybeOwnedFd::Borrowed(fd) => *fd,
-        }
+        self.as_raw_descriptor()
     }
 }
 
@@ -370,7 +377,7 @@ impl VmMemoryRequest {
                 offset,
                 gpa,
             } => {
-                let mmap = match MemoryMapping::from_fd_offset(fd, size, offset as u64) {
+                let mmap = match MemoryMapping::from_descriptor_offset(fd, size, offset as u64) {
                     Ok(v) => v,
                     Err(_e) => return VmMemoryResponse::Err(SysError::new(EINVAL)),
                 };
@@ -419,7 +426,7 @@ pub enum VmIrqRequest {
 /// VmIrqRequest::execute can't take an `IrqChip` argument, because of a dependency cycle between
 /// devices and vm_control, so it takes a Fn that processes an `IrqSetup`.
 pub enum IrqSetup<'a> {
-    Event(u32, &'a EventFd),
+    Event(u32, &'a Event),
     Route(IrqRoute),
 }
 
@@ -441,14 +448,14 @@ impl VmIrqRequest {
             AllocateOneMsi { ref irqfd } => {
                 if let Some(irq_num) = sys_allocator.allocate_irq() {
                     // Beacuse of the limitation of `MaybeOwnedFd` not fitting into `register_irqfd`
-                    // which expects an `&EventFd`, we use the unsafe `from_raw_fd` to assume that
-                    // the fd given is an `EventFd`, and we ignore the ownership question using
+                    // which expects an `&Event`, we use the unsafe `from_raw_fd` to assume that
+                    // the fd given is an `Event`, and we ignore the ownership question using
                     // `ManuallyDrop`. This is safe because `ManuallyDrop` prevents any Drop
                     // implementation from triggering on `irqfd` which already has an owner, and the
-                    // `EventFd` methods are never called. The underlying fd is merely passed to the
+                    // `Event` methods are never called. The underlying fd is merely passed to the
                     // kernel which doesn't care about ownership and deals with incorrect FDs, in
                     // the case of bugs on our part.
-                    let evt = unsafe { ManuallyDrop::new(EventFd::from_raw_fd(irqfd.as_raw_fd())) };
+                    let evt = unsafe { ManuallyDrop::new(Event::from_raw_fd(irqfd.as_raw_fd())) };
 
                     match set_up_irq(IrqSetup::Event(irq_num, &evt)) {
                         Ok(_) => VmIrqResponse::AllocateOneMsi { gsi: irq_num },
@@ -571,11 +578,11 @@ pub enum VmRequest {
 fn register_memory(
     vm: &mut impl Vm,
     allocator: &mut SystemAllocator,
-    fd: &dyn AsRawFd,
+    fd: &dyn AsRawDescriptor,
     size: usize,
     pci_allocation: Option<(Alloc, u64)>,
 ) -> Result<(u64, MemSlot)> {
-    let mmap = match MemoryMapping::from_fd(fd, size) {
+    let mmap = match MemoryMapping::from_descriptor(fd, size) {
         Ok(v) => v,
         Err(MmapError::SystemCallFailed(e)) => return Err(e),
         _ => return Err(SysError::new(EINVAL)),
@@ -583,13 +590,13 @@ fn register_memory(
 
     let addr = match pci_allocation {
         Some(pci_allocation) => allocator
-            .mmio_allocator(MmioType::High)
+            .mmio_allocator_any()
             .address_from_pci_offset(pci_allocation.0, pci_allocation.1, size as u64)
             .map_err(|_e| SysError::new(EINVAL))?,
         None => {
             let alloc = allocator.get_anon_alloc();
             allocator
-                .mmio_allocator(MmioType::High)
+                .mmio_allocator_any()
                 .allocate(size as u64, alloc, "vmcontrol_register_memory".to_string())
                 .map_err(|_e| SysError::new(EINVAL))?
         }
@@ -607,7 +614,7 @@ fn register_memory_hva(
     pci_allocation: (Alloc, u64),
 ) -> Result<(u64, MemSlot)> {
     let addr = allocator
-        .mmio_allocator(MmioType::High)
+        .mmio_allocator_any()
         .address_from_pci_offset(pci_allocation.0, pci_allocation.1, mem.size() as u64)
         .map_err(|_e| SysError::new(EINVAL))?;
 
