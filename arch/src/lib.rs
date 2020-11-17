@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use acpi_tables::sdt::SDT;
-use base::{syslog, EventFd};
+use base::{syslog, AsRawDescriptor, Event};
 use devices::virtio::VirtioDevice;
 use devices::{
     Bus, BusDevice, BusError, IrqChip, PciAddress, PciDevice, PciDeviceError, PciInterruptPin,
@@ -74,6 +74,7 @@ pub struct VmComponents {
     pub memory_size: u64,
     pub vcpu_count: usize,
     pub vcpu_affinity: Option<VcpuAffinity>,
+    pub no_smt: bool,
     pub vm_image: VmImage,
     pub android_fstab: Option<File>,
     pub pstore: Option<Pstore>,
@@ -88,18 +89,19 @@ pub struct VmComponents {
 pub struct RunnableLinuxVm<V: VmArch, I: IrqChipArch<V::Vcpu>> {
     pub vm: V,
     pub resources: SystemAllocator,
-    pub exit_evt: EventFd,
+    pub exit_evt: Event,
     pub vcpu_count: usize,
     /// If vcpus is None, then it's the responsibility of the vcpu thread to create vcpus.
     /// If it's Some, then `build_vm` already created the vcpus.
     pub vcpus: Option<Vec<V::Vcpu>>,
     pub vcpu_affinity: Option<VcpuAffinity>,
+    pub no_smt: bool,
     pub irq_chip: I,
     pub has_bios: bool,
     pub io_bus: Bus,
     pub mmio_bus: Bus,
     pub pid_debug_label_map: BTreeMap<u32, String>,
-    pub suspend_evt: EventFd,
+    pub suspend_evt: Event,
     pub rt_cpus: Vec<usize>,
 }
 
@@ -138,7 +140,7 @@ pub trait LinuxArch {
             &GuestMemory,
             &mut V,
             &mut SystemAllocator,
-            &EventFd,
+            &Event,
         ) -> std::result::Result<Vec<(Box<dyn PciDevice>, Option<Minijail>)>, E1>,
         FV: FnOnce(GuestMemory) -> std::result::Result<V, E2>,
         FI: FnOnce(&V, /* vcpu_count: */ usize) -> std::result::Result<I, E3>,
@@ -165,6 +167,7 @@ pub trait LinuxArch {
         vcpu_id: usize,
         num_cpus: usize,
         has_bios: bool,
+        no_smt: bool,
     ) -> Result<(), Self::Error>;
 }
 
@@ -181,17 +184,17 @@ pub enum DeviceRegistrationError {
     CreatePipe(base::Error),
     // Unable to create serial device from serial parameters
     CreateSerialDevice(serial::Error),
-    /// Could not clone an event fd.
-    EventFdClone(base::Error),
-    /// Could not create an event fd.
-    EventFdCreate(base::Error),
+    /// Could not clone an event.
+    EventClone(base::Error),
+    /// Could not create an event.
+    EventCreate(base::Error),
     /// Missing a required serial device.
     MissingRequiredSerialDevice(u8),
     /// Could not add a device to the mmio bus.
     MmioInsert(BusError),
     /// Failed to register ioevent with VM.
     RegisterIoevent(base::Error),
-    /// Failed to register irq eventfd with VM.
+    /// Failed to register irq event with VM.
     RegisterIrqfd(base::Error),
     /// Failed to initialize proxy device for jailed device.
     ProxyDeviceCreation(devices::ProxyError),
@@ -216,12 +219,12 @@ impl Display for DeviceRegistrationError {
             CreatePipe(e) => write!(f, "failed to create pipe: {}", e),
             CreateSerialDevice(e) => write!(f, "failed to create serial device: {}", e),
             Cmdline(e) => write!(f, "unable to add device to kernel command line: {}", e),
-            EventFdClone(e) => write!(f, "failed to clone eventfd: {}", e),
-            EventFdCreate(e) => write!(f, "failed to create eventfd: {}", e),
+            EventClone(e) => write!(f, "failed to clone event: {}", e),
+            EventCreate(e) => write!(f, "failed to create event: {}", e),
             MissingRequiredSerialDevice(n) => write!(f, "missing required serial device {}", n),
             MmioInsert(e) => write!(f, "failed to add to mmio bus: {}", e),
             RegisterIoevent(e) => write!(f, "failed to register ioevent to VM: {}", e),
-            RegisterIrqfd(e) => write!(f, "failed to register irq eventfd to VM: {}", e),
+            RegisterIrqfd(e) => write!(f, "failed to register irq event to VM: {}", e),
             ProxyDeviceCreation(e) => write!(f, "failed to create proxy device: {}", e),
             IrqsExhausted => write!(f, "no more IRQs are available"),
             AddrsExhausted => write!(f, "no more addresses are available"),
@@ -234,7 +237,7 @@ impl Display for DeviceRegistrationError {
 
 /// Creates a root PCI device for use by this Vm.
 pub fn generate_pci_root<T: Vcpu>(
-    devices: Vec<(Box<dyn PciDevice>, Option<Minijail>)>,
+    mut devices: Vec<(Box<dyn PciDevice>, Option<Minijail>)>,
     irq_chip: &mut impl IrqChip<T>,
     mmio_bus: &mut Bus,
     resources: &mut SystemAllocator,
@@ -254,20 +257,46 @@ pub fn generate_pci_root<T: Vcpu>(
 
     let mut irqs: Vec<Option<u32>> = vec![None; max_irqs];
 
-    for (dev_idx, (mut device, jail)) in devices.into_iter().enumerate() {
-        // Auto assign PCI device numbers starting from 1
-        let address = PciAddress {
-            bus: 0,
-            dev: 1 + dev_idx as u8,
-            func: 0,
-        };
-        device.assign_address(address);
+    // Assign addresses to all devices before allocating BARs.
+    let device_addrs: Vec<PciAddress> = devices
+        .iter_mut()
+        .enumerate()
+        .map(|(dev_idx, (device, _jail))| {
+            let address = PciAddress {
+                bus: 0,
+                dev: 1 + dev_idx as u8,
+                func: 0,
+            };
+            device.assign_address(address);
+            address
+        })
+        .collect();
 
+    // Allocate ranges that may need to be in the low MMIO region (MmioType::Low).
+    let mut io_ranges = BTreeMap::new();
+    for (dev_idx, (device, _jail)) in devices.iter_mut().enumerate() {
+        let ranges = device
+            .allocate_io_bars(resources)
+            .map_err(DeviceRegistrationError::AllocateIoAddrs)?;
+        io_ranges.insert(dev_idx, ranges);
+    }
+
+    // Allocate device ranges that may be in low or high MMIO after low-only ranges.
+    let mut device_ranges = BTreeMap::new();
+    for (dev_idx, (device, _jail)) in devices.iter_mut().enumerate() {
+        let ranges = device
+            .allocate_device_bars(resources)
+            .map_err(DeviceRegistrationError::AllocateDeviceAddrs)?;
+        device_ranges.insert(dev_idx, ranges);
+    }
+
+    for (dev_idx, (mut device, jail)) in devices.into_iter().enumerate() {
+        let address = device_addrs[dev_idx];
         let mut keep_fds = device.keep_fds();
         syslog::push_fds(&mut keep_fds);
 
-        let irqfd = EventFd::new().map_err(DeviceRegistrationError::EventFdCreate)?;
-        let irq_resample_fd = EventFd::new().map_err(DeviceRegistrationError::EventFdCreate)?;
+        let irqfd = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
+        let irq_resample_fd = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
         let irq_num = if let Some(irq) = irqs[dev_idx % max_irqs] {
             irq
         } else {
@@ -293,17 +322,12 @@ pub fn generate_pci_root<T: Vcpu>(
         keep_fds.push(irq_resample_fd.as_raw_fd());
         device.assign_irq(irqfd, irq_resample_fd, irq_num, pci_irq_pin);
         pci_irqs.push((address, irq_num, pci_irq_pin));
-
-        let ranges = device
-            .allocate_io_bars(resources)
-            .map_err(DeviceRegistrationError::AllocateIoAddrs)?;
-        let device_ranges = device
-            .allocate_device_bars(resources)
-            .map_err(DeviceRegistrationError::AllocateDeviceAddrs)?;
+        let ranges = io_ranges.remove(&dev_idx).unwrap_or_default();
+        let device_ranges = device_ranges.remove(&dev_idx).unwrap_or_default();
         device
             .register_device_capabilities()
             .map_err(DeviceRegistrationError::RegisterDeviceCapabilities)?;
-        for (event, addr, datamatch) in device.ioeventfds() {
+        for (event, addr, datamatch) in device.ioevents() {
             let io_addr = IoEventAddress::Mmio(addr);
             vm.register_ioevent(&event, io_addr, datamatch)
                 .map_err(DeviceRegistrationError::RegisterIoevent)?;
@@ -373,7 +397,7 @@ pub fn load_image<F>(
     max_size: u64,
 ) -> Result<usize, LoadImageError>
 where
-    F: Read + Seek + AsRawFd,
+    F: Read + Seek + AsRawDescriptor,
 {
     let size = image.seek(SeekFrom::End(0)).map_err(LoadImageError::Seek)?;
 
@@ -415,7 +439,7 @@ pub fn load_image_high<F>(
     align: u64,
 ) -> Result<(GuestAddress, usize), LoadImageError>
 where
-    F: Read + Seek + AsRawFd,
+    F: Read + Seek + AsRawDescriptor,
 {
     if !align.is_power_of_two() {
         return Err(LoadImageError::BadAlignment(align));

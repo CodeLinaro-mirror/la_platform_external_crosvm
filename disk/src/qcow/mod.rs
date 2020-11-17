@@ -7,8 +7,8 @@ mod refcount;
 mod vec_cache;
 
 use base::{
-    error, AsRawFds, FileAllocate, FileReadWriteAtVolatile, FileReadWriteVolatile, FileSetLen,
-    FileSync, PunchHole, SeekHole, WriteZeroesAt,
+    error, AsRawDescriptors, FileAllocate, FileReadWriteAtVolatile, FileReadWriteVolatile,
+    FileSetLen, FileSync, PunchHole, SeekHole, WriteZeroesAt,
 };
 use data_model::{VolatileMemory, VolatileSlice};
 use libc::{EINVAL, ENOSPC, ENOTSUP};
@@ -1251,7 +1251,7 @@ impl QcowFile {
     }
 
     // Deallocate the storage for the cluster starting at `address`.
-    // Any future reads of this cluster will return all zeroes.
+    // Any future reads of this cluster will return all zeroes (or the backing file, if in use).
     fn deallocate_cluster(&mut self, address: u64) -> std::io::Result<()> {
         if address >= self.virtual_size() as u64 {
             return Err(std::io::Error::from_raw_os_error(EINVAL));
@@ -1322,9 +1322,10 @@ impl QcowFile {
         Ok(())
     }
 
-    // Deallocate the storage for `length` bytes starting at `address`.
+    // Fill a range of `length` bytes starting at `address` with zeroes.
     // Any future reads of this range will return all zeroes.
-    fn deallocate_bytes(&mut self, address: u64, length: usize) -> std::io::Result<()> {
+    // If there is no backing file, this will deallocate cluster storage when possible.
+    fn zero_bytes(&mut self, address: u64, length: usize) -> std::io::Result<()> {
         let write_count: usize = self.limit_range_file(address, length);
 
         let mut nwritten: usize = 0;
@@ -1332,14 +1333,22 @@ impl QcowFile {
             let curr_addr = address + nwritten as u64;
             let count = self.limit_range_cluster(curr_addr, write_count - nwritten);
 
-            if count == self.raw_file.cluster_size() as usize {
-                // Full cluster - deallocate the storage.
+            if self.backing_file.is_none() && count == self.raw_file.cluster_size() as usize {
+                // Full cluster and no backing file in use - deallocate the storage.
                 self.deallocate_cluster(curr_addr)?;
             } else {
-                // Partial cluster - zero out the relevant bytes if it was allocated.
-                // Any space in unallocated clusters can be left alone, since
-                // unallocated clusters already read back as zeroes.
-                if let Some(offset) = self.file_offset_read(curr_addr)? {
+                // Partial cluster - zero out the relevant bytes.
+                let offset = if self.backing_file.is_some() {
+                    // There is a backing file, so we need to allocate a cluster in order to
+                    // zero out the hole-punched bytes such that the backing file contents do not
+                    // show through.
+                    Some(self.file_offset_write(curr_addr)?)
+                } else {
+                    // Any space in unallocated clusters can be left alone, since
+                    // unallocated clusters already read back as zeroes.
+                    self.file_offset_read(curr_addr)?
+                };
+                if let Some(offset) = offset {
                     // Partial cluster - zero it out.
                     self.raw_file
                         .file_mut()
@@ -1524,11 +1533,11 @@ impl Drop for QcowFile {
     }
 }
 
-impl AsRawFds for QcowFile {
-    fn as_raw_fds(&self) -> Vec<RawFd> {
+impl AsRawDescriptors for QcowFile {
+    fn as_raw_descriptors(&self) -> Vec<RawFd> {
         let mut fds = vec![self.raw_file.file().as_raw_fd()];
         if let Some(backing) = &self.backing_file {
-            fds.append(&mut backing.as_raw_fds());
+            fds.append(&mut backing.as_raw_descriptors());
         }
         fds
     }
@@ -1695,7 +1704,7 @@ impl PunchHole for QcowFile {
         let mut offset = offset;
         while remaining > 0 {
             let chunk_length = min(remaining, std::usize::MAX as u64) as usize;
-            self.deallocate_bytes(offset, chunk_length)?;
+            self.zero_bytes(offset, chunk_length)?;
             remaining -= chunk_length as u64;
             offset += chunk_length as u64;
         }
@@ -1761,9 +1770,9 @@ fn div_round_up_u32(dividend: u32, divisor: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base::{SharedMemory, WriteZeroes};
-    use std::fs::File;
+    use base::WriteZeroes;
     use std::io::{Read, Seek, SeekFrom, Write};
+    use tempfile::tempfile;
 
     fn valid_header() -> Vec<u8> {
         vec![
@@ -1813,8 +1822,7 @@ mod tests {
     }
 
     fn basic_file(header: &[u8]) -> File {
-        let shm = SharedMemory::anon().unwrap();
-        let mut disk_file: File = shm.into();
+        let mut disk_file = tempfile().expect("failed to create tempfile");
         disk_file.write_all(&header).unwrap();
         disk_file.set_len(0x8000_0000).unwrap();
         disk_file.seek(SeekFrom::Start(0)).unwrap();
@@ -1832,8 +1840,8 @@ mod tests {
     where
         F: FnMut(QcowFile),
     {
-        let shm = SharedMemory::anon().unwrap();
-        let qcow_file = QcowFile::new(shm.into(), file_size).unwrap();
+        let file = tempfile().expect("failed to create tempfile");
+        let qcow_file = QcowFile::new(file, file_size).unwrap();
 
         testfn(qcow_file); // File closed when the function exits.
     }
@@ -1841,8 +1849,7 @@ mod tests {
     #[test]
     fn default_header() {
         let header = QcowHeader::create_for_size_and_path(0x10_0000, None);
-        let shm = SharedMemory::anon().unwrap();
-        let mut disk_file: File = shm.into();
+        let mut disk_file = tempfile().expect("failed to create tempfile");
         header
             .expect("Failed to create header.")
             .write_to(&mut disk_file)
@@ -1862,8 +1869,7 @@ mod tests {
     fn header_with_backing() {
         let header = QcowHeader::create_for_size_and_path(0x10_0000, Some("/my/path/to/a/file"))
             .expect("Failed to create header.");
-        let shm = SharedMemory::anon().unwrap();
-        let mut disk_file: File = shm.into();
+        let mut disk_file = tempfile().expect("failed to create tempfile");
         header
             .write_to(&mut disk_file)
             .expect("Failed to write header to shm.");
@@ -2084,6 +2090,39 @@ mod tests {
             assert_eq!(buf[0], 0);
             assert_eq!(buf[CHUNK_SIZE - 1], 0);
         });
+    }
+
+    #[test]
+    fn write_zeroes_backing() {
+        let disk_file = basic_file(&valid_header());
+        let mut backing = QcowFile::from(disk_file).unwrap();
+        // Write some test data.
+        let b = [0x55u8; 0x1000];
+        backing
+            .seek(SeekFrom::Start(0xfff2000))
+            .expect("Failed to seek.");
+        backing.write(&b).expect("Failed to write test string.");
+        let wrapping_disk_file = basic_file(&valid_header());
+        let mut wrapping = QcowFile::from(wrapping_disk_file).unwrap();
+        wrapping.set_backing_file(Some(Box::new(backing)));
+        // Overwrite the test data with zeroes.
+        // This should allocate new clusters in the wrapping file so that they can be zeroed.
+        wrapping
+            .seek(SeekFrom::Start(0xfff2000))
+            .expect("Failed to seek.");
+        wrapping
+            .write_zeroes_all(0x200)
+            .expect("Failed to write zeroes.");
+        // Verify that the correct part of the data was zeroed out.
+        let mut buf = [0u8; 0x1000];
+        wrapping
+            .seek(SeekFrom::Start(0xfff2000))
+            .expect("Failed to seek.");
+        wrapping.read(&mut buf).expect("Failed to read.");
+        assert_eq!(buf[0], 0);
+        assert_eq!(buf[0x1FF], 0);
+        assert_eq!(buf[0x200], 0x55);
+        assert_eq!(buf[0xFFF], 0x55);
     }
 
     #[test]
