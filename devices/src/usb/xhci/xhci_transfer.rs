@@ -10,14 +10,15 @@ use super::xhci_abi::{
     TrbCompletionCode, TrbType,
 };
 use super::xhci_regs::MAX_INTERRUPTER;
+use base::{error, Error as SysError, Event};
 use bit_field::Error as BitFieldError;
 use std::cmp::min;
 use std::fmt::{self, Display};
 use std::mem;
 use std::sync::{Arc, Weak};
 use sync::Mutex;
-use sys_util::{error, Error as SysError, EventFd, GuestMemory};
 use usb_util::{TransferStatus, UsbRequestSetup};
+use vm_memory::GuestMemory;
 
 #[derive(Debug)]
 pub enum Error {
@@ -166,7 +167,7 @@ impl XhciTransferManager {
         slot_id: u8,
         endpoint_id: u8,
         transfer_trbs: TransferDescriptor,
-        completion_event: EventFd,
+        completion_event: Event,
     ) -> XhciTransfer {
         assert!(!transfer_trbs.is_empty());
         let transfer_dir = {
@@ -235,7 +236,7 @@ pub struct XhciTransfer {
     endpoint_id: u8,
     transfer_dir: TransferDirection,
     transfer_trbs: TransferDescriptor,
-    transfer_completion_event: EventFd,
+    transfer_completion_event: Event,
 }
 
 impl Drop for XhciTransfer {

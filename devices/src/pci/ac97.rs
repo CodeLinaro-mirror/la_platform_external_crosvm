@@ -8,13 +8,11 @@ use std::fmt::{self, Display};
 use std::os::unix::io::RawFd;
 use std::str::FromStr;
 
-use audio_streams::{
-    shm_streams::{NullShmStreamSource, ShmStreamSource},
-    StreamEffect,
-};
+use audio_streams::shm_streams::{NullShmStreamSource, ShmStreamSource};
+use base::{error, Event};
 use libcras::{CrasClient, CrasClientType, CrasSocketType};
 use resources::{Alloc, MmioType, SystemAllocator};
-use sys_util::{error, EventFd, GuestMemory};
+use vm_memory::GuestMemory;
 
 use crate::pci::ac97_bus_master::Ac97BusMaster;
 use crate::pci::ac97_mixer::Ac97Mixer;
@@ -77,7 +75,6 @@ impl FromStr for Ac97Backend {
 pub struct Ac97Parameters {
     pub backend: Ac97Backend,
     pub capture: bool,
-    pub capture_effects: Vec<StreamEffect>,
 }
 
 pub struct Ac97Dev {
@@ -85,16 +82,21 @@ pub struct Ac97Dev {
     pci_address: Option<PciAddress>,
     // The irq events are temporarily saved here. They need to be passed to the device after the
     // jail forks. This happens when the bus is first written.
-    irq_evt: Option<EventFd>,
-    irq_resample_evt: Option<EventFd>,
+    irq_evt: Option<Event>,
+    irq_resample_evt: Option<Event>,
     bus_master: Ac97BusMaster,
     mixer: Ac97Mixer,
+    backend: Ac97Backend,
 }
 
 impl Ac97Dev {
     /// Creates an 'Ac97Dev' that uses the given `GuestMemory` and starts with all registers at
     /// default values.
-    pub fn new(mem: GuestMemory, audio_server: Box<dyn ShmStreamSource>) -> Self {
+    pub fn new(
+        mem: GuestMemory,
+        backend: Ac97Backend,
+        audio_server: Box<dyn ShmStreamSource>,
+    ) -> Self {
         let config_regs = PciConfiguration::new(
             0x8086,
             PCI_DEVICE_ID_INTEL_82801AA_5,
@@ -106,17 +108,41 @@ impl Ac97Dev {
             0x1,    // Subsystem ID.
         );
 
-        Ac97Dev {
+        Self {
             config_regs,
             pci_address: None,
             irq_evt: None,
             irq_resample_evt: None,
             bus_master: Ac97BusMaster::new(mem, audio_server),
             mixer: Ac97Mixer::new(),
+            backend,
         }
     }
 
-    fn create_cras_audio_device(params: Ac97Parameters, mem: GuestMemory) -> Result<Ac97Dev> {
+    /// Creates an `Ac97Dev` with suitable audio server inside based on Ac97Parameters. If it fails
+    /// to create `Ac97Dev` with the given back-end, it'll fallback to the null audio device.
+    pub fn try_new(mem: GuestMemory, param: Ac97Parameters) -> Result<Self> {
+        match param.backend {
+            Ac97Backend::CRAS => Self::create_cras_audio_device(param, mem.clone()).or_else(|e| {
+                error!(
+                    "Ac97Dev: create_cras_audio_device: {}. Fallback to null audio device",
+                    e
+                );
+                Self::create_null_audio_device(mem)
+            }),
+            Ac97Backend::NULL => Self::create_null_audio_device(mem),
+        }
+    }
+
+    /// Return the minijail policy file path for the current Ac97Dev.
+    pub fn minijail_policy(&self) -> &'static str {
+        match self.backend {
+            Ac97Backend::CRAS => "cras_audio_device",
+            Ac97Backend::NULL => "null_audio_device",
+        }
+    }
+
+    fn create_cras_audio_device(params: Ac97Parameters, mem: GuestMemory) -> Result<Self> {
         let mut server = Box::new(
             CrasClient::with_type(CrasSocketType::Unified)
                 .map_err(|e| pci_device::Error::CreateCrasClientFailed(e))?,
@@ -126,28 +152,14 @@ impl Ac97Dev {
             server.enable_cras_capture();
         }
 
-        let mut cras_audio = Ac97Dev::new(mem, server);
-        cras_audio.set_capture_effects(params.capture_effects);
+        let cras_audio = Self::new(mem, Ac97Backend::CRAS, server);
         Ok(cras_audio)
     }
 
-    fn create_null_audio_device(mem: GuestMemory) -> Result<Ac97Dev> {
+    fn create_null_audio_device(mem: GuestMemory) -> Result<Self> {
         let server = Box::new(NullShmStreamSource::new());
-        let null_audio = Ac97Dev::new(mem, server);
+        let null_audio = Self::new(mem, Ac97Backend::NULL, server);
         Ok(null_audio)
-    }
-
-    /// Creates an 'Ac97Dev' with suitable audio server inside based on Ac97Parameters
-    pub fn try_new(mem: GuestMemory, param: Ac97Parameters) -> Result<Ac97Dev> {
-        match param.backend {
-            Ac97Backend::CRAS => Ac97Dev::create_cras_audio_device(param, mem),
-            Ac97Backend::NULL => Ac97Dev::create_null_audio_device(mem),
-        }
-    }
-
-    /// Provides the effect needed in capture stream creation
-    pub fn set_capture_effects(&mut self, effect: Vec<StreamEffect>) {
-        self.bus_master.set_capture_effects(effect);
     }
 
     fn read_mixer(&mut self, offset: u64, data: &mut [u8]) {
@@ -178,7 +190,7 @@ impl Ac97Dev {
         match data.len() {
             1 => data[0] = self.bus_master.readb(offset),
             2 => {
-                let val: u16 = self.bus_master.readw(offset);
+                let val: u16 = self.bus_master.readw(offset, &self.mixer);
                 data[0] = val as u8;
                 data[1] = (val >> 8) as u8;
             }
@@ -205,6 +217,7 @@ impl Ac97Dev {
                     | (u32::from(data[1]) << 8)
                     | (u32::from(data[2]) << 16)
                     | (u32::from(data[3]) << 24),
+                &mut self.mixer,
             ),
             l => error!("write length of {}", l),
         }
@@ -222,8 +235,8 @@ impl PciDevice for Ac97Dev {
 
     fn assign_irq(
         &mut self,
-        irq_evt: EventFd,
-        irq_resample_evt: EventFd,
+        irq_evt: Event,
+        irq_resample_evt: Event,
         irq_num: u32,
         irq_pin: PciInterruptPin,
     ) {
@@ -256,7 +269,7 @@ impl PciDevice for Ac97Dev {
             .set_address(mixer_regs_addr)
             .set_size(MIXER_REGS_SIZE);
         self.config_regs
-            .add_pci_bar(&mixer_config)
+            .add_pci_bar(mixer_config)
             .map_err(|e| pci_device::Error::IoRegistrationFailed(mixer_regs_addr, e))?;
         ranges.push((mixer_regs_addr, MIXER_REGS_SIZE));
 
@@ -279,7 +292,7 @@ impl PciDevice for Ac97Dev {
             .set_address(master_regs_addr)
             .set_size(MASTER_REGS_SIZE);
         self.config_regs
-            .add_pci_bar(&master_config)
+            .add_pci_bar(master_config)
             .map_err(|e| pci_device::Error::IoRegistrationFailed(master_regs_addr, e))?;
         ranges.push((master_regs_addr, MASTER_REGS_SIZE));
         Ok(ranges)
@@ -323,7 +336,7 @@ impl PciDevice for Ac97Dev {
                 if let (Some(irq_evt), Some(irq_resample_evt)) =
                     (self.irq_evt.take(), self.irq_resample_evt.take())
                 {
-                    self.bus_master.set_irq_event_fd(irq_evt, irq_resample_evt);
+                    self.bus_master.set_irq_event(irq_evt, irq_resample_evt);
                 }
                 self.write_bus_master(addr - bar1, data)
             }
@@ -336,12 +349,13 @@ impl PciDevice for Ac97Dev {
 mod tests {
     use super::*;
     use audio_streams::shm_streams::MockShmStreamSource;
-    use sys_util::GuestAddress;
+    use vm_memory::GuestAddress;
 
     #[test]
     fn create() {
         let mem = GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)]).unwrap();
-        let mut ac97_dev = Ac97Dev::new(mem, Box::new(MockShmStreamSource::new()));
+        let mut ac97_dev =
+            Ac97Dev::new(mem, Ac97Backend::NULL, Box::new(MockShmStreamSource::new()));
         let mut allocator = SystemAllocator::builder()
             .add_io_addresses(0x1000_0000, 0x1000_0000)
             .add_low_mmio_addresses(0x2000_0000, 0x1000_0000)

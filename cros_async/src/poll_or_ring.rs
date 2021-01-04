@@ -72,7 +72,7 @@ pub enum PollOrRing<F: AsRawFd> {
 impl<F: AsRawFd + Unpin> PollOrRing<F> {
     /// Creates a `PollOrRing` that uses uring if available or falls back to the fd_executor if not.
     /// Note that on older kernels (pre 5.6) FDs such as event or timer FDs are unreliable when
-    /// having readvwritev performed through io_uring. To deal with EventFd or TimerFd, use
+    /// having readvwritev performed through io_uring. To deal with Event or Timer, use
     /// `U64Source` instead.
     pub fn new(f: F) -> Result<Self> {
         if crate::uring_executor::use_uring() {
@@ -94,6 +94,13 @@ impl<F: AsRawFd + Unpin> PollOrRing<F> {
         PollSource::new(f)
             .map_err(Error::Poll)
             .map(PollOrRing::Poll)
+    }
+
+    pub fn into_source(self) -> F {
+        match self {
+            PollOrRing::Poll(s) => s.into_source(),
+            PollOrRing::Uring(s) => s.into_source(),
+        }
     }
 
     /// Reads from the iosource at `file_offset` and fill the given `vec`.
@@ -205,7 +212,26 @@ impl<F: AsRawFd + Unpin> PollOrRing<F> {
     }
 }
 
-/// Convenience helper for reading a series of u64s which is common for timerfd and eventfd.
+impl<F: AsRawFd> std::ops::Deref for PollOrRing<F> {
+    type Target = F;
+    fn deref(&self) -> &Self::Target {
+        match &self {
+            PollOrRing::Poll(s) => &s,
+            PollOrRing::Uring(s) => &s,
+        }
+    }
+}
+
+impl<F: AsRawFd> std::ops::DerefMut for PollOrRing<F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            PollOrRing::Poll(s) => s,
+            PollOrRing::Uring(s) => s,
+        }
+    }
+}
+
+/// Convenience helper for reading a series of u64s which is common for timer and event.
 pub struct U64Source<F: AsRawFd + Unpin> {
     inner: PollOrRing<F>,
 }
@@ -241,10 +267,22 @@ impl<F: AsRawFd + Unpin> U64Source<F> {
     }
 }
 
+impl<F: AsRawFd + Unpin> std::ops::Deref for U64Source<F> {
+    type Target = F;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<F: AsRawFd + Unpin> std::ops::DerefMut for U64Source<F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::{File, OpenOptions};
-    use std::path::PathBuf;
 
     use futures::pin_mut;
 
@@ -322,17 +360,25 @@ mod tests {
                 .read_to_mem(
                     0,
                     Rc::<VecIoWrapper>::clone(&mem),
-                    &[MemRegion { offset: 0, len: 32 }],
+                    &[
+                        MemRegion { offset: 0, len: 32 },
+                        MemRegion {
+                            offset: 200,
+                            len: 56,
+                        },
+                    ],
                 )
                 .await
                 .unwrap();
-            assert_eq!(ret, 32);
+            assert_eq!(ret, 32 + 56);
             let vec: Vec<u8> = match Rc::try_unwrap(mem) {
                 Ok(v) => v.into(),
                 Err(_) => panic!("Too many vec refs"),
             };
             assert!(vec.iter().take(32).all(|&b| b == 0));
-            assert!(vec.iter().skip(32).all(|&b| b == 0x55));
+            assert!(vec.iter().skip(32).take(168).all(|&b| b == 0x55));
+            assert!(vec.iter().skip(200).take(56).all(|&b| b == 0));
+            assert!(vec.iter().skip(256).all(|&b| b == 0x55));
         }
 
         let f = File::open("/dev/zero").unwrap();
@@ -406,16 +452,16 @@ mod tests {
     }
 
     #[test]
-    fn read_eventfds() {
-        use sys_util::EventFd;
+    fn read_events() {
+        use base::Event;
 
         async fn go<F: AsRawFd + Unpin>(mut source: U64Source<F>) -> u64 {
             source.next_val().await.unwrap()
         }
 
-        let eventfd = EventFd::new().unwrap();
-        eventfd.write(0x55).unwrap();
-        let fut = go(U64Source::new(eventfd).unwrap());
+        let event = Event::new().unwrap();
+        event.write(0x55).unwrap();
+        let fut = go(U64Source::new(event).unwrap());
         pin_mut!(fut);
         let val = crate::uring_executor::URingExecutor::new(crate::RunOne::new(fut))
             .unwrap()
@@ -423,9 +469,9 @@ mod tests {
             .unwrap();
         assert_eq!(val, 0x55);
 
-        let eventfd = EventFd::new().unwrap();
-        eventfd.write(0xaa).unwrap();
-        let fut = go(U64Source::new_poll(eventfd).unwrap());
+        let event = Event::new().unwrap();
+        event.write(0xaa).unwrap();
+        let fut = go(U64Source::new_poll(event).unwrap());
         pin_mut!(fut);
         let val = crate::fd_executor::FdExecutor::new(crate::RunOne::new(fut))
             .unwrap()
@@ -446,15 +492,7 @@ mod tests {
             source.fsync().await.unwrap();
         }
 
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut file_path = PathBuf::from(dir.path());
-        file_path.push("test");
-
-        let f = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&file_path)
-            .unwrap();
+        let f = tempfile::tempfile().unwrap();
         let source = PollOrRing::new(f).unwrap();
 
         let fut = go(source);

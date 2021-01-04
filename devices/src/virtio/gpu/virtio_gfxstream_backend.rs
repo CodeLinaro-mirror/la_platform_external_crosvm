@@ -10,32 +10,30 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap as Map;
-use std::mem::transmute;
+use std::mem::{size_of, transmute};
 use std::os::raw::{c_char, c_int, c_uchar, c_uint, c_void};
 use std::panic;
+use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::usize;
 
+use base::{error, ExternalMapping, ExternalMappingError, ExternalMappingResult};
 use gpu_display::*;
 use gpu_renderer::RendererFlags;
 use msg_socket::{MsgReceiver, MsgSender};
 use resources::Alloc;
 use sync::Mutex;
-use sys_util::{error, ExternalMapping, ExternalMappingResult, GuestAddress, GuestMemory};
-use vm_control::{VmMemoryControlRequestSocket, VmMemoryRequest, VmMemoryResponse};
+use vm_control::{MemSlot, VmMemoryControlRequestSocket, VmMemoryRequest, VmMemoryResponse};
+use vm_memory::{GuestAddress, GuestMemory};
 
-use super::protocol::GpuResponse;
+use super::protocol::{GpuResponse::*, VirtioGpuResult};
 pub use super::virtio_backend::{VirtioBackend, VirtioResource};
 use crate::virtio::gpu::{
     Backend, VirtioScanoutBlobData, VIRTIO_F_VERSION_1, VIRTIO_GPU_F_RESOURCE_BLOB,
     VIRTIO_GPU_F_VIRGL,
 };
 use crate::virtio::resource_bridge::ResourceResponse;
-
-// Page size definition for use with resource_create_blob and related functions.
-const PAGE_SIZE_FOR_BLOB: u64 = 4096;
-const PAGE_MASK_FOR_BLOB: u64 = !(0xfff);
 
 // C definitions related to gfxstream
 // In gfxstream, only write_fence is used
@@ -180,10 +178,12 @@ extern "C" {
     );
 
     fn stream_renderer_resource_create_v2(res_handle: u32, hostmemId: u64);
-    fn stream_renderer_resource_get_hva(res_handle: u32) -> u64;
-    fn stream_renderer_resource_get_hva_size(res_handle: u32) -> u64;
-    fn stream_renderer_resource_set_hv_slot(res_handle: u32, slot: u32);
-    fn stream_renderer_resource_get_hv_slot(res_handle: u32) -> u32;
+    fn stream_renderer_resource_map(
+        res_handle: u32,
+        map: *mut *mut c_void,
+        out_size: *mut u64,
+    ) -> c_int;
+    fn stream_renderer_resource_unmap(res_handle: u32) -> c_int;
 }
 
 // Fence state stuff (begin)
@@ -219,9 +219,10 @@ const GFXSTREAM_RENDERER_CALLBACKS: &GfxStreamRendererCallbacks = &GfxStreamRend
 };
 
 // Fence state stuff (end)
+
 struct VirtioGfxStreamResource {
-    guest_memory_backing: Option<GuestMemory>,
-    mappable: bool,
+    guest_memory_backing: Option<Vec<iovec>>,
+    slot: Option<MemSlot>,
 }
 
 pub struct VirtioGfxStreamBackend {
@@ -245,26 +246,21 @@ pub struct VirtioGfxStreamBackend {
     map_request: Arc<Mutex<Option<ExternalMapping>>>,
 }
 
-fn align_to_page(raw_hva: u64) -> u64 {
-    raw_hva & PAGE_MASK_FOR_BLOB
-}
-
-fn align_to_page_size(size: u64) -> u64 {
-    PAGE_SIZE_FOR_BLOB * ((size + PAGE_SIZE_FOR_BLOB - 1) / PAGE_SIZE_FOR_BLOB)
-}
-
 fn map_func(resource_id: u32) -> ExternalMappingResult<(u64, usize)> {
-    let raw_hva = unsafe { stream_renderer_resource_get_hva(resource_id) };
-    let raw_hva_size = unsafe { stream_renderer_resource_get_hva_size(resource_id) };
+    let mut map: *mut c_void = null_mut();
+    let map_ptr: *mut *mut c_void = &mut map;
+    let mut size: u64 = 0;
 
-    let aligned_hva = align_to_page(raw_hva);
-    let aligned_hva_size = align_to_page_size(raw_hva_size);
-    Ok((aligned_hva, aligned_hva_size as usize))
+    // Safe because the Stream renderer wraps and validates use of vkMapMemory.
+    let ret = unsafe { stream_renderer_resource_map(resource_id, map_ptr, &mut size) };
+    if ret != 0 {
+        return Err(ExternalMappingError::LibraryError(ret));
+    }
+    Ok((map as u64, size as usize))
 }
 
-fn unmap_func(_resource_id: u32) -> () {
-    // no-op: No further cleanup considered outside of what happens in
-    // resource unmap
+fn unmap_func(resource_id: u32) {
+    unsafe { stream_renderer_resource_unmap(resource_id) };
 }
 
 impl VirtioGfxStreamBackend {
@@ -326,18 +322,21 @@ impl VirtioGfxStreamBackend {
         }
     }
 
-    fn resource_set_mappable(&mut self, resource_id: u32, mappable: bool) {
-        match self.resources.get_mut(&resource_id) {
-            Some(resource) => {
-                resource.mappable = mappable;
-            }
-            _ => {
-                error!(
-                    "Could not set mappable={} for resource id {}",
-                    mappable, resource_id
-                );
-            }
+    fn submit_command_impl(&mut self, ctx_id: u32, commands: &mut [u8]) -> VirtioGpuResult {
+        if commands.len() % size_of::<u32>() != 0 {
+            return Err(ErrUnspec);
         }
+
+        let dword_count = commands.len() / size_of::<u32>();
+        unsafe {
+            pipe_virgl_renderer_submit_cmd(
+                commands.as_mut_ptr() as *mut c_void,
+                ctx_id as i32,
+                dword_count as i32,
+            );
+        }
+
+        Ok(OkNoData)
     }
 }
 
@@ -392,8 +391,8 @@ impl Backend for VirtioGfxStreamBackend {
 
     /// Attaches the given input device to the given surface of the display (to allow for input
     /// from a X11 window for example).
-    fn import_event_device(&mut self, event_device: EventDevice, scanout: u32) {
-        self.base.import_event_device(event_device, scanout);
+    fn import_event_device(&mut self, event_device: EventDevice, scanout: u32) -> VirtioGpuResult {
+        self.base.import_event_device(event_device, scanout)
     }
 
     /// If supported, export the resource with the given id to a file.
@@ -403,11 +402,11 @@ impl Backend for VirtioGfxStreamBackend {
 
     /// Creates a fence with the given id that can be used to determine when the previous command
     /// completed.
-    fn create_fence(&mut self, ctx_id: u32, fence_id: u32) -> GpuResponse {
+    fn create_fence(&mut self, ctx_id: u32, fence_id: u32) -> VirtioGpuResult {
         unsafe {
             pipe_virgl_renderer_create_fence(fence_id as i32, ctx_id);
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
     /// Returns the id of the latest fence to complete.
@@ -424,17 +423,17 @@ impl Backend for VirtioGfxStreamBackend {
         _width: u32,
         _height: u32,
         _format: u32,
-    ) -> GpuResponse {
+    ) -> VirtioGpuResult {
         // Not considered for gfxstream
-        GpuResponse::ErrUnspec
+        Err(ErrUnspec)
     }
 
     /// Removes the guest's reference count for the given resource id.
-    fn unref_resource(&mut self, id: u32) -> GpuResponse {
+    fn unref_resource(&mut self, id: u32) -> VirtioGpuResult {
         match self.resources.remove(&id) {
             Some(_) => (),
             None => {
-                return GpuResponse::ErrInvalidResourceId;
+                return Err(ErrInvalidResourceId);
             }
         }
 
@@ -442,7 +441,7 @@ impl Backend for VirtioGfxStreamBackend {
             pipe_virgl_renderer_resource_unref(id);
         }
 
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
     /// Sets the given resource id as the source of scanout to the display.
@@ -451,8 +450,8 @@ impl Backend for VirtioGfxStreamBackend {
         _scanout_id: u32,
         _resource_id: u32,
         _scanout_data: Option<VirtioScanoutBlobData>,
-    ) -> GpuResponse {
-        GpuResponse::OkNoData
+    ) -> VirtioGpuResult {
+        Ok(OkNoData)
     }
 
     /// Flushes the given rectangle of pixels of the given resource to the display.
@@ -463,7 +462,7 @@ impl Backend for VirtioGfxStreamBackend {
         _y: u32,
         _width: u32,
         _height: u32,
-    ) -> GpuResponse {
+    ) -> VirtioGpuResult {
         // For now, always update the whole display.
         let mut display_ref = self.base.display.borrow_mut();
 
@@ -471,7 +470,7 @@ impl Backend for VirtioGfxStreamBackend {
             Some(id) => id,
             _ => {
                 error!("No scanout surface created for backend!");
-                return GpuResponse::ErrInvalidResourceId;
+                return Err(ErrInvalidResourceId);
             }
         };
 
@@ -509,7 +508,7 @@ impl Backend for VirtioGfxStreamBackend {
 
         display_ref.flip(scanout_surface_id);
 
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
     /// Copes the given rectangle of pixels of the given resource's backing memory to the host side
@@ -523,9 +522,9 @@ impl Backend for VirtioGfxStreamBackend {
         _height: u32,
         _src_offset: u64,
         _mem: &GuestMemory,
-    ) -> GpuResponse {
+    ) -> VirtioGpuResult {
         // Not considered for gfxstream
-        GpuResponse::ErrInvalidResourceId
+        Err(ErrInvalidResourceId)
     }
 
     /// Attaches backing memory to the given resource, represented by a `Vec` of `(address, size)`
@@ -535,15 +534,11 @@ impl Backend for VirtioGfxStreamBackend {
         id: u32,
         mem: &GuestMemory,
         vecs: Vec<(GuestAddress, usize)>,
-    ) -> GpuResponse {
-        match self.resources.get_mut(&id) {
-            Some(resource) => {
-                resource.guest_memory_backing = Some(mem.clone());
-            }
-            None => {
-                return GpuResponse::ErrInvalidResourceId;
-            }
-        }
+    ) -> VirtioGpuResult {
+        let resource = match self.resources.get_mut(&id) {
+            Some(resource) => resource,
+            None => return Err(ErrInvalidResourceId),
+        };
 
         let mut backing_iovecs: Vec<iovec> = Vec::new();
 
@@ -562,19 +557,17 @@ impl Backend for VirtioGfxStreamBackend {
                 backing_iovecs.len() as i32,
             );
         }
-        GpuResponse::OkNoData
+
+        resource.guest_memory_backing = Some(backing_iovecs);
+        Ok(OkNoData)
     }
 
     /// Detaches any backing memory from the given resource, if there is any.
-    fn detach_backing(&mut self, id: u32) -> GpuResponse {
-        match self.resources.get_mut(&id) {
-            Some(resource) => {
-                resource.guest_memory_backing = None;
-            }
-            None => {
-                return GpuResponse::ErrInvalidResourceId;
-            }
-        }
+    fn detach_backing(&mut self, id: u32) -> VirtioGpuResult {
+        let resource = match self.resources.get_mut(&id) {
+            Some(resource) => resource,
+            None => return Err(ErrInvalidResourceId),
+        };
 
         unsafe {
             pipe_virgl_renderer_resource_detach_iov(
@@ -583,63 +576,65 @@ impl Backend for VirtioGfxStreamBackend {
                 std::ptr::null_mut(),
             );
         }
-        GpuResponse::OkNoData
+
+        resource.guest_memory_backing = None;
+        Ok(OkNoData)
     }
 
-    fn update_cursor(&mut self, _id: u32, _x: u32, _y: u32) -> GpuResponse {
+    fn update_cursor(&mut self, _id: u32, _x: u32, _y: u32) -> VirtioGpuResult {
         // Not considered for gfxstream
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
-    fn move_cursor(&mut self, _x: u32, _y: u32) -> GpuResponse {
+    fn move_cursor(&mut self, _x: u32, _y: u32) -> VirtioGpuResult {
         // Not considered for gfxstream
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
-    fn get_capset_info(&self, index: u32) -> GpuResponse {
+    fn get_capset_info(&self, index: u32) -> VirtioGpuResult {
         if 0 != index {
-            return GpuResponse::ErrUnspec;
+            return Err(ErrUnspec);
         }
-        GpuResponse::OkCapsetInfo {
+        Ok(OkCapsetInfo {
             id: index,
             version: 1,
             size: 0,
-        }
+        })
     }
 
-    fn get_capset(&self, id: u32, _version: u32) -> GpuResponse {
+    fn get_capset(&self, id: u32, _version: u32) -> VirtioGpuResult {
         if 0 != id {
-            return GpuResponse::ErrUnspec;
+            return Err(ErrUnspec);
         }
-        GpuResponse::OkCapset(Vec::new())
+        Ok(OkCapset(Vec::new()))
     }
 
-    fn create_renderer_context(&mut self, id: u32) -> GpuResponse {
+    fn create_renderer_context(&mut self, id: u32) -> VirtioGpuResult {
         unsafe {
             pipe_virgl_renderer_context_create(id, 1, std::ptr::null_mut());
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
-    fn destroy_renderer_context(&mut self, id: u32) -> GpuResponse {
+    fn destroy_renderer_context(&mut self, id: u32) -> VirtioGpuResult {
         unsafe {
             pipe_virgl_renderer_context_destroy(id);
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
-    fn context_attach_resource(&mut self, ctx_id: u32, res_id: u32) -> GpuResponse {
+    fn context_attach_resource(&mut self, ctx_id: u32, res_id: u32) -> VirtioGpuResult {
         unsafe {
             pipe_virgl_renderer_ctx_attach_resource(ctx_id as i32, res_id as i32);
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
-    fn context_detach_resource(&mut self, ctx_id: u32, res_id: u32) -> GpuResponse {
+    fn context_detach_resource(&mut self, ctx_id: u32, res_id: u32) -> VirtioGpuResult {
         unsafe {
             pipe_virgl_renderer_ctx_detach_resource(ctx_id as i32, res_id as i32);
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
     fn resource_create_3d(
@@ -655,20 +650,20 @@ impl Backend for VirtioGfxStreamBackend {
         last_level: u32,
         nr_samples: u32,
         flags: u32,
-    ) -> GpuResponse {
+    ) -> VirtioGpuResult {
         if id == 0 {
-            return GpuResponse::ErrInvalidResourceId;
+            return Err(ErrInvalidResourceId);
         }
 
         match self.resources.entry(id) {
             Entry::Vacant(entry) => {
                 entry.insert(VirtioGfxStreamResource {
                     guest_memory_backing: None, /* no guest memory attached yet */
-                    mappable: false,            /* not mappable */
+                    slot: None,
                 });
             }
             Entry::Occupied(_) => {
-                return GpuResponse::ErrInvalidResourceId;
+                return Err(ErrInvalidResourceId);
             }
         }
 
@@ -694,7 +689,7 @@ impl Backend for VirtioGfxStreamBackend {
             );
         }
 
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
     fn transfer_to_resource_3d(
@@ -711,7 +706,7 @@ impl Backend for VirtioGfxStreamBackend {
         stride: u32,
         layer_stride: u32,
         offset: u64,
-    ) -> GpuResponse {
+    ) -> VirtioGpuResult {
         let mut transfer_box = virgl_box {
             x,
             y,
@@ -734,7 +729,7 @@ impl Backend for VirtioGfxStreamBackend {
                 0,
             );
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
     fn transfer_from_resource_3d(
@@ -751,7 +746,7 @@ impl Backend for VirtioGfxStreamBackend {
         stride: u32,
         layer_stride: u32,
         offset: u64,
-    ) -> GpuResponse {
+    ) -> VirtioGpuResult {
         let mut transfer_box = virgl_box {
             x,
             y,
@@ -774,30 +769,17 @@ impl Backend for VirtioGfxStreamBackend {
                 0,
             );
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
-    fn submit_command(&mut self, ctx_id: u32, commands: &mut [u8]) -> GpuResponse {
-        if commands.len() % std::mem::size_of::<u32>() != 0 {
-            error!(
-                "context {} got command with size {} which is not u32 multiple",
-                ctx_id,
-                commands.len()
-            );
-            return GpuResponse::ErrUnspec;
+    fn submit_command(&mut self, ctx_id: u32, commands: &mut [u8]) -> VirtioGpuResult {
+        match self.submit_command_impl(ctx_id, commands) {
+            Ok(_) => Ok(OkNoData),
+            Err(e) => {
+                error!("submit_command error: {}", e);
+                Err(ErrUnspec)
+            }
         }
-
-        let dword_count = commands.len() / std::mem::size_of::<u32>();
-
-        unsafe {
-            pipe_virgl_renderer_submit_cmd(
-                commands.as_mut_ptr() as *mut c_void,
-                ctx_id as i32,
-                dword_count as i32,
-            );
-        }
-
-        GpuResponse::OkNoData
     }
 
     // Not considered for gfxstream
@@ -813,149 +795,74 @@ impl Backend for VirtioGfxStreamBackend {
         _size: u64,
         _vecs: Vec<(GuestAddress, usize)>,
         _mem: &GuestMemory,
-    ) -> GpuResponse {
+    ) -> VirtioGpuResult {
         match self.resources.entry(resource_id) {
             Entry::Vacant(entry) => {
                 entry.insert(VirtioGfxStreamResource {
                     guest_memory_backing: None, /* no guest memory attached yet */
-                    mappable: true,             /* is mappable */
+                    slot: None,
                 });
             }
             Entry::Occupied(_) => {
-                return GpuResponse::ErrInvalidResourceId;
+                return Err(ErrInvalidResourceId);
             }
         }
-
-        let hostmem_id = blob_id;
 
         unsafe {
-            stream_renderer_resource_create_v2(resource_id, hostmem_id);
+            stream_renderer_resource_create_v2(resource_id, blob_id);
         }
-        GpuResponse::OkNoData
+        Ok(OkNoData)
     }
 
-    fn resource_map_blob(&mut self, resource_id: u32, offset: u64) -> GpuResponse {
-        match self.resources.get_mut(&resource_id) {
-            Some(resource) => {
-                if !resource.mappable {
-                    error!("resource {} already mapped!", resource_id);
-                    return GpuResponse::ErrUnspec;
-                }
-            }
-            None => {
-                return GpuResponse::ErrInvalidResourceId;
-            }
-        };
+    fn resource_map_blob(&mut self, resource_id: u32, offset: u64) -> VirtioGpuResult {
+        let resource = self
+            .resources
+            .get_mut(&resource_id)
+            .ok_or(ErrInvalidResourceId)?;
 
-        let map_result = ExternalMapping::new(resource_id, map_func, unmap_func);
-        if map_result.is_err() {
-            return GpuResponse::ErrUnspec;
-        }
-
-        let mapping = map_result.unwrap();
+        let mapping = unsafe { ExternalMapping::new(resource_id, map_func, unmap_func)? };
         {
             // scope for lock
             let mut map_req = self.map_request.lock();
             if map_req.is_some() {
-                return GpuResponse::ErrUnspec;
+                return Err(ErrUnspec);
             }
             *map_req = Some(mapping);
         }
 
         let request = VmMemoryRequest::RegisterHostPointerAtPciBarOffset(self.pci_bar, offset);
-        match self.gpu_device_socket.send(&request) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("failed to send map request: {}", e);
-                return GpuResponse::ErrUnspec;
-            }
-        }
-
-        let response = match self.gpu_device_socket.recv() {
-            Ok(response) => response,
-            Err(e) => {
-                error!("failed to receive data from map request: {}", e);
-                return GpuResponse::ErrUnspec;
-            }
-        };
+        self.gpu_device_socket.send(&request)?;
+        let response = self.gpu_device_socket.recv()?;
 
         match response {
             VmMemoryResponse::RegisterMemory { pfn: _, slot } => {
-                self.resource_set_mappable(resource_id, false /* not mappable */);
-                unsafe {
-                    stream_renderer_resource_set_hv_slot(resource_id, slot);
-                }
                 // 0x02 for uncached type in map info
-                GpuResponse::OkMapInfo { map_info: 0x02 }
+                resource.slot = Some(slot);
+                Ok(OkMapInfo { map_info: 0x02 })
             }
-            VmMemoryResponse::Err(e) => {
-                error!("received an error on mapping memory: {}", e);
-                GpuResponse::ErrUnspec
-            }
-            _ => {
-                error!("recieved an unexpected response while mapping memory");
-                GpuResponse::ErrUnspec
-            }
+            VmMemoryResponse::Err(e) => Err(ErrSys(e)),
+            _ => Err(ErrUnspec),
         }
     }
 
-    fn resource_unmap_blob(&mut self, resource_id: u32) -> GpuResponse {
-        match self.resources.get_mut(&resource_id) {
-            Some(resource) => {
-                if resource.mappable {
-                    error!("resource {} already not mapped!", resource_id);
-                    return GpuResponse::ErrUnspec;
-                }
-            }
-            None => {
-                return GpuResponse::ErrInvalidResourceId;
-            }
-        };
+    fn resource_unmap_blob(&mut self, resource_id: u32) -> VirtioGpuResult {
+        let resource = self
+            .resources
+            .get_mut(&resource_id)
+            .ok_or(ErrInvalidResourceId)?;
 
-        let hva = unsafe { stream_renderer_resource_get_hva(resource_id) };
-
-        // Ignore null hva for the resource.
-        if 0 == hva {
-            return GpuResponse::OkNoData;
-        }
-
-        let slot = unsafe { stream_renderer_resource_get_hv_slot(resource_id) };
-
-        // Ignore invalid slot for the resource.
-        if 0xffffffff == slot {
-            return GpuResponse::OkNoData;
-        }
-
+        let slot = resource.slot.ok_or(ErrUnspec)?;
         let request = VmMemoryRequest::UnregisterMemory(slot);
-        match self.gpu_device_socket.send(&request) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("failed to send request on unmapping memory: {}", e);
-                return GpuResponse::ErrUnspec;
-            }
-        }
-
-        let response = match self.gpu_device_socket.recv() {
-            Ok(response) => response,
-            Err(e) => {
-                error!("failed to receive data on unmapping memory: {}", e);
-                return GpuResponse::ErrUnspec;
-            }
-        };
+        self.gpu_device_socket.send(&request)?;
+        let response = self.gpu_device_socket.recv()?;
 
         match response {
             VmMemoryResponse::Ok => {
-                self.resource_set_mappable(resource_id, true /* mappable */);
-                GpuResponse::OkNoData
+                resource.slot = None;
+                Ok(OkNoData)
             }
-            VmMemoryResponse::Err(e) => {
-                error!("received an error when unmapping memory: {}", e);
-                GpuResponse::ErrUnspec
-            }
-            _ => {
-                error!("recieved an unexpected response when unmapping memory");
-                GpuResponse::ErrUnspec
-            }
+            VmMemoryResponse::Err(e) => Err(ErrSys(e)),
+            _ => Err(ErrUnspec),
         }
     }
 }

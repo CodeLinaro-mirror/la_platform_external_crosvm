@@ -8,14 +8,15 @@ use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::thread;
 
-use sys_util::{error, EventFd, GuestAddress, GuestMemory, PollContext, PollToken};
-use sys_util::{Error as SysError, Result as SysResult};
+use base::{error, Event, PollContext, PollToken};
+use base::{Error as SysError, Result as SysResult};
+use vm_memory::{GuestAddress, GuestMemory};
 
 use data_model::{DataInit, Le32, Le64};
 
 use msg_socket::{MsgReceiver, MsgSender};
 
-use vm_control::{VmMsyncRequest, VmMsyncRequestSocket, VmMsyncResponse};
+use vm_control::{MemSlot, VmMsyncRequest, VmMsyncRequestSocket, VmMsyncResponse};
 
 use super::{
     copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, VirtioDevice, Writer,
@@ -88,7 +89,7 @@ struct Worker {
     queue: Queue,
     memory: GuestMemory,
     pmem_device_socket: VmMsyncRequestSocket,
-    mapping_arena_slot: u32,
+    mapping_arena_slot: MemSlot,
     mapping_size: usize,
 }
 
@@ -130,8 +131,8 @@ impl Worker {
 
     fn handle_request(&self, avail_desc: DescriptorChain) -> Result<usize> {
         let mut reader =
-            Reader::new(&self.memory, avail_desc.clone()).map_err(Error::Descriptor)?;
-        let mut writer = Writer::new(&self.memory, avail_desc).map_err(Error::Descriptor)?;
+            Reader::new(self.memory.clone(), avail_desc.clone()).map_err(Error::Descriptor)?;
+        let mut writer = Writer::new(self.memory.clone(), avail_desc).map_err(Error::Descriptor)?;
 
         let status_code = reader
             .read_obj()
@@ -167,7 +168,7 @@ impl Worker {
         needs_interrupt
     }
 
-    fn run(&mut self, queue_evt: EventFd, kill_evt: EventFd) {
+    fn run(&mut self, queue_evt: Event, kill_evt: Event) {
         #[derive(PollToken)]
         enum Token {
             QueueAvailable,
@@ -201,7 +202,7 @@ impl Worker {
                 match event.token() {
                     Token::QueueAvailable => {
                         if let Err(e) = queue_evt.read() {
-                            error!("failed reading queue EventFd: {}", e);
+                            error!("failed reading queue Event: {}", e);
                             break 'poll;
                         }
                         needs_interrupt |= self.process_queue();
@@ -220,11 +221,11 @@ impl Worker {
 }
 
 pub struct Pmem {
-    kill_event: Option<EventFd>,
+    kill_event: Option<Event>,
     worker_thread: Option<thread::JoinHandle<()>>,
     disk_image: Option<File>,
     mapping_address: GuestAddress,
-    mapping_arena_slot: u32,
+    mapping_arena_slot: MemSlot,
     mapping_size: u64,
     pmem_device_socket: Option<VmMsyncRequestSocket>,
 }
@@ -233,7 +234,7 @@ impl Pmem {
     pub fn new(
         disk_image: File,
         mapping_address: GuestAddress,
-        mapping_arena_slot: u32,
+        mapping_arena_slot: MemSlot,
         mapping_size: u64,
         pmem_device_socket: Option<VmMsyncRequestSocket>,
     ) -> SysResult<Pmem> {
@@ -304,7 +305,7 @@ impl VirtioDevice for Pmem {
         memory: GuestMemory,
         interrupt: Interrupt,
         mut queues: Vec<Queue>,
-        mut queue_events: Vec<EventFd>,
+        mut queue_events: Vec<Event>,
     ) {
         if queues.len() != 1 || queue_events.len() != 1 {
             return;
@@ -319,10 +320,10 @@ impl VirtioDevice for Pmem {
 
         if let Some(pmem_device_socket) = self.pmem_device_socket.take() {
             let (self_kill_event, kill_event) =
-                match EventFd::new().and_then(|e| Ok((e.try_clone()?, e))) {
+                match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
                     Ok(v) => v,
                     Err(e) => {
-                        error!("failed creating kill EventFd pair: {}", e);
+                        error!("failed creating kill Event pair: {}", e);
                         return;
                     }
                 };

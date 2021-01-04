@@ -12,8 +12,8 @@
 //! Each `WlVfd` represents one virtual file descriptor created by either the guest or the host.
 //! Virtual file descriptors contain actual file descriptors, either a shared memory file descriptor
 //! or a unix domain socket to the wayland server. In the shared memory case, there is also an
-//! associated slot that indicates which KVM memory slot the memory is installed into, as well as a
-//! page frame number that the guest can access the memory from.
+//! associated slot that indicates which hypervisor memory slot the memory is installed into, as
+//! well as a page frame number that the guest can access the memory from.
 //!
 //! The types starting with `Ctrl` are structures representing the virtio wayland protocol "on the
 //! wire." They are decoded and executed in the `execute` function and encoded as some variant of
@@ -53,24 +53,27 @@ use libc::{EBADF, EINVAL};
 use data_model::VolatileMemoryError;
 use data_model::*;
 
+#[cfg(feature = "wl-dmabuf")]
+use base::ioctl_iow_nr;
+use base::{
+    error, pipe, round_up_to_page_size, warn, AsRawDescriptor, Error, Event, FileFlags,
+    PollContext, PollToken, Result, ScmSocket, SharedMemory, SharedMemoryUnix,
+};
 use msg_socket::{MsgError, MsgReceiver, MsgSender};
 #[cfg(feature = "wl-dmabuf")]
 use resources::GpuMemoryDesc;
-#[cfg(feature = "wl-dmabuf")]
-use sys_util::ioctl_iow_nr;
-use sys_util::{
-    error, pipe, round_up_to_page_size, warn, Error, EventFd, FileFlags, GuestMemory,
-    GuestMemoryError, PollContext, PollToken, Result, ScmSocket, SharedMemory,
-};
+use vm_memory::{GuestMemory, GuestMemoryError};
 
 #[cfg(feature = "wl-dmabuf")]
-use sys_util::ioctl_with_ref;
+use base::ioctl_with_ref;
 
 use super::resource_bridge::*;
 use super::{
     DescriptorChain, Interrupt, Queue, Reader, VirtioDevice, Writer, TYPE_WL, VIRTIO_F_VERSION_1,
 };
-use vm_control::{MaybeOwnedFd, VmMemoryControlRequestSocket, VmMemoryRequest, VmMemoryResponse};
+use vm_control::{
+    MaybeOwnedFd, MemSlot, VmMemoryControlRequestSocket, VmMemoryRequest, VmMemoryResponse,
+};
 
 const VIRTWL_SEND_MAX_ALLOCS: usize = 28;
 const VIRTIO_WL_CMD_VFD_NEW: u32 = 256;
@@ -260,7 +263,6 @@ fn encode_resp(writer: &mut Writer, resp: WlResp) -> WlResult<()> {
 enum WlError {
     NewAlloc(Error),
     NewPipe(Error),
-    AllocSetSize(Error),
     SocketConnect(io::Error),
     SocketNonBlock(io::Error),
     VmControl(MsgError),
@@ -275,6 +277,7 @@ enum WlError {
     ReadPipe(io::Error),
     PollContextAdd(Error),
     DmabufSync(io::Error),
+    FromSharedMemory(Error),
     WriteResponse(io::Error),
     InvalidString(std::str::Utf8Error),
     UnknownSocketName(String),
@@ -287,7 +290,6 @@ impl Display for WlError {
         match self {
             NewAlloc(e) => write!(f, "failed to create shared memory allocation: {}", e),
             NewPipe(e) => write!(f, "failed to create pipe: {}", e),
-            AllocSetSize(e) => write!(f, "failed to set size of shared memory: {}", e),
             SocketConnect(e) => write!(f, "failed to connect socket: {}", e),
             SocketNonBlock(e) => write!(f, "failed to set socket as non-blocking: {}", e),
             VmControl(e) => write!(f, "failed to control parent VM: {}", e),
@@ -302,6 +304,9 @@ impl Display for WlError {
             ReadPipe(e) => write!(f, "failed to read a pipe: {}", e),
             PollContextAdd(e) => write!(f, "failed to listen to FD on poll context: {}", e),
             DmabufSync(e) => write!(f, "failed to synchronize DMABuf access: {}", e),
+            FromSharedMemory(e) => {
+                write!(f, "failed to create shared memory from descriptor: {}", e)
+            }
             WriteResponse(e) => write!(f, "failed to write response: {}", e),
             InvalidString(e) => write!(f, "invalid string: {}", e),
             UnknownSocketName(name) => write!(f, "unknown socket name: {}", name),
@@ -516,10 +521,10 @@ impl<'a> WlResp<'a> {
 #[derive(Default)]
 struct WlVfd {
     socket: Option<UnixStream>,
-    guest_shared_memory: Option<(u64 /* size */, File)>,
+    guest_shared_memory: Option<(u64 /* size */, SharedMemory)>,
     remote_pipe: Option<File>,
     local_pipe: Option<(u32 /* flags */, File)>,
-    slot: Option<(u32 /* slot */, u64 /* pfn */, VmRequester)>,
+    slot: Option<(MemSlot, u64 /* pfn */, VmRequester)>,
     #[cfg(feature = "wl-dmabuf")]
     is_dmabuf: bool,
 }
@@ -553,18 +558,17 @@ impl WlVfd {
 
     fn allocate(vm: VmRequester, size: u64) -> WlResult<WlVfd> {
         let size_page_aligned = round_up_to_page_size(size as usize) as u64;
-        let mut vfd_shm = SharedMemory::named("virtwl_alloc").map_err(WlError::NewAlloc)?;
-        vfd_shm
-            .set_size(size_page_aligned)
-            .map_err(WlError::AllocSetSize)?;
+        let vfd_shm =
+            SharedMemory::named("virtwl_alloc", size_page_aligned).map_err(WlError::NewAlloc)?;
+
         let register_response = vm.request(VmMemoryRequest::RegisterMemory(
-            MaybeOwnedFd::Borrowed(vfd_shm.as_raw_fd()),
+            MaybeOwnedFd::Borrowed(vfd_shm.as_raw_descriptor()),
             vfd_shm.size() as usize,
         ))?;
         match register_response {
             VmMemoryResponse::RegisterMemory { pfn, slot } => {
                 let mut vfd = WlVfd::default();
-                vfd.guest_shared_memory = Some((vfd_shm.size(), vfd_shm.into()));
+                vfd.guest_shared_memory = Some((vfd_shm.size(), vfd_shm));
                 vfd.slot = Some((slot, pfn, vm));
                 Ok(vfd)
             }
@@ -594,7 +598,7 @@ impl WlVfd {
             } => {
                 let mut vfd = WlVfd::default();
                 let vfd_shm = SharedMemory::from_file(file).map_err(WlError::NewAlloc)?;
-                vfd.guest_shared_memory = Some((vfd_shm.size(), vfd_shm.into()));
+                vfd.guest_shared_memory = Some((vfd_shm.size(), vfd_shm));
                 vfd.slot = Some((slot, pfn, vm));
                 vfd.is_dmabuf = true;
                 Ok((vfd, desc))
@@ -658,7 +662,10 @@ impl WlVfd {
                 match register_response {
                     VmMemoryResponse::RegisterMemory { pfn, slot } => {
                         let mut vfd = WlVfd::default();
-                        vfd.guest_shared_memory = Some((size, fd));
+                        vfd.guest_shared_memory = Some((
+                            size,
+                            SharedMemory::from_file(fd).map_err(WlError::FromSharedMemory)?,
+                        ));
                         vfd.slot = Some((slot, pfn, vm));
                         Ok(vfd)
                     }
@@ -713,7 +720,7 @@ impl WlVfd {
     fn send_fd(&self) -> Option<RawFd> {
         self.guest_shared_memory
             .as_ref()
-            .map(|(_, fd)| fd.as_raw_fd())
+            .map(|(_, fd)| fd.as_raw_descriptor())
             .or(self.socket.as_ref().map(|s| s.as_raw_fd()))
             .or(self.remote_pipe.as_ref().map(|p| p.as_raw_fd()))
     }
@@ -730,7 +737,7 @@ impl WlVfd {
     fn send(&mut self, fds: &[RawFd], data: &mut Reader) -> WlResult<WlResp> {
         if let Some(socket) = &self.socket {
             socket
-                .send_with_fds(data.get_remaining(), fds)
+                .send_with_fds(&data.get_remaining(), fds)
                 .map_err(WlError::SendVfd)?;
             // All remaining data in `data` is now considered consumed.
             data.consume(::std::usize::MAX);
@@ -1372,7 +1379,7 @@ impl Worker {
         }
     }
 
-    fn run(&mut self, mut queue_evts: Vec<EventFd>, kill_evt: EventFd) {
+    fn run(&mut self, mut queue_evts: Vec<Event>, kill_evt: Event) {
         let mut in_desc_chains: VecDeque<DescriptorChain> =
             VecDeque::with_capacity(QUEUE_SIZE as usize);
         let in_queue_evt = queue_evts.remove(0);
@@ -1443,8 +1450,8 @@ impl Worker {
                         while let Some(desc) = self.out_queue.pop(&self.mem) {
                             let desc_index = desc.index;
                             match (
-                                Reader::new(&self.mem, desc.clone()),
-                                Writer::new(&self.mem, desc),
+                                Reader::new(self.mem.clone(), desc.clone()),
+                                Writer::new(self.mem.clone(), desc),
                             ) {
                                 (Ok(mut reader), Ok(mut writer)) => {
                                     let resp = match self.state.execute(&mut reader) {
@@ -1493,7 +1500,7 @@ impl Worker {
                     // in_desc_chains is not empty (checked by loop condition) so unwrap is safe.
                     let desc = in_desc_chains.pop_front().unwrap();
                     let index = desc.index;
-                    match Writer::new(&self.mem, desc) {
+                    match Writer::new(self.mem.clone(), desc) {
                         Ok(mut writer) => {
                             match encode_resp(&mut writer, in_resp) {
                                 Ok(()) => {
@@ -1533,7 +1540,7 @@ impl Worker {
 }
 
 pub struct Wl {
-    kill_evt: Option<EventFd>,
+    kill_evt: Option<Event>,
     worker_thread: Option<thread::JoinHandle<()>>,
     wayland_paths: Map<String, PathBuf>,
     vm_socket: Option<VmMemoryControlRequestSocket>,
@@ -1608,16 +1615,16 @@ impl VirtioDevice for Wl {
         mem: GuestMemory,
         interrupt: Interrupt,
         mut queues: Vec<Queue>,
-        queue_evts: Vec<EventFd>,
+        queue_evts: Vec<Event>,
     ) {
         if queues.len() != QUEUE_SIZES.len() || queue_evts.len() != QUEUE_SIZES.len() {
             return;
         }
 
-        let (self_kill_evt, kill_evt) = match EventFd::new().and_then(|e| Ok((e.try_clone()?, e))) {
+        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
             Err(e) => {
-                error!("failed creating kill EventFd pair: {}", e);
+                error!("failed creating kill Event pair: {}", e);
                 return;
             }
         };

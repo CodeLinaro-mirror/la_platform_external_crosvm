@@ -5,11 +5,12 @@
 //! Data structures that represent video format information in virtio video devices.
 
 use std::convert::{From, Into, TryFrom};
+use std::fmt::{self, Display};
 use std::io;
 
+use base::error;
 use data_model::Le32;
 use enumn::N;
-use sys_util::error;
 
 use crate::virtio::video::command::ReadCmdError;
 use crate::virtio::video::protocol::*;
@@ -115,6 +116,20 @@ impl Profile {
 #[repr(u32)]
 pub enum Level {
     H264_1_0 = VIRTIO_VIDEO_LEVEL_H264_1_0,
+    H264_1_1 = VIRTIO_VIDEO_LEVEL_H264_1_1,
+    H264_1_2 = VIRTIO_VIDEO_LEVEL_H264_1_2,
+    H264_1_3 = VIRTIO_VIDEO_LEVEL_H264_1_3,
+    H264_2_0 = VIRTIO_VIDEO_LEVEL_H264_2_0,
+    H264_2_1 = VIRTIO_VIDEO_LEVEL_H264_2_1,
+    H264_2_2 = VIRTIO_VIDEO_LEVEL_H264_2_2,
+    H264_3_0 = VIRTIO_VIDEO_LEVEL_H264_3_0,
+    H264_3_1 = VIRTIO_VIDEO_LEVEL_H264_3_1,
+    H264_3_2 = VIRTIO_VIDEO_LEVEL_H264_3_2,
+    H264_4_0 = VIRTIO_VIDEO_LEVEL_H264_4_0,
+    H264_4_1 = VIRTIO_VIDEO_LEVEL_H264_4_1,
+    H264_4_2 = VIRTIO_VIDEO_LEVEL_H264_4_2,
+    H264_5_0 = VIRTIO_VIDEO_LEVEL_H264_5_0,
+    H264_5_1 = VIRTIO_VIDEO_LEVEL_H264_5_1,
 }
 impl_try_from_le32_for_enumn!(Level, "level");
 
@@ -132,6 +147,20 @@ pub enum Format {
     VP9 = VIRTIO_VIDEO_FORMAT_VP9,
 }
 impl_try_from_le32_for_enumn!(Format, "format");
+
+impl Display for Format {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use Format::*;
+        match self {
+            NV12 => write!(f, "NV12"),
+            YUV420 => write!(f, "YUV420"),
+            H264 => write!(f, "H264"),
+            HEVC => write!(f, "HEVC"),
+            VP8 => write!(f, "VP8"),
+            VP9 => write!(f, "VP9"),
+        }
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct Crop {

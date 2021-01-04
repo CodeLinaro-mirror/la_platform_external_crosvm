@@ -5,14 +5,15 @@
 use std::ffi::CStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::mem::size_of;
+use std::mem::{size_of, MaybeUninit};
+use std::time::Duration;
 
+use base::error;
 use data_model::DataInit;
-use sys_util::error;
 
 use crate::virtio::fs::filesystem::{
-    Context, DirEntry, Entry, FileSystem, GetxattrReply, IoctlReply, ListxattrReply,
-    ZeroCopyReader, ZeroCopyWriter,
+    Context, DirEntry, DirectoryIterator, Entry, FileSystem, GetxattrReply, IoctlReply,
+    ListxattrReply, ZeroCopyReader, ZeroCopyWriter,
 };
 use crate::virtio::fs::fuse::*;
 use crate::virtio::fs::{Error, Result};
@@ -21,29 +22,29 @@ use crate::virtio::{Reader, Writer};
 const MAX_BUFFER_SIZE: u32 = 1 << 20;
 const DIRENT_PADDING: [u8; 8] = [0; 8];
 
-struct ZCReader<'a>(Reader<'a>);
+struct ZCReader(Reader);
 
-impl<'a> ZeroCopyReader for ZCReader<'a> {
+impl ZeroCopyReader for ZCReader {
     fn read_to(&mut self, f: &mut File, count: usize, off: u64) -> io::Result<usize> {
         self.0.read_to_at(f, count, off)
     }
 }
 
-impl<'a> io::Read for ZCReader<'a> {
+impl io::Read for ZCReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.read(buf)
     }
 }
 
-struct ZCWriter<'a>(Writer<'a>);
+struct ZCWriter(Writer);
 
-impl<'a> ZeroCopyWriter for ZCWriter<'a> {
+impl ZeroCopyWriter for ZCWriter {
     fn write_from(&mut self, f: &mut File, count: usize, off: u64) -> io::Result<usize> {
         self.0.write_from_at(f, count, off)
     }
 }
 
-impl<'a> io::Write for ZCWriter<'a> {
+impl io::Write for ZCWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.write(buf)
     }
@@ -63,7 +64,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     pub fn handle_message(&self, mut r: Reader, w: Writer) -> Result<usize> {
-        let in_header: InHeader = r.read_obj().map_err(Error::DecodeMessage)?;
+        let in_header = InHeader::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         if in_header.len > MAX_BUFFER_SIZE {
             return reply_error(
@@ -152,7 +153,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn forget(&self, in_header: InHeader, mut r: Reader) -> Result<usize> {
-        let ForgetIn { nlookup } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let ForgetIn { nlookup } = ForgetIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         self.fs
             .forget(Context::from(in_header), in_header.nodeid.into(), nlookup);
@@ -166,7 +167,7 @@ impl<F: FileSystem + Sync> Server<F> {
             flags,
             dummy: _,
             fh,
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = GetattrIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         let handle = if (flags & GETATTR_FH) != 0 {
             Some(fh.into())
@@ -192,7 +193,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn setattr(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let setattr_in: SetattrIn = r.read_obj().map_err(Error::DecodeMessage)?;
+        let setattr_in = SetattrIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         let handle = if setattr_in.valid & FATTR_FH != 0 {
             Some(setattr_in.fh.into())
@@ -248,20 +249,23 @@ impl<F: FileSystem + Sync> Server<F> {
 
         r.read_exact(&mut buf).map_err(Error::DecodeMessage)?;
 
-        // We want to include the '\0' byte in the first slice.
-        let split_pos = buf
-            .iter()
-            .position(|c| *c == b'\0')
-            .map(|p| p + 1)
-            .ok_or(Error::MissingParameter)?;
-
-        let (name, linkname) = buf.split_at(split_pos);
+        let mut iter = split_inclusive(&buf, |&c| c == b'\0');
+        let name = iter
+            .next()
+            .ok_or(Error::MissingParameter)
+            .and_then(bytes_to_cstr)?;
+        let linkname = iter
+            .next()
+            .ok_or(Error::MissingParameter)
+            .and_then(bytes_to_cstr)?;
+        let security_ctx = iter.next().map(bytes_to_cstr).transpose()?;
 
         match self.fs.symlink(
             Context::from(in_header),
-            bytes_to_cstr(linkname)?,
+            linkname,
             in_header.nodeid.into(),
-            bytes_to_cstr(name)?,
+            name,
+            security_ctx,
         ) {
             Ok(entry) => {
                 let out = EntryOut::from(entry);
@@ -275,24 +279,32 @@ impl<F: FileSystem + Sync> Server<F> {
     fn mknod(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
         let MknodIn {
             mode, rdev, umask, ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = MknodIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
-        let namelen = (in_header.len as usize)
+        let buflen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
             .and_then(|l| l.checked_sub(size_of::<MknodIn>()))
             .ok_or(Error::InvalidHeaderLength)?;
-        let mut name = Vec::with_capacity(namelen);
-        name.resize(namelen, 0);
+        let mut buf = Vec::with_capacity(buflen);
+        buf.resize(buflen, 0);
 
-        r.read_exact(&mut name).map_err(Error::DecodeMessage)?;
+        r.read_exact(&mut buf).map_err(Error::DecodeMessage)?;
+
+        let mut iter = split_inclusive(&buf, |&c| c == b'\0');
+        let name = iter
+            .next()
+            .ok_or(Error::MissingParameter)
+            .and_then(bytes_to_cstr)?;
+        let security_ctx = iter.next().map(bytes_to_cstr).transpose()?;
 
         match self.fs.mknod(
             Context::from(in_header),
             in_header.nodeid.into(),
-            bytes_to_cstr(&name)?,
+            name,
             mode,
             rdev,
             umask,
+            security_ctx,
         ) {
             Ok(entry) => {
                 let out = EntryOut::from(entry);
@@ -304,23 +316,31 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn mkdir(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let MkdirIn { mode, umask } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let MkdirIn { mode, umask } = MkdirIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
-        let namelen = (in_header.len as usize)
+        let buflen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
             .and_then(|l| l.checked_sub(size_of::<MkdirIn>()))
             .ok_or(Error::InvalidHeaderLength)?;
-        let mut name = Vec::with_capacity(namelen);
-        name.resize(namelen, 0);
+        let mut buf = Vec::with_capacity(buflen);
+        buf.resize(buflen, 0);
 
-        r.read_exact(&mut name).map_err(Error::DecodeMessage)?;
+        r.read_exact(&mut buf).map_err(Error::DecodeMessage)?;
+
+        let mut iter = split_inclusive(&buf, |&c| c == b'\0');
+        let name = iter
+            .next()
+            .ok_or(Error::MissingParameter)
+            .and_then(bytes_to_cstr)?;
+        let security_ctx = iter.next().map(bytes_to_cstr).transpose()?;
 
         match self.fs.mkdir(
             Context::from(in_header),
             in_header.nodeid.into(),
-            bytes_to_cstr(&name)?,
+            name,
             mode,
             umask,
+            security_ctx,
         ) {
             Ok(entry) => {
                 let out = EntryOut::from(entry);
@@ -410,13 +430,14 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn rename(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let RenameIn { newdir } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let RenameIn { newdir } = RenameIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         self.do_rename(in_header, size_of::<RenameIn>(), newdir, 0, r, w)
     }
 
     fn rename2(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let Rename2In { newdir, flags, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let Rename2In { newdir, flags, .. } =
+            Rename2In::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         let flags = flags & (libc::RENAME_EXCHANGE | libc::RENAME_NOREPLACE) as u32;
 
@@ -424,7 +445,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn link(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let LinkIn { oldnodeid } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let LinkIn { oldnodeid } = LinkIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         let namelen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
@@ -451,7 +472,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn open(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let OpenIn { flags, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let OpenIn { flags, .. } = OpenIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         match self
             .fs
@@ -479,7 +500,7 @@ impl<F: FileSystem + Sync> Server<F> {
             lock_owner,
             flags,
             ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = ReadIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         if size > MAX_BUFFER_SIZE {
             return reply_error(
@@ -533,7 +554,7 @@ impl<F: FileSystem + Sync> Server<F> {
             lock_owner,
             flags,
             ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = WriteIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         if size > MAX_BUFFER_SIZE {
             return reply_error(
@@ -592,7 +613,7 @@ impl<F: FileSystem + Sync> Server<F> {
             flags,
             release_flags,
             lock_owner,
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = ReleaseIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         let flush = release_flags & RELEASE_FLUSH != 0;
         let flock_release = release_flags & RELEASE_FLOCK_UNLOCK != 0;
@@ -619,7 +640,7 @@ impl<F: FileSystem + Sync> Server<F> {
     fn fsync(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
         let FsyncIn {
             fh, fsync_flags, ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = FsyncIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
         let datasync = fsync_flags & 0x1 != 0;
 
         match self.fs.fsync(
@@ -634,7 +655,8 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn setxattr(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let SetxattrIn { size, flags } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let SetxattrIn { size, flags } =
+            SetxattrIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         // The name and value and encoded one after another and separated by a '\0' character.
         let len = (in_header.len as usize)
@@ -672,7 +694,8 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn getxattr(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let GetxattrIn { size, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let GetxattrIn { size, .. } =
+            GetxattrIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         let namelen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
@@ -711,7 +734,8 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn listxattr(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let GetxattrIn { size, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let GetxattrIn { size, .. } =
+            GetxattrIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         if size > MAX_BUFFER_SIZE {
             return reply_error(
@@ -765,7 +789,7 @@ impl<F: FileSystem + Sync> Server<F> {
             unused: _,
             padding: _,
             lock_owner,
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = FlushIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         match self.fs.flush(
             Context::from(in_header),
@@ -784,7 +808,7 @@ impl<F: FileSystem + Sync> Server<F> {
             minor,
             max_readahead,
             flags,
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = InitIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         if major < KERNEL_VERSION {
             error!("Unsupported fuse protocol version: {}.{}", major, minor);
@@ -826,6 +850,8 @@ impl<F: FileSystem + Sync> Server<F> {
             | FsOptions::HANDLE_KILLPRIV
             | FsOptions::ASYNC_DIO
             | FsOptions::HAS_IOCTL_DIR
+            | FsOptions::DO_READDIRPLUS
+            | FsOptions::READDIRPLUS_AUTO
             | FsOptions::ATOMIC_O_TRUNC;
 
         let capable = FsOptions::from_bits_truncate(flags);
@@ -859,7 +885,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn opendir(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let OpenIn { flags, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let OpenIn { flags, .. } = OpenIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         match self
             .fs
@@ -878,16 +904,10 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn do_readdir(
-        &self,
-        in_header: InHeader,
-        mut r: Reader,
-        mut w: Writer,
-        plus: bool,
-    ) -> Result<usize> {
+    fn readdir(&self, in_header: InHeader, mut r: Reader, mut w: Writer) -> Result<usize> {
         let ReadIn {
             fh, offset, size, ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = ReadIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         if size > MAX_BUFFER_SIZE {
             return reply_error(
@@ -908,53 +928,138 @@ impl<F: FileSystem + Sync> Server<F> {
 
         // Skip over enough bytes for the header.
         let mut cursor = w.split_at(size_of::<OutHeader>());
+        let unique = in_header.unique;
 
-        let res = if plus {
-            self.fs.readdirplus(
-                Context::from(in_header),
-                in_header.nodeid.into(),
-                fh.into(),
-                size,
-                offset,
-                |d, e| add_dirent(&mut cursor, size, d, Some(e)),
-            )
-        } else {
-            self.fs.readdir(
-                Context::from(in_header),
-                in_header.nodeid.into(),
-                fh.into(),
-                size,
-                offset,
-                |d| add_dirent(&mut cursor, size, d, None),
-            )
-        };
-
-        if let Err(e) = res {
-            reply_error(e, in_header.unique, w)
-        } else {
-            // Don't use `reply_ok` because we need to set a custom size length for the
-            // header.
-            let out = OutHeader {
-                len: (size_of::<OutHeader>() + cursor.bytes_written()) as u32,
-                error: 0,
-                unique: in_header.unique,
-            };
-
-            w.write_all(out.as_slice()).map_err(Error::EncodeMessage)?;
-            Ok(out.len as usize)
+        match self.fs.readdir(
+            Context::from(in_header),
+            in_header.nodeid.into(),
+            fh.into(),
+            size,
+            offset,
+        ) {
+            Ok(mut entries) => {
+                while let Some(dirent) = entries.next() {
+                    match add_dirent(&mut cursor, size, dirent, None) {
+                        // No more space left in the buffer.
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) => return reply_error(e, unique, w),
+                    }
+                }
+                reply_readdir(cursor.bytes_written(), unique, w)
+            }
+            Err(e) => reply_error(e, unique, w),
         }
     }
 
-    fn readdir(&self, in_header: InHeader, r: Reader, w: Writer) -> Result<usize> {
-        self.do_readdir(in_header, r, w, false)
+    fn handle_dirent<'d>(
+        &self,
+        in_header: &InHeader,
+        dir_entry: DirEntry<'d>,
+    ) -> io::Result<(DirEntry<'d>, Entry)> {
+        let parent = in_header.nodeid.into();
+        let name = dir_entry.name.to_bytes();
+        let entry = if name == b"." || name == b".." {
+            // Don't do lookups on the current directory or the parent directory. Safe because
+            // this only contains integer fields and any value is valid.
+            let mut attr = unsafe { MaybeUninit::<libc::stat64>::zeroed().assume_init() };
+            attr.st_ino = dir_entry.ino;
+            attr.st_mode = dir_entry.type_;
+
+            // We use 0 for the inode value to indicate a negative entry.
+            Entry {
+                inode: 0,
+                generation: 0,
+                attr,
+                attr_timeout: Duration::from_secs(0),
+                entry_timeout: Duration::from_secs(0),
+            }
+        } else {
+            self.fs
+                .lookup(Context::from(*in_header), parent, dir_entry.name)?
+        };
+
+        Ok((dir_entry, entry))
     }
 
-    fn readdirplus(&self, in_header: InHeader, r: Reader, w: Writer) -> Result<usize> {
-        self.do_readdir(in_header, r, w, true)
+    fn readdirplus(&self, in_header: InHeader, mut r: Reader, mut w: Writer) -> Result<usize> {
+        let ReadIn {
+            fh, offset, size, ..
+        } = ReadIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
+
+        if size > MAX_BUFFER_SIZE {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::ENOMEM),
+                in_header.unique,
+                w,
+            );
+        }
+
+        let available_bytes = w.available_bytes();
+        if available_bytes < size as usize {
+            return reply_error(
+                io::Error::from_raw_os_error(libc::ENOMEM),
+                in_header.unique,
+                w,
+            );
+        }
+
+        // Skip over enough bytes for the header.
+        let mut cursor = w.split_at(size_of::<OutHeader>());
+        let unique = in_header.unique;
+
+        match self.fs.readdir(
+            Context::from(in_header),
+            in_header.nodeid.into(),
+            fh.into(),
+            size,
+            offset,
+        ) {
+            Ok(mut entries) => {
+                while let Some(dirent) = entries.next() {
+                    let mut entry_inode = None;
+                    match self.handle_dirent(&in_header, dirent).and_then(|(d, e)| {
+                        entry_inode = Some(e.inode);
+                        add_dirent(&mut cursor, size, d, Some(e))
+                    }) {
+                        Ok(0) => {
+                            // No more space left in the buffer but we need to undo the lookup
+                            // that created the Entry or we will end up with mismatched lookup
+                            // counts.
+                            if let Some(inode) = entry_inode {
+                                self.fs.forget(Context::from(in_header), inode.into(), 1);
+                            }
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            if let Some(inode) = entry_inode {
+                                self.fs.forget(Context::from(in_header), inode.into(), 1);
+                            }
+
+                            if cursor.bytes_written() == 0 {
+                                // We haven't filled any entries yet so we can just propagate
+                                // the error.
+                                return reply_error(e, unique, w);
+                            }
+
+                            // We already filled in some entries. Returning an error now will
+                            // cause lookup count mismatches for those entries so just return
+                            // whatever we already have.
+                            break;
+                        }
+                    }
+                }
+
+                reply_readdir(cursor.bytes_written(), unique, w)
+            }
+            Err(e) => reply_error(e, unique, w),
+        }
     }
 
     fn releasedir(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let ReleaseIn { fh, flags, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let ReleaseIn { fh, flags, .. } =
+            ReleaseIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         match self.fs.releasedir(
             Context::from(in_header),
@@ -970,7 +1075,7 @@ impl<F: FileSystem + Sync> Server<F> {
     fn fsyncdir(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
         let FsyncIn {
             fh, fsync_flags, ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = FsyncIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
         let datasync = fsync_flags & 0x1 != 0;
 
         match self.fs.fsyncdir(
@@ -1009,7 +1114,7 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn access(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let AccessIn { mask, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let AccessIn { mask, .. } = AccessIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         match self
             .fs
@@ -1023,19 +1128,24 @@ impl<F: FileSystem + Sync> Server<F> {
     fn create(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
         let CreateIn {
             flags, mode, umask, ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = CreateIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
-        let namelen = (in_header.len as usize)
+        let buflen = (in_header.len as usize)
             .checked_sub(size_of::<InHeader>())
             .and_then(|l| l.checked_sub(size_of::<CreateIn>()))
             .ok_or(Error::InvalidHeaderLength)?;
 
-        let mut buf = Vec::with_capacity(namelen);
-        buf.resize(namelen, 0);
+        let mut buf = Vec::with_capacity(buflen);
+        buf.resize(buflen, 0);
 
         r.read_exact(&mut buf).map_err(Error::DecodeMessage)?;
 
-        let name = bytes_to_cstr(&buf)?;
+        let mut iter = split_inclusive(&buf, |&c| c == b'\0');
+        let name = iter
+            .next()
+            .ok_or(Error::MissingParameter)
+            .and_then(bytes_to_cstr)?;
+        let security_ctx = iter.next().map(bytes_to_cstr).transpose()?;
 
         match self.fs.create(
             Context::from(in_header),
@@ -1044,6 +1154,7 @@ impl<F: FileSystem + Sync> Server<F> {
             mode,
             flags,
             umask,
+            security_ctx,
         ) {
             Ok((entry, handle, opts)) => {
                 let entry_out = EntryOut {
@@ -1100,7 +1211,7 @@ impl<F: FileSystem + Sync> Server<F> {
             arg,
             in_size,
             out_size,
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = IoctlIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         let res = self.fs.ioctl(
             in_header.into(),
@@ -1141,7 +1252,8 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn batch_forget(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
-        let BatchForgetIn { count, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
+        let BatchForgetIn { count, .. } =
+            BatchForgetIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         if let Some(size) = (count as usize).checked_mul(size_of::<ForgetOne>()) {
             if size > MAX_BUFFER_SIZE as usize {
@@ -1162,7 +1274,7 @@ impl<F: FileSystem + Sync> Server<F> {
         let mut requests = Vec::with_capacity(count as usize);
         for _ in 0..count {
             requests.push(
-                r.read_obj::<ForgetOne>()
+                ForgetOne::from_reader(&mut r)
                     .map(|f| (f.nodeid.into(), f.nlookup))
                     .map_err(Error::DecodeMessage)?,
             );
@@ -1181,7 +1293,7 @@ impl<F: FileSystem + Sync> Server<F> {
             length,
             mode,
             ..
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = FallocateIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         match self.fs.fallocate(
             Context::from(in_header),
@@ -1213,7 +1325,7 @@ impl<F: FileSystem + Sync> Server<F> {
             off_dst,
             len,
             flags,
-        } = r.read_obj().map_err(Error::DecodeMessage)?;
+        } = CopyFileRangeIn::from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
         match self.fs.copy_file_range(
             Context::from(in_header),
@@ -1298,6 +1410,17 @@ fn finish_ioctl(unique: u64, res: io::Result<Vec<u8>>, w: Writer) -> Result<usiz
         }
     };
     reply_ok(Some(out), data.as_ref().map(|d| &d[..]), unique, w)
+}
+
+fn reply_readdir(len: usize, unique: u64, mut w: Writer) -> Result<usize> {
+    let out = OutHeader {
+        len: (size_of::<OutHeader>() + len) as u32,
+        error: 0,
+        unique,
+    };
+
+    w.write_all(out.as_slice()).map_err(Error::EncodeMessage)?;
+    Ok(out.len as usize)
 }
 
 fn reply_ok<T: DataInit>(
@@ -1413,5 +1536,85 @@ fn add_dirent(
         }
 
         Ok(total_len)
+    }
+}
+
+// TODO: Remove this once std::slice::SplitInclusive is stabilized.
+struct SplitInclusive<'a, T, F> {
+    buf: &'a [T],
+    pred: F,
+}
+
+impl<'a, T, F> Iterator for SplitInclusive<'a, T, F>
+where
+    F: FnMut(&T) -> bool,
+{
+    type Item = &'a [T];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buf.is_empty() {
+            return None;
+        }
+
+        let split_pos = self
+            .buf
+            .iter()
+            .position(&mut self.pred)
+            .map(|p| p + 1)
+            .unwrap_or(self.buf.len());
+
+        let (next, rem) = self.buf.split_at(split_pos);
+        self.buf = rem;
+
+        Some(next)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.buf.is_empty() {
+            (0, Some(0))
+        } else {
+            (1, Some(self.buf.len()))
+        }
+    }
+}
+
+fn split_inclusive<T, F>(buf: &[T], pred: F) -> SplitInclusive<T, F>
+where
+    F: FnMut(&T) -> bool,
+{
+    SplitInclusive { buf, pred }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_inclusive_basic() {
+        let slice = [10, 40, 33, 20];
+        let mut iter = split_inclusive(&slice, |num| num % 3 == 0);
+
+        assert_eq!(iter.next().unwrap(), &[10, 40, 33]);
+        assert_eq!(iter.next().unwrap(), &[20]);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn split_inclusive_last() {
+        let slice = [3, 10, 40, 33];
+        let mut iter = split_inclusive(&slice, |num| num % 3 == 0);
+
+        assert_eq!(iter.next().unwrap(), &[3]);
+        assert_eq!(iter.next().unwrap(), &[10, 40, 33]);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn split_inclusive_no_match() {
+        let slice = [3, 10, 40, 33];
+        let mut iter = split_inclusive(&slice, |num| num % 7 == 0);
+
+        assert_eq!(iter.next().unwrap(), &slice);
+        assert!(iter.next().is_none());
     }
 }

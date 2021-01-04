@@ -11,8 +11,9 @@ use std::fmt::{self, Display};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::thread;
 
+use base::{error, Error as SysError, Event};
 use data_model::{DataInit, Le32};
-use sys_util::{error, Error as SysError, EventFd, GuestMemory};
+use vm_memory::GuestMemory;
 
 use crate::virtio::resource_bridge::ResourceRequestSocket;
 use crate::virtio::virtio_device::VirtioDevice;
@@ -20,6 +21,7 @@ use crate::virtio::{self, copy_config, DescriptorError, Interrupt, VIRTIO_F_VERS
 
 #[macro_use]
 mod macros;
+mod async_cmd_desc_map;
 mod command;
 mod control;
 mod decoder;
@@ -43,18 +45,12 @@ const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE, QUEUE_SIZE];
 /// An error indicating something went wrong in virtio-video's worker.
 #[derive(Debug)]
 pub enum Error {
-    /// Failed to create a libvda instance.
-    LibvdaCreationFailed(libvda::Error),
     /// Creating PollContext failed.
     PollContextCreationFailed(SysError),
     /// A DescriptorChain contains invalid data.
     InvalidDescriptorChain(DescriptorError),
-    /// Invalid output buffer is specified for EOS notification.
-    InvalidEOSResource { stream_id: u32, resource_id: u32 },
     /// No available descriptor in which an event is written to.
     DescriptorNotAvailable,
-    /// Output buffer for EOS is unavailable.
-    NoEOSBuffer { stream_id: u32 },
     /// Error while polling for events.
     PollError(SysError),
     /// Failed to read a virtio-video command.
@@ -72,25 +68,11 @@ impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Error::*;
         match self {
-            LibvdaCreationFailed(e) => write!(f, "failed to create a libvda instance: {}", e),
             PollContextCreationFailed(e) => write!(f, "failed to create PollContext: {}", e),
             InvalidDescriptorChain(e) => write!(f, "DescriptorChain contains invalid data: {}", e),
-            InvalidEOSResource {
-                stream_id,
-                resource_id,
-            } => write!(
-                f,
-                "invalid resource {} was specified for stream {}'s EOS",
-                resource_id, stream_id
-            ),
             DescriptorNotAvailable => {
                 write!(f, "no available descriptor in which an event is written to")
             }
-            NoEOSBuffer { stream_id } => write!(
-                f,
-                "no output resource is available to notify EOS: {}",
-                stream_id
-            ),
             PollError(err) => write!(f, "failed to poll events: {}", err),
             ReadFailure(e) => write!(f, "failed to read a command from the guest: {}", e),
             UnexpectedResponse(tag) => {
@@ -116,7 +98,7 @@ pub enum VideoDeviceType {
 
 pub struct VideoDevice {
     device_type: VideoDeviceType,
-    kill_evt: Option<EventFd>,
+    kill_evt: Option<Event>,
     resource_bridge: Option<ResourceRequestSocket>,
 }
 
@@ -182,7 +164,7 @@ impl VirtioDevice for VideoDevice {
         mem: GuestMemory,
         interrupt: Interrupt,
         mut queues: Vec<virtio::queue::Queue>,
-        mut queue_evts: Vec<EventFd>,
+        mut queue_evts: Vec<Event>,
     ) {
         if queues.len() != QUEUE_SIZES.len() {
             error!(
@@ -194,16 +176,16 @@ impl VirtioDevice for VideoDevice {
         }
         if queue_evts.len() != QUEUE_SIZES.len() {
             error!(
-                "wrong number of event FDs are passed: expected {}, actual {}",
+                "wrong number of events are passed: expected {}, actual {}",
                 queue_evts.len(),
                 QUEUE_SIZES.len()
             );
         }
 
-        let (self_kill_evt, kill_evt) = match EventFd::new().and_then(|e| Ok((e.try_clone()?, e))) {
+        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
             Err(e) => {
-                error!("failed to create kill EventFd pair: {:?}", e);
+                error!("failed to create kill Event pair: {:?}", e);
                 return;
             }
         };
@@ -232,16 +214,28 @@ impl VirtioDevice for VideoDevice {
             VideoDeviceType::Decoder => thread::Builder::new()
                 .name("virtio video decoder".to_owned())
                 .spawn(move || {
-                    let vda = libvda::decode::VdaInstance::new(libvda::decode::VdaImplType::Gavda)
-                        .map_err(Error::LibvdaCreationFailed)?;
+                    let vda = match libvda::decode::VdaInstance::new(
+                        libvda::decode::VdaImplType::Gavda,
+                    ) {
+                        Ok(vda) => vda,
+                        Err(e) => {
+                            error!("Failed to initialize vda: {}", e);
+                            return;
+                        }
+                    };
                     let device = decoder::Decoder::new(&vda);
-                    worker.run(cmd_queue, event_queue, device)
+                    if let Err(e) = worker.run(cmd_queue, event_queue, device) {
+                        error!("Failed to start decoder worker: {}", e);
+                    };
+                    // Don't return any information since the return value is never checked.
                 }),
             VideoDeviceType::Encoder => thread::Builder::new()
                 .name("virtio video encoder".to_owned())
                 .spawn(move || {
                     let device = encoder::Encoder::new();
-                    worker.run(cmd_queue, event_queue, device)
+                    if let Err(e) = worker.run(cmd_queue, event_queue, device) {
+                        error!("Failed to start encoder worker: {}", e);
+                    }
                 }),
         };
         if let Err(e) = worker_result {

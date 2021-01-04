@@ -1,0 +1,13 @@
+[package]
+name = "base"
+version = "0.1.0"
+authors = ["The Chromium OS Authors"]
+edition = "2018"
+
+[features]
+chromeos = ["sys_util/chromeos"]
+
+[dependencies]
+data_model = { path = "../data_model" }
+sync = { path = "../sync" }
+sys_util = { path = "../sys_util" }

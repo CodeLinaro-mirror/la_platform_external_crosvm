@@ -4,7 +4,8 @@
 
 use std::convert::TryInto;
 
-use sys_util::{warn, GuestAddress};
+use base::warn;
+use vm_memory::GuestAddress;
 
 use super::*;
 
@@ -242,8 +243,9 @@ impl VirtioPciCommonConfig {
 mod tests {
     use super::*;
 
+    use base::Event;
     use std::os::unix::io::RawFd;
-    use sys_util::{EventFd, GuestMemory};
+    use vm_memory::GuestMemory;
 
     struct DummyDevice(u32);
     const QUEUE_SIZE: u16 = 256;
@@ -264,7 +266,7 @@ mod tests {
             _mem: GuestMemory,
             _interrupt: Interrupt,
             _queues: Vec<Queue>,
-            _queue_evts: Vec<EventFd>,
+            _queue_evts: Vec<Event>,
         ) {
         }
         fn features(&self) -> u64 {

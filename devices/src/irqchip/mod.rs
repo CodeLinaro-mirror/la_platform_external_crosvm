@@ -5,12 +5,15 @@
 use std::marker::{Send, Sized};
 
 use crate::Bus;
+use base::{Event, Result};
 use hypervisor::{IrqRoute, MPState, Vcpu};
 use resources::SystemAllocator;
-use sys_util::{EventFd, Result};
 
 mod kvm;
 pub use self::kvm::KvmKernelIrqChip;
+
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+pub use self::kvm::AARCH64_GIC_NR_IRQS;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use self::kvm::KvmSplitIrqChip;
@@ -53,12 +56,12 @@ pub trait IrqChip<V: Vcpu>: Send + Sized {
     fn register_irq_event(
         &mut self,
         irq: u32,
-        irq_event: &EventFd,
-        resample_event: Option<&EventFd>,
+        irq_event: &Event,
+        resample_event: Option<&Event>,
     ) -> Result<()>;
 
     /// Unregister an event for a particular GSI.
-    fn unregister_irq_event(&mut self, irq: u32, irq_event: &EventFd) -> Result<()>;
+    fn unregister_irq_event(&mut self, irq: u32, irq_event: &Event) -> Result<()>;
 
     /// Route an IRQ line to an interrupt controller, or to a particular MSI vector.
     fn route_irq(&mut self, route: IrqRoute) -> Result<()>;
@@ -68,15 +71,15 @@ pub trait IrqChip<V: Vcpu>: Send + Sized {
 
     /// Return a vector of all registered irq numbers and their associated events.  To be used by
     /// the main thread to wait for irq events to be triggered.
-    fn irq_event_tokens(&self) -> Result<Vec<(u32, EventFd)>>;
+    fn irq_event_tokens(&self) -> Result<Vec<(u32, Event)>>;
 
     /// Either assert or deassert an IRQ line.  Sends to either an interrupt controller, or does
     /// a send_msi if the irq is associated with an MSI.
     fn service_irq(&mut self, irq: u32, level: bool) -> Result<()>;
 
-    /// Service an IRQ event by asserting then deasserting an IRQ line. The associated EventFd
+    /// Service an IRQ event by asserting then deasserting an IRQ line. The associated Event
     /// that triggered the irq event will be read from. If the irq is associated with a resample
-    /// EventFd, then the deassert will only happen after an EOI is broadcast for a vector
+    /// Event, then the deassert will only happen after an EOI is broadcast for a vector
     /// associated with the irq line.
     fn service_irq_event(&mut self, irq: u32) -> Result<()>;
 

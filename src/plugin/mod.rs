@@ -26,15 +26,15 @@ use libc::{
 use protobuf::ProtobufError;
 use remain::sorted;
 
+use base::{
+    block_signal, clear_signal, drop_capabilities, error, getegid, geteuid, info, pipe,
+    register_rt_signal_handler, validate_raw_fd, warn, Error as SysError, Event, Killable,
+    MmapError, PollContext, PollToken, Result as SysResult, SignalFd, SignalFdError, SIGRTMIN,
+};
 use kvm::{Cap, Datamatch, IoeventAddress, Kvm, Vcpu, VcpuExit, Vm};
 use minijail::{self, Minijail};
 use net_util::{Error as TapError, Tap, TapT};
-use sys_util::{
-    block_signal, clear_signal, drop_capabilities, error, getegid, geteuid, info, pipe,
-    register_rt_signal_handler, validate_raw_fd, warn, Error as SysError, EventFd, GuestMemory,
-    Killable, MmapError, PollContext, PollToken, Result as SysResult, SignalFd, SignalFdError,
-    SIGRTMIN,
-};
+use vm_memory::GuestMemory;
 
 use self::process::*;
 use self::vcpu::*;
@@ -46,9 +46,9 @@ const MAX_VCPU_DATAGRAM_SIZE: usize = 0x40000;
 /// An error that occurs during the lifetime of a plugin process.
 #[sorted]
 pub enum Error {
-    CloneEventFd(SysError),
+    CloneEvent(SysError),
     CloneVcpuPipe(io::Error),
-    CreateEventFd(SysError),
+    CreateEvent(SysError),
     CreateIrqChip(SysError),
     CreateJail(minijail::Error),
     CreateKvm(SysError),
@@ -115,9 +115,9 @@ impl Display for Error {
 
         #[sorted]
         match self {
-            CloneEventFd(e) => write!(f, "failed to clone eventfd: {}", e),
+            CloneEvent(e) => write!(f, "failed to clone event: {}", e),
             CloneVcpuPipe(e) => write!(f, "failed to clone vcpu pipe: {}", e),
-            CreateEventFd(e) => write!(f, "failed to create eventfd: {}", e),
+            CreateEvent(e) => write!(f, "failed to create event: {}", e),
             CreateIrqChip(e) => write!(f, "failed to create kvm irqchip: {}", e),
             CreateJail(e) => write!(f, "failed to create jail: {}", e),
             CreateKvm(e) => write!(f, "error creating Kvm: {}", e),
@@ -353,7 +353,7 @@ fn create_plugin_jail(root: &Path, log_failures: bool, seccomp_policy: &Path) ->
 /// ```
 enum PluginObject {
     IoEvent {
-        evt: EventFd,
+        evt: Event,
         addr: IoeventAddress,
         length: u32,
         datamatch: u64,
@@ -364,7 +364,7 @@ enum PluginObject {
     },
     IrqEvent {
         irq_id: u32,
-        evt: EventFd,
+        evt: Event,
     },
 }
 
@@ -396,7 +396,7 @@ pub fn run_vcpus(
     plugin: &Process,
     vcpu_count: u32,
     kill_signaled: &Arc<AtomicBool>,
-    exit_evt: &EventFd,
+    exit_evt: &Event,
     vcpu_handles: &mut Vec<thread::JoinHandle<()>>,
 ) -> Result<()> {
     let vcpu_thread_barrier = Arc::new(Barrier::new((vcpu_count) as usize));
@@ -441,7 +441,7 @@ pub fn run_vcpus(
     for cpu_id in 0..vcpu_count {
         let kill_signaled = kill_signaled.clone();
         let vcpu_thread_barrier = vcpu_thread_barrier.clone();
-        let vcpu_exit_evt = exit_evt.try_clone().map_err(Error::CloneEventFd)?;
+        let vcpu_exit_evt = exit_evt.try_clone().map_err(Error::CloneEvent)?;
         let vcpu_plugin = plugin.create_vcpu(cpu_id)?;
         let vcpu = Vcpu::new(cpu_id as c_ulong, kvm, vm).map_err(Error::CreateVcpu)?;
 
@@ -454,6 +454,11 @@ pub fn run_vcpus(
                         // because we will be using first RT signal to kick the VCPU.
                         vcpu.set_signal_mask(&[])
                             .expect("failed to set up KVM VCPU signal mask");
+                    }
+
+                    #[cfg(feature = "chromeos")]
+                    if let Err(e) = base::sched::enable_core_scheduling() {
+                        error!("Failed to enable core scheduling: {}", e);
                     }
 
                     let vcpu = vcpu
@@ -575,7 +580,7 @@ pub fn run_vcpus(
                     }
                     vcpu_exit_evt
                         .write(1)
-                        .expect("failed to signal vcpu exit eventfd");
+                        .expect("failed to signal vcpu exit event");
                 })
                 .map_err(Error::SpawnVcpu)?,
         );
@@ -684,7 +689,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
         Some(Executable::Plugin(ref plugin_path)) => plugin_path.as_path(),
         _ => panic!("Executable was not a plugin"),
     };
-    let vcpu_count = cfg.vcpu_count.unwrap_or(1);
+    let vcpu_count = cfg.vcpu_count.unwrap_or(1) as u32;
     let mem = GuestMemory::new(&[]).unwrap();
     let kvm = Kvm::new().map_err(Error::CreateKvm)?;
     let mut vm = Vm::new(&kvm, mem).map_err(Error::CreateVm)?;
@@ -701,7 +706,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
     let mut dying_instant: Option<Instant> = None;
     let duration_to_die = Duration::from_millis(1000);
 
-    let exit_evt = EventFd::new().map_err(Error::CreateEventFd)?;
+    let exit_evt = Event::new().map_err(Error::CreateEvent)?;
     let kill_signaled = Arc::new(AtomicBool::new(false));
     let mut vcpu_handles = Vec::with_capacity(vcpu_count as usize);
 

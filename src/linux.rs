@@ -2,13 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::cmp::max;
+use std::cmp::{max, Reverse};
 use std::convert::TryFrom;
+#[cfg(feature = "gpu")]
+use std::env;
 use std::error::Error as StdError;
 use std::ffi::CStr;
 use std::fmt::{self, Display};
 use std::fs::{File, OpenOptions};
 use std::io::{self, stdin, Read};
+use std::iter;
 use std::mem;
 use std::net::Ipv4Addr;
 #[cfg(feature = "gpu")]
@@ -28,84 +31,99 @@ use libc::{self, c_int, gid_t, uid_t};
 
 use acpi_tables::sdt::SDT;
 
+use base::net::{UnixSeqpacket, UnixSeqpacketListener, UnlinkUnixSeqpacketListener};
 #[cfg(feature = "gpu")]
 use devices::virtio::EventDevice;
 use devices::virtio::{self, Console, VirtioDevice};
-use devices::{
-    self, HostBackendDeviceProvider, PciDevice, VfioContainer, VfioDevice, VfioPciDevice,
-    VirtioPciDevice, XhciController,
-};
 #[cfg(feature = "audio")]
-use devices::{Ac97Backend, Ac97Dev};
-use kvm::*;
+use devices::Ac97Dev;
+use devices::{
+    self, HostBackendDeviceProvider, KvmKernelIrqChip, PciDevice, VfioContainer, VfioDevice,
+    VfioPciDevice, VirtioPciDevice, XhciController,
+};
+use hypervisor::kvm::{Kvm, KvmVcpu, KvmVm};
+use hypervisor::{Hypervisor, HypervisorCap, Vcpu, VcpuExit, VcpuRunHandle, Vm, VmCap};
 use minijail::{self, Minijail};
 use msg_socket::{MsgError, MsgReceiver, MsgSender, MsgSocket};
 use net_util::{Error as NetError, MacAddress, Tap};
 use remain::sorted;
 use resources::{Alloc, MmioType, SystemAllocator};
 use sync::{Condvar, Mutex};
-use sys_util::net::{UnixSeqpacket, UnixSeqpacketListener, UnlinkUnixSeqpacketListener};
 
-use sys_util::{
+use base::{
     self, block_signal, clear_signal, drop_capabilities, error, flock, get_blocked_signals,
     get_group_id, get_user_id, getegid, geteuid, info, register_rt_signal_handler,
-    set_cpu_affinity, validate_raw_fd, warn, EventFd, ExternalMapping, FlockOperation,
-    GuestAddress, GuestMemory, Killable, MemoryMappingArena, PollContext, PollToken, Protection,
-    ScopedEvent, SignalFd, Terminal, TimerFd, WatchingEvents, SIGRTMIN,
+    set_cpu_affinity, set_rt_prio_limit, set_rt_round_robin, signal, validate_raw_fd, warn, Event,
+    ExternalMapping, FlockOperation, Killable, MemoryMappingArena, PollContext, PollToken,
+    Protection, ScopedEvent, SignalFd, Terminal, Timer, WatchingEvents, SIGRTMIN,
 };
 use vm_control::{
     BalloonControlCommand, BalloonControlRequestSocket, BalloonControlResponseSocket,
     BalloonControlResult, DiskControlCommand, DiskControlRequestSocket, DiskControlResponseSocket,
-    DiskControlResult, UsbControlSocket, VmControlResponseSocket, VmIrqRequest, VmIrqResponse,
-    VmIrqResponseSocket, VmMemoryControlRequestSocket, VmMemoryControlResponseSocket,
-    VmMemoryRequest, VmMemoryResponse, VmMsyncRequest, VmMsyncRequestSocket, VmMsyncResponse,
-    VmMsyncResponseSocket, VmRunMode,
+    DiskControlResult, IrqSetup, UsbControlSocket, VmControlResponseSocket, VmIrqRequest,
+    VmIrqRequestSocket, VmIrqResponse, VmIrqResponseSocket, VmMemoryControlRequestSocket,
+    VmMemoryControlResponseSocket, VmMemoryRequest, VmMemoryResponse, VmMsyncRequest,
+    VmMsyncRequestSocket, VmMsyncResponse, VmMsyncResponseSocket, VmRunMode,
 };
+use vm_memory::{GuestAddress, GuestMemory};
 
 use crate::{Config, DiskOption, Executable, SharedDir, SharedDirKind, TouchDeviceOption};
 use arch::{
-    self, LinuxArch, RunnableLinuxVm, SerialHardware, SerialParameters, VirtioDeviceStub,
-    VmComponents, VmImage,
+    self, LinuxArch, RunnableLinuxVm, SerialHardware, SerialParameters, VcpuAffinity,
+    VirtioDeviceStub, VmComponents, VmImage,
 };
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use aarch64::AArch64 as Arch;
+use {
+    aarch64::AArch64 as Arch,
+    devices::{IrqChip, IrqChipAArch64 as IrqChipArch},
+    hypervisor::{VcpuAArch64 as VcpuArch, VmAArch64 as VmArch},
+};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use x86_64::X8664arch as Arch;
+use {
+    devices::{IrqChipX86_64, IrqChipX86_64 as IrqChipArch, KvmSplitIrqChip},
+    hypervisor::{VcpuX86_64, VcpuX86_64 as VcpuArch, VmX86_64 as VmArch},
+    x86_64::X8664arch as Arch,
+};
 
 #[sorted]
 #[derive(Debug)]
 pub enum Error {
-    AddGpuDeviceMemory(sys_util::Error),
-    AddPmemDeviceMemory(sys_util::Error),
+    AddGpuDeviceMemory(base::Error),
+    AddIrqChipVcpu(base::Error),
+    AddPmemDeviceMemory(base::Error),
     AllocateGpuDeviceAddress,
     AllocatePmemDeviceAddress(resources::Error),
     BalloonDeviceNew(virtio::BalloonError),
-    BlockDeviceNew(sys_util::Error),
-    BlockSignal(sys_util::signal::Error),
+    BlockDeviceNew(base::Error),
+    BlockSignal(base::signal::Error),
     BuildVm(<Arch as LinuxArch>::Error),
-    ChownTpmStorage(sys_util::Error),
-    CloneEventFd(sys_util::Error),
+    ChownTpmStorage(base::Error),
+    CloneEvent(base::Error),
+    CloneVcpu(base::Error),
+    ConfigureVcpu(<Arch as LinuxArch>::Error),
     #[cfg(feature = "audio")]
     CreateAc97(devices::PciDeviceError),
     CreateConsole(arch::serial::Error),
     CreateDiskError(disk::Error),
-    CreateEventFd(sys_util::Error),
-    CreatePollContext(sys_util::Error),
-    CreateSignalFd(sys_util::SignalFdError),
+    CreateEvent(base::Error),
+    CreatePollContext(base::Error),
+    CreateSignalFd(base::SignalFdError),
     CreateSocket(io::Error),
     CreateTapDevice(NetError),
-    CreateTimerFd(sys_util::Error),
+    CreateTimer(base::Error),
     CreateTpmStorage(PathBuf, io::Error),
     CreateUsbProvider(devices::usb::host_backend::error::Error),
+    CreateVcpu(base::Error),
     CreateVfioDevice(devices::vfio::VfioError),
     DeviceJail(minijail::Error),
     DevicePivotRoot(minijail::Error),
     Disk(PathBuf, io::Error),
-    DiskImageLock(sys_util::Error),
-    DropCapabilities(sys_util::Error),
+    DiskImageLock(base::Error),
+    DropCapabilities(base::Error),
     FsDeviceNew(virtio::fs::Error),
     GetMaxOpenFiles(io::Error),
+    GetSignalMask(signal::Error),
     InputDeviceNew(virtio::InputError),
     InputEventsOpen(std::io::Error),
     InvalidFdPath,
@@ -124,9 +142,9 @@ pub enum Error {
     ParseMaxOpenFiles(ParseIntError),
     PivotRootDoesntExist(&'static str),
     PmemDeviceImageTooBig,
-    PmemDeviceNew(sys_util::Error),
-    PollContextAdd(sys_util::Error),
-    PollContextDelete(sys_util::Error),
+    PmemDeviceNew(base::Error),
+    PollContextAdd(base::Error),
+    PollContextDelete(base::Error),
     ReadMemAvailable(io::Error),
     RegisterBalloon(arch::DeviceRegistrationError),
     RegisterBlock(arch::DeviceRegistrationError),
@@ -134,24 +152,26 @@ pub enum Error {
     RegisterNet(arch::DeviceRegistrationError),
     RegisterP9(arch::DeviceRegistrationError),
     RegisterRng(arch::DeviceRegistrationError),
-    RegisterSignalHandler(sys_util::Error),
+    RegisterSignalHandler(base::Error),
     RegisterWayland(arch::DeviceRegistrationError),
-    ReserveGpuMemory(sys_util::MmapError),
-    ReserveMemory(sys_util::Error),
-    ReservePmemMemory(sys_util::MmapError),
-    ResetTimerFd(sys_util::Error),
+    ReserveGpuMemory(base::MmapError),
+    ReserveMemory(base::Error),
+    ReservePmemMemory(base::MmapError),
+    ResetTimer(base::Error),
     RngDeviceNew(virtio::RngError),
+    RunnableVcpu(base::Error),
     SettingGidMap(minijail::Error),
     SettingMaxOpenFiles(minijail::Error),
+    SettingSignalMask(base::Error),
     SettingUidMap(minijail::Error),
-    SignalFd(sys_util::SignalFdError),
+    SignalFd(base::SignalFdError),
     SpawnVcpu(io::Error),
-    TimerFd(sys_util::Error),
-    ValidateRawFd(sys_util::Error),
+    Timer(base::Error),
+    ValidateRawFd(base::Error),
     VhostNetDeviceNew(virtio::vhost::Error),
     VhostVsockDeviceNew(virtio::vhost::Error),
-    VirtioPciDev(sys_util::Error),
-    WaylandDeviceNew(sys_util::Error),
+    VirtioPciDev(base::Error),
+    WaylandDeviceNew(base::Error),
 }
 
 impl Display for Error {
@@ -162,6 +182,7 @@ impl Display for Error {
         #[sorted]
         match self {
             AddGpuDeviceMemory(e) => write!(f, "failed to add gpu device memory: {}", e),
+            AddIrqChipVcpu(e) => write!(f, "failed to add vcpu to irq chip: {}", e),
             AddPmemDeviceMemory(e) => write!(f, "failed to add pmem device memory: {}", e),
             AllocateGpuDeviceAddress => write!(f, "failed to allocate gpu device guest address"),
             AllocatePmemDeviceAddress(e) => {
@@ -172,21 +193,24 @@ impl Display for Error {
             BlockSignal(e) => write!(f, "failed to block signal: {}", e),
             BuildVm(e) => write!(f, "The architecture failed to build the vm: {}", e),
             ChownTpmStorage(e) => write!(f, "failed to chown tpm storage: {}", e),
-            CloneEventFd(e) => write!(f, "failed to clone eventfd: {}", e),
+            CloneEvent(e) => write!(f, "failed to clone event: {}", e),
+            CloneVcpu(e) => write!(f, "failed to clone vcpu: {}", e),
+            ConfigureVcpu(e) => write!(f, "failed to configure vcpu: {}", e),
             #[cfg(feature = "audio")]
             CreateAc97(e) => write!(f, "failed to create ac97 device: {}", e),
             CreateConsole(e) => write!(f, "failed to create console device: {}", e),
             CreateDiskError(e) => write!(f, "failed to create virtual disk: {}", e),
-            CreateEventFd(e) => write!(f, "failed to create eventfd: {}", e),
+            CreateEvent(e) => write!(f, "failed to create event: {}", e),
             CreatePollContext(e) => write!(f, "failed to create poll context: {}", e),
             CreateSignalFd(e) => write!(f, "failed to create signalfd: {}", e),
             CreateSocket(e) => write!(f, "failed to create socket: {}", e),
             CreateTapDevice(e) => write!(f, "failed to create tap device: {}", e),
-            CreateTimerFd(e) => write!(f, "failed to create timerfd: {}", e),
+            CreateTimer(e) => write!(f, "failed to create Timer: {}", e),
             CreateTpmStorage(p, e) => {
                 write!(f, "failed to create tpm storage dir {}: {}", p.display(), e)
             }
             CreateUsbProvider(e) => write!(f, "failed to create usb provider: {}", e),
+            CreateVcpu(e) => write!(f, "failed to create vcpu: {}", e),
             CreateVfioDevice(e) => write!(f, "Failed to create vfio device {}", e),
             DeviceJail(e) => write!(f, "failed to jail device: {}", e),
             DevicePivotRoot(e) => write!(f, "failed to pivot root device: {}", e),
@@ -195,6 +219,7 @@ impl Display for Error {
             DropCapabilities(e) => write!(f, "failed to drop process capabilities: {}", e),
             FsDeviceNew(e) => write!(f, "failed to create fs device: {}", e),
             GetMaxOpenFiles(e) => write!(f, "failed to get max number of open files: {}", e),
+            GetSignalMask(e) => write!(f, "failed to retrieve signal mask for vcpu: {}", e),
             InputDeviceNew(e) => write!(f, "failed to set up input device: {}", e),
             InputEventsOpen(e) => write!(f, "failed to open event device: {}", e),
             InvalidFdPath => write!(f, "failed parsing a /proc/self/fd/*"),
@@ -235,14 +260,16 @@ impl Display for Error {
             ReserveGpuMemory(e) => write!(f, "failed to reserve gpu memory: {}", e),
             ReserveMemory(e) => write!(f, "failed to reserve memory: {}", e),
             ReservePmemMemory(e) => write!(f, "failed to reserve pmem memory: {}", e),
-            ResetTimerFd(e) => write!(f, "failed to reset timerfd: {}", e),
+            ResetTimer(e) => write!(f, "failed to reset Timer: {}", e),
             RngDeviceNew(e) => write!(f, "failed to set up rng: {}", e),
+            RunnableVcpu(e) => write!(f, "failed to set thread id for vcpu: {}", e),
             SettingGidMap(e) => write!(f, "error setting GID map: {}", e),
             SettingMaxOpenFiles(e) => write!(f, "error setting max open files: {}", e),
+            SettingSignalMask(e) => write!(f, "failed to set the signal mask for vcpu: {}", e),
             SettingUidMap(e) => write!(f, "error setting UID map: {}", e),
             SignalFd(e) => write!(f, "failed to read signal fd: {}", e),
             SpawnVcpu(e) => write!(f, "failed to spawn VCPU thread: {}", e),
-            TimerFd(e) => write!(f, "failed to read timer fd: {}", e),
+            Timer(e) => write!(f, "failed to read timer fd: {}", e),
             ValidateRawFd(e) => write!(f, "failed to validate raw fd: {}", e),
             VhostNetDeviceNew(e) => write!(f, "failed to set up vhost networking: {}", e),
             VhostVsockDeviceNew(e) => write!(f, "failed to set up virtual socket device: {}", e),
@@ -458,10 +485,10 @@ fn create_rng_device(cfg: &Config) -> DeviceResult {
 
 #[cfg(feature = "tpm")]
 fn create_tpm_device(cfg: &Config) -> DeviceResult {
+    use base::chown;
     use std::ffi::CString;
     use std::fs;
     use std::process;
-    use sys_util::chown;
 
     let tpm_storage: PathBuf;
     let mut tpm_jail = simple_jail(&cfg, "tpm_device")?;
@@ -598,7 +625,7 @@ fn create_tap_net_device(cfg: &Config, tap_fd: RawFd) -> DeviceResult {
 
     let mut vq_pairs = cfg.net_vq_pairs.unwrap_or(1);
     let vcpu_count = cfg.vcpu_count.unwrap_or(1);
-    if vcpu_count < vq_pairs as u32 {
+    if vcpu_count < vq_pairs as usize {
         error!("net vq pairs must be smaller than vcpu count, fall back to single queue mode");
         vq_pairs = 1;
     }
@@ -619,7 +646,7 @@ fn create_net_device(
 ) -> DeviceResult {
     let mut vq_pairs = cfg.net_vq_pairs.unwrap_or(1);
     let vcpu_count = cfg.vcpu_count.unwrap_or(1);
-    if vcpu_count < vq_pairs as u32 {
+    if vcpu_count < vq_pairs as usize {
         error!("net vq pairs must be smaller than vcpu count, fall back to single queue mode");
         vq_pairs = 1;
     }
@@ -650,7 +677,7 @@ fn create_net_device(
 #[cfg(feature = "gpu")]
 fn create_gpu_device(
     cfg: &Config,
-    exit_evt: &EventFd,
+    exit_evt: &Event,
     gpu_device_socket: VmMemoryControlRequestSocket,
     gpu_sockets: Vec<virtio::resource_bridge::ResourceResponseSocket>,
     wayland_socket_path: Option<&PathBuf>,
@@ -677,7 +704,7 @@ fn create_gpu_device(
     }
 
     let dev = virtio::Gpu::new(
-        exit_evt.try_clone().map_err(Error::CloneEventFd)?,
+        exit_evt.try_clone().map_err(Error::CloneEvent)?,
         Some(gpu_device_socket),
         NonZeroU8::new(1).unwrap(), // number of scanouts
         gpu_sockets,
@@ -705,8 +732,34 @@ fn create_gpu_device(
             jail.mount_bind(sys_dev_char_path, sys_dev_char_path, false)?;
             let sys_devices_path = Path::new("/sys/devices");
             jail.mount_bind(sys_devices_path, sys_devices_path, false)?;
+
             let drm_dri_path = Path::new("/dev/dri");
-            jail.mount_bind(drm_dri_path, drm_dri_path, false)?;
+            if drm_dri_path.exists() {
+                jail.mount_bind(drm_dri_path, drm_dri_path, false)?;
+            }
+
+            // Prepare GPU shader disk cache directory.
+            if let Some(cache_dir) = cfg
+                .gpu_parameters
+                .as_ref()
+                .and_then(|params| params.cache_path.as_ref())
+            {
+                if cfg!(any(target_arch = "arm", target_arch = "aarch64")) && cfg.sandbox {
+                    warn!("shader caching not yet supported on ARM with sandbox enabled");
+                    env::set_var("MESA_GLSL_CACHE_DISABLE", "true");
+                } else {
+                    env::set_var("MESA_GLSL_CACHE_DIR", cache_dir);
+                    if let Some(cache_size) = cfg
+                        .gpu_parameters
+                        .as_ref()
+                        .and_then(|params| params.cache_size.as_ref())
+                    {
+                        env::set_var("MESA_GLSL_CACHE_MAX_SIZE", cache_size);
+                    }
+                    let shadercache_path = Path::new(cache_dir);
+                    jail.mount_bind(shadercache_path, shadercache_path, true)?;
+                }
+            }
 
             // If the ARM specific devices exist on the host, bind mount them in.
             let mali0_path = Path::new("/dev/mali0");
@@ -833,6 +886,19 @@ fn create_video_device(
             let dev_dri_path = Path::new("/dev/dri/renderD128");
             jail.mount_bind(dev_dri_path, dev_dri_path, false)?;
 
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                // Device nodes used by libdrm through minigbm in libvda on AMD devices.
+                let sys_dev_char_path = Path::new("/sys/dev/char");
+                jail.mount_bind(sys_dev_char_path, sys_dev_char_path, false)?;
+                let sys_devices_path = Path::new("/sys/devices");
+                jail.mount_bind(sys_devices_path, sys_devices_path, false)?;
+
+                // Required for loading dri libraries loaded by minigbm on AMD devices.
+                let lib_dir = Path::new("/usr/lib64");
+                jail.mount_bind(lib_dir, lib_dir, false)?;
+            }
+
             // Device nodes required by libchrome which establishes Mojo connection in libvda.
             let dev_urandom_path = Path::new("/dev/urandom");
             jail.mount_bind(dev_urandom_path, dev_urandom_path, false)?;
@@ -956,7 +1022,7 @@ fn create_9p_device(
 
 fn create_pmem_device(
     cfg: &Config,
-    vm: &mut Vm,
+    vm: &mut impl Vm,
     resources: &mut SystemAllocator,
     disk: &DiskOption,
     index: usize,
@@ -1044,7 +1110,7 @@ fn create_pmem_device(
 
 fn create_console_device(cfg: &Config, param: &SerialParameters) -> DeviceResult {
     let mut keep_fds = Vec::new();
-    let evt = EventFd::new().map_err(Error::CreateEventFd)?;
+    let evt = Event::new().map_err(Error::CreateEvent)?;
     let dev = param
         .create_serial_device::<Console>(&evt, &mut keep_fds)
         .map_err(Error::CreateConsole)?;
@@ -1082,9 +1148,9 @@ fn create_console_device(cfg: &Config, param: &SerialParameters) -> DeviceResult
 fn create_virtio_devices(
     cfg: &Config,
     mem: &GuestMemory,
-    vm: &mut Vm,
+    vm: &mut impl Vm,
     resources: &mut SystemAllocator,
-    _exit_evt: &EventFd,
+    _exit_evt: &Event,
     wayland_device_socket: VmMemoryControlRequestSocket,
     gpu_device_socket: VmMemoryControlRequestSocket,
     balloon_device_socket: BalloonControlResponseSocket,
@@ -1285,9 +1351,9 @@ fn create_virtio_devices(
 fn create_devices(
     cfg: &Config,
     mem: &GuestMemory,
-    vm: &mut Vm,
+    vm: &mut impl Vm,
     resources: &mut SystemAllocator,
-    exit_evt: &EventFd,
+    exit_evt: &Event,
     control_sockets: &mut Vec<TaggedControlSocket>,
     wayland_device_socket: VmMemoryControlRequestSocket,
     gpu_device_socket: VmMemoryControlRequestSocket,
@@ -1326,12 +1392,8 @@ fn create_devices(
     #[cfg(feature = "audio")]
     for ac97_param in &cfg.ac97_parameters {
         let dev = Ac97Dev::try_new(mem.clone(), ac97_param.clone()).map_err(Error::CreateAc97)?;
-        let policy = match ac97_param.backend {
-            Ac97Backend::CRAS => "cras_audio_device",
-            Ac97Backend::NULL => "null_audio_device",
-        };
-
-        pci_devices.push((Box::new(dev), simple_jail(&cfg, &policy)?));
+        let jail = simple_jail(&cfg, dev.minijail_policy())?;
+        pci_devices.push((Box::new(dev), jail));
     }
 
     // Create xhci controller.
@@ -1344,10 +1406,14 @@ fn create_devices(
         ));
 
         for vfio_path in &cfg.vfio {
-            // create one Irq and Mem request socket for each vfio device
-            let (vfio_host_socket_irq, vfio_device_socket_irq) =
+            // create MSI, MSI-X, and Mem request sockets for each vfio device
+            let (vfio_host_socket_msi, vfio_device_socket_msi) =
                 msg_socket::pair::<VmIrqResponse, VmIrqRequest>().map_err(Error::CreateSocket)?;
-            control_sockets.push(TaggedControlSocket::VmIrq(vfio_host_socket_irq));
+            control_sockets.push(TaggedControlSocket::VmIrq(vfio_host_socket_msi));
+
+            let (vfio_host_socket_msix, vfio_device_socket_msix) =
+                msg_socket::pair::<VmIrqResponse, VmIrqRequest>().map_err(Error::CreateSocket)?;
+            control_sockets.push(TaggedControlSocket::VmIrq(vfio_host_socket_msix));
 
             let (vfio_host_socket_mem, vfio_device_socket_mem) =
                 msg_socket::pair::<VmMemoryResponse, VmMemoryRequest>()
@@ -1358,7 +1424,8 @@ fn create_devices(
                 .map_err(Error::CreateVfioDevice)?;
             let vfiopcidevice = Box::new(VfioPciDevice::new(
                 vfiodevice,
-                vfio_device_socket_irq,
+                vfio_device_socket_msi,
+                vfio_device_socket_msix,
                 vfio_device_socket_mem,
             ));
             pci_devices.push((vfiopcidevice, simple_jail(&cfg, "vfio_device")?));
@@ -1447,8 +1514,8 @@ impl IntoUnixStream for UnixStream {
     }
 }
 
-fn setup_vcpu_signal_handler(use_kvm_signals: bool) -> Result<()> {
-    if use_kvm_signals {
+fn setup_vcpu_signal_handler<T: Vcpu>(use_hypervisor_signals: bool) -> Result<()> {
+    if use_hypervisor_signals {
         unsafe {
             extern "C" fn handle_signal() {}
             // Our signal handler does nothing and is trivially async signal safe.
@@ -1458,10 +1525,10 @@ fn setup_vcpu_signal_handler(use_kvm_signals: bool) -> Result<()> {
         block_signal(SIGRTMIN() + 0).map_err(Error::BlockSignal)?;
     } else {
         unsafe {
-            extern "C" fn handle_signal() {
-                Vcpu::set_local_immediate_exit(true);
+            extern "C" fn handle_signal<T: Vcpu>() {
+                T::set_local_immediate_exit(true);
             }
-            register_rt_signal_handler(SIGRTMIN() + 0, handle_signal)
+            register_rt_signal_handler(SIGRTMIN() + 0, handle_signal::<T>)
                 .map_err(Error::RegisterSignalHandler)?;
         }
     }
@@ -1481,69 +1548,135 @@ impl VcpuRunMode {
     }
 }
 
-// Converts a vcpu into a runnable vcpu if possible. On failure, returns `None`.
-fn runnable_vcpu(vcpu: Vcpu, use_kvm_signals: bool, cpu_id: u32) -> Option<RunnableVcpu> {
-    if use_kvm_signals {
-        match get_blocked_signals() {
-            Ok(mut v) => {
-                v.retain(|&x| x != SIGRTMIN() + 0);
-                if let Err(e) = vcpu.set_signal_mask(&v) {
-                    error!(
-                        "Failed to set the KVM_SIGNAL_MASK for vcpu {} : {}",
-                        cpu_id, e
-                    );
-                    return None;
-                }
-            }
-            Err(e) => {
-                error!("Failed to retrieve signal mask for vcpu {} : {}", cpu_id, e);
-                return None;
-            }
-        };
-    }
+// Sets up a vcpu and converts it into a runnable vcpu.
+fn runnable_vcpu<V>(
+    cpu_id: usize,
+    vcpu: Option<V>,
+    vm: impl VmArch<Vcpu = V>,
+    irq_chip: &mut impl IrqChipArch<V>,
+    vcpu_count: usize,
+    run_rt: bool,
+    vcpu_affinity: Vec<usize>,
+    no_smt: bool,
+    has_bios: bool,
+    use_hypervisor_signals: bool,
+) -> Result<(V, VcpuRunHandle)>
+where
+    V: VcpuArch,
+{
+    let mut vcpu = if let Some(v) = vcpu {
+        v
+    } else {
+        // If vcpu is None, it means this arch/hypervisor requires create_vcpu to be called from the
+        // vcpu thread.
+        vm.create_vcpu(cpu_id).map_err(Error::CreateVcpu)?
+    };
 
-    match vcpu.to_runnable(Some(SIGRTMIN() + 0)) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            error!("Failed to set thread id for vcpu {} : {}", cpu_id, e);
-            None
+    irq_chip
+        .add_vcpu(cpu_id, vcpu.try_clone().map_err(Error::CloneVcpu)?)
+        .map_err(Error::AddIrqChipVcpu)?;
+
+    if !vcpu_affinity.is_empty() {
+        if let Err(e) = set_cpu_affinity(vcpu_affinity) {
+            error!("Failed to set CPU affinity: {}", e);
         }
     }
+
+    Arch::configure_vcpu(
+        vm.get_memory(),
+        vm.get_hypervisor(),
+        irq_chip,
+        &mut vcpu,
+        cpu_id,
+        vcpu_count,
+        has_bios,
+        no_smt,
+    )
+    .map_err(Error::ConfigureVcpu)?;
+
+    #[cfg(feature = "chromeos")]
+    if let Err(e) = base::sched::enable_core_scheduling() {
+        error!("Failed to enable core scheduling: {}", e);
+    }
+
+    if run_rt {
+        const DEFAULT_VCPU_RT_LEVEL: u16 = 6;
+        if let Err(e) = set_rt_prio_limit(u64::from(DEFAULT_VCPU_RT_LEVEL))
+            .and_then(|_| set_rt_round_robin(i32::from(DEFAULT_VCPU_RT_LEVEL)))
+        {
+            warn!("Failed to set vcpu to real time: {}", e);
+        }
+    }
+
+    if use_hypervisor_signals {
+        let mut v = get_blocked_signals().map_err(Error::GetSignalMask)?;
+        v.retain(|&x| x != SIGRTMIN() + 0);
+        vcpu.set_signal_mask(&v).map_err(Error::SettingSignalMask)?;
+    }
+
+    let vcpu_run_handle = vcpu
+        .take_run_handle(Some(SIGRTMIN() + 0))
+        .map_err(Error::RunnableVcpu)?;
+
+    Ok((vcpu, vcpu_run_handle))
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn inject_interrupt(pic: &Arc<Mutex<devices::Pic>>, vcpu: &RunnableVcpu) {
-    let mut pic = pic.lock();
-    if pic.interrupt_requested() && vcpu.ready_for_interrupt() {
-        if let Some(vector) = pic.get_external_interrupt() {
-            if let Err(e) = vcpu.interrupt(vector as u32) {
-                error!("PIC: failed to inject interrupt to vCPU0: {}", e);
-            }
+fn inject_interrupt<T: VcpuX86_64>(
+    irq_chip: &mut impl IrqChipX86_64<T>,
+    vcpu: &impl VcpuX86_64,
+    vcpu_id: usize,
+) {
+    if !irq_chip.interrupt_requested(vcpu_id) || !vcpu.ready_for_interrupt() {
+        return;
+    }
+
+    let vector = irq_chip
+        .get_external_interrupt(vcpu_id)
+        .unwrap_or_else(|e| {
+            error!("get_external_interrupt failed on vcpu {}: {}", vcpu_id, e);
+            None
+        });
+    if let Some(vector) = vector {
+        if let Err(e) = vcpu.interrupt(vector as u32) {
+            error!(
+                "Failed to inject interrupt {} to vcpu {}: {}",
+                vector, vcpu_id, e
+            );
         }
-        // The second interrupt request should be handled immediately, so ask
-        // vCPU to exit as soon as possible.
-        if pic.interrupt_requested() {
-            vcpu.request_interrupt_window();
-        }
+    }
+
+    // The second interrupt request should be handled immediately, so ask vCPU to exit as soon as
+    // possible.
+    if irq_chip.interrupt_requested(vcpu_id) {
+        vcpu.request_interrupt_window();
     }
 }
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-fn inject_interrupt(pic: &Arc<Mutex<devices::Pic>>, vcpu: &RunnableVcpu) {}
+fn inject_interrupt<T: Vcpu>(_irq_chip: &mut impl IrqChip<T>, _vcpu: &impl Vcpu, _vcpu_id: usize) {}
 
-fn run_vcpu(
-    vcpu: Vcpu,
-    cpu_id: u32,
+fn run_vcpu<V>(
+    cpu_id: usize,
+    vcpu: Option<V>,
+    vm: impl VmArch<Vcpu = V> + 'static,
+    mut irq_chip: impl IrqChipArch<V> + 'static,
+    vcpu_count: usize,
+    run_rt: bool,
     vcpu_affinity: Vec<usize>,
+    no_smt: bool,
     start_barrier: Arc<Barrier>,
+    has_bios: bool,
     io_bus: devices::Bus,
     mmio_bus: devices::Bus,
-    split_irqchip: Option<(Arc<Mutex<devices::Pic>>, Arc<Mutex<devices::Ioapic>>)>,
-    exit_evt: EventFd,
-    requires_kvmclock_ctrl: bool,
+    exit_evt: Event,
+    requires_pvclock_ctrl: bool,
     run_mode_arc: Arc<VcpuRunMode>,
-    use_kvm_signals: bool,
-) -> Result<JoinHandle<()>> {
+    use_hypervisor_signals: bool,
+) -> Result<JoinHandle<()>>
+where
+    V: VcpuArch + 'static,
+{
     thread::Builder::new()
         .name(format!("crosvm_vcpu{}", cpu_id))
         .spawn(move || {
@@ -1551,123 +1684,135 @@ fn run_vcpu(
             // implementation accomplishes that.
             let _scoped_exit_evt = ScopedEvent::from(exit_evt);
 
-            if !vcpu_affinity.is_empty() {
-                if let Err(e) = set_cpu_affinity(vcpu_affinity) {
-                    error!("Failed to set CPU affinity: {}", e);
-                }
-            }
-
-            let vcpu = runnable_vcpu(vcpu, use_kvm_signals, cpu_id);
+            let runnable_vcpu = runnable_vcpu(
+                cpu_id,
+                vcpu,
+                vm,
+                &mut irq_chip,
+                vcpu_count,
+                run_rt,
+                vcpu_affinity,
+                no_smt,
+                has_bios,
+                use_hypervisor_signals,
+            );
 
             start_barrier.wait();
 
-            if let Some(vcpu) = vcpu {
-                loop {
-                    let mut interrupted_by_signal = false;
-                    match vcpu.run() {
-                        Ok(VcpuExit::IoIn { port, mut size }) => {
-                            let mut data = [0; 8];
-                            if size > data.len() {
-                                error!("unsupported IoIn size of {} bytes", size);
-                                size = data.len();
-                            }
-                            io_bus.read(port as u64, &mut data[..size]);
-                            if let Err(e) = vcpu.set_data(&data[..size]) {
-                                error!("failed to set return data for IoIn: {}", e);
-                            }
-                        }
-                        Ok(VcpuExit::IoOut {
-                            port,
-                            mut size,
-                            data,
-                        }) => {
-                            if size > data.len() {
-                                error!("unsupported IoOut size of {} bytes", size);
-                                size = data.len();
-                            }
-                            io_bus.write(port as u64, &data[..size]);
-                        }
-                        Ok(VcpuExit::MmioRead { address, size }) => {
-                            let mut data = [0; 8];
-                            mmio_bus.read(address, &mut data[..size]);
-                            // Setting data for mmio can not fail.
-                            let _ = vcpu.set_data(&data[..size]);
-                        }
-                        Ok(VcpuExit::MmioWrite {
-                            address,
-                            size,
-                            data,
-                        }) => {
-                            mmio_bus.write(address, &data[..size]);
-                        }
-                        Ok(VcpuExit::IoapicEoi{vector}) => {
-                            if let Some((_, ioapic)) = &split_irqchip {
-                                ioapic.lock().end_of_interrupt(vector);
-                            } else {
-                                panic!("userspace ioapic not found in split irqchip mode, should be impossible.");
-                            }
-                        },
-                        Ok(VcpuExit::Hlt) => break,
-                        Ok(VcpuExit::Shutdown) => break,
-                        Ok(VcpuExit::FailEntry {
-                            hardware_entry_failure_reason,
-                        }) => {
-                            error!("vcpu hw run failure: {:#x}", hardware_entry_failure_reason);
-                            break;
-                        },
-                        Ok(VcpuExit::SystemEvent(_, _)) => break,
-                        Ok(r) => warn!("unexpected vcpu exit: {:?}", r),
-                        Err(e) => match e.errno() {
-                            libc::EINTR => interrupted_by_signal = true,
-                            libc::EAGAIN => {}
-                            _ => {
-                                error!("vcpu hit unknown error: {}", e);
-                                break;
-                            }
-                        },
-                    }
+            let (vcpu, vcpu_run_handle) = match runnable_vcpu {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("failed to start vcpu {}: {}", cpu_id, e);
+                    return;
+                }
+            };
 
-                    if interrupted_by_signal {
-                        if use_kvm_signals {
-                            // Try to clear the signal that we use to kick VCPU if it is pending before
-                            // attempting to handle pause requests.
-                            if let Err(e) = clear_signal(SIGRTMIN() + 0) {
-                                error!("failed to clear pending signal: {}", e);
-                                break;
-                            }
-                        } else {
-                            vcpu.set_immediate_exit(false);
+            loop {
+                let mut interrupted_by_signal = false;
+                match vcpu.run(&vcpu_run_handle) {
+                    Ok(VcpuExit::IoIn { port, mut size }) => {
+                        let mut data = [0; 8];
+                        if size > data.len() {
+                            error!("unsupported IoIn size of {} bytes", size);
+                            size = data.len();
                         }
-                        let mut run_mode_lock = run_mode_arc.mtx.lock();
-                        loop {
-                            match *run_mode_lock {
-                                VmRunMode::Running => break,
-                                VmRunMode::Suspending => {
-                                    // On KVM implementations that use a paravirtualized clock (e.g.
-                                    // x86), a flag must be set to indicate to the guest kernel that
-                                    // a VCPU was suspended. The guest kernel will use this flag to
-                                    // prevent the soft lockup detection from triggering when this
-                                    // VCPU resumes, which could happen days later in realtime.
-                                    if requires_kvmclock_ctrl {
-                                        if let Err(e) = vcpu.kvmclock_ctrl() {
-                                            error!("failed to signal to kvm that vcpu {} is being suspended: {}", cpu_id, e);
-                                        }
+                        io_bus.read(port as u64, &mut data[..size]);
+                        if let Err(e) = vcpu.set_data(&data[..size]) {
+                            error!("failed to set return data for IoIn: {}", e);
+                        }
+                    }
+                    Ok(VcpuExit::IoOut {
+                        port,
+                        mut size,
+                        data,
+                    }) => {
+                        if size > data.len() {
+                            error!("unsupported IoOut size of {} bytes", size);
+                            size = data.len();
+                        }
+                        io_bus.write(port as u64, &data[..size]);
+                    }
+                    Ok(VcpuExit::MmioRead { address, size }) => {
+                        let mut data = [0; 8];
+                        mmio_bus.read(address, &mut data[..size]);
+                        // Setting data for mmio can not fail.
+                        let _ = vcpu.set_data(&data[..size]);
+                    }
+                    Ok(VcpuExit::MmioWrite {
+                        address,
+                        size,
+                        data,
+                    }) => {
+                        mmio_bus.write(address, &data[..size]);
+                    }
+                    Ok(VcpuExit::IoapicEoi { vector }) => {
+                        if let Err(e) = irq_chip.broadcast_eoi(vector) {
+                            error!(
+                                "failed to broadcast eoi {} on vcpu {}: {}",
+                                vector, cpu_id, e
+                            );
+                        }
+                    }
+                    Ok(VcpuExit::Hlt) => break,
+                    Ok(VcpuExit::Shutdown) => break,
+                    Ok(VcpuExit::FailEntry {
+                        hardware_entry_failure_reason,
+                    }) => {
+                        error!("vcpu hw run failure: {:#x}", hardware_entry_failure_reason);
+                        break;
+                    }
+                    Ok(VcpuExit::SystemEvent(_, _)) => break,
+                    Ok(r) => warn!("unexpected vcpu exit: {:?}", r),
+                    Err(e) => match e.errno() {
+                        libc::EINTR => interrupted_by_signal = true,
+                        libc::EAGAIN => {}
+                        _ => {
+                            error!("vcpu hit unknown error: {}", e);
+                            break;
+                        }
+                    },
+                }
+
+                if interrupted_by_signal {
+                    if use_hypervisor_signals {
+                        // Try to clear the signal that we use to kick VCPU if it is pending before
+                        // attempting to handle pause requests.
+                        if let Err(e) = clear_signal(SIGRTMIN() + 0) {
+                            error!("failed to clear pending signal: {}", e);
+                            break;
+                        }
+                    } else {
+                        vcpu.set_immediate_exit(false);
+                    }
+                    let mut run_mode_lock = run_mode_arc.mtx.lock();
+                    loop {
+                        match *run_mode_lock {
+                            VmRunMode::Running => break,
+                            VmRunMode::Suspending => {
+                                // On KVM implementations that use a paravirtualized clock (e.g.
+                                // x86), a flag must be set to indicate to the guest kernel that a
+                                // VCPU was suspended. The guest kernel will use this flag to
+                                // prevent the soft lockup detection from triggering when this VCPU
+                                // resumes, which could happen days later in realtime.
+                                if requires_pvclock_ctrl {
+                                    if let Err(e) = vcpu.pvclock_ctrl() {
+                                        error!(
+                                            "failed to tell hypervisor vcpu {} is suspending: {}",
+                                            cpu_id, e
+                                        );
                                     }
                                 }
-                                VmRunMode::Exiting => return,
                             }
-                            // Give ownership of our exclusive lock to the condition variable that
-                            // will block. When the condition variable is notified, `wait` will
-                            // unblock and return a new exclusive lock.
-                            run_mode_lock = run_mode_arc.cvar.wait(run_mode_lock);
+                            VmRunMode::Exiting => return,
                         }
-                    }
-
-                    if cpu_id != 0 { continue; }
-                    if let Some((pic, _)) = &split_irqchip {
-                        inject_interrupt(pic, &vcpu);
+                        // Give ownership of our exclusive lock to the condition variable that will
+                        // block. When the condition variable is notified, `wait` will unblock and
+                        // return a new exclusive lock.
+                        run_mode_lock = run_mode_arc.cvar.wait(run_mode_lock);
                     }
                 }
+
+                inject_interrupt(&mut irq_chip, &vcpu, cpu_id);
             }
         })
         .map_err(Error::SpawnVcpu)
@@ -1702,7 +1847,58 @@ fn file_to_i64<P: AsRef<Path>>(path: P) -> io::Result<i64> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty file"))
 }
 
+fn create_kvm(mem: GuestMemory) -> base::Result<KvmVm> {
+    let kvm = Kvm::new()?;
+    let vm = KvmVm::new(&kvm, mem)?;
+    Ok(vm)
+}
+
+fn create_kvm_kernel_irq_chip(
+    vm: &KvmVm,
+    vcpu_count: usize,
+    _ioapic_device_socket: VmIrqRequestSocket,
+) -> base::Result<impl IrqChipArch<KvmVcpu>> {
+    let irq_chip = KvmKernelIrqChip::new(vm.try_clone()?, vcpu_count)?;
+    Ok(irq_chip)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn create_kvm_split_irq_chip(
+    vm: &KvmVm,
+    vcpu_count: usize,
+    ioapic_device_socket: VmIrqRequestSocket,
+) -> base::Result<impl IrqChipArch<KvmVcpu>> {
+    let irq_chip = KvmSplitIrqChip::new(vm.try_clone()?, vcpu_count, ioapic_device_socket)?;
+    Ok(irq_chip)
+}
+
 pub fn run_config(cfg: Config) -> Result<()> {
+    if cfg.split_irqchip {
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            unimplemented!("KVM split irqchip mode only supported on x86 processors")
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            run_vm(cfg, create_kvm, create_kvm_split_irq_chip)
+        }
+    } else {
+        run_vm(cfg, create_kvm, create_kvm_kernel_irq_chip)
+    }
+}
+
+fn run_vm<V, I, FV, FI>(cfg: Config, create_vm: FV, create_irq_chip: FI) -> Result<()>
+where
+    V: VmArch + 'static,
+    I: IrqChipArch<V::Vcpu> + 'static,
+    FV: FnOnce(GuestMemory) -> base::Result<V>,
+    FI: FnOnce(
+        &V,
+        usize,              // vcpu_count
+        VmIrqRequestSocket, // ioapic_device_socket
+    ) -> base::Result<I>,
+{
     if cfg.sandbox {
         // Printing something to the syslog before entering minijail so that libc's syslogger has a
         // chance to open files necessary for its operation, like `/etc/localtime`. After jailing,
@@ -1741,6 +1937,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
             .ok_or(Error::MemoryTooLarge)?,
         vcpu_count: cfg.vcpu_count.unwrap_or(1),
         vcpu_affinity: cfg.vcpu_affinity.clone(),
+        no_smt: cfg.no_smt,
         vm_image,
         android_fstab: cfg
             .android_fstab
@@ -1756,6 +1953,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
             .iter()
             .map(|path| SDT::from_file(path).map_err(|e| Error::OpenAcpiTable(path.clone(), e)))
             .collect::<Result<Vec<SDT>>>()?,
+        rt_cpus: cfg.rt_cpus.clone(),
     };
 
     let control_server_socket = match &cfg.socket_path {
@@ -1805,11 +2003,8 @@ pub fn run_config(cfg: Config) -> Result<()> {
 
     let map_request: Arc<Mutex<Option<ExternalMapping>>> = Arc::new(Mutex::new(None));
 
-    let sandbox = cfg.sandbox;
     let linux = Arch::build_vm(
         components,
-        cfg.split_irqchip,
-        ioapic_device_socket,
         &cfg.serial_parameters,
         simple_jail(&cfg, "serial")?,
         |mem, vm, sys_allocator, exit_evt| {
@@ -1829,6 +2024,8 @@ pub fn run_config(cfg: Config) -> Result<()> {
                 Arc::clone(&map_request),
             )
         },
+        create_vm,
+        |vm, vcpu_count| create_irq_chip(vm, vcpu_count, ioapic_device_socket),
     )
     .map_err(Error::BuildVm)?;
 
@@ -1840,13 +2037,13 @@ pub fn run_config(cfg: Config) -> Result<()> {
         &disk_host_sockets,
         usb_control_socket,
         sigchld_fd,
-        sandbox,
+        cfg.sandbox,
         Arc::clone(&map_request),
     )
 }
 
-fn run_control(
-    mut linux: RunnableLinuxVm,
+fn run_control<V: VmArch + 'static, I: IrqChipArch<V::Vcpu> + 'static>(
+    mut linux: RunnableLinuxVm<V, I>,
     control_server_socket: Option<UnlinkUnixSeqpacketListener>,
     mut control_sockets: Vec<TaggedControlSocket>,
     balloon_host_socket: BalloonControlRequestSocket,
@@ -1892,18 +2089,19 @@ fn run_control(
             .map_err(Error::PollContextAdd)?;
     }
 
-    if let Some(gsi_relay) = &linux.gsi_relay {
-        for (gsi, evt) in gsi_relay.irqfd.iter().enumerate() {
-            if let Some(evt) = evt {
-                poll_ctx
-                    .add(evt, Token::IrqFd { gsi })
-                    .map_err(Error::PollContextAdd)?;
-            }
-        }
+    let events = linux
+        .irq_chip
+        .irq_event_tokens()
+        .map_err(Error::PollContextAdd)?;
+
+    for (gsi, evt) in events {
+        poll_ctx
+            .add(&evt, Token::IrqFd { gsi: gsi as usize })
+            .map_err(Error::PollContextAdd)?;
     }
 
     // Balance available memory between guest and host every second.
-    let balancemem_timer = TimerFd::new().map_err(Error::CreateTimerFd)?;
+    let mut balancemem_timer = Timer::new().map_err(Error::CreateTimer)?;
     if Path::new(LOWMEM_AVAILABLE).exists() {
         // Create timer request balloon stats every 1s.
         poll_ctx
@@ -1913,7 +2111,7 @@ fn run_control(
         let balancemem_int = Duration::from_secs(1);
         balancemem_timer
             .reset(balancemem_dur, Some(balancemem_int))
-            .map_err(Error::ResetTimerFd)?;
+            .map_err(Error::ResetTimer)?;
 
         // Listen for balloon statistics from the guest so we can balance.
         poll_ctx
@@ -1928,31 +2126,48 @@ fn run_control(
         drop_capabilities().map_err(Error::DropCapabilities)?;
     }
 
-    let mut vcpu_handles = Vec::with_capacity(linux.vcpus.len());
-    let vcpu_thread_barrier = Arc::new(Barrier::new(linux.vcpus.len() + 1));
+    let mut vcpu_handles = Vec::with_capacity(linux.vcpu_count);
+    let vcpu_thread_barrier = Arc::new(Barrier::new(linux.vcpu_count + 1));
     let run_mode_arc = Arc::new(VcpuRunMode::default());
-    let use_kvm_signals = !linux.kvm.check_extension(Cap::ImmediateExit);
-    setup_vcpu_signal_handler(use_kvm_signals)?;
-    let vcpus = linux.vcpus.split_off(0);
+    let use_hypervisor_signals = !linux
+        .vm
+        .get_hypervisor()
+        .check_capability(&HypervisorCap::ImmediateExit);
+    setup_vcpu_signal_handler::<V::Vcpu>(use_hypervisor_signals)?;
+
+    let vcpus: Vec<Option<V::Vcpu>> = match linux.vcpus.take() {
+        Some(vec) => vec.into_iter().map(|vcpu| Some(vcpu)).collect(),
+        None => iter::repeat_with(|| None).take(linux.vcpu_count).collect(),
+    };
     for (cpu_id, vcpu) in vcpus.into_iter().enumerate() {
+        let vcpu_affinity = match linux.vcpu_affinity.clone() {
+            Some(VcpuAffinity::Global(v)) => v,
+            Some(VcpuAffinity::PerVcpu(mut m)) => m.remove(&cpu_id).unwrap_or_default(),
+            None => Default::default(),
+        };
         let handle = run_vcpu(
+            cpu_id,
             vcpu,
-            cpu_id as u32,
-            linux.vcpu_affinity.clone(),
+            linux.vm.try_clone().map_err(Error::CloneEvent)?,
+            linux.irq_chip.try_clone().map_err(Error::CloneEvent)?,
+            linux.vcpu_count,
+            linux.rt_cpus.contains(&cpu_id),
+            vcpu_affinity,
+            linux.no_smt,
             vcpu_thread_barrier.clone(),
+            linux.has_bios,
             linux.io_bus.clone(),
             linux.mmio_bus.clone(),
-            linux.split_irqchip.clone(),
-            linux.exit_evt.try_clone().map_err(Error::CloneEventFd)?,
-            linux.vm.check_extension(Cap::KvmclockCtrl),
+            linux.exit_evt.try_clone().map_err(Error::CloneEvent)?,
+            linux.vm.check_capability(VmCap::PvClockSuspend),
             run_mode_arc.clone(),
-            use_kvm_signals,
+            use_hypervisor_signals,
         )?;
         vcpu_handles.push(handle);
     }
+
     vcpu_thread_barrier.wait();
 
-    let mut ioapic_delayed = Vec::<usize>::default();
     'poll: loop {
         let events = {
             match poll_ctx.wait() {
@@ -1964,25 +2179,9 @@ fn run_control(
             }
         };
 
-        ioapic_delayed.retain(|&gsi| {
-            if let Some((_, ioapic)) = &linux.split_irqchip {
-                if let Ok(mut ioapic) = ioapic.try_lock() {
-                    // The unwrap will never fail because gsi_relay is Some iff split_irqchip is
-                    // Some.
-                    if linux.gsi_relay.as_ref().unwrap().irqfd_resample[gsi].is_some() {
-                        ioapic.service_irq(gsi, true);
-                    } else {
-                        ioapic.service_irq(gsi, true);
-                        ioapic.service_irq(gsi, false);
-                    }
-                    false
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        });
+        if let Err(e) = linux.irq_chip.process_delayed_irq_events() {
+            warn!("can't deliver delayed irqs: {}", e);
+        }
 
         let mut vm_control_indices_to_remove = Vec::new();
         for event in events.iter_readable() {
@@ -2015,48 +2214,12 @@ fn run_control(
                     break 'poll;
                 }
                 Token::IrqFd { gsi } => {
-                    if let Some((pic, ioapic)) = &linux.split_irqchip {
-                        // This will never fail because gsi_relay is Some iff split_irqchip is
-                        // Some.
-                        let gsi_relay = linux.gsi_relay.as_ref().unwrap();
-                        if let Some(eventfd) = &gsi_relay.irqfd[gsi] {
-                            eventfd.read().unwrap();
-                        } else {
-                            warn!(
-                                "irqfd {} not found in GSI relay, should be impossible.",
-                                gsi
-                            );
-                        }
-
-                        let mut pic = pic.lock();
-                        if gsi_relay.irqfd_resample[gsi].is_some() {
-                            pic.service_irq(gsi as u8, true);
-                        } else {
-                            pic.service_irq(gsi as u8, true);
-                            pic.service_irq(gsi as u8, false);
-                        }
-                        if let Err(e) = vcpu_handles[0].kill(SIGRTMIN() + 0) {
-                            warn!("PIC: failed to kick vCPU0: {}", e);
-                        }
-
-                        // When IOAPIC is configuring its redirection table, we should first
-                        // process its AddMsiRoute request, otherwise we would deadlock.
-                        if let Ok(mut ioapic) = ioapic.try_lock() {
-                            if gsi_relay.irqfd_resample[gsi].is_some() {
-                                ioapic.service_irq(gsi, true);
-                            } else {
-                                ioapic.service_irq(gsi, true);
-                                ioapic.service_irq(gsi, false);
-                            }
-                        } else {
-                            ioapic_delayed.push(gsi);
-                        }
-                    } else {
-                        panic!("split irqchip not found, should be impossible.");
+                    if let Err(e) = linux.irq_chip.service_irq_event(gsi as u32) {
+                        error!("failed to signal irq {}: {}", gsi, e);
                     }
                 }
                 Token::BalanceMemory => {
-                    balancemem_timer.wait().map_err(Error::TimerFd)?;
+                    balancemem_timer.wait().map_err(Error::Timer)?;
                     let command = BalloonControlCommand::Stats {};
                     if let Err(e) = balloon_host_socket.send(&command) {
                         warn!("failed to send stats request to balloon device: {}", e);
@@ -2072,47 +2235,58 @@ fn run_control(
                             let host_available = file_to_i64(LOWMEM_AVAILABLE)
                                 .map_err(Error::ReadMemAvailable)?
                                 << 20;
-                            let guest_available_u = if let Some(available) = stats.available_memory
-                            {
-                                available
+                            let guest_free_u = if let Some(free) = stats.free_memory {
+                                free
                             } else {
-                                warn!("guest available_memory stat is missing");
+                                warn!("guest free_memory stat is missing");
                                 continue;
                             };
-                            if guest_available_u > i64::max_value() as u64 {
-                                warn!("guest available memory is too large");
+                            let guest_cached_u = if let Some(cached) = stats.disk_caches {
+                                cached
+                            } else {
+                                warn!("guest disk_caches stat is missing");
+                                continue;
+                            };
+                            if guest_free_u > i64::max_value() as u64 {
+                                warn!("guest free memory is too large");
+                                continue;
+                            }
+                            if guest_cached_u > i64::max_value() as u64 {
+                                warn!("guest cached memory is too large");
                                 continue;
                             }
                             if balloon_actual_u > i64::max_value() as u64 {
                                 warn!("actual balloon size is too large");
                                 continue;
                             }
-                            // Guest and host available memory is balanced equally.
-                            const GUEST_SHARE: i64 = 1;
-                            const HOST_SHARE: i64 = 1;
-                            // Tell the guest to change the balloon size if the
-                            // target balloon size is more than 5% different
-                            // from the current balloon size.
+                            // Tell the guest to change the balloon size if the target balloon size
+                            // is more than 5% different from the current balloon size.
                             const RESIZE_PERCENT: i64 = 5;
                             let balloon_actual = balloon_actual_u as i64;
-                            let guest_available = guest_available_u as i64;
-                            // Compute how much memory the guest should have
-                            // available after we rebalance.
-                            let guest_available_target = (GUEST_SHARE
-                                * (guest_available + host_available))
-                                / (GUEST_SHARE + HOST_SHARE);
-                            let guest_available_delta = guest_available_target - guest_available;
-                            // How much do we have to change the balloon to
-                            // balance.
+                            let guest_free = guest_free_u as i64;
+                            let guest_cached = guest_cached_u as i64;
+                            // Compute how much memory the guest should have available after we
+                            // rebalance.
+                            let guest_available_target = host_available;
+                            let guest_available_delta =
+                                guest_available_target - guest_free - guest_cached;
+                            // How much do we have to change the balloon to balance.
                             let balloon_target = max(balloon_actual - guest_available_delta, 0);
-                            // Compute the change in balloon size in percent.
-                            // If the balloon size is 0, use 1 so we don't
-                            // overflow from the infinity % increase.
+                            // Compute the change in balloon size in percent.  If the balloon size
+                            // is 0, use 1 so we don't overflow from the infinity % increase.
                             let balloon_change_percent = (balloon_actual - balloon_target).abs()
                                 * 100
                                 / max(balloon_actual, 1);
 
                             if balloon_change_percent >= RESIZE_PERCENT {
+                                info!("resizing balloon: host avail {}, guest free {} cached {} (target {}), balloon actual {} (target {})",
+                                    host_available,
+                                    guest_free,
+                                    guest_cached,
+                                    guest_available_target,
+                                    balloon_actual,
+                                    balloon_target,
+                                );
                                 let command = BalloonControlCommand::Adjust {
                                     num_bytes: balloon_target as u64,
                                 };
@@ -2215,8 +2389,18 @@ fn run_control(
                             },
                             TaggedControlSocket::VmIrq(socket) => match socket.recv() {
                                 Ok(request) => {
-                                    let response =
-                                        request.execute(&mut linux.vm, &mut linux.resources);
+                                    let response = {
+                                        let irq_chip = &mut linux.irq_chip;
+                                        request.execute(
+                                            |setup| match setup {
+                                                IrqSetup::Event(irq, ev) => {
+                                                    irq_chip.register_irq_event(irq, ev, None)
+                                                }
+                                                IrqSetup::Route(route) => irq_chip.route_irq(route),
+                                            },
+                                            &mut linux.resources,
+                                        )
+                                    };
                                     if let Err(e) = socket.send(&response) {
                                         error!("failed to send VmIrqResponse: {}", e);
                                     }
@@ -2277,7 +2461,7 @@ fn run_control(
 
         // Sort in reverse so the highest indexes are removed first. This removal algorithm
         // preserves correct indexes as each element is removed.
-        vm_control_indices_to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        vm_control_indices_to_remove.sort_unstable_by_key(|&k| Reverse(k));
         vm_control_indices_to_remove.dedup();
         for index in vm_control_indices_to_remove {
             // Delete the socket from the `poll_ctx` synchronously. Otherwise, the kernel will do

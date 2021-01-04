@@ -6,9 +6,8 @@
 
 use cros_fuzz::fuzz_target;
 use disk::QcowFile;
-use sys_util::SharedMemory;
+use tempfile;
 
-use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 
@@ -22,8 +21,7 @@ fuzz_target!(|bytes| {
     let mut disk_image = Cursor::new(bytes);
     let addr = read_u64(&mut disk_image);
     let value = read_u64(&mut disk_image);
-    let shm = SharedMemory::anon().unwrap();
-    let mut disk_file: File = shm.into();
+    let mut disk_file = tempfile::tempfile().unwrap();
     disk_file.write_all(&bytes[16..]).unwrap();
     disk_file.seek(SeekFrom::Start(0)).unwrap();
     if let Ok(mut qcow) = QcowFile::from(disk_file) {

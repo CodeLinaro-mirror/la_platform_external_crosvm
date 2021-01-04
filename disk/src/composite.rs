@@ -10,12 +10,13 @@ use std::ops::Range;
 use std::os::unix::io::RawFd;
 
 use crate::{create_disk_file, DiskFile, DiskGetLen, ImageType};
+use base::{
+    AsRawDescriptors, FileAllocate, FileReadWriteAtVolatile, FileSetLen, FileSync, PunchHole,
+    WriteZeroesAt,
+};
 use data_model::VolatileSlice;
 use protos::cdisk_spec;
 use remain::sorted;
-use sys_util::{
-    AsRawFds, FileAllocate, FileReadWriteAtVolatile, FileSetLen, FileSync, PunchHole, WriteZeroesAt,
-};
 
 #[sorted]
 #[derive(Debug)]
@@ -329,11 +330,11 @@ impl WriteZeroesAt for CompositeDiskFile {
     }
 }
 
-impl AsRawFds for CompositeDiskFile {
-    fn as_raw_fds(&self) -> Vec<RawFd> {
+impl AsRawDescriptors for CompositeDiskFile {
+    fn as_raw_descriptors(&self) -> Vec<RawFd> {
         self.component_disks
             .iter()
-            .map(|d| d.file.as_raw_fds())
+            .map(|d| d.file.as_raw_descriptors())
             .flatten()
             .collect()
     }
@@ -342,9 +343,9 @@ impl AsRawFds for CompositeDiskFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base::SharedMemory;
     use data_model::VolatileMemory;
     use std::os::unix::io::AsRawFd;
-    use sys_util::SharedMemory;
 
     #[test]
     fn block_duplicate_offset_disks() {
@@ -427,7 +428,7 @@ mod tests {
             length: 100,
         };
         let composite = CompositeDiskFile::new(vec![disk_part1, disk_part2, disk_part3]).unwrap();
-        let mut out_fds = composite.as_raw_fds();
+        let mut out_fds = composite.as_raw_descriptors();
         out_fds.sort();
         assert_eq!(in_fds, out_fds);
     }

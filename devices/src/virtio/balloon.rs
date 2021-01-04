@@ -8,14 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use base::{self, error, info, warn, Event, PollContext, PollToken};
 use data_model::{DataInit, Le16, Le32, Le64};
 use msg_socket::{MsgReceiver, MsgSender};
-use sys_util::{
-    self, error, info, warn, EventFd, GuestAddress, GuestMemory, PollContext, PollToken,
-};
 use vm_control::{
     BalloonControlCommand, BalloonControlResponseSocket, BalloonControlResult, BalloonStats,
 };
+use vm_memory::{GuestAddress, GuestMemory};
 
 use super::{
     copy_config, Interrupt, Queue, Reader, VirtioDevice, TYPE_BALLOON, VIRTIO_F_VERSION_1,
@@ -26,7 +25,7 @@ pub enum BalloonError {
     /// Request to adjust memory size can't provide the number of pages requested.
     NotEnoughPages,
     /// Failure wriitng the config notification event.
-    WritingConfigEvent(sys_util::Error),
+    WritingConfigEvent(base::Error),
 }
 pub type Result<T> = std::result::Result<T, BalloonError>;
 
@@ -135,7 +134,7 @@ impl Worker {
             let index = avail_desc.index;
 
             if inflate {
-                let mut reader = match Reader::new(&self.mem, avail_desc) {
+                let mut reader = match Reader::new(self.mem.clone(), avail_desc) {
                     Ok(r) => r,
                     Err(e) => {
                         error!("balloon: failed to create reader: {}", e);
@@ -181,7 +180,7 @@ impl Worker {
                 queue.add_used(&self.mem, prev_desc, 0);
             }
             self.stats_desc_index = Some(stats_desc.index);
-            let mut reader = match Reader::new(&self.mem, stats_desc) {
+            let mut reader = match Reader::new(self.mem.clone(), stats_desc) {
                 Ok(r) => r,
                 Err(e) => {
                     error!("balloon: failed to create reader: {}", e);
@@ -216,7 +215,7 @@ impl Worker {
         }
     }
 
-    fn run(&mut self, mut queue_evts: Vec<EventFd>, kill_evt: EventFd) {
+    fn run(&mut self, mut queue_evts: Vec<Event>, kill_evt: Event) {
         #[derive(PartialEq, PollToken)]
         enum Token {
             Inflate,
@@ -261,21 +260,21 @@ impl Worker {
                 match event.token() {
                     Token::Inflate => {
                         if let Err(e) = inflate_queue_evt.read() {
-                            error!("failed reading inflate queue EventFd: {}", e);
+                            error!("failed reading inflate queue Event: {}", e);
                             break 'poll;
                         }
                         needs_interrupt_inflate |= self.process_inflate_deflate(true);
                     }
                     Token::Deflate => {
                         if let Err(e) = deflate_queue_evt.read() {
-                            error!("failed reading deflate queue EventFd: {}", e);
+                            error!("failed reading deflate queue Event: {}", e);
                             break 'poll;
                         }
                         needs_interrupt_deflate |= self.process_inflate_deflate(false);
                     }
                     Token::Stats => {
                         if let Err(e) = stats_queue_evt.read() {
-                            error!("failed reading stats queue EventFd: {}", e);
+                            error!("failed reading stats queue Event: {}", e);
                             break 'poll;
                         }
                         self.process_stats();
@@ -327,7 +326,7 @@ pub struct Balloon {
     command_socket: Option<BalloonControlResponseSocket>,
     config: Arc<BalloonConfig>,
     features: u64,
-    kill_evt: Option<EventFd>,
+    kill_evt: Option<Event>,
     worker_thread: Option<thread::JoinHandle<Worker>>,
 }
 
@@ -410,16 +409,16 @@ impl VirtioDevice for Balloon {
         mem: GuestMemory,
         interrupt: Interrupt,
         mut queues: Vec<Queue>,
-        queue_evts: Vec<EventFd>,
+        queue_evts: Vec<Event>,
     ) {
         if queues.len() != QUEUE_SIZES.len() || queue_evts.len() != QUEUE_SIZES.len() {
             return;
         }
 
-        let (self_kill_evt, kill_evt) = match EventFd::new().and_then(|e| Ok((e.try_clone()?, e))) {
+        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
             Err(e) => {
-                error!("failed to create kill EventFd pair: {}", e);
+                error!("failed to create kill Event pair: {}", e);
                 return;
             }
         };

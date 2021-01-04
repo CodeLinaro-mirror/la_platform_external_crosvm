@@ -4,7 +4,8 @@
 
 use std::os::unix::io::RawFd;
 
-use sys_util::{EventFd, GuestMemory};
+use base::Event;
+use vm_memory::GuestMemory;
 
 use super::*;
 use crate::pci::{MsixStatus, PciAddress, PciBarConfiguration, PciCapability};
@@ -63,7 +64,7 @@ pub trait VirtioDevice: Send {
         mem: GuestMemory,
         interrupt: Interrupt,
         queues: Vec<Queue>,
-        queue_evts: Vec<EventFd>,
+        queue_evts: Vec<Event>,
     );
 
     /// Optionally deactivates this device. If the reset method is

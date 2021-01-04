@@ -10,7 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use sync::Mutex;
 
-use libc::{self, timerfd_create, timerfd_gettime, timerfd_settime, CLOCK_MONOTONIC, TFD_CLOEXEC};
+use libc::{
+    self, clock_getres, timerfd_create, timerfd_gettime, timerfd_settime, CLOCK_MONOTONIC,
+    TFD_CLOEXEC,
+};
 
 use crate::{errno_result, EventFd, FakeClock, Result};
 
@@ -108,6 +111,21 @@ impl TimerFd {
 
         Ok(())
     }
+
+    /// Returns the resolution of timers on the host.
+    pub fn resolution() -> Result<Duration> {
+        // Safe because we are zero-initializing a struct with only primitive member fields.
+        let mut res: libc::timespec = unsafe { mem::zeroed() };
+
+        // Safe because it only modifies a local struct and we check the return value.
+        let ret = unsafe { clock_getres(CLOCK_MONOTONIC, &mut res) };
+
+        if ret != 0 {
+            return errno_result();
+        }
+
+        Ok(Duration::new(res.tv_sec as u64, res.tv_nsec as u32))
+    }
 }
 
 impl AsRawFd for TimerFd {
@@ -200,6 +218,11 @@ impl FakeTimerFd {
         self.interval = None;
         Ok(())
     }
+
+    /// Returns the resolution of timers on the host.
+    pub fn resolution() -> Result<Duration> {
+        Ok(Duration::from_nanos(1))
+    }
 }
 
 impl AsRawFd for FakeTimerFd {
@@ -227,7 +250,7 @@ mod tests {
 
         let dur = Duration::from_millis(200);
         let now = Instant::now();
-        tfd.reset(dur.clone(), None).expect("failed to arm timer");
+        tfd.reset(dur, None).expect("failed to arm timer");
 
         assert_eq!(tfd.is_armed().unwrap(), true);
 
@@ -243,8 +266,7 @@ mod tests {
 
         let dur = Duration::from_millis(200);
         let interval = Duration::from_millis(100);
-        tfd.reset(dur.clone(), Some(interval))
-            .expect("failed to arm timer");
+        tfd.reset(dur, Some(interval)).expect("failed to arm timer");
 
         sleep(dur * 3);
 
@@ -259,7 +281,7 @@ mod tests {
         assert_eq!(tfd.is_armed().unwrap(), false);
 
         let dur = Duration::from_nanos(200);
-        tfd.reset(dur.clone(), None).expect("failed to arm timer");
+        tfd.reset(dur, None).expect("failed to arm timer");
 
         assert_eq!(tfd.is_armed().unwrap(), true);
         clock.lock().add_ns(200);
@@ -276,8 +298,7 @@ mod tests {
 
         let dur = Duration::from_nanos(200);
         let interval = Duration::from_nanos(100);
-        tfd.reset(dur.clone(), Some(interval))
-            .expect("failed to arm timer");
+        tfd.reset(dur, Some(interval)).expect("failed to arm timer");
 
         clock.lock().add_ns(300);
 

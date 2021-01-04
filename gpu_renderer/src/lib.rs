@@ -8,6 +8,7 @@ mod command_buffer;
 mod generated;
 mod vsnprintf;
 
+use base::{ExternalMapping, ExternalMappingError, ExternalMappingResult};
 use std::cell::RefCell;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::ffi::CString;
@@ -24,8 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use libc::close;
 
 use data_model::VolatileSlice;
-use sys_util::{ExternalMapping, ExternalMappingError, ExternalMappingResult, GuestAddress, GuestMemory,
-};
+use vm_memory::{GuestAddress, GuestMemory};
 
 use crate::generated::p_defines::{
     PIPE_BIND_RENDER_TARGET, PIPE_BIND_SAMPLER_VIEW, PIPE_TEXTURE_1D, PIPE_TEXTURE_2D,
@@ -338,6 +338,7 @@ impl Renderer {
         ret_to_res(ret)?;
         Ok(Resource {
             id: args.handle,
+            blob: false,
             backing_iovecs: Vec::new(),
             backing_mem: None,
         })
@@ -463,6 +464,7 @@ impl Renderer {
 
             Ok(Resource {
                 id: resource_id,
+                blob: true,
                 backing_iovecs: iovecs,
                 backing_mem: None,
             })
@@ -490,7 +492,7 @@ impl Renderer {
             vsnprintf(raw, len.into(), fmt, &mut varargs);
             c_str = CString::from_raw(raw);
         }
-        sys_util::debug!("{}", c_str.to_string_lossy());
+        base::debug!("{}", c_str.to_string_lossy());
     }
 }
 
@@ -555,7 +557,8 @@ fn map_func(resource_id: u32) -> ExternalMappingResult<(u64, usize)> {
         let mut map: *mut c_void = null_mut();
         let map_ptr: *mut *mut c_void = &mut map;
         let mut size: u64 = 0;
-        let ret = unsafe { virgl_renderer_resource_map(resource_id as u32, map_ptr, &mut size) };
+        // Safe because virglrenderer wraps and validates use of GL/VK.
+        let ret = unsafe { virgl_renderer_resource_map(resource_id, map_ptr, &mut size) };
         if ret != 0 {
             return Err(ExternalMappingError::LibraryError(ret));
         }
@@ -567,7 +570,7 @@ fn map_func(resource_id: u32) -> ExternalMappingResult<(u64, usize)> {
 }
 
 #[allow(unused_variables)]
-fn unmap_func(resource_id: u32) -> () {
+fn unmap_func(resource_id: u32) {
     #[cfg(feature = "virtio-gpu-next")]
     {
         unsafe {
@@ -576,7 +579,7 @@ fn unmap_func(resource_id: u32) -> () {
             // involved, so force ctx0 here. It's a no-op when the ctx is already 0, so there's
             // little performance loss during normal VM operation.
             virgl_renderer_force_ctx_0();
-            virgl_renderer_resource_unmap(resource_id as u32);
+            virgl_renderer_resource_unmap(resource_id);
         }
     }
 }
@@ -584,6 +587,7 @@ fn unmap_func(resource_id: u32) -> () {
 /// A resource handle used by the renderer.
 pub struct Resource {
     id: u32,
+    blob: bool,
     backing_iovecs: Vec<VirglVec>,
     backing_mem: Option<GuestMemory>,
 }
@@ -617,8 +621,39 @@ impl Resource {
         self.export_query(false)
     }
 
-    /// Returns resource metadata and exports the associated dma-buf.
-    pub fn export(&self) -> Result<(Query, File)> {
+    /// Exports the associated dma-buf for a blob resource.
+    fn export_blob(&self) -> Result<File> {
+        #[cfg(feature = "virtio-gpu-next")]
+        {
+            let mut fd_type = 0;
+            let mut fd = 0;
+            let ret = unsafe {
+                virgl_renderer_resource_export_blob(self.id as u32, &mut fd_type, &mut fd)
+            };
+            ret_to_res(ret)?;
+
+            /* Only support dma-bufs until someone wants opaque fds too. */
+            if fd_type != VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF {
+                // Safe because the FD was just returned by a successful virglrenderer
+                // call so it must be valid and owned by us.
+                unsafe { close(fd) };
+                return Err(Error::Unsupported);
+            }
+
+            let dmabuf = unsafe { File::from_raw_fd(fd) };
+            Ok(dmabuf)
+        }
+        #[cfg(not(feature = "virtio-gpu-next"))]
+        Err(Error::Unsupported)
+    }
+
+    /// Exports the associated dma-buf for a blob resource and traditional virtio-gpu resource
+    /// backed by a dma-buf.
+    pub fn export(&self) -> Result<File> {
+        if self.blob {
+            return self.export_blob();
+        }
+
         let query = self.export_query(true)?;
         if query.out_num_fds != 1 || query.out_fds[0] < 0 {
             for fd in &query.out_fds {
@@ -634,7 +669,7 @@ impl Resource {
         // Safe because the FD was just returned by a successful virglrenderer call so it must
         // be valid and owned by us.
         let dmabuf = unsafe { File::from_raw_fd(query.out_fds[0]) };
-        Ok((query, dmabuf))
+        Ok(dmabuf)
     }
 
     #[allow(unused_variables)]
@@ -654,7 +689,7 @@ impl Resource {
 
     /// Maps the associated resource using glMapBufferRange.
     pub fn map(&self) -> Result<ExternalMapping> {
-        let map_result = ExternalMapping::new(self.id, map_func, unmap_func);
+        let map_result = unsafe { ExternalMapping::new(self.id, map_func, unmap_func) };
         match map_result {
             Ok(mapping) => Ok(mapping),
             Err(e) => Err(Error::MappingFailed(e)),

@@ -4,9 +4,9 @@
 
 //! Capablities of the virtio video decoder device.
 
+use base::warn;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use sys_util::warn;
 
 use crate::virtio::video::control::*;
 use crate::virtio::video::format::*;
@@ -135,7 +135,6 @@ impl Capability {
                 let levels = self.levels.get(&fmt)?;
                 Some(QueryCtrlResponse::Level(levels.iter().copied().collect()))
             }
-            _ => None,
         }
     }
 }

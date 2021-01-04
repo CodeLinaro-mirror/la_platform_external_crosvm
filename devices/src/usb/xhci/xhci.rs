@@ -12,11 +12,12 @@ use super::xhci_backend_device_provider::XhciBackendDeviceProvider;
 use super::xhci_regs::*;
 use crate::usb::host_backend::host_backend_device_provider::HostBackendDeviceProvider;
 use crate::utils::{Error as UtilsError, EventLoop, FailHandle};
+use base::{error, Event};
 use std::fmt::{self, Display};
 use std::sync::Arc;
 use std::thread;
 use sync::Mutex;
-use sys_util::{error, EventFd, GuestAddress, GuestMemory};
+use vm_memory::{GuestAddress, GuestMemory};
 
 #[derive(Debug)]
 pub enum Error {
@@ -83,8 +84,8 @@ impl Xhci {
         fail_handle: Arc<dyn FailHandle>,
         mem: GuestMemory,
         device_provider: HostBackendDeviceProvider,
-        irq_evt: EventFd,
-        irq_resample_evt: EventFd,
+        irq_evt: Event,
+        irq_resample_evt: Event,
         regs: XhciRegs,
     ) -> Result<Arc<Self>> {
         let (event_loop, join_handle) =

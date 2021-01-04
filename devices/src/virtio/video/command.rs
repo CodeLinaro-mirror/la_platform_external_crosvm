@@ -8,9 +8,9 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io;
 
+use base::error;
 use data_model::Le32;
 use enumn::N;
-use sys_util::error;
 
 use crate::virtio::video::control::*;
 use crate::virtio::video::format::*;
@@ -59,6 +59,7 @@ pub enum QueueType {
 }
 impl_try_from_le32_for_enumn!(QueueType, "queue_type");
 
+#[derive(Debug)]
 pub enum VideoCmd {
     QueryCapability {
         queue_type: QueueType,
@@ -89,6 +90,7 @@ pub enum VideoCmd {
     },
     ResourceDestroyAll {
         stream_id: u32,
+        queue_type: QueueType,
     },
     QueueClear {
         stream_id: u32,
@@ -118,7 +120,7 @@ pub enum VideoCmd {
 
 impl<'a> VideoCmd {
     /// Reads a request on virtqueue and construct a VideoCmd value.
-    pub fn from_reader(r: &'a mut Reader<'a>) -> Result<Self, ReadCmdError> {
+    pub fn from_reader(r: &'a mut Reader) -> Result<Self, ReadCmdError> {
         use self::ReadCmdError::*;
         use self::VideoCmd::*;
 
@@ -235,14 +237,10 @@ impl<'a> VideoCmd {
                 }
             }
             VIRTIO_VIDEO_CMD_RESOURCE_DESTROY_ALL => {
-                let virtio_video_resource_destroy_all {
-
-                    // `queue_type` should be ignored because destroy_all will affect both queues.
-                    // This field exists here by mistake.
-                    ..
-                } = r.read_obj()?;
+                let virtio_video_resource_destroy_all { queue_type, .. } = r.read_obj()?;
                 ResourceDestroyAll {
                     stream_id: hdr.stream_id.into(),
+                    queue_type: queue_type.try_into()?,
                 }
             }
             VIRTIO_VIDEO_CMD_QUEUE_CLEAR => {
@@ -270,7 +268,6 @@ impl<'a> VideoCmd {
             VIRTIO_VIDEO_CMD_QUERY_CONTROL => {
                 let body = r.read_obj::<virtio_video_query_control>()?;
                 let query_ctrl_type = match body.control.into() {
-                    VIRTIO_VIDEO_CONTROL_BITRATE => QueryCtrlType::Bitrate,
                     VIRTIO_VIDEO_CONTROL_PROFILE => QueryCtrlType::Profile(
                         r.read_obj::<virtio_video_query_control_profile>()?
                             .format

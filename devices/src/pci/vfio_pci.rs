@@ -6,10 +6,10 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::u32;
 
-use kvm::Datamatch;
+use base::{error, Event, MappedRegion, MemoryMapping};
+use hypervisor::Datamatch;
 use msg_socket::{MsgReceiver, MsgSender};
 use resources::{Alloc, MmioType, SystemAllocator};
-use sys_util::{error, EventFd, MappedRegion, MemoryMapping};
 
 use vfio_sys::*;
 use vm_control::{
@@ -112,7 +112,8 @@ const PCI_MSI_DATA_32: u32 = 0x8; // 16 bits of data for 32-bit message address
 const PCI_MSI_DATA_64: u32 = 0xC; // 16 bits of date for 64-bit message address
 
 // MSI length
-const MSI_LENGTH_32BIT: u32 = 0xA;
+const MSI_LENGTH_32BIT_WITHOUT_MASK: u32 = 0xA;
+const MSI_LENGTH_32BIT_WITH_MASK: u32 = 0x14;
 const MSI_LENGTH_64BIT_WITHOUT_MASK: u32 = 0xE;
 const MSI_LENGTH_64BIT_WITH_MASK: u32 = 0x18;
 
@@ -123,34 +124,24 @@ enum VfioMsiChange {
 
 struct VfioMsiCap {
     offset: u32,
-    size: u32,
+    is_64bit: bool,
+    mask_cap: bool,
     ctl: u16,
     address: u64,
     data: u16,
-    vm_socket_irq: Arc<VmIrqRequestSocket>,
-    irqfd: Option<EventFd>,
+    vm_socket_irq: VmIrqRequestSocket,
+    irqfd: Option<Event>,
     gsi: Option<u32>,
 }
 
 impl VfioMsiCap {
-    fn new(
-        config: &VfioPciConfig,
-        msi_cap_start: u32,
-        vm_socket_irq: Arc<VmIrqRequestSocket>,
-    ) -> Self {
-        // msi minimum size is 0xa
-        let mut msi_len: u32 = MSI_LENGTH_32BIT;
+    fn new(config: &VfioPciConfig, msi_cap_start: u32, vm_socket_irq: VmIrqRequestSocket) -> Self {
         let msi_ctl = config.read_config_word(msi_cap_start + PCI_MSI_FLAGS);
-        if msi_ctl & PCI_MSI_FLAGS_64BIT != 0 {
-            msi_len = MSI_LENGTH_64BIT_WITHOUT_MASK;
-        }
-        if msi_ctl & PCI_MSI_FLAGS_MASKBIT != 0 {
-            msi_len = MSI_LENGTH_64BIT_WITH_MASK;
-        }
 
         VfioMsiCap {
             offset: msi_cap_start,
-            size: msi_len,
+            is_64bit: (msi_ctl & PCI_MSI_FLAGS_64BIT) != 0,
+            mask_cap: (msi_ctl & PCI_MSI_FLAGS_MASKBIT) != 0,
             ctl: 0,
             address: 0,
             data: 0,
@@ -161,9 +152,23 @@ impl VfioMsiCap {
     }
 
     fn is_msi_reg(&self, index: u64, len: usize) -> bool {
+        let msi_len: u32 = if self.is_64bit {
+            if self.mask_cap {
+                MSI_LENGTH_64BIT_WITH_MASK
+            } else {
+                MSI_LENGTH_64BIT_WITHOUT_MASK
+            }
+        } else {
+            if self.mask_cap {
+                MSI_LENGTH_32BIT_WITH_MASK
+            } else {
+                MSI_LENGTH_32BIT_WITHOUT_MASK
+            }
+        };
+
         if index >= self.offset as u64
-            && index + len as u64 <= (self.offset + self.size) as u64
-            && len as u32 <= self.size
+            && index + len as u64 <= (self.offset + msi_len) as u64
+            && len as u32 <= msi_len
         {
             true
         } else {
@@ -190,30 +195,29 @@ impl VfioMsiCap {
             } else if was_enabled && !is_enabled {
                 ret = Some(VfioMsiChange::Disable)
             }
-        } else if len == 4 && offset == PCI_MSI_ADDRESS_LO && self.size == MSI_LENGTH_32BIT {
+        } else if len == 4 && offset == PCI_MSI_ADDRESS_LO && !self.is_64bit {
             //write 32 bit message address
             let value: [u8; 8] = [data[0], data[1], data[2], data[3], 0, 0, 0, 0];
             self.address = u64::from_le_bytes(value);
-        } else if len == 4 && offset == PCI_MSI_ADDRESS_LO && self.size != MSI_LENGTH_32BIT {
+        } else if len == 4 && offset == PCI_MSI_ADDRESS_LO && self.is_64bit {
             // write 64 bit message address low part
             let value: [u8; 8] = [data[0], data[1], data[2], data[3], 0, 0, 0, 0];
             self.address &= !0xffffffff;
             self.address |= u64::from_le_bytes(value);
-        } else if len == 4 && offset == PCI_MSI_ADDRESS_HI && self.size != MSI_LENGTH_32BIT {
+        } else if len == 4 && offset == PCI_MSI_ADDRESS_HI && self.is_64bit {
             //write 64 bit message address high part
             let value: [u8; 8] = [0, 0, 0, 0, data[0], data[1], data[2], data[3]];
             self.address &= 0xffffffff;
             self.address |= u64::from_le_bytes(value);
-        } else if len == 8 && offset == PCI_MSI_ADDRESS_LO && self.size != MSI_LENGTH_32BIT {
+        } else if len == 8 && offset == PCI_MSI_ADDRESS_LO && self.is_64bit {
             // write 64 bit message address
             let value: [u8; 8] = [
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ];
             self.address = u64::from_le_bytes(value);
         } else if len == 2
-            && ((offset == PCI_MSI_DATA_32 && self.size == MSI_LENGTH_32BIT)
-                || (offset == PCI_MSI_DATA_64 && self.size == MSI_LENGTH_64BIT_WITH_MASK)
-                || (offset == PCI_MSI_DATA_64 && self.size == MSI_LENGTH_64BIT_WITHOUT_MASK))
+            && ((offset == PCI_MSI_DATA_32 && !self.is_64bit)
+                || (offset == PCI_MSI_DATA_64 && self.is_64bit))
         {
             // write message data
             let value: [u8; 2] = [data[0], data[1]];
@@ -256,10 +260,10 @@ impl VfioMsiCap {
 
     fn allocate_one_msi(&mut self) {
         if self.irqfd.is_none() {
-            match EventFd::new() {
+            match Event::new() {
                 Ok(fd) => self.irqfd = Some(fd),
                 Err(e) => {
-                    error!("failed to create eventfd: {:?}", e);
+                    error!("failed to create event: {:?}", e);
                     return;
                 }
             };
@@ -286,7 +290,7 @@ impl VfioMsiCap {
         self.add_msi_route();
     }
 
-    fn get_msi_irqfd(&self) -> Option<&EventFd> {
+    fn get_msi_irqfd(&self) -> Option<&Event> {
         self.irqfd.as_ref()
     }
 }
@@ -312,11 +316,7 @@ struct VfioMsixCap {
 }
 
 impl VfioMsixCap {
-    fn new(
-        config: &VfioPciConfig,
-        msix_cap_start: u32,
-        vm_socket_irq: Arc<VmIrqRequestSocket>,
-    ) -> Self {
+    fn new(config: &VfioPciConfig, msix_cap_start: u32, vm_socket_irq: VmIrqRequestSocket) -> Self {
         let msix_ctl = config.read_config_word(msix_cap_start + PCI_MSIX_FLAGS);
         let table_size = (msix_ctl & PCI_MSIX_FLAGS_QSIZE) + 1;
         let table = config.read_config_dword(msix_cap_start + PCI_MSIX_TABLE);
@@ -423,7 +423,7 @@ impl VfioMsixCap {
         }
     }
 
-    fn get_msix_irqfds(&self) -> Option<Vec<&EventFd>> {
+    fn get_msix_irqfds(&self) -> Option<Vec<&Event>> {
         let mut irqfds = Vec::new();
 
         for i in 0..self.table_size {
@@ -458,15 +458,14 @@ pub struct VfioPciDevice {
     device: Arc<VfioDevice>,
     config: VfioPciConfig,
     pci_address: Option<PciAddress>,
-    interrupt_evt: Option<EventFd>,
-    interrupt_resample_evt: Option<EventFd>,
+    interrupt_evt: Option<Event>,
+    interrupt_resample_evt: Option<Event>,
     mmio_regions: Vec<MmioInfo>,
     io_regions: Vec<IoInfo>,
     msi_cap: Option<VfioMsiCap>,
     msix_cap: Option<VfioMsixCap>,
     irq_type: Option<VfioIrqType>,
     vm_socket_mem: VmMemoryControlRequestSocket,
-    vm_socket_irq: Arc<VmIrqRequestSocket>,
     device_data: Option<DeviceData>,
 
     // scratch MemoryMapping to avoid unmap beform vm exit
@@ -477,12 +476,14 @@ impl VfioPciDevice {
     /// Constructs a new Vfio Pci device for the give Vfio device
     pub fn new(
         device: VfioDevice,
-        vfio_device_socket_irq: VmIrqRequestSocket,
+        vfio_device_socket_msi: VmIrqRequestSocket,
+        vfio_device_socket_msix: VmIrqRequestSocket,
         vfio_device_socket_mem: VmMemoryControlRequestSocket,
     ) -> Self {
         let dev = Arc::new(device);
         let config = VfioPciConfig::new(Arc::clone(&dev));
-        let vm_socket_irq = Arc::new(vfio_device_socket_irq);
+        let mut msi_socket = Some(vfio_device_socket_msi);
+        let mut msix_socket = Some(vfio_device_socket_msix);
         let mut msi_cap: Option<VfioMsiCap> = None;
         let mut msix_cap: Option<VfioMsixCap> = None;
 
@@ -490,17 +491,13 @@ impl VfioPciDevice {
         while cap_next != 0 {
             let cap_id = config.read_config_byte(cap_next);
             if cap_id == PCI_CAP_ID_MSI {
-                msi_cap = Some(VfioMsiCap::new(
-                    &config,
-                    cap_next,
-                    Arc::clone(&vm_socket_irq),
-                ));
+                if let Some(msi_socket) = msi_socket.take() {
+                    msi_cap = Some(VfioMsiCap::new(&config, cap_next, msi_socket));
+                }
             } else if cap_id == PCI_CAP_ID_MSIX {
-                msix_cap = Some(VfioMsixCap::new(
-                    &config,
-                    cap_next,
-                    Arc::clone(&vm_socket_irq),
-                ));
+                if let Some(msix_socket) = msix_socket.take() {
+                    msix_cap = Some(VfioMsixCap::new(&config, cap_next, msix_socket));
+                }
             }
             let offset = cap_next + PCI_MSI_NEXT_POINTER;
             cap_next = config.read_config_byte(offset).into();
@@ -531,7 +528,6 @@ impl VfioPciDevice {
             msix_cap,
             irq_type: None,
             vm_socket_mem: vfio_device_socket_mem,
-            vm_socket_irq,
             device_data,
             mem: Vec::new(),
         }
@@ -732,7 +728,7 @@ impl VfioPciDevice {
                         // Even if vm has mapped this region, but it is in vm main process,
                         // device process doesn't has this mapping, but vfio_dma_map() need it
                         // in device process, so here map it again.
-                        let mmap = match MemoryMapping::from_fd_offset(
+                        let mmap = match MemoryMapping::from_descriptor_offset(
                             self.device.as_ref(),
                             mmap_size as usize,
                             offset,
@@ -789,14 +785,19 @@ impl PciDevice for VfioPciDevice {
             fds.push(interrupt_resample_evt.as_raw_fd());
         }
         fds.push(self.vm_socket_mem.as_raw_fd());
-        fds.push(self.vm_socket_irq.as_ref().as_raw_fd());
+        if let Some(msi_cap) = &self.msi_cap {
+            fds.push(msi_cap.vm_socket_irq.as_raw_fd());
+        }
+        if let Some(msix_cap) = &self.msix_cap {
+            fds.push(msix_cap.config.as_raw_fd());
+        }
         fds
     }
 
     fn assign_irq(
         &mut self,
-        irq_evt: EventFd,
-        irq_resample_evt: EventFd,
+        irq_evt: Event,
+        irq_resample_evt: Event,
         irq_num: u32,
         _irq_pin: PciInterruptPin,
     ) {
@@ -954,7 +955,7 @@ impl PciDevice for VfioPciDevice {
         Ok(())
     }
 
-    fn ioeventfds(&self) -> Vec<(&EventFd, u64, Datamatch)> {
+    fn ioevents(&self) -> Vec<(&Event, u64, Datamatch)> {
         Vec::new()
     }
 

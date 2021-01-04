@@ -6,8 +6,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use sys_util::{ioctl_io_nr, ioctl_ior_nr, ioctl_iow_nr, ioctl_iowr_nr};
-
+use base::{ioctl_io_nr, ioctl_ior_nr, ioctl_iow_nr, ioctl_iowr_nr};
+use data_model::FlexibleArray;
 // Each of the below modules defines ioctls specific to their platform.
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -16,7 +16,7 @@ pub mod x86 {
     #[allow(clippy::all)]
     pub mod bindings;
     pub use crate::bindings::*;
-    use sys_util::{ioctl_ior_nr, ioctl_iow_nr, ioctl_iowr_nr};
+    use base::{ioctl_ior_nr, ioctl_iow_nr, ioctl_iowr_nr};
 
     ioctl_iowr_nr!(KVM_GET_MSR_INDEX_LIST, KVMIO, 0x02, kvm_msr_list);
     ioctl_iowr_nr!(KVM_GET_SUPPORTED_CPUID, KVMIO, 0x05, kvm_cpuid2);
@@ -50,8 +50,8 @@ pub mod x86 {
 pub mod aarch64 {
     // generated with bindgen <arm sysroot>/usr/include/linux/kvm.h --no-unstable-rust --constified-enum '*' --with-derive-default -- -I<arm sysroot>/usr/include
     pub mod bindings;
+    use base::{ioctl_ior_nr, ioctl_iow_nr};
     pub use bindings::*;
-    use sys_util::{ioctl_ior_nr, ioctl_iow_nr};
 
     ioctl_iow_nr!(KVM_ARM_SET_DEVICE_ADDR, KVMIO, 0xab, kvm_arm_device_addr);
     ioctl_iow_nr!(KVM_ARM_VCPU_INIT, KVMIO, 0xae, kvm_vcpu_init);
@@ -154,6 +154,25 @@ ioctl_io_nr!(KVM_SMI, KVMIO, 0xb7);
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use crate::x86::*;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+impl FlexibleArray<kvm_cpuid_entry2> for kvm_cpuid2 {
+    fn set_len(&mut self, len: usize) {
+        self.nent = len as u32;
+    }
+
+    fn get_len(&self) -> usize {
+        self.nent as usize
+    }
+
+    fn get_slice(&self, len: usize) -> &[kvm_cpuid_entry2] {
+        unsafe { self.entries.as_slice(len) }
+    }
+
+    fn get_mut_slice(&mut self, len: usize) -> &mut [kvm_cpuid_entry2] {
+        unsafe { self.entries.as_mut_slice(len) }
+    }
+}
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub use aarch64::*;

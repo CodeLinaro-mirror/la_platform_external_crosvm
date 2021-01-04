@@ -10,7 +10,7 @@
 //! utility functions to combine futures.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::{self, Display};
 use std::fs::File;
 use std::future::Future;
@@ -19,7 +19,9 @@ use std::os::unix::io::RawFd;
 use std::pin::Pin;
 use std::task::Waker;
 
-use sys_util::{PollContext, WatchingEvents};
+use slab::Slab;
+
+use base::{PollContext, WatchingEvents};
 
 use crate::executor::{ExecutableFuture, Executor, FutureList};
 use crate::WakerToken;
@@ -29,15 +31,15 @@ pub enum Error {
     /// Attempts to create two Executors on the same thread fail.
     AttemptedDuplicateExecutor,
     /// Failed to copy the FD for the polling context.
-    DuplicatingFd(sys_util::Error),
+    DuplicatingFd(base::Error),
     /// Failed accessing the thread local storage for wakers.
     InvalidContext,
     /// Creating a context to wait on FDs failed.
-    CreatingContext(sys_util::Error),
+    CreatingContext(base::Error),
     /// PollContext failure.
-    PollContextError(sys_util::Error),
+    PollContextError(base::Error),
     /// Failed to submit the waker to the polling context.
-    SubmittingWaker(sys_util::Error),
+    SubmittingWaker(base::Error),
     /// A Waker was canceled, but the operation isn't running.
     UnknownWaker,
 }
@@ -94,7 +96,7 @@ impl PendingWaker {
 impl Drop for PendingWaker {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
-            let _ = cancel_waker(&token);
+            let _ = cancel_waker(token);
         }
     }
 }
@@ -120,7 +122,7 @@ pub(crate) fn add_write_waker(fd: RawFd, waker: Waker) -> Result<PendingWaker> {
 }
 
 /// Cancels the waker that returned the given token if the waker hasn't yet fired.
-pub(crate) fn cancel_waker(token: &WakerToken) -> Result<()> {
+pub(crate) fn cancel_waker(token: WakerToken) -> Result<()> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Some(state) = state.as_mut() {
@@ -147,9 +149,8 @@ pub(crate) fn add_future(future: Pin<Box<dyn Future<Output = ()>>>) -> Result<()
 
 // Tracks active wakers and associates wakers with the futures that registered them.
 struct FdWakerState {
-    poll_ctx: PollContext<u64>,
-    token_map: BTreeMap<WakerToken, (File, Waker)>,
-    next_token: u64, // Next token for adding to the context.
+    poll_ctx: PollContext<usize>,
+    tokens: Slab<(File, Waker)>,
     new_futures: VecDeque<ExecutableFuture<()>>,
 }
 
@@ -157,8 +158,7 @@ impl FdWakerState {
     fn new() -> Result<Self> {
         Ok(FdWakerState {
             poll_ctx: PollContext::new().map_err(Error::CreatingContext)?,
-            token_map: BTreeMap::new(),
-            next_token: 0,
+            tokens: Slab::with_capacity(64),
             new_futures: VecDeque::new(),
         })
     }
@@ -170,33 +170,31 @@ impl FdWakerState {
             // will only be added to the poll loop.
             File::from_raw_fd(dup_fd(fd)?)
         };
+        let entry = self.tokens.vacant_entry();
+        let next_token = entry.key();
         self.poll_ctx
-            .add_fd_with_events(&duped_fd, events, self.next_token)
+            .add_fd_with_events(&duped_fd, events, next_token)
             .map_err(Error::SubmittingWaker)?;
-        let next_token = WakerToken(self.next_token);
-        self.token_map.insert(next_token.clone(), (duped_fd, waker));
-        self.next_token += 1;
-        Ok(next_token)
+        entry.insert((duped_fd, waker));
+        Ok(WakerToken(next_token))
     }
 
     // Waits until one of the FDs is readable and wakes the associated waker.
     fn wait_wake_event(&mut self) -> Result<()> {
         let events = self.poll_ctx.wait().map_err(Error::PollContextError)?;
         for e in events.iter() {
-            let waker_token = WakerToken(e.token());
-            if let Some((fd, waker)) = self.token_map.remove(&waker_token) {
-                self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
-                waker.wake_by_ref();
-            }
+            let token = e.token();
+            let (fd, waker) = self.tokens.remove(token);
+            self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
+            waker.wake();
         }
         Ok(())
     }
 
     // Remove the waker for the given token if it hasn't fired yet.
-    fn cancel_waker(&mut self, token: &WakerToken) -> Result<()> {
-        if let Some((fd, _waker)) = self.token_map.remove(token) {
-            self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
-        }
+    fn cancel_waker(&mut self, token: WakerToken) -> Result<()> {
+        let (fd, _waker) = self.tokens.remove(token.0);
+        self.poll_ctx.delete(&fd).map_err(Error::PollContextError)?;
         Ok(())
     }
 }
@@ -276,7 +274,7 @@ impl<T: FutureList> Drop for FdExecutor<T> {
 unsafe fn dup_fd(fd: RawFd) -> Result<RawFd> {
     let ret = libc::dup(fd);
     if ret < 0 {
-        Err(Error::DuplicatingFd(sys_util::Error::last()))
+        Err(Error::DuplicatingFd(base::Error::last()))
     } else {
         Ok(ret)
     }
@@ -299,7 +297,7 @@ mod test {
     fn pending_ops() -> usize {
         STATE.with(|state| {
             let state = state.borrow_mut();
-            state.as_ref().unwrap().token_map.len()
+            state.as_ref().unwrap().tokens.len()
         })
     }
 
@@ -340,7 +338,7 @@ mod test {
     #[test]
     fn test_it() {
         async fn do_test() {
-            let (r, _w) = sys_util::pipe(true).unwrap();
+            let (r, _w) = base::pipe(true).unwrap();
             let done = Box::pin(async { 5usize });
             let pending = Box::pin(TestFut::new(r));
             match futures::future::select(pending, done).await {

@@ -30,12 +30,13 @@ RUN apt-get update && apt-get install -y \
     ninja-build \
     pkg-config \
     protobuf-compiler \
-    python3
+    python3 \
+    python3-setuptools
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.44.1 \
+    RUST_VERSION=1.45.2 \
     RUSTFLAGS='--cfg hermetic'
 
 # Debian usually has an old rust version in the repository. Instead of using that, we use rustup to
@@ -49,6 +50,11 @@ RUN curl -LO "https://static.rust-lang.org/rustup/archive/1.22.1/x86_64-unknown-
     && rustup --version \
     && cargo --version \
     && rustc --version
+
+# Set the default toolchain to 'stable' to match the one that bin/smoke_test
+# uses. This allows kokoro runs to avoid re-downloading the toolchain as long
+# as the version matches RUST_VERSION.
+RUN rustup default stable
 
 # Warms up the cargo registry cache for future cargo runs. Cargo will still update the cache using a
 # git pull, but it only needs to download files that were changed since this image was built.
@@ -94,13 +100,15 @@ RUN git clone https://github.com/anholt/libepoxy.git \
     && meson \
     && ninja install
 
-# We've forked virglrenderer to accomodate differences in the GBM header.
-# Until we can upstream our changes, build based on this downstream tree.
-RUN git clone https://gitlab.freedesktop.org/gurchetansingh/virglrenderer.git \
+# Build against virglrenderer master
+ARG VIRGL_COMMIT=master
+RUN git clone https://gitlab.freedesktop.org/virgl/virglrenderer.git \
     && cd virglrenderer \
-    && git checkout keep-kokoro-happy \
-    && ./autogen.sh \
-    && make install -j$(nproc)
+    && git checkout $VIRGL_COMMIT \
+    && mkdir build \
+    && cd build \
+    && meson \
+    && ninja install
 
 # Install libtpm2 so that tpm2-sys/build.rs does not try to build it in place in
 # the read-only source directory.
@@ -151,6 +159,7 @@ ENV AOSP_EXTERNAL_ROOT=$CROS_ROOT/aosp/external
 RUN mkdir -p $AOSP_EXTERNAL_ROOT
 
 # minijail does not exist in upstream linux distros.
+ARG MINIJAIL_COMMIT=master
 RUN git clone https://android.googlesource.com/platform/external/minijail $AOSP_EXTERNAL_ROOT/minijail \
     && cd $AOSP_EXTERNAL_ROOT/minijail \
     && git checkout $MINIJAIL_COMMIT \

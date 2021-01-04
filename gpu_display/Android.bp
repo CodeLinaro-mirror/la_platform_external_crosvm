@@ -5,26 +5,40 @@
 //   does not generate cc_library module yet
 //   does not generate wayland_protocol_codegen module yet
 
-rust_library_host {
+rust_library {
     name: "libgpu_display",
     defaults: ["crosvm_defaults"],
+    host_supported: true,
     crate_name: "gpu_display",
     srcs: ["src/lib.rs"],
+    edition: "2018",
     rustlibs: [
+        "libbase_rust",
         "libdata_model",
         "liblibc",
         "liblinux_input_sys",
-        "libsys_util",
     ],
     static_libs: [
         "libdisplay_wl",
-        "libwayland_client",
-        "libffi",
     ],
+
+    // added manually
+    target: {
+        host: {
+            shared_libs: ["libwayland_client"],
+        },
+        android: {
+            static_libs: [
+                "libwayland_client_static",
+                "libffi"
+            ],
+        },
+    },
 }
 
-cc_library_host_static {
+cc_library_static {
     name: "libdisplay_wl",
+    host_supported: true,
     c_std: "c11",
     srcs: ["src/display_wl.c"],
 
@@ -32,7 +46,22 @@ cc_library_host_static {
     generated_headers: ["gpu_display_client_protocol_headers"],
     export_generated_headers: ["gpu_display_client_protocol_headers"],
 
-    static_libs: ["libwayland_client"],
+    // added manually
+    target: {
+        host: {
+            shared_libs: ["libwayland_client"],
+        },
+        android: {
+            static_libs: [
+                "libwayland_client_static",
+                "libffi"
+            ],
+        },
+        linux_glibc_x86: {
+            // libffi broken on x86, see b/162610242
+            enabled: false,
+        },
+    },
 }
 
 wayland_protocol_codegen {
@@ -60,3 +89,20 @@ wayland_protocol_codegen {
     ],
     tools: ["wayland_scanner"],
 }
+
+// dependent_library ["feature_list"]
+//   ../assertions/src/lib.rs
+//   ../base/src/lib.rs
+//   ../data_model/src/lib.rs
+//   ../linux_input_sys/src/lib.rs
+//   ../sync/src/lib.rs
+//   ../sys_util/poll_token_derive/poll_token_derive.rs
+//   ../sys_util/src/lib.rs
+//   ../syscall_defines/src/lib.rs
+//   ../tempfile/src/lib.rs
+//   cc-1.0.25
+//   libc-0.2.78 "default,std"
+//   proc-macro2-1.0.24 "default,proc-macro"
+//   quote-1.0.7 "default,proc-macro"
+//   syn-1.0.42 "clone-impls,default,derive,parsing,printing,proc-macro,quote"
+//   unicode-xid-0.2.1 "default"

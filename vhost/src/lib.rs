@@ -17,8 +17,9 @@ use std::os::unix::io::AsRawFd;
 use std::ptr::null;
 
 use assertions::const_assert;
-use sys_util::{ioctl, ioctl_with_mut_ref, ioctl_with_ptr, ioctl_with_ref};
-use sys_util::{EventFd, GuestAddress, GuestMemory, GuestMemoryError, LayoutAllocation};
+use base::{ioctl, ioctl_with_mut_ref, ioctl_with_ptr, ioctl_with_ref};
+use base::{Event, LayoutAllocation};
+use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 
 #[derive(Debug)]
 pub enum Error {
@@ -293,12 +294,12 @@ pub trait Vhost: AsRawFd + std::marker::Sized {
         Ok(())
     }
 
-    /// Set the eventfd to trigger when buffers have been used by the host.
+    /// Set the event to trigger when buffers have been used by the host.
     ///
     /// # Arguments
     /// * `queue_index` - Index of the queue to modify.
-    /// * `fd` - EventFd to trigger.
-    fn set_vring_call(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    /// * `fd` - Event to trigger.
+    fn set_vring_call(&self, queue_index: usize, fd: &Event) -> Result<()> {
         let vring_file = virtio_sys::vhost_vring_file {
             index: queue_index as u32,
             fd: fd.as_raw_fd(),
@@ -313,13 +314,13 @@ pub trait Vhost: AsRawFd + std::marker::Sized {
         Ok(())
     }
 
-    /// Set the eventfd that will be signaled by the guest when buffers are
+    /// Set the event that will be signaled by the guest when buffers are
     /// available for the host to process.
     ///
     /// # Arguments
     /// * `queue_index` - Index of the queue to modify.
-    /// * `fd` - EventFd that will be signaled from guest.
-    fn set_vring_kick(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    /// * `fd` - Event that will be signaled from guest.
+    fn set_vring_kick(&self, queue_index: usize, fd: &Event) -> Result<()> {
         let vring_file = virtio_sys::vhost_vring_file {
             index: queue_index as u32,
             fd: fd.as_raw_fd(),
@@ -342,7 +343,7 @@ mod tests {
     use crate::net::fakes::FakeNet;
     use net_util::fakes::FakeTap;
     use std::result;
-    use sys_util::{GuestAddress, GuestMemory, GuestMemoryError};
+    use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 
     fn create_guest_memory() -> result::Result<GuestMemory, GuestMemoryError> {
         let start_addr1 = GuestAddress(0x0);
@@ -430,14 +431,14 @@ mod tests {
     #[test]
     fn set_vring_call() {
         let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_vring_call(0, &EventFd::new().unwrap());
+        let res = vhost_net.set_vring_call(0, &Event::new().unwrap());
         assert_ok_or_known_failure(res);
     }
 
     #[test]
     fn set_vring_kick() {
         let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_vring_kick(0, &EventFd::new().unwrap());
+        let res = vhost_net.set_vring_kick(0, &Event::new().unwrap());
         assert_ok_or_known_failure(res);
     }
 }

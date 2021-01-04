@@ -5,9 +5,10 @@
 //! Implementation of the the `Encoder` struct, which is responsible for translation between the
 //! virtio protocols and LibVDA APIs.
 
-use sys_util::PollContext;
+use base::PollContext;
 
 use crate::virtio::resource_bridge::ResourceRequestSocket;
+use crate::virtio::video::async_cmd_desc_map::AsyncCmdDescMap;
 use crate::virtio::video::command::VideoCmd;
 use crate::virtio::video::device::{Device, Token, VideoCmdResponseType, VideoEvtResponseType};
 use crate::virtio::video::error::*;
@@ -30,11 +31,11 @@ impl Device for Encoder {
         Err(VideoError::InvalidOperation)
     }
 
-    fn process_event_fd(&mut self, _stream_id: u32) -> Option<VideoEvtResponseType> {
-        None
-    }
-
-    fn take_resource_id_to_notify_eos(&mut self, _stream_id: u32) -> Option<u32> {
+    fn process_event(
+        &mut self,
+        _desc_map: &mut AsyncCmdDescMap,
+        _stream_id: u32,
+    ) -> Option<Vec<VideoEvtResponseType>> {
         None
     }
 }
