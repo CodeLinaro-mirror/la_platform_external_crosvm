@@ -55,12 +55,12 @@ pub use self::wl::*;
 use std::cmp;
 use std::convert::TryFrom;
 
-const DEVICE_RESET: u32 = 0x0;
-const DEVICE_ACKNOWLEDGE: u32 = 0x01;
-const DEVICE_DRIVER: u32 = 0x02;
-const DEVICE_DRIVER_OK: u32 = 0x04;
-const DEVICE_FEATURES_OK: u32 = 0x08;
-const DEVICE_FAILED: u32 = 0x80;
+pub const DEVICE_RESET: u32 = 0x0;
+pub const DEVICE_ACKNOWLEDGE: u32 = 0x01;
+pub const DEVICE_DRIVER: u32 = 0x02;
+pub const DEVICE_DRIVER_OK: u32 = 0x04;
+pub const DEVICE_FEATURES_OK: u32 = 0x08;
+pub const DEVICE_FAILED: u32 = 0x80;
 
 // Types taken from linux/virtio_ids.h
 const TYPE_NET: u32 = 1;
