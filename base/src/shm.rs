@@ -59,6 +59,8 @@ pub trait Unix {
     fn get_seals(&self) -> Result<MemfdSeals>;
 
     fn add_seals(&mut self, seals: MemfdSeals) -> Result<()>;
+
+    fn set_size(&mut self, size: u64) -> Result<()> ;
 }
 
 impl Unix for SharedMemory {
@@ -68,6 +70,10 @@ impl Unix for SharedMemory {
 
     fn add_seals(&mut self, seals: MemfdSeals) -> Result<()> {
         self.0.add_seals(seals)
+    }
+
+    fn set_size(&mut self, size: u64) -> Result<()> {
+        self.0.set_size(size)
     }
 }
 

@@ -7,6 +7,7 @@
 
 pub mod argument;
 pub mod linux;
+pub mod panic_hook;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 
