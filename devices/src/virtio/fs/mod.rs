@@ -231,7 +231,7 @@ impl VirtioDevice for Fs {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
@@ -242,7 +242,7 @@ impl VirtioDevice for Fs {
         let fs = self.fs.take().expect("missing file system implementation");
 
         let server = Arc::new(Server::new(fs));
-        let irq = Arc::new(interrupt);
+        //let irq = Arc::new(interrupt);
 
         let mut watch_resample_event = true;
         for (idx, (queue, evt)) in queues.into_iter().zip(queue_evts.into_iter()).enumerate() {
@@ -258,7 +258,7 @@ impl VirtioDevice for Fs {
 
             let mem = guest_mem.clone();
             let server = server.clone();
-            let irq = irq.clone();
+            let irq = interrupt.clone();
 
             let worker_result = thread::Builder::new()
                 .name(format!("virtio-fs worker {}", idx))

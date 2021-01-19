@@ -6,6 +6,7 @@ use std::mem;
 use std::net::Ipv4Addr;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::thread;
+use std::sync::Arc;
 
 use net_util::{MacAddress, TapT};
 
@@ -18,7 +19,7 @@ use super::control_socket::*;
 use super::worker::Worker;
 use super::{Error, Result};
 use crate::pci::MsixStatus;
-use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_NET};
+use crate::virtio::{Interrupt, InterruptBase, Queue, VirtioDevice, TYPE_NET};
 use msg_socket::{MsgReceiver, MsgSender};
 
 const QUEUE_SIZE: u16 = 256;
@@ -193,7 +194,7 @@ where
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
@@ -408,13 +409,13 @@ pub mod tests {
         // Just testing that we don't panic, for now
         net.activate(
             guest_memory,
-            Interrupt::new(
+            Arc::new(InterruptBase::new(
                 Arc::new(AtomicUsize::new(0)),
                 Event::new().unwrap(),
                 Event::new().unwrap(),
                 None,
                 VIRTIO_MSI_NO_VECTOR,
-            ),
+            )),
             vec![Queue::new(1)],
             vec![Event::new().unwrap()],
         );

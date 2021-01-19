@@ -16,7 +16,7 @@ pub struct Worker<F: FileSystem + Sync> {
     mem: GuestMemory,
     queue: Queue,
     server: Arc<Server<F>>,
-    irq: Arc<Interrupt>,
+    irq: Arc<dyn Interrupt>,
 }
 
 impl<F: FileSystem + Sync> Worker<F> {
@@ -24,7 +24,7 @@ impl<F: FileSystem + Sync> Worker<F> {
         mem: GuestMemory,
         queue: Queue,
         server: Arc<Server<F>>,
-        irq: Arc<Interrupt>,
+        irq: Arc<dyn Interrupt>,
     ) -> Worker<F> {
         Worker {
             mem,
