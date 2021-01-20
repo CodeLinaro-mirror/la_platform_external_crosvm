@@ -9,6 +9,7 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::result;
 use std::thread;
+use std::sync::Arc;
 
 use base::{error, warn, Error as SysError, Event, PollContext, PollToken};
 use vm_memory::GuestMemory;
@@ -83,7 +84,7 @@ impl Display for P9Error {
 pub type P9Result<T> = result::Result<T, P9Error>;
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Arc<dyn Interrupt>,
     mem: GuestMemory,
     queue: Queue,
     server: p9::Server,
@@ -230,7 +231,7 @@ impl VirtioDevice for P9 {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

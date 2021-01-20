@@ -6,6 +6,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::io::RawFd;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::thread;
+use std::sync::Arc;
 
 use base::{error, Event, PollContext, PollToken};
 use data_model::{DataInit, Le16, Le32};
@@ -36,7 +37,7 @@ unsafe impl DataInit for virtio_console_config {}
 
 struct Worker {
     mem: GuestMemory,
-    interrupt: Interrupt,
+    interrupt: Arc<dyn Interrupt>,
     input: Option<Box<dyn io::Read + Send>>,
     output: Option<Box<dyn io::Write + Send>>,
 }
@@ -367,7 +368,7 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

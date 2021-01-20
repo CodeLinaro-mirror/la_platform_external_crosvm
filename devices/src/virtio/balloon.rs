@@ -109,7 +109,7 @@ impl BalloonStat {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Arc<dyn Interrupt>,
     mem: GuestMemory,
     inflate_queue: Queue,
     deflate_queue: Queue,
@@ -408,7 +408,7 @@ impl VirtioDevice for Balloon {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

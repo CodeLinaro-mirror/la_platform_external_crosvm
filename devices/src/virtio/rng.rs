@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::thread;
+use std::sync::Arc;
 
 use base::{error, warn, Event, PollContext, PollToken};
 use vm_memory::GuestMemory;
@@ -34,7 +35,7 @@ impl Display for RngError {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Arc<dyn Interrupt>,
     queue: Queue,
     mem: GuestMemory,
     random_file: File,
@@ -178,7 +179,7 @@ impl VirtioDevice for Rng {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

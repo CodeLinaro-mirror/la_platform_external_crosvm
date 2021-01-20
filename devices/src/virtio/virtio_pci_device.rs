@@ -664,13 +664,13 @@ impl PciDevice for VirtioPciDevice {
                     };
                     if let Some(mem) = self.mem.take() {
                         self.mem = Some(mem.clone());
-                        let interrupt = Interrupt::new(
+                        let interrupt = Arc::new(InterruptBase::new(
                             self.interrupt_status.clone(),
                             interrupt_evt,
                             interrupt_resample_evt,
                             Some(self.msix_config.clone()),
                             self.common_config.msix_config,
-                        );
+                        ));
 
                         match self.clone_queue_evts() {
                             Ok(queue_evts) => {

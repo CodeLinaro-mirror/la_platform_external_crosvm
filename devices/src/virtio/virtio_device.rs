@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std::os::unix::io::RawFd;
+use std::sync::Arc;
 
 use base::Event;
 use vm_memory::GuestMemory;
@@ -62,7 +63,7 @@ pub trait VirtioDevice: Send {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     );

@@ -4,6 +4,7 @@
 
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::thread;
+use std::sync::Arc;
 
 use data_model::{DataInit, Le64};
 
@@ -143,7 +144,7 @@ impl VirtioDevice for Vsock {
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

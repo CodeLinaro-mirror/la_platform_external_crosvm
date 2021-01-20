@@ -46,6 +46,7 @@ use std::rc::Rc;
 use std::result;
 use std::thread;
 use std::time::Duration;
+use std::sync::Arc;
 
 #[cfg(feature = "wl-dmabuf")]
 use libc::{EBADF, EINVAL};
@@ -1345,7 +1346,7 @@ impl WlState {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Arc<dyn Interrupt>,
     mem: GuestMemory,
     in_queue: Queue,
     out_queue: Queue,
@@ -1355,7 +1356,7 @@ struct Worker {
 impl Worker {
     fn new(
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         in_queue: Queue,
         out_queue: Queue,
         wayland_paths: Map<String, PathBuf>,
@@ -1614,7 +1615,7 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
