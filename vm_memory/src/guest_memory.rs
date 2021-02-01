@@ -15,8 +15,8 @@ use std::sync::Arc;
 use crate::guest_address::GuestAddress;
 use base::{pagesize, Error as SysError};
 use base::{
-    AsRawDescriptor, MappedRegion, MemfdSeals, MemoryMapping, MmapError, SharedMemory,
-    SharedMemoryUnix,
+    AsRawDescriptor, MappedRegion, MemfdSeals, MemoryMapping, MemoryMappingBuilder, MmapError,
+    SharedMemory, SharedMemoryUnix,
 };
 use cros_async::{
     uring_mem::{self, BorrowedIoVec},
@@ -86,7 +86,7 @@ impl Display for Error {
     }
 }
 
-struct MemoryRegion {
+pub struct MemoryRegion {
     mapping: MemoryMapping,
     guest_base: GuestAddress,
     memfd_offset: u64,
@@ -111,8 +111,8 @@ impl MemoryRegion {
 /// fd of the underlying memory regions.
 #[derive(Clone)]
 pub struct GuestMemory {
-    regions: Arc<Vec<MemoryRegion>>,
-    memfd: Arc<SharedMemory>,
+    pub regions: Arc<Vec<MemoryRegion>>,
+    pub memfd: Arc<SharedMemory>,
 }
 
 impl AsRawFd for GuestMemory {
@@ -155,12 +155,8 @@ impl GuestMemory {
         Ok(memfd)
     }
 
-    /// Creates a container for guest memory regions.
-    /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
-    pub fn new(ranges: &[(GuestAddress, u64)]) -> Result<GuestMemory> {
-        // Create memfd
-
-        let memfd = GuestMemory::create_memfd(ranges)?;
+    pub fn create_mem_regions(ranges: &[(GuestAddress, u64)], memfd: &SharedMemory) -> Result<Vec<MemoryRegion>>
+    {
         // Create memory regions
         let mut regions = Vec::<MemoryRegion>::new();
         let mut offset = 0;
@@ -178,7 +174,10 @@ impl GuestMemory {
 
             let size =
                 usize::try_from(range.1).map_err(|_| Error::MemoryRegionTooLarge(range.1))?;
-            let mapping = MemoryMapping::from_descriptor_offset(&memfd, size, offset)
+            let mapping = MemoryMappingBuilder::new(size)
+                .from_descriptor(memfd)
+                .offset(offset)
+                .build()
                 .map_err(Error::MemoryMappingFailed)?;
             regions.push(MemoryRegion {
                 mapping,
@@ -188,6 +187,18 @@ impl GuestMemory {
 
             offset += size as u64;
         }
+
+        Ok(regions)
+    }
+
+    /// Creates a container for guest memory regions.
+    /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
+    pub fn new(ranges: &[(GuestAddress, u64)]) -> Result<GuestMemory> {
+        // Create memfd
+
+        let memfd = GuestMemory::create_memfd(ranges)?;
+        // Create memory regions
+        let regions  = GuestMemory::create_mem_regions(ranges, &memfd)?;
 
         Ok(GuestMemory {
             regions: Arc::new(regions),
@@ -851,8 +862,11 @@ mod tests {
             .unwrap();
 
         let _ = gm.with_regions::<_, ()>(|index, _, size, _, memfd_offset| {
-            let mmap =
-                MemoryMapping::from_descriptor_offset(gm.as_ref(), size, memfd_offset).unwrap();
+            let mmap = MemoryMappingBuilder::new(size)
+                .from_descriptor(gm.as_ref())
+                .offset(memfd_offset)
+                .build()
+                .unwrap();
 
             if index == 0 {
                 assert!(mmap.read_obj::<u16>(0x0).unwrap() == 0x1337u16);

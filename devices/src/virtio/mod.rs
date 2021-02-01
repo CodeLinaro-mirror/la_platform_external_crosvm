@@ -55,12 +55,12 @@ pub use self::wl::*;
 use std::cmp;
 use std::convert::TryFrom;
 
-const DEVICE_RESET: u32 = 0x0;
-const DEVICE_ACKNOWLEDGE: u32 = 0x01;
-const DEVICE_DRIVER: u32 = 0x02;
-const DEVICE_DRIVER_OK: u32 = 0x04;
-const DEVICE_FEATURES_OK: u32 = 0x08;
-const DEVICE_FAILED: u32 = 0x80;
+pub const DEVICE_RESET: u32 = 0x0;
+pub const DEVICE_ACKNOWLEDGE: u32 = 0x01;
+pub const DEVICE_DRIVER: u32 = 0x02;
+pub const DEVICE_DRIVER_OK: u32 = 0x04;
+pub const DEVICE_FEATURES_OK: u32 = 0x08;
+pub const DEVICE_FAILED: u32 = 0x80;
 
 // Types taken from linux/virtio_ids.h
 const TYPE_NET: u32 = 1;
@@ -88,6 +88,7 @@ const TYPE_WL: u32 = MAX_VIRTIO_DEVICE_ID;
 const TYPE_TPM: u32 = MAX_VIRTIO_DEVICE_ID - 1;
 
 const VIRTIO_F_VERSION_1: u32 = 32;
+const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
 
 const INTERRUPT_STATUS_USED_RING: u32 = 0x1;
 const INTERRUPT_STATUS_CONFIG_CHANGED: u32 = 0x2;
@@ -148,4 +149,15 @@ pub fn copy_config(dst: &mut [u8], dst_offset: u64, src: &[u8], src_offset: u64)
             }
         }
     }
+}
+
+/// Returns the set of reserved base features common to all virtio devices.
+pub fn base_features(protected_vm: bool) -> u64 {
+    let mut features: u64 = 1 << VIRTIO_F_VERSION_1;
+
+    if protected_vm {
+        features |= 1 << VIRTIO_F_ACCESS_PLATFORM;
+    }
+
+    features
 }

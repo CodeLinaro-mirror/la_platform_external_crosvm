@@ -7,6 +7,7 @@
 
 pub mod argument;
 pub mod linux;
+pub mod panic_hook;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 
@@ -209,6 +210,7 @@ pub struct Config {
     pub video_dec: bool,
     pub video_enc: bool,
     pub acpi_tables: Vec<PathBuf>,
+    pub protected_vm: bool,
 }
 
 impl Default for Config {
@@ -263,6 +265,7 @@ impl Default for Config {
             video_dec: false,
             video_enc: false,
             acpi_tables: Vec::new(),
+            protected_vm: false,
         }
     }
 }
