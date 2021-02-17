@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::thread;
+use std::sync::Arc;
 
 use base::{error, Event, PollContext, PollToken};
 use base::{Error as SysError, Result as SysResult};
@@ -85,7 +86,7 @@ impl ::std::error::Error for Error {}
 type Result<T> = ::std::result::Result<T, Error>;
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Arc<dyn Interrupt>,
     queue: Queue,
     memory: GuestMemory,
     pmem_device_socket: VmMsyncRequestSocket,
@@ -306,7 +307,7 @@ impl VirtioDevice for Pmem {
     fn activate(
         &mut self,
         memory: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_events: Vec<Event>,
     ) {

@@ -8,7 +8,7 @@ mod bus;
 mod cmos;
 mod i8042;
 pub mod irqchip;
-mod pci;
+pub mod pci;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod pit;
 pub mod pl030;

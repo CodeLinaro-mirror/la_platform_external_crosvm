@@ -10,6 +10,7 @@
 use std::fmt::{self, Display};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::thread;
+use std::sync::Arc;
 
 use base::{error, Error as SysError, Event};
 use data_model::{DataInit, Le32};
@@ -165,7 +166,7 @@ impl VirtioDevice for VideoDevice {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Arc<dyn Interrupt>,
         mut queues: Vec<virtio::queue::Queue>,
         mut queue_evts: Vec<Event>,
     ) {

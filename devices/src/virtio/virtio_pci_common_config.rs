@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std::convert::TryInto;
+use std::sync::Arc;
 
 use base::warn;
 use vm_memory::GuestAddress;
@@ -264,7 +265,7 @@ mod tests {
         fn activate(
             &mut self,
             _mem: GuestMemory,
-            _interrupt: Interrupt,
+            _interrupt: Arc<dyn Interrupt>,
             _queues: Vec<Queue>,
             _queue_evts: Vec<Event>,
         ) {
