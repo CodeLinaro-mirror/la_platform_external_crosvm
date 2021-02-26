@@ -8,7 +8,7 @@ use crate::{
 };
 use std::ffi::CStr;
 use std::fs::File;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use sys_util::SharedMemory as SysUtilSharedMemory;
 
 /// See [SharedMemory](sys_util::SharedMemory) for struct- and method-level
@@ -78,14 +78,6 @@ impl Unix for SharedMemory {
 
     fn set_size(&mut self, size: u64) -> Result<()> {
         self.0.set_size(size)
-    }
-}
-
-// TODO(mikehoyle): Remove this in favor of just AsRawDescriptor
-// when the rest of the codebase is ready.
-impl AsRawFd for SharedMemory {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
     }
 }
 
