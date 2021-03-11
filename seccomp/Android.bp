@@ -14,6 +14,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "external_crosvm_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    //   SPDX-license-identifier-BSD
+    default_applicable_licenses: ["external_crosvm_license"],
+}
+
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
     cmd: "$(location policy-inliner.sh) $(location x86_64/common_device.policy) < $(in) > $(out)",
@@ -325,6 +335,56 @@ prebuilt_etc {
         },
     },
 }
+
+genrule {
+    name: "vios_audio_device.policy_inline_x86_64",
+    defaults: ["crosvm_inline_seccomp_policy_x86_64"],
+    out: ["vios_audio_device.policy"],
+    srcs: ["x86_64/vios_audio_device.policy"],
+}
+
+prebuilt_usr_share_host {
+    name: "vios_audio_device.policy_x86_64",
+    filename: "vios_audio_device.policy",
+    relative_install_path: "crosvm/x86_64-linux-gnu/seccomp",
+    src: ":vios_audio_device.policy_inline_x86_64",
+}
+
+genrule {
+    name: "vios_audio_device.policy_inline_aarch64",
+    defaults: ["crosvm_inline_seccomp_policy_aarch64"],
+    out: ["vios_audio_device.policy"],
+    srcs: ["aarch64/vios_audio_device.policy"],
+}
+
+prebuilt_usr_share_host {
+    name: "vios_audio_device.policy_aarch64",
+    filename: "vios_audio_device.policy",
+    relative_install_path: "crosvm/aarch64-linux-gnu/seccomp",
+    src: ":vios_audio_device.policy_inline_aarch64",
+}
+
+prebuilt_etc {
+    name: "vios_audio_device.policy",
+    relative_install_path: "seccomp_policy/crosvm",
+    arch: {
+        x86_64: {
+            src: ":vios_audio_device.policy_inline_x86_64",
+        },
+        arm64: {
+            src: ":vios_audio_device.policy_inline_aarch64",
+        },
+    },
+    target: {
+        android_arm: {
+            enabled: false,
+        },
+        android_x86: {
+            enabled: false,
+        },
+    },
+}
+
 
 genrule {
     name: "vfio_device.policy_inline_x86_64",
@@ -934,4 +994,3 @@ prebuilt_etc {
         },
     },
 }
-
