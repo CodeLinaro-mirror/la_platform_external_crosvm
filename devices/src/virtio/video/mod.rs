@@ -36,7 +36,6 @@ mod response;
 mod worker;
 
 use command::ReadCmdError;
-use device::AsyncCmdTag;
 use worker::Worker;
 
 const QUEUE_SIZE: u16 = 256;
@@ -55,8 +54,6 @@ pub enum Error {
     WaitError(SysError),
     /// Failed to read a virtio-video command.
     ReadFailure(ReadCmdError),
-    /// Got response for an unexpected asynchronous command.
-    UnexpectedResponse(AsyncCmdTag),
     /// Failed to write an event into the event queue.
     WriteEventFailure {
         event: event::VideoEvt,
@@ -75,9 +72,6 @@ impl Display for Error {
             }
             WaitError(err) => write!(f, "failed to wait for events: {}", err),
             ReadFailure(e) => write!(f, "failed to read a command from the guest: {}", e),
-            UnexpectedResponse(tag) => {
-                write!(f, "got a response for an untracked command: {:?}", tag)
-            }
             WriteEventFailure { event, error } => write!(
                 f,
                 "failed to write an event {:?} into event queue: {}",
