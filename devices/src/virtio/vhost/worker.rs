@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::os::raw::c_ulonglong;
-use std::sync::Arc;
 
 use base::{error, Error as SysError, Event, PollToken, WaitContext};
 use vhost::Vhost;
@@ -16,7 +15,7 @@ use msg_socket::{MsgReceiver, MsgSender};
 
 /// Worker that takes care of running the vhost device.
 pub struct Worker<T: Vhost> {
-    interrupt: Arc<dyn Interrupt>,
+    interrupt: Interrupt,
     queues: Vec<Queue>,
     pub vhost_handle: T,
     pub vhost_interrupt: Vec<Event>,
@@ -30,7 +29,7 @@ impl<T: Vhost> Worker<T> {
         queues: Vec<Queue>,
         vhost_handle: T,
         vhost_interrupt: Vec<Event>,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         acked_features: u64,
         kill_evt: Event,
         response_socket: Option<VhostDevResponseSocket>,
@@ -201,7 +200,7 @@ impl<T: Vhost> Worker<T> {
         // with the msix. Due to this, cannot use the direct irq fd but
         // should fall back to indirect irq fd.
         if self.response_socket.is_some() {
-            if let Some(msix_config) = self.interrupt.get_msix_config() {
+            if let Some(msix_config) = &self.interrupt.msix_config {
                 let msix_config = msix_config.lock();
                 let msix_masked = msix_config.masked();
                 if msix_masked {
@@ -229,7 +228,7 @@ impl<T: Vhost> Worker<T> {
     }
 
     fn set_vring_calls(&self) -> Result<()> {
-        if let Some(msix_config) = self.interrupt.get_msix_config() {
+        if let Some(msix_config) = &self.interrupt.msix_config {
             let msix_config = msix_config.lock();
             if msix_config.masked() {
                 for (queue_index, _) in self.queues.iter().enumerate() {

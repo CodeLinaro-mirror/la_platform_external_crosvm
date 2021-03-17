@@ -9,7 +9,6 @@
 
 use std::fmt::{self, Display};
 use std::thread;
-use std::sync::Arc;
 
 use base::{error, AsRawDescriptor, Error as SysError, Event, RawDescriptor};
 use data_model::{DataInit, Le32};
@@ -159,7 +158,7 @@ impl VirtioDevice for VideoDevice {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<virtio::queue::Queue>,
         mut queue_evts: Vec<Event>,
     ) {

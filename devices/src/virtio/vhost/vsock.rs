@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::thread;
-use std::sync::Arc;
 
 use data_model::{DataInit, Le64};
 
@@ -143,7 +142,7 @@ impl VirtioDevice for Vsock {
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

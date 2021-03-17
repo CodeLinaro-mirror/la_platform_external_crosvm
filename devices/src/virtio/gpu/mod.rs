@@ -678,7 +678,7 @@ impl Frontend {
 }
 
 struct Worker {
-    interrupt: Arc<dyn Interrupt>,
+    interrupt: Interrupt,
     exit_evt: Event,
     mem: GuestMemory,
     ctrl_queue: Queue,
@@ -1073,7 +1073,7 @@ impl VirtioDevice for Gpu {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
