@@ -688,22 +688,26 @@ impl PciDevice for VirtioPciDevice {
                     };
                     if let Some(mem) = self.mem.take() {
                         self.mem = Some(mem.clone());
-                        let interrupt = Arc::new(InterruptBase::new(
+                        let interrupt = Interrupt::new(
                             self.interrupt_status.clone(),
                             interrupt_evt,
                             interrupt_resample_evt,
                             Some(self.msix_config.clone()),
                             self.common_config.msix_config,
-                        ));
+                        );
 
                         match self.clone_queue_evts() {
                             Ok(queue_evts) => {
-                                self.device.activate(
-                                    mem,
-                                    interrupt,
-                                    self.queues.clone(),
-                                    queue_evts,
-                                );
+                                // Use ready queues and their events.
+                                let (queues, queue_evts) = self
+                                    .queues
+                                    .clone()
+                                    .into_iter()
+                                    .zip(queue_evts.into_iter())
+                                    .filter(|(q, _)| q.ready)
+                                    .unzip();
+
+                                self.device.activate(mem, interrupt, queues, queue_evts);
                                 self.device_activated = true;
                             }
                             Err(e) => {

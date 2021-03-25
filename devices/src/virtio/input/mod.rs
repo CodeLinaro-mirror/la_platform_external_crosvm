@@ -9,7 +9,6 @@ mod evdev;
 mod event_source;
 
 use self::constants::*;
-use std::sync::Arc;
 
 use base::{error, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, WaitContext};
 use data_model::{DataInit, Le16, Le32};
@@ -341,7 +340,7 @@ impl VirtioInputConfig {
 }
 
 struct Worker<T: EventSource> {
-    interrupt: Arc<dyn Interrupt>,
+    interrupt: Interrupt,
     event_source: T,
     event_queue: Queue,
     status_queue: Queue,
@@ -585,7 +584,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
