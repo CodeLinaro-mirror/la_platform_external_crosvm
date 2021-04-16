@@ -1462,7 +1462,7 @@ impl WlState {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     mem: GuestMemory,
     in_queue: Queue,
     out_queue: Queue,
@@ -1472,7 +1472,7 @@ struct Worker {
 impl Worker {
     fn new(
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         in_queue: Queue,
         out_queue: Queue,
         wayland_paths: Map<String, PathBuf>,
@@ -1738,7 +1738,7 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

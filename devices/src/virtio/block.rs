@@ -249,7 +249,7 @@ impl ExecuteError {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_image: Box<dyn DiskFile>,
@@ -342,7 +342,7 @@ impl Worker {
             };
 
             queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &self.interrupt);
+            queue.trigger_interrupt(&self.mem, &(*self.interrupt));
             queue.set_notify(&self.mem, true);
         }
     }
@@ -781,7 +781,7 @@ impl VirtioDevice for Block {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

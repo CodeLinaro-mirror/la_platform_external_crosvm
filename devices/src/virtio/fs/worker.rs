@@ -127,7 +127,7 @@ pub struct Worker<F: FileSystem + Sync> {
     mem: GuestMemory,
     queue: Queue,
     server: Arc<fuse::Server<F>>,
-    irq: Arc<Interrupt>,
+    irq: Arc<dyn Interrupt>,
     socket: Arc<Mutex<FsMappingRequestSocket>>,
     slot: u32,
 }
@@ -137,7 +137,7 @@ impl<F: FileSystem + Sync> Worker<F> {
         mem: GuestMemory,
         queue: Queue,
         server: Arc<fuse::Server<F>>,
-        irq: Arc<Interrupt>,
+        irq: Arc<dyn Interrupt>,
         socket: Arc<Mutex<FsMappingRequestSocket>>,
         slot: u32,
     ) -> Worker<F> {

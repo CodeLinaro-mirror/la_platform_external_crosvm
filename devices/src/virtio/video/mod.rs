@@ -158,7 +158,7 @@ impl VirtioDevice for VideoDevice {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         mut queues: Vec<virtio::queue::Queue>,
         mut queue_evts: Vec<Event>,
     ) {

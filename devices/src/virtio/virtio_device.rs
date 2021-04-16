@@ -60,7 +60,7 @@ pub trait VirtioDevice: Send {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     );
