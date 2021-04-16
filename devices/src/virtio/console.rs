@@ -35,7 +35,7 @@ unsafe impl DataInit for virtio_console_config {}
 
 struct Worker {
     mem: GuestMemory,
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     input: Option<Box<dyn io::Read + Send>>,
     output: Option<Box<dyn io::Write + Send>>,
 }
@@ -366,7 +366,7 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

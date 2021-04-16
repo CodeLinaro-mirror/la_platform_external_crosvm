@@ -340,7 +340,7 @@ impl VirtioInputConfig {
 }
 
 struct Worker<T: EventSource> {
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     event_source: T,
     event_queue: Queue,
     status_queue: Queue,
@@ -584,7 +584,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
