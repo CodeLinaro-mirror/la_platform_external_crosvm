@@ -145,7 +145,7 @@ struct VirtioNetConfig {
 unsafe impl DataInit for VirtioNetConfig {}
 
 struct Worker<T: TapT> {
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn Interrupt>,
     mem: GuestMemory,
     rx_queue: Queue,
     tx_queue: Queue,
@@ -639,7 +639,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -665,7 +665,7 @@ where
             );
             return;
         }
-        let interrupt_arc = Arc::new(interrupt);
+        let interrupt_arc = interrupt.try_clone_arc();
         for i in 0..vq_pairs {
             let tap = self.taps.remove(0);
             let acked_features = self.acked_features;
