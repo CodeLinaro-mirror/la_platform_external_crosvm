@@ -34,6 +34,7 @@ use crosvm::{
 };
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::{GpuMode, GpuParameters};
+use devices::ProtectionType;
 #[cfg(feature = "audio")]
 use devices::{Ac97Backend, Ac97Parameters};
 use disk::QcowFile;
@@ -1439,6 +1440,14 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
             }
             cfg.virtio_keyboard = Some(PathBuf::from(value.unwrap().to_owned()));
         }
+        "switches" => {
+            if cfg.virtio_switches.is_some() {
+                return Err(argument::Error::TooManyArguments(
+                    "`switches` already given".to_owned(),
+                ));
+            }
+            cfg.virtio_switches = Some(PathBuf::from(value.unwrap().to_owned()));
+        }
         "evdev" => {
             let dev_path = PathBuf::from(value.unwrap());
             if !dev_path.exists() {
@@ -1505,7 +1514,7 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
             cfg.acpi_tables.push(acpi_table);
         }
         "protected-vm" => {
-            cfg.protected_vm = true;
+            cfg.protected_vm = ProtectionType::Protected;
             cfg.params.push("swiotlb=force".to_string());
         }
         "battery" => {
@@ -1721,6 +1730,7 @@ writeback=BOOL - Indicates whether the VM can use writeback caching (default: fa
           Argument::value("trackpad", "PATH:WIDTH:HEIGHT", "Path to a socket from where to read trackpad input events and write status updates to, optionally followed by screen width and height (defaults to 800x1280)."),
           Argument::value("mouse", "PATH", "Path to a socket from where to read mouse input events and write status updates to."),
           Argument::value("keyboard", "PATH", "Path to a socket from where to read keyboard input events and write status updates to."),
+          Argument::value("switches", "PATH", "Path to a socket from where to read switch input events and write status updates to."),
           #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
           Argument::flag("split-irqchip", "(EXPERIMENTAL) enable split-irqchip support"),
           Argument::value("bios", "PATH", "Path to BIOS/firmware ROM"),
@@ -2695,6 +2705,19 @@ mod tests {
             config.virtio_single_touch.unwrap().get_size(),
             (touch_width, touch_height)
         );
+    }
+
+    #[test]
+    fn virtio_switches() {
+        let mut config = Config::default();
+        config
+            .executable_path
+            .replace(Executable::Kernel(PathBuf::from("kernel")));
+        set_argument(&mut config, "switches", Some("/dev/switches-test")).unwrap();
+        validate_arguments(&mut config).unwrap();
+        assert_eq!(
+            config.virtio_switches.unwrap(),
+            PathBuf::from("/dev/switches-test"));
     }
 
     #[cfg(all(feature = "gpu", feature = "gfxstream"))]

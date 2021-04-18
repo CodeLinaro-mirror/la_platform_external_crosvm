@@ -26,6 +26,7 @@ use devices::virtio::fs::passthrough;
 use devices::virtio::gpu::GpuParameters;
 #[cfg(feature = "audio")]
 use devices::Ac97Parameters;
+use devices::ProtectionType;
 use libc::{getegid, geteuid};
 use vm_control::BatteryType;
 
@@ -218,13 +219,14 @@ pub struct Config {
     pub virtio_trackpad: Option<TouchDeviceOption>,
     pub virtio_mouse: Option<PathBuf>,
     pub virtio_keyboard: Option<PathBuf>,
+    pub virtio_switches: Option<PathBuf>,
     pub virtio_input_evdevs: Vec<PathBuf>,
     pub split_irqchip: bool,
     pub vfio: Vec<PathBuf>,
     pub video_dec: bool,
     pub video_enc: bool,
     pub acpi_tables: Vec<PathBuf>,
-    pub protected_vm: bool,
+    pub protected_vm: ProtectionType,
     pub battery_type: Option<BatteryType>,
     #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
     pub gdb: Option<u32>,
@@ -278,13 +280,14 @@ impl Default for Config {
             virtio_trackpad: None,
             virtio_mouse: None,
             virtio_keyboard: None,
+            virtio_switches: None,
             virtio_input_evdevs: Vec::new(),
             split_irqchip: false,
             vfio: Vec::new(),
             video_dec: false,
             video_enc: false,
             acpi_tables: Vec::new(),
-            protected_vm: false,
+            protected_vm: ProtectionType::Unprotected,
             battery_type: None,
             #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
             gdb: None,

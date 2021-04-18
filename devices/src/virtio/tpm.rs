@@ -9,7 +9,6 @@ use std::io::{self, Read, Write};
 use std::ops::BitOrAssign;
 use std::path::PathBuf;
 use std::thread;
-use std::sync::Arc;
 
 use base::{error, Event, PollToken, RawDescriptor, WaitContext};
 use vm_memory::GuestMemory;
@@ -30,7 +29,7 @@ const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
 const TPM_BUFSIZE: usize = 4096;
 
 struct Worker {
-    interrupt: Arc<dyn Interrupt>,
+    interrupt: Interrupt,
     queue: Queue,
     mem: GuestMemory,
     queue_evt: Event,
@@ -200,7 +199,7 @@ impl VirtioDevice for Tpm {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

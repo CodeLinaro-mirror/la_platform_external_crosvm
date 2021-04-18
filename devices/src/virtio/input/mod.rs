@@ -9,7 +9,6 @@ mod evdev;
 mod event_source;
 
 use self::constants::*;
-use std::sync::Arc;
 
 use base::{error, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, WaitContext};
 use data_model::{DataInit, Le16, Le32};
@@ -341,7 +340,7 @@ impl VirtioInputConfig {
 }
 
 struct Worker<T: EventSource> {
-    interrupt: Arc<dyn Interrupt>,
+    interrupt: Interrupt,
     event_source: T,
     event_queue: Queue,
     status_queue: Queue,
@@ -585,7 +584,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -756,6 +755,20 @@ where
         kill_evt: None,
         worker_thread: None,
         config: defaults::new_keyboard_config(),
+        source: Some(SocketEventSource::new(source)),
+        virtio_features,
+    })
+}
+
+/// Creates a new virtio device for switches.
+pub fn new_switches<T>(source: T, virtio_features: u64) -> Result<Input<SocketEventSource<T>>>
+where
+    T: Read + Write + AsRawDescriptor,
+{
+    Ok(Input {
+        kill_evt: None,
+        worker_thread: None,
+        config: defaults::new_switches_config(),
         source: Some(SocketEventSource::new(source)),
         virtio_features,
     })

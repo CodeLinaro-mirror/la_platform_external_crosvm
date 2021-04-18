@@ -501,20 +501,37 @@ fn create_block_device(
     };
     flock(&raw_image, lock_op, true).map_err(Error::DiskImageLock)?;
 
-    let disk_file = disk::create_disk_file(raw_image).map_err(Error::CreateDiskError)?;
-    let dev = virtio::Block::new(
-        virtio::base_features(cfg.protected_vm),
-        disk_file,
-        disk.read_only,
-        disk.sparse,
-        disk.block_size,
-        disk.id,
-        Some(disk_device_socket),
-    )
-    .map_err(Error::BlockDeviceNew)?;
+    let dev = if disk::async_ok(&raw_image).map_err(Error::CreateDiskError)? {
+        let async_file = disk::create_async_disk_file(raw_image).map_err(Error::CreateDiskError)?;
+        Box::new(
+            virtio::BlockAsync::new(
+                virtio::base_features(cfg.protected_vm),
+                async_file,
+                disk.read_only,
+                disk.sparse,
+                disk.block_size,
+                Some(disk_device_socket),
+            )
+            .map_err(Error::BlockDeviceNew)?,
+        ) as Box<dyn VirtioDevice>
+    } else {
+        let disk_file = disk::create_disk_file(raw_image).map_err(Error::CreateDiskError)?;
+        Box::new(
+            virtio::Block::new(
+                virtio::base_features(cfg.protected_vm),
+                disk_file,
+                disk.read_only,
+                disk.sparse,
+                disk.block_size,
+                disk.id,
+                Some(disk_device_socket),
+            )
+            .map_err(Error::BlockDeviceNew)?,
+        ) as Box<dyn VirtioDevice>
+    };
 
     Ok(VirtioDeviceStub {
-        dev: Box::new(dev),
+        dev,
         jail: simple_jail(&cfg, "block_device")?,
     })
 }
@@ -676,6 +693,21 @@ fn create_keyboard_device<T: IntoUnixStream>(cfg: &Config, keyboard_socket: T) -
     })
 }
 
+fn create_switches_device<T: IntoUnixStream>(cfg: &Config, switches_socket: T) -> DeviceResult {
+    let socket = switches_socket.into_unix_stream().map_err(|e| {
+        error!("failed configuring virtio switches: {}", e);
+        e
+    })?;
+
+    let dev = virtio::new_switches(socket, virtio::base_features(cfg.protected_vm))
+        .map_err(Error::InputDeviceNew)?;
+
+    Ok(VirtioDeviceStub {
+        dev: Box::new(dev),
+        jail: simple_jail(&cfg, "input_device")?,
+    })
+}
+
 fn create_vinput_device(cfg: &Config, dev_path: &Path) -> DeviceResult {
     let dev_file = OpenOptions::new()
         .read(true)
@@ -809,6 +841,7 @@ fn create_gpu_device(
         map_request,
         cfg.sandbox,
         virtio::base_features(cfg.protected_vm),
+        cfg.wayland_socket_paths.clone(),
     );
 
     let jail = match simple_jail(&cfg, "gpu_device")? {
@@ -885,7 +918,10 @@ fn create_gpu_device(
             }
 
             // Bind mount the wayland socket into jail's root. This is necessary since each
-            // new wayland context must open() the socket.
+            // new wayland context must open() the socket.  Don't bind mount the camera socket
+            // since it seems to cause problems on ARCVM (b/180126126) + Mali.  It's unclear if
+            // camera team will opt for virtio-camera or continue using virtio-wl, so this should
+            // be fine for now.
             if let Some(path) = wayland_socket_path {
                 jail.mount_bind(path, jailed_wayland_path, true)?;
             }
@@ -1339,6 +1375,10 @@ fn create_virtio_devices(
 
     if let Some(keyboard_socket) = &cfg.virtio_keyboard {
         devs.push(create_keyboard_device(cfg, keyboard_socket)?);
+    }
+
+    if let Some(switches_socket) = &cfg.virtio_switches {
+        devs.push(create_switches_device(cfg, switches_socket)?);
     }
 
     for dev_path in &cfg.virtio_input_evdevs {

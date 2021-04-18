@@ -2,19 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::cell::RefCell;
 use std::cmp::min;
 use std::num::Wrapping;
-use std::rc::Rc;
 use std::sync::atomic::{fence, Ordering};
-use std::sync::Arc;
 
 use base::error;
 use cros_async::{AsyncError, EventAsync};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::{GuestAddress, GuestMemory};
 
-use super::{Interrupt, InterruptBase, VIRTIO_MSI_NO_VECTOR};
+use super::{Interrupt, VIRTIO_MSI_NO_VECTOR};
 
 const VIRTQ_DESC_F_NEXT: u16 = 0x1;
 const VIRTQ_DESC_F_WRITE: u16 = 0x2;
@@ -491,6 +488,11 @@ impl Queue {
         self.set_used_index(mem, self.next_used);
     }
 
+    /// Updates the index at which the driver should signal the device next.
+    pub fn update_int_required(&mut self, mem: &GuestMemory) {
+        self.set_avail_event(mem, self.get_avail_index(mem));
+    }
+
     /// Enable / Disable guest notify device that requests are available on
     /// the descriptor chain.
     pub fn set_notify(&mut self, mem: &GuestMemory, enable: bool) {
@@ -501,7 +503,7 @@ impl Queue {
         }
 
         if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) != 0 {
-            self.set_avail_event(mem, self.get_avail_index(mem));
+            self.update_int_required(mem);
         } else {
             self.set_used_flag(
                 mem,
@@ -534,7 +536,7 @@ impl Queue {
     /// inject interrupt into guest on this queue
     /// return true: interrupt is injected into guest for this queue
     ///        false: interrupt isn't injected
-    pub fn trigger_interrupt(&mut self, mem: &GuestMemory, interrupt: Arc<dyn Interrupt>) -> bool {
+    pub fn trigger_interrupt(&mut self, mem: &GuestMemory, interrupt: &Interrupt) -> bool {
         if self.available_interrupt_enabled(mem) {
             self.last_used = self.next_used;
             interrupt.signal_used_queue(self.vector);
@@ -547,29 +549,6 @@ impl Queue {
     /// Acknowledges that this set of features should be enabled on this queue.
     pub fn ack_features(&mut self, features: u64) {
         self.features |= features;
-    }
-}
-
-/// Used to temporarily disable notifications while processing a request. Notification will be
-/// re-enabled on drop.
-pub struct NotifyGuard {
-    queue: Rc<RefCell<Queue>>,
-    mem: GuestMemory,
-}
-
-impl NotifyGuard {
-    /// Disable notifications for the lifetime of the returned guard. Useful when the caller is
-    /// processing a descriptor and doesn't need notifications of further messages from the guest.
-    pub fn new(queue: Rc<RefCell<Queue>>, mem: GuestMemory) -> Self {
-        // Disable notification until we're done processing the next request.
-        queue.borrow_mut().set_notify(&mem, false);
-        NotifyGuard { queue, mem }
-    }
-}
-
-impl Drop for NotifyGuard {
-    fn drop(&mut self) {
-        self.queue.borrow_mut().set_notify(&self.mem, true);
     }
 }
 
@@ -688,13 +667,13 @@ mod tests {
         let mem = GuestMemory::new(&vec![(memory_start_addr, GUEST_MEMORY_SIZE)]).unwrap();
         setup_vq(&mut queue, &mem);
 
-        let interrupt = Arc::new(InterruptBase::new(
+        let interrupt = Interrupt::new(
             Arc::new(AtomicUsize::new(0)),
             Event::new().unwrap(),
             Event::new().unwrap(),
             None,
             10,
-        ));
+        );
 
         // Calculating the offset of used_event within Avail structure
         let used_event_offset: u64 =
@@ -710,7 +689,7 @@ mod tests {
 
         // At this moment driver hasn't handled any interrupts yet, so it
         // should inject interrupt.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), true);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), true);
 
         // Driver handle all the interrupts and update avail.used_event to 0x100
         let mut driver_handled = device_generate;
@@ -718,7 +697,7 @@ mod tests {
 
         // At this moment driver have handled all the interrupts, and
         // device doesn't generate more data, so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
 
         // Assume driver submit another u16::MAX - 0x100 req to device,
         // Device has handled all of them, so increase self.next_used to u16::MAX
@@ -729,7 +708,7 @@ mod tests {
 
         // At this moment driver just handled 0x100 interrupts, so it
         // should inject interrupt.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), true);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), true);
 
         // driver handle all the interrupts and update avail.used_event to u16::MAX
         driver_handled = device_generate;
@@ -737,7 +716,7 @@ mod tests {
 
         // At this moment driver have handled all the interrupts, and
         // device doesn't generate more data, so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
 
         // Assume driver submit another 1 request,
         // device has handled it, so wrap self.next_used to 0
@@ -746,7 +725,7 @@ mod tests {
 
         // At this moment driver has handled all the previous interrupts, so it
         // should inject interrupt again.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), true);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), true);
 
         // driver handle that interrupts and update avail.used_event to 0
         driver_handled = device_generate;
@@ -754,7 +733,7 @@ mod tests {
 
         // At this moment driver have handled all the interrupts, and
         // device doesn't generate more data, so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
     }
 
     #[test]
@@ -764,13 +743,13 @@ mod tests {
         let mem = GuestMemory::new(&vec![(memory_start_addr, GUEST_MEMORY_SIZE)]).unwrap();
         setup_vq(&mut queue, &mem);
 
-        let interrupt = Arc::new(InterruptBase::new(
+        let interrupt = Interrupt::new(
             Arc::new(AtomicUsize::new(0)),
             Event::new().unwrap(),
             Event::new().unwrap(),
             None,
             10,
-        ));
+        );
 
         // Calculating the offset of used_event within Avail structure
         let used_event_offset: u64 =
@@ -786,7 +765,7 @@ mod tests {
 
         // At this moment driver hasn't handled any interrupts yet, so it
         // should inject interrupt.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), true);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), true);
 
         // Driver handle part of the interrupts and update avail.used_event to 0x80
         let mut driver_handled = Wrapping(0x80);
@@ -794,7 +773,7 @@ mod tests {
 
         // At this moment driver hasn't finished last interrupt yet,
         // so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
 
         // Assume driver submit another 1 request,
         // device has handled it, so increment self.next_used.
@@ -803,7 +782,7 @@ mod tests {
 
         // At this moment driver hasn't finished last interrupt yet,
         // so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
 
         // Assume driver submit another u16::MAX - 0x101 req to device,
         // Device has handled all of them, so increase self.next_used to u16::MAX
@@ -814,7 +793,7 @@ mod tests {
 
         // At this moment driver hasn't finished last interrupt yet,
         // so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
 
         // driver handle most of the interrupts and update avail.used_event to u16::MAX - 1,
         driver_handled = device_generate - Wrapping(1);
@@ -827,7 +806,7 @@ mod tests {
 
         // At this moment driver has already finished the last interrupt(0x100),
         // and device service other request, so new interrupt is needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), true);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), true);
 
         // Assume driver submit another 1 request,
         // device has handled it, so increment self.next_used to 1
@@ -836,7 +815,7 @@ mod tests {
 
         // At this moment driver hasn't finished last interrupt((Wrapping(0)) yet,
         // so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
 
         // driver handle all the remain interrupts and wrap avail.used_event to 0x1.
         driver_handled = device_generate;
@@ -844,7 +823,7 @@ mod tests {
 
         // At this moment driver has handled all the interrupts, and
         // device doesn't generate more data, so interrupt isn't needed.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), false);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), false);
 
         // Assume driver submit another 1 request,
         // device has handled it, so increase self.next_used.
@@ -853,6 +832,6 @@ mod tests {
 
         // At this moment driver has finished all the previous interrupts, so it
         // should inject interrupt again.
-        assert_eq!(queue.trigger_interrupt(&mem, interrupt.clone()), true);
+        assert_eq!(queue.trigger_interrupt(&mem, &interrupt), true);
     }
 }

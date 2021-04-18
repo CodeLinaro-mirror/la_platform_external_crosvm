@@ -9,23 +9,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use sync::Mutex;
 
-pub struct InterruptBase {
+pub struct Interrupt {
     interrupt_status: Arc<AtomicUsize>,
     interrupt_evt: Event,
     interrupt_resample_evt: Event,
-    msix_config: Option<Arc<Mutex<MsixConfig>>>,
+    pub msix_config: Option<Arc<Mutex<MsixConfig>>>,
     config_msix_vector: u16,
 }
 
-impl InterruptBase {
+impl Interrupt {
     pub fn new(
         interrupt_status: Arc<AtomicUsize>,
         interrupt_evt: Event,
         interrupt_resample_evt: Event,
         msix_config: Option<Arc<Mutex<MsixConfig>>>,
         config_msix_vector: u16,
-    ) -> InterruptBase {
-        InterruptBase {
+    ) -> Interrupt {
+        Interrupt {
             interrupt_status,
             interrupt_evt,
             interrupt_resample_evt,
@@ -61,38 +61,26 @@ impl InterruptBase {
             self.interrupt_evt.write(1).unwrap();
         }
     }
-}
-
-pub trait Interrupt : Send + Sync {
-    fn signal_used_queue(&self, vector: u16);
-    fn signal_config_changed(&self);
-    fn interrupt_resample(&self);
-    fn do_interrupt_resample(&self);
-    fn get_resample_evt(&self) -> &Event;
-    fn get_msix_config(&self) -> Option<Arc<Mutex<MsixConfig>>>;
-}
-
-impl Interrupt for InterruptBase {
 
     /// Notify the driver that buffers have been placed in the used queue.
-    fn signal_used_queue(&self, vector: u16) {
+    pub fn signal_used_queue(&self, vector: u16) {
         self.signal(vector, INTERRUPT_STATUS_USED_RING)
     }
 
     /// Notify the driver that the device configuration has changed.
-    fn signal_config_changed(&self) {
+    pub fn signal_config_changed(&self) {
         self.signal(self.config_msix_vector, INTERRUPT_STATUS_CONFIG_CHANGED)
     }
 
     /// Handle interrupt resampling event, reading the value from the event and doing the resample.
-    fn interrupt_resample(&self) {
+    pub fn interrupt_resample(&self) {
         let _ = self.interrupt_resample_evt.read();
         self.do_interrupt_resample();
     }
 
     /// Read the status and write to the interrupt event. Don't read the resample event, assume the
     /// resample has been requested.
-    fn do_interrupt_resample(&self) {
+    pub fn do_interrupt_resample(&self) {
         if self.interrupt_status.load(Ordering::SeqCst) != 0 {
             self.interrupt_evt.write(1).unwrap();
         }
@@ -100,12 +88,7 @@ impl Interrupt for InterruptBase {
 
     /// Return the reference of interrupt_resample_evt
     /// To keep the interface clean, this member is private.
-    fn get_resample_evt(&self) -> &Event {
+    pub fn get_resample_evt(&self) -> &Event {
         &self.interrupt_resample_evt
-    }
-
-    // Get a pointer to MsixConfig to operate.
-    fn get_msix_config(&self) -> Option<Arc<Mutex<MsixConfig>>> {
-        self.msix_config.clone()
     }
 }

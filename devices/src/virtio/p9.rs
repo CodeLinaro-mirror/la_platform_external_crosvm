@@ -7,7 +7,6 @@ use std::io::{self, Write};
 use std::mem;
 use std::result;
 use std::thread;
-use std::sync::Arc;
 
 use base::{error, warn, Error as SysError, Event, PollToken, RawDescriptor, WaitContext};
 use vm_memory::GuestMemory;
@@ -78,7 +77,7 @@ impl Display for P9Error {
 pub type P9Result<T> = result::Result<T, P9Error>;
 
 struct Worker {
-    interrupt: Arc<dyn Interrupt>,
+    interrupt: Interrupt,
     mem: GuestMemory,
     queue: Queue,
     server: p9::Server,
@@ -217,7 +216,7 @@ impl VirtioDevice for P9 {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

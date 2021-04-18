@@ -5,7 +5,6 @@
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::thread;
-use std::sync::Arc;
 
 use base::{error, Event, PollToken, RawDescriptor, WaitContext};
 use data_model::{DataInit, Le16, Le32};
@@ -14,7 +13,7 @@ use vm_memory::GuestMemory;
 use super::{
     base_features, copy_config, Interrupt, Queue, Reader, VirtioDevice, Writer, TYPE_CONSOLE,
 };
-use crate::SerialDevice;
+use crate::{ProtectionType, SerialDevice};
 
 const QUEUE_SIZE: u16 = 256;
 
@@ -36,7 +35,7 @@ unsafe impl DataInit for virtio_console_config {}
 
 struct Worker {
     mem: GuestMemory,
-    interrupt: Arc<dyn Interrupt>,
+    interrupt: Interrupt,
     input: Option<Box<dyn io::Read + Send>>,
     output: Option<Box<dyn io::Write + Send>>,
 }
@@ -309,7 +308,7 @@ pub struct Console {
 
 impl SerialDevice for Console {
     fn new(
-        protected_vm: bool,
+        protected_vm: ProtectionType,
         _evt: Event,
         input: Option<Box<dyn io::Read + Send>>,
         output: Option<Box<dyn io::Write + Send>>,
@@ -367,7 +366,7 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

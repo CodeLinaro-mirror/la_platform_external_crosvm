@@ -5,7 +5,6 @@
 use std::mem;
 use std::net::Ipv4Addr;
 use std::thread;
-use std::sync::Arc;
 
 use net_util::{MacAddress, TapT};
 
@@ -18,7 +17,7 @@ use super::control_socket::*;
 use super::worker::Worker;
 use super::{Error, Result};
 use crate::pci::MsixStatus;
-use crate::virtio::{Interrupt, InterruptBase, Queue, VirtioDevice, TYPE_NET};
+use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_NET};
 use msg_socket::{MsgReceiver, MsgSender};
 
 const QUEUE_SIZE: u16 = 256;
@@ -193,7 +192,7 @@ where
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Arc<dyn Interrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
@@ -349,6 +348,7 @@ pub mod tests {
     use super::*;
     use crate::virtio::base_features;
     use crate::virtio::VIRTIO_MSI_NO_VECTOR;
+    use crate::ProtectionType;
     use net_util::fakes::FakeTap;
     use std::result;
     use std::sync::atomic::AtomicUsize;
@@ -364,7 +364,7 @@ pub mod tests {
 
     fn create_net_common() -> Net<FakeTap, FakeNet<FakeTap>> {
         let guest_memory = create_guest_memory().unwrap();
-        let features = base_features(false);
+        let features = base_features(ProtectionType::Unprotected);
         Net::<FakeTap, FakeNet<FakeTap>>::new(
             features,
             Ipv4Addr::new(127, 0, 0, 1),
@@ -408,13 +408,13 @@ pub mod tests {
         // Just testing that we don't panic, for now
         net.activate(
             guest_memory,
-            Arc::new(InterruptBase::new(
+            Interrupt::new(
                 Arc::new(AtomicUsize::new(0)),
                 Event::new().unwrap(),
                 Event::new().unwrap(),
                 None,
                 VIRTIO_MSI_NO_VECTOR,
-            )),
+            ),
             vec![Queue::new(1)],
             vec![Event::new().unwrap()],
         );

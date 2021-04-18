@@ -6,6 +6,7 @@
 
 mod balloon;
 mod block;
+mod block_async;
 mod console;
 mod descriptor_utils;
 mod input;
@@ -34,6 +35,7 @@ pub mod vhost;
 
 pub use self::balloon::*;
 pub use self::block::*;
+pub use self::block_async::*;
 pub use self::console::*;
 pub use self::descriptor_utils::Error as DescriptorError;
 pub use self::descriptor_utils::*;
@@ -54,15 +56,16 @@ pub use self::virtio_device::*;
 pub use self::virtio_pci_device::*;
 pub use self::wl::*;
 
+use crate::ProtectionType;
 use std::cmp;
 use std::convert::TryFrom;
 
-pub const DEVICE_RESET: u32 = 0x0;
-pub const DEVICE_ACKNOWLEDGE: u32 = 0x01;
-pub const DEVICE_DRIVER: u32 = 0x02;
-pub const DEVICE_DRIVER_OK: u32 = 0x04;
-pub const DEVICE_FEATURES_OK: u32 = 0x08;
-pub const DEVICE_FAILED: u32 = 0x80;
+const DEVICE_RESET: u32 = 0x0;
+const DEVICE_ACKNOWLEDGE: u32 = 0x01;
+const DEVICE_DRIVER: u32 = 0x02;
+const DEVICE_DRIVER_OK: u32 = 0x04;
+const DEVICE_FEATURES_OK: u32 = 0x08;
+const DEVICE_FAILED: u32 = 0x80;
 
 // Types taken from linux/virtio_ids.h
 const TYPE_NET: u32 = 1;
@@ -92,10 +95,10 @@ const TYPE_TPM: u32 = MAX_VIRTIO_DEVICE_ID - 1;
 const VIRTIO_F_VERSION_1: u32 = 32;
 const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
 
-pub const INTERRUPT_STATUS_USED_RING: u32 = 0x1;
-pub const INTERRUPT_STATUS_CONFIG_CHANGED: u32 = 0x2;
+const INTERRUPT_STATUS_USED_RING: u32 = 0x1;
+const INTERRUPT_STATUS_CONFIG_CHANGED: u32 = 0x2;
 
-pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
+const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
 
 /// Offset from the base MMIO address of a virtio device used by the guest to notify the device of
 /// queue events.
@@ -154,10 +157,10 @@ pub fn copy_config(dst: &mut [u8], dst_offset: u64, src: &[u8], src_offset: u64)
 }
 
 /// Returns the set of reserved base features common to all virtio devices.
-pub fn base_features(protected_vm: bool) -> u64 {
+pub fn base_features(protected_vm: ProtectionType) -> u64 {
     let mut features: u64 = 1 << VIRTIO_F_VERSION_1;
 
-    if protected_vm {
+    if protected_vm == ProtectionType::Protected {
         features |= 1 << VIRTIO_F_ACCESS_PLATFORM;
     }
 
