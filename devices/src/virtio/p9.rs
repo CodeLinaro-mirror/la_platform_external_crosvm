@@ -77,7 +77,7 @@ impl Display for P9Error {
 pub type P9Result<T> = result::Result<T, P9Error>;
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     mem: GuestMemory,
     queue: Queue,
     server: p9::Server,
@@ -216,7 +216,7 @@ impl VirtioDevice for P9 {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

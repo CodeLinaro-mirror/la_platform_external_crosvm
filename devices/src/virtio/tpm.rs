@@ -29,7 +29,7 @@ const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
 const TPM_BUFSIZE: usize = 4096;
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     queue: Queue,
     mem: GuestMemory,
     queue_evt: Event,
@@ -199,7 +199,7 @@ impl VirtioDevice for Tpm {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

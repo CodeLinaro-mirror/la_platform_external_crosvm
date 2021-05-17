@@ -84,7 +84,7 @@ impl ::std::error::Error for Error {}
 type Result<T> = ::std::result::Result<T, Error>;
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     queue: Queue,
     memory: GuestMemory,
     pmem_device_socket: VmMsyncRequestSocket,
@@ -305,7 +305,7 @@ impl VirtioDevice for Pmem {
     fn activate(
         &mut self,
         memory: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         mut queues: Vec<Queue>,
         mut queue_events: Vec<Event>,
     ) {

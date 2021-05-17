@@ -163,7 +163,7 @@ async fn handle_queue<F>(
     mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn Interrupt>>,
     mut desc_handler: F,
 ) where
     F: FnMut(GuestAddress, u64),
@@ -196,7 +196,7 @@ async fn handle_stats_queue(
     mut stats_rx: mpsc::Receiver<()>,
     command_socket: &BalloonControlResponseSocket,
     config: Arc<BalloonConfig>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn Interrupt>>,
 ) {
     loop {
         let stats_desc = match queue.next_async(mem, &mut queue_event).await {
@@ -250,7 +250,7 @@ async fn handle_stats_queue(
 async fn handle_command_socket(
     ex: &Executor,
     command_socket: &BalloonControlResponseSocket,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn Interrupt>>,
     config: Arc<BalloonConfig>,
     mut stats_tx: mpsc::Sender<()>,
 ) -> Result<()> {
@@ -282,7 +282,7 @@ async fn handle_command_socket(
 
 // Async task that resamples the status of the interrupt when the guest sends a request by
 // signalling the resample event associated with the interrupt.
-async fn handle_irq_resample(ex: &Executor, interrupt: Rc<RefCell<Interrupt>>) {
+async fn handle_irq_resample(ex: &Executor, interrupt: Rc<RefCell<dyn Interrupt>>) {
     let resample_evt = interrupt
         .borrow_mut()
         .get_resample_evt()
@@ -307,13 +307,13 @@ fn run_worker(
     mut queue_evts: Vec<Event>,
     mut queues: Vec<Queue>,
     command_socket: &BalloonControlResponseSocket,
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     kill_evt: Event,
     mem: GuestMemory,
     config: Arc<BalloonConfig>,
 ) {
     // Wrap the interrupt in a `RefCell` so it can be shared between async functions.
-    let interrupt = Rc::new(RefCell::new(interrupt));
+    let interrupt = interrupt.try_clone_rc();
 
     let ex = Executor::new().unwrap();
 
@@ -467,7 +467,7 @@ impl VirtioDevice for Balloon {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

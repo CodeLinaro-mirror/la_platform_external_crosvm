@@ -276,7 +276,7 @@ async fn process_one_request_task(
     avail_desc: DescriptorChain,
     disk_state: Rc<AsyncMutex<DiskState>>,
     mem: GuestMemory,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn Interrupt>>,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
@@ -294,7 +294,7 @@ async fn process_one_request_task(
 
     let mut queue = queue.borrow_mut();
     queue.add_used(&mem, descriptor_index, len as u32);
-    queue.trigger_interrupt(&mem, &interrupt.borrow());
+    queue.trigger_interrupt(&mem, &(*interrupt.borrow()));
     queue.update_int_required(&mem);
 }
 
@@ -307,7 +307,7 @@ async fn handle_queue(
     disk_state: Rc<AsyncMutex<DiskState>>,
     queue: Rc<RefCell<Queue>>,
     evt: EventAsync,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn Interrupt>>,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
@@ -333,7 +333,7 @@ async fn handle_queue(
 
 async fn handle_irq_resample(
     ex: &Executor,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn Interrupt>>,
 ) -> result::Result<(), OtherError> {
     let resample_evt = interrupt
         .borrow_mut()
@@ -360,7 +360,7 @@ async fn wait_kill(kill_evt: EventAsync) {
 async fn handle_command_socket(
     ex: &Executor,
     command_socket: &Option<DiskControlResponseSocket>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn Interrupt>>,
     disk_state: Rc<AsyncMutex<DiskState>>,
 ) -> Result<(), ExecuteError> {
     let command_socket = match command_socket {
@@ -458,7 +458,7 @@ async fn flush_disk(
 // a resizing command.
 fn run_worker(
     ex: Executor,
-    interrupt: Interrupt,
+    interrupt: Box<dyn Interrupt>,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_state: &Rc<AsyncMutex<DiskState>>,
@@ -467,7 +467,7 @@ fn run_worker(
     kill_evt: Event,
 ) -> Result<(), String> {
     // Wrap the interupt in a `RefCell` so it can be shared between async functions.
-    let interrupt = Rc::new(RefCell::new(interrupt));
+    let interrupt = interrupt.try_clone_rc();
 
     // One flush timer per disk.
     let timer = Timer::new().expect("Failed to create a timer");
@@ -847,7 +847,7 @@ impl VirtioDevice for BlockAsync {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn Interrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

@@ -6,12 +6,14 @@ use std::cmp::min;
 use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
 
-use base::error;
+extern crate log;
+use log::{error, debug, info};
+
 use cros_async::{AsyncError, EventAsync};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::{GuestAddress, GuestMemory};
 
-use super::{Interrupt, VIRTIO_MSI_NO_VECTOR};
+use super::{Interrupt, InterruptBase, VIRTIO_MSI_NO_VECTOR};
 
 const VIRTQ_DESC_F_NEXT: u16 = 0x1;
 const VIRTQ_DESC_F_WRITE: u16 = 0x2;
@@ -348,6 +350,7 @@ impl Queue {
         let avail_event_addr = self
             .used_ring
             .unchecked_add(4 + 8 * u64::from(self.actual_size()));
+        debug!("{}", format!("desc_table {} avail_index {}", self.desc_table, avail_index.0));
         mem.write_obj_at_addr(avail_index.0, avail_event_addr)
             .unwrap();
     }
@@ -413,7 +416,9 @@ impl Queue {
         let avail_index = self.get_avail_index(mem);
         let avail_len = avail_index - self.next_avail;
 
+        debug!("{}", format!("desc_table {} avail_idx {} avail_len {}", self.desc_table, avail_index, avail_len.0));
         if avail_len.0 > queue_size || self.next_avail == avail_index {
+            debug!("{}", format!("desc_table {} peek returns none", self.desc_table));
             return None;
         }
 
@@ -485,6 +490,7 @@ impl Queue {
             .unwrap();
 
         self.next_used += Wrapping(1);
+        debug!("{}", format!("desc_table {} next_used {}", self.desc_table, self.next_used.0));
         self.set_used_index(mem, self.next_used);
     }
 
@@ -536,7 +542,7 @@ impl Queue {
     /// inject interrupt into guest on this queue
     /// return true: interrupt is injected into guest for this queue
     ///        false: interrupt isn't injected
-    pub fn trigger_interrupt(&mut self, mem: &GuestMemory, interrupt: &Interrupt) -> bool {
+    pub fn trigger_interrupt(&mut self, mem: &GuestMemory, interrupt: &dyn Interrupt) -> bool {
         if self.available_interrupt_enabled(mem) {
             self.last_used = self.next_used;
             interrupt.signal_used_queue(self.vector);
@@ -667,7 +673,7 @@ mod tests {
         let mem = GuestMemory::new(&vec![(memory_start_addr, GUEST_MEMORY_SIZE)]).unwrap();
         setup_vq(&mut queue, &mem);
 
-        let interrupt = Interrupt::new(
+        let interrupt = InterruptBase::new(
             Arc::new(AtomicUsize::new(0)),
             Event::new().unwrap(),
             Event::new().unwrap(),
@@ -743,7 +749,7 @@ mod tests {
         let mem = GuestMemory::new(&vec![(memory_start_addr, GUEST_MEMORY_SIZE)]).unwrap();
         setup_vq(&mut queue, &mem);
 
-        let interrupt = Interrupt::new(
+        let interrupt = InterruptBase::new(
             Arc::new(AtomicUsize::new(0)),
             Event::new().unwrap(),
             Event::new().unwrap(),
