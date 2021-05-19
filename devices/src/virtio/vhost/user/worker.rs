@@ -9,7 +9,7 @@ use thiserror::Error as ThisError;
 use vm_memory::GuestMemory;
 
 use crate::virtio::interrupt::SignalableInterrupt;
-use crate::virtio::{Interrupt, Queue};
+use crate::virtio::Queue;
 
 #[derive(ThisError, Debug)]
 enum Error {
@@ -28,7 +28,7 @@ impl Worker {
     // Processes any requests to resample the irq value.
     async fn handle_irq_resample(
         resample_evt: EventAsync,
-        interrupt: Interrupt,
+        interrupt: &dyn SignalableInterrupt,
     ) -> Result<(), Error> {
         loop {
             let _ = resample_evt
@@ -47,7 +47,7 @@ impl Worker {
     }
 
     // Runs asynchronous tasks.
-    pub fn run(&mut self, ex: &Executor, interrupt: Interrupt) -> Result<(), String> {
+    pub fn run(&mut self, ex: &Executor, interrupt: Box<dyn SignalableInterrupt>) -> Result<(), String> {
         let resample_evt = interrupt
             .get_resample_evt()
             .expect("resample event required")
@@ -55,7 +55,7 @@ impl Worker {
             .expect("failed to clone resample event");
         let async_resample_evt =
             EventAsync::new(resample_evt.0, ex).expect("failed to create async resample event");
-        let resample = Self::handle_irq_resample(async_resample_evt, interrupt);
+        let resample = Self::handle_irq_resample(async_resample_evt, &*interrupt);
         pin_mut!(resample);
 
         let kill_evt = EventAsync::new(
