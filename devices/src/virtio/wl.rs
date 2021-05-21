@@ -68,7 +68,7 @@ use super::resource_bridge::{
     get_resource_info, BufferInfo, ResourceBridgeError, ResourceInfo, ResourceRequest,
 };
 use super::{
-    DescriptorChain, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice, Writer, TYPE_WL,
+    DescriptorChain, Queue, Reader, SignalableInterrupt, VirtioDevice, Writer, TYPE_WL,
 };
 use vm_control::{MemSlot, VmMemoryRequest, VmMemoryResponse};
 
@@ -1463,7 +1463,7 @@ impl WlState {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     mem: GuestMemory,
     in_queue: Queue,
     out_queue: Queue,
@@ -1473,7 +1473,7 @@ struct Worker {
 impl Worker {
     fn new(
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         in_queue: Queue,
         out_queue: Queue,
         wayland_paths: Map<String, PathBuf>,
@@ -1747,7 +1747,7 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

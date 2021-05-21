@@ -11,7 +11,7 @@ use data_model::{DataInit, Le16, Le32};
 use vm_memory::GuestMemory;
 
 use super::{
-    base_features, copy_config, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice,
+    base_features, copy_config, Queue, Reader, SignalableInterrupt, VirtioDevice,
     Writer, TYPE_CONSOLE,
 };
 use crate::{ProtectionType, SerialDevice};
@@ -36,7 +36,7 @@ unsafe impl DataInit for virtio_console_config {}
 
 struct Worker {
     mem: GuestMemory,
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     input: Option<Box<dyn io::Read + Send>>,
     output: Option<Box<dyn io::Write + Send>>,
 }
@@ -375,7 +375,7 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

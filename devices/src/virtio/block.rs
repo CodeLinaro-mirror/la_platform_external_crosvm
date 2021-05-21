@@ -29,7 +29,7 @@ use vm_control::{DiskControlCommand, DiskControlResult};
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt,
+    copy_config, DescriptorChain, DescriptorError, Queue, Reader, SignalableInterrupt,
     VirtioDevice, Writer, TYPE_BLOCK,
 };
 
@@ -252,7 +252,7 @@ impl ExecuteError {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_image: Box<dyn DiskFile>,
@@ -346,7 +346,7 @@ impl Worker {
 
             debug!("{}", format!("add_used {}", desc_index));
             queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &self.interrupt);
+            queue.trigger_interrupt(&self.mem, &*self.interrupt);
             queue.set_notify(&self.mem, true);
         }
     }
@@ -791,7 +791,7 @@ impl VirtioDevice for Block {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

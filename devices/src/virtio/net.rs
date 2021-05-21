@@ -23,7 +23,7 @@ use virtio_sys::virtio_net::{
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice,
+    copy_config, DescriptorError, Queue, Reader, SignalableInterrupt, VirtioDevice,
     Writer, TYPE_NET,
 };
 
@@ -146,7 +146,7 @@ pub(crate) struct VirtioNetConfig {
 unsafe impl DataInit for VirtioNetConfig {}
 
 struct Worker<T: TapT> {
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
     mem: GuestMemory,
     rx_queue: Queue,
     tx_queue: Queue,
@@ -642,7 +642,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -668,7 +668,7 @@ where
             );
             return;
         }
-        let interrupt_arc = Arc::new(interrupt);
+        let interrupt_arc = interrupt.by_arc();
         for i in 0..vq_pairs {
             let tap = self.taps.remove(0);
             let acked_features = self.acked_features;
