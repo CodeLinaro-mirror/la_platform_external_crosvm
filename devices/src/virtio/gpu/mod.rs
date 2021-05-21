@@ -37,7 +37,7 @@ use sync::Mutex;
 use vm_memory::{GuestAddress, GuestMemory};
 
 use super::{
-    copy_config, resource_bridge::*, DescriptorChain, Interrupt, Queue, Reader,
+    copy_config, resource_bridge::*, DescriptorChain, Queue, Reader,
     SignalableInterrupt, VirtioDevice, Writer, TYPE_GPU,
 };
 
@@ -675,7 +675,7 @@ impl Frontend {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     exit_evt: Event,
     mem: GuestMemory,
     ctrl_queue: Queue,
@@ -1100,7 +1100,7 @@ impl VirtioDevice for Gpu {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
