@@ -10,7 +10,7 @@ use std::thread;
 use base::{error, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, WaitContext};
 use vm_memory::GuestMemory;
 
-use super::{Interrupt, Queue, VirtioDevice, Writer, TYPE_RNG};
+use super::{Queue, SignalableInterrupt, VirtioDevice, Writer, TYPE_RNG};
 
 const QUEUE_SIZE: u16 = 256;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
@@ -33,7 +33,7 @@ impl Display for RngError {
 }
 
 struct Worker {
-    interrupt: Box<dyn Interrupt>,
+    interrupt: Box<dyn SignalableInterrupt>,
     queue: Queue,
     mem: GuestMemory,
     random_file: File,
@@ -75,7 +75,6 @@ impl Worker {
 
         let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
             (&queue_evt, Token::QueueAvailable),
-            (self.interrupt.get_resample_evt(), Token::InterruptResample),
             (&kill_evt, Token::Kill),
         ]) {
             Ok(pc) => pc,
@@ -84,6 +83,15 @@ impl Worker {
                 return;
             }
         };
+        if let Some(resample_evt) = self.interrupt.get_resample_evt() {
+            if wait_ctx
+                .add(resample_evt, Token::InterruptResample)
+                .is_err()
+            {
+                error!("failed adding resample event to WaitContext.");
+                return;
+            }
+        }
 
         'wait: loop {
             let events = match wait_ctx.wait() {
@@ -177,7 +185,7 @@ impl VirtioDevice for Rng {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn Interrupt>,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
