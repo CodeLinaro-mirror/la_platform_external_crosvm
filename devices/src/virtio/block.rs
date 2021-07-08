@@ -18,19 +18,19 @@ use log::{debug, error, info, warn};
 use base::Error as SysError;
 use base::Result as SysResult;
 use base::{
-    iov_max, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer,
+    iov_max, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer, Tube,
     WaitContext,
 };
 use data_model::{DataInit, Le16, Le32, Le64};
 use disk::DiskFile;
-use msg_socket::{MsgReceiver, MsgSender};
+
 use sync::Mutex;
-use vm_control::{DiskControlCommand, DiskControlResponseSocket, DiskControlResult};
+use vm_control::{DiskControlCommand, DiskControlResult};
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, VirtioDevice, Writer,
-    TYPE_BLOCK,
+    copy_config, DescriptorChain, DescriptorError, Queue, Reader, SignalableInterrupt,
+    VirtioDevice, Writer, TYPE_BLOCK,
 };
 
 const QUEUE_SIZE: u16 = 256;
@@ -252,7 +252,7 @@ impl ExecuteError {
 }
 
 struct Worker {
-    interrupt: Box<dyn Interrupt>,
+    interrupt: Box<dyn SignalableInterrupt>,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_image: Box<dyn DiskFile>,
@@ -260,7 +260,7 @@ struct Worker {
     read_only: bool,
     sparse: bool,
     id: Option<BlockId>,
-    control_socket: Option<DiskControlResponseSocket>,
+    control_tube: Option<Tube>,
 }
 
 impl Worker {
@@ -346,7 +346,7 @@ impl Worker {
 
             debug!("{}", format!("add_used {}", desc_index));
             queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &(*self.interrupt));
+            queue.trigger_interrupt(&self.mem, &*self.interrupt);
             queue.set_notify(&self.mem, true);
         }
     }
@@ -401,12 +401,17 @@ impl Worker {
         let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
             (&flush_timer, Token::FlushTimer),
             (&queue_evt, Token::QueueAvailable),
-            (self.interrupt.get_resample_evt(), Token::InterruptResample),
             (&kill_evt, Token::Kill),
         ])
+        .and_then(|wc| {
+            if let Some(resample_evt) = self.interrupt.get_resample_evt() {
+                wc.add(resample_evt, Token::InterruptResample)?;
+            }
+            Ok(wc)
+        })
         .and_then(|pc| {
-            if let Some(control_socket) = self.control_socket.as_ref() {
-                pc.add(control_socket, Token::ControlRequest)?
+            if let Some(control_tube) = self.control_tube.as_ref() {
+                pc.add(control_tube, Token::ControlRequest)?
             }
             Ok(pc)
         }) {
@@ -447,14 +452,14 @@ impl Worker {
                         self.process_queue(0, &mut flush_timer, &mut flush_timer_armed);
                     }
                     Token::ControlRequest => {
-                        let control_socket = match self.control_socket.as_ref() {
+                        let control_tube = match self.control_tube.as_ref() {
                             Some(cs) => cs,
                             None => {
                                 error!("received control socket request with no control socket");
                                 break 'wait;
                             }
                         };
-                        let req = match control_socket.recv() {
+                        let req = match control_tube.recv() {
                             Ok(req) => req,
                             Err(e) => {
                                 error!("control socket failed recv: {}", e);
@@ -472,8 +477,8 @@ impl Worker {
                             }
                         };
 
-                        // We already know there is Some control_socket used to recv a request.
-                        if let Err(e) = self.control_socket.as_ref().unwrap().send(&resp) {
+                        // We already know there is Some control_tube used to recv a request.
+                        if let Err(e) = self.control_tube.as_ref().unwrap().send(&resp) {
                             error!("control socket failed send: {}", e);
                             break 'wait;
                         }
@@ -503,7 +508,7 @@ pub struct Block {
     seg_max: u32,
     block_size: u32,
     id: Option<BlockId>,
-    control_socket: Option<DiskControlResponseSocket>,
+    control_tube: Option<Tube>,
 }
 
 fn build_config_space(disk_size: u64, seg_max: u32, block_size: u32) -> virtio_blk_config {
@@ -531,7 +536,7 @@ impl Block {
         sparse: bool,
         block_size: u32,
         id: Option<BlockId>,
-        control_socket: Option<DiskControlResponseSocket>,
+        control_tube: Option<Tube>,
     ) -> SysResult<Block> {
         if block_size % SECTOR_SIZE as u32 != 0 {
             error!(
@@ -580,7 +585,7 @@ impl Block {
             seg_max,
             block_size,
             id,
-            control_socket,
+            control_tube,
         })
     }
 
@@ -756,8 +761,8 @@ impl VirtioDevice for Block {
             keep_rds.extend(disk_image.as_raw_descriptors());
         }
 
-        if let Some(control_socket) = &self.control_socket {
-            keep_rds.push(control_socket.as_raw_descriptor());
+        if let Some(control_tube) = &self.control_tube {
+            keep_rds.push(control_tube.as_raw_descriptor());
         }
 
         keep_rds
@@ -786,7 +791,7 @@ impl VirtioDevice for Block {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn Interrupt>,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -808,7 +813,7 @@ impl VirtioDevice for Block {
         let disk_size = self.disk_size.clone();
         let id = self.id.take();
         if let Some(disk_image) = self.disk_image.take() {
-            let control_socket = self.control_socket.take();
+            let control_tube = self.control_tube.take();
             let worker_result =
                 thread::Builder::new()
                     .name("virtio_blk".to_string())
@@ -822,7 +827,7 @@ impl VirtioDevice for Block {
                             read_only,
                             sparse,
                             id,
-                            control_socket,
+                            control_tube,
                         };
                         worker.run(queue_evts.remove(0), kill_evt);
                         worker
@@ -856,7 +861,7 @@ impl VirtioDevice for Block {
                 }
                 Ok(worker) => {
                     self.disk_image = Some(worker.disk_image);
-                    self.control_socket = worker.control_socket;
+                    self.control_tube = worker.control_tube;
                     return true;
                 }
             }

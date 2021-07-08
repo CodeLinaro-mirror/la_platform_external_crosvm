@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::thread;
+use std::{path::PathBuf, thread};
 
 use data_model::{DataInit, Le64};
 
@@ -13,7 +13,7 @@ use vm_memory::GuestMemory;
 
 use super::worker::Worker;
 use super::{Error, Result};
-use crate::virtio::{copy_config, Interrupt, Queue, VirtioDevice, TYPE_VSOCK};
+use crate::virtio::{copy_config, SignalableInterrupt, Queue, VirtioDevice, TYPE_VSOCK};
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 3;
@@ -31,9 +31,15 @@ pub struct Vsock {
 
 impl Vsock {
     /// Create a new virtio-vsock device with the given VM cid.
-    pub fn new(base_features: u64, cid: u64, mem: &GuestMemory) -> Result<Vsock> {
+    pub fn new(
+        vhost_vsock_device_path: &PathBuf,
+        base_features: u64,
+        cid: u64,
+        mem: &GuestMemory,
+    ) -> Result<Vsock> {
         let kill_evt = Event::new().map_err(Error::CreateKillEvent)?;
-        let handle = VhostVsockHandle::new(mem).map_err(Error::VhostOpen)?;
+        let handle =
+            VhostVsockHandle::new(vhost_vsock_device_path, mem).map_err(Error::VhostOpen)?;
 
         let avail_features = base_features
             | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY
@@ -142,7 +148,7 @@ impl VirtioDevice for Vsock {
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Box<dyn Interrupt>,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

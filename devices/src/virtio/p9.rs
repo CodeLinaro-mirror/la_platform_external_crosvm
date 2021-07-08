@@ -12,7 +12,8 @@ use base::{error, warn, Error as SysError, Event, PollToken, RawDescriptor, Wait
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorError, Interrupt, Queue, Reader, VirtioDevice, Writer, TYPE_9P,
+    copy_config, DescriptorError, Queue, Reader, SignalableInterrupt, VirtioDevice,
+    Writer, TYPE_9P,
 };
 
 const QUEUE_SIZE: u16 = 128;
@@ -77,7 +78,7 @@ impl Display for P9Error {
 pub type P9Result<T> = result::Result<T, P9Error>;
 
 struct Worker {
-    interrupt: Box<dyn Interrupt>,
+    interrupt: Box<dyn SignalableInterrupt>,
     mem: GuestMemory,
     queue: Queue,
     server: p9::Server,
@@ -115,12 +116,14 @@ impl Worker {
             Kill,
         }
 
-        let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
-            (&queue_evt, Token::QueueReady),
-            (self.interrupt.get_resample_evt(), Token::InterruptResample),
-            (&kill_evt, Token::Kill),
-        ])
-        .map_err(P9Error::CreateWaitContext)?;
+        let wait_ctx: WaitContext<Token> =
+            WaitContext::build_with(&[(&queue_evt, Token::QueueReady), (&kill_evt, Token::Kill)])
+                .map_err(P9Error::CreateWaitContext)?;
+        if let Some(resample_evt) = self.interrupt.get_resample_evt() {
+            wait_ctx
+                .add(resample_evt, Token::InterruptResample)
+                .map_err(P9Error::CreateWaitContext)?;
+        }
 
         loop {
             let events = wait_ctx.wait().map_err(P9Error::WaitError)?;
@@ -216,7 +219,7 @@ impl VirtioDevice for P9 {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Box<dyn Interrupt>,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
