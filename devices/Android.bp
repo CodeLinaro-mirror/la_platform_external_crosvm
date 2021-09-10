@@ -59,8 +59,7 @@ rust_defaults {
         "libvirtio_sys",
         "libvm_control",
         "libvm_memory",
-	    "libvmm_vhost",
-        "liblog_rust",
+        "libvmm_vhost",
     ],
     proc_macros: [
         "libenumn",

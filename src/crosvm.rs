@@ -7,7 +7,6 @@
 
 pub mod argument;
 pub mod error;
-pub mod panic_hook;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 pub mod gdb;
 #[path = "linux.rs"]

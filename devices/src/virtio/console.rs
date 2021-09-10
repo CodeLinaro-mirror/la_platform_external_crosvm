@@ -13,7 +13,7 @@ use thiserror::Error as ThisError;
 use vm_memory::GuestMemory;
 
 use super::{
-    base_features, copy_config, Queue, Reader, SignalableInterrupt, VirtioDevice,
+    base_features, copy_config, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice,
     Writer, TYPE_CONSOLE,
 };
 use crate::{ProtectionType, SerialDevice};
@@ -447,7 +447,7 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

@@ -15,7 +15,7 @@ use vm_control::{FsMappingRequest, VmResponse};
 use vm_memory::GuestMemory;
 
 use crate::virtio::fs::{Error, Result};
-use crate::virtio::{Queue, Reader, SignalableInterrupt, Writer};
+use crate::virtio::{Interrupt, Queue, Reader, SignalableInterrupt, Writer};
 
 impl fuse::Reader for Reader {}
 
@@ -126,7 +126,7 @@ pub struct Worker<F: FileSystem + Sync> {
     mem: GuestMemory,
     queue: Queue,
     server: Arc<fuse::Server<F>>,
-    irq: Arc<dyn SignalableInterrupt>,
+    irq: Arc<Interrupt>,
     tube: Arc<Mutex<Tube>>,
     slot: u32,
 }
@@ -136,7 +136,7 @@ impl<F: FileSystem + Sync> Worker<F> {
         mem: GuestMemory,
         queue: Queue,
         server: Arc<fuse::Server<F>>,
-        irq: Arc<dyn SignalableInterrupt>,
+        irq: Arc<Interrupt>,
         tube: Arc<Mutex<Tube>>,
         slot: u32,
     ) -> Worker<F> {

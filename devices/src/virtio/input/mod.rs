@@ -16,7 +16,7 @@ use vm_memory::GuestMemory;
 
 use self::event_source::{EvdevEventSource, EventSource, SocketEventSource};
 use super::{
-    copy_config, DescriptorChain, DescriptorError, Queue, Reader, SignalableInterrupt,
+    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt,
     VirtioDevice, Writer, TYPE_INPUT,
 };
 use linux_input_sys::{virtio_input_event, InputEventDecoder};
@@ -340,7 +340,7 @@ impl VirtioInputConfig {
 }
 
 struct Worker<T: EventSource> {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     event_source: T,
     event_queue: Queue,
     status_queue: Queue,
@@ -593,7 +593,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

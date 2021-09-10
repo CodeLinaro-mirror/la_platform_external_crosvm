@@ -58,18 +58,18 @@ pub use self::virtio_device::*;
 pub use self::virtio_pci_device::*;
 pub use self::wl::*;
 
-pub use crate::ProtectionType;
+use crate::ProtectionType;
 use std::cmp;
 use std::convert::TryFrom;
 
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 
-pub const DEVICE_RESET: u32 = 0x0;
-pub const DEVICE_ACKNOWLEDGE: u32 = 0x01;
-pub const DEVICE_DRIVER: u32 = 0x02;
-pub const DEVICE_DRIVER_OK: u32 = 0x04;
-pub const DEVICE_FEATURES_OK: u32 = 0x08;
-pub const DEVICE_FAILED: u32 = 0x80;
+const DEVICE_RESET: u32 = 0x0;
+const DEVICE_ACKNOWLEDGE: u32 = 0x01;
+const DEVICE_DRIVER: u32 = 0x02;
+const DEVICE_DRIVER_OK: u32 = 0x04;
+const DEVICE_FEATURES_OK: u32 = 0x08;
+const DEVICE_FAILED: u32 = 0x80;
 
 // Types taken from linux/virtio_ids.h
 const TYPE_NET: u32 = 1;
@@ -101,10 +101,10 @@ const TYPE_TPM: u32 = MAX_VIRTIO_DEVICE_ID - 1;
 pub const VIRTIO_F_VERSION_1: u32 = 32;
 const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
 
-pub const INTERRUPT_STATUS_USED_RING: u32 = 0x1;
-pub const INTERRUPT_STATUS_CONFIG_CHANGED: u32 = 0x2;
+const INTERRUPT_STATUS_USED_RING: u32 = 0x1;
+const INTERRUPT_STATUS_CONFIG_CHANGED: u32 = 0x2;
 
-pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
+const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
 
 /// Offset from the base MMIO address of a virtio device used by the guest to notify the device of
 /// queue events.

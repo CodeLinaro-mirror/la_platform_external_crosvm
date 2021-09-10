@@ -7,11 +7,9 @@ use crate::pci::MsixConfig;
 use base::Event;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::rc::Rc;
 use sync::Mutex;
-use std::cell::RefCell;
 
-pub trait SignalableInterrupt : Send + Sync {
+pub trait SignalableInterrupt {
     /// Writes to the irqfd to VMM to deliver virtual interrupt to the guest.
     fn signal(&self, vector: u16, interrupt_status_mask: u32);
 
@@ -29,19 +27,6 @@ pub trait SignalableInterrupt : Send + Sync {
     /// Reads the status and writes to the interrupt event. Doesn't read the resample event, it
     /// assumes the resample has been requested.
     fn do_interrupt_resample(&self);
-
-    /// Handle interrupt resampling event, reading the value from the event and doing the resample.
-    fn interrupt_resample(&self);
-
-    /// Get a reference to the msix configuration
-    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>>;
-
-    /// Get a interrupt object contained in reference counter.
-    fn by_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>>;
-
-    /// Get a interrupt object contained in automic reference counter.
-    fn by_arc(&self) -> Arc<dyn SignalableInterrupt>;
-
 }
 
 pub struct Interrupt {
@@ -94,29 +79,6 @@ impl SignalableInterrupt for Interrupt {
             self.interrupt_evt.write(1).unwrap();
         }
     }
-
-    /// Get a reference to the interrupt event.
-    pub fn get_interrupt_evt(&self) -> &Event {
-        &self.interrupt_evt
-    }
-
-    fn interrupt_resample(&self) {
-        let _ = self.interrupt_resample_evt.read();
-        self.do_interrupt_resample();
-    }
-
-    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
-        &self.msix_config
-    }
-
-    fn by_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>> {
-        Rc::new(RefCell::new(self.try_clone()))
-    }
-
-    fn by_arc(&self) -> Arc<dyn SignalableInterrupt> {
-        Arc::new(self.try_clone())
-    }
-
 }
 
 impl<I: SignalableInterrupt> SignalableInterrupt for Arc<Mutex<I>> {
@@ -157,15 +119,15 @@ impl Interrupt {
         }
     }
 
-    /// Shallow copy.
-    fn try_clone(&self) -> Self {
-        Self{
-              interrupt_status: self.interrupt_status.clone(),
-              interrupt_evt: self.interrupt_evt.try_clone().unwrap(),
-              interrupt_resample_evt: self.interrupt_resample_evt.try_clone().unwrap(),
-              msix_config: self.msix_config.clone(),
-              config_msix_vector: self.config_msix_vector.clone(),
-            }
+    /// Get a reference to the interrupt event.
+    pub fn get_interrupt_evt(&self) -> &Event {
+        &self.interrupt_evt
+    }
+
+    /// Handle interrupt resampling event, reading the value from the event and doing the resample.
+    pub fn interrupt_resample(&self) {
+        let _ = self.interrupt_resample_evt.read();
+        self.do_interrupt_resample();
     }
 
     /// Get a reference to the msix configuration

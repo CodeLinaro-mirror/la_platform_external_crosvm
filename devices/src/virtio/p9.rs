@@ -12,7 +12,7 @@ use base::{error, warn, Error as SysError, Event, PollToken, RawDescriptor, Wait
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorError, Queue, Reader, SignalableInterrupt, VirtioDevice,
+    copy_config, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice,
     Writer, TYPE_9P,
 };
 
@@ -78,7 +78,7 @@ impl Display for P9Error {
 pub type P9Result<T> = result::Result<T, P9Error>;
 
 struct Worker {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     mem: GuestMemory,
     queue: Queue,
     server: p9::Server,
@@ -218,7 +218,7 @@ impl VirtioDevice for P9 {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

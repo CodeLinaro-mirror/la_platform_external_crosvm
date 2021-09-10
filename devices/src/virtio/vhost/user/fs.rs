@@ -20,7 +20,7 @@ use crate::virtio::vhost::user::handler::VhostUserHandler;
 use crate::virtio::vhost::user::worker::Worker;
 use crate::virtio::vhost::user::{Error, Result};
 use crate::virtio::{copy_config, TYPE_FS};
-use crate::virtio::{SignalableInterrupt, Queue, VirtioDevice};
+use crate::virtio::{Interrupt, Queue, VirtioDevice};
 
 pub struct Fs {
     cfg: virtio_fs_config,
@@ -120,14 +120,14 @@ impl VirtioDevice for Fs {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &*interrupt, &queues, &queue_evts)
+            .activate(&mem, &interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;

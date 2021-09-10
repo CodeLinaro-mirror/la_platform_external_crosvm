@@ -12,13 +12,10 @@ use std::thread;
 use std::time::Duration;
 use std::u32;
 
-extern crate log;
-
-use log::{debug, error, info, warn};
 use base::Error as SysError;
 use base::Result as SysResult;
 use base::{
-    iov_max, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer, Tube,
+    error, info, iov_max, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer, Tube,
     WaitContext,
 };
 use data_model::DataInit;
@@ -30,7 +27,7 @@ use vm_memory::GuestMemory;
 
 use super::common::*;
 use crate::virtio::{
-    copy_config, DescriptorChain, DescriptorError, Queue, Reader, SignalableInterrupt,
+    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt,
     VirtioDevice, Writer, TYPE_BLOCK,
 };
 
@@ -149,7 +146,7 @@ impl ExecuteError {
 }
 
 struct Worker {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_image: Box<dyn DiskFile>,
@@ -241,9 +238,8 @@ impl Worker {
                 }
             };
 
-            debug!("{}", format!("add_used {}", desc_index));
             queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &*self.interrupt);
+            queue.trigger_interrupt(&self.mem, &self.interrupt);
             queue.set_notify(&self.mem, true);
         }
     }
@@ -511,7 +507,6 @@ impl Block {
                     .checked_shl(u32::from(SECTOR_SHIFT))
                     .ok_or(ExecuteError::OutOfRange)?;
                 check_range(offset, data_len as u64, disk_size)?;
-                debug!("{}", format!("Read {}", sector));
                 writer
                     .write_all_from_at(disk, data_len, offset)
                     .map_err(|desc_error| ExecuteError::ReadIo {
@@ -661,7 +656,7 @@ impl VirtioDevice for Block {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

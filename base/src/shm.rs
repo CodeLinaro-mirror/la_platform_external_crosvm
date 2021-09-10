@@ -60,15 +60,9 @@ pub trait Unix {
         SysUtilSharedMemory::from_file(file).map(SharedMemory)
     }
 
-    fn from_filesize(file: File, size: u64) -> Result<SharedMemory> {
-        SysUtilSharedMemory::from_filesize(file, size).map(|shm| SharedMemory(shm))
-    }
-
     fn get_seals(&self) -> Result<MemfdSeals>;
 
     fn add_seals(&mut self, seals: MemfdSeals) -> Result<()>;
-
-    fn set_size(&mut self, size: u64) -> Result<()> ;
 }
 
 impl Unix for SharedMemory {
@@ -78,10 +72,6 @@ impl Unix for SharedMemory {
 
     fn add_seals(&mut self, seals: MemfdSeals) -> Result<()> {
         self.0.add_seals(seals)
-    }
-
-    fn set_size(&mut self, size: u64) -> Result<()> {
-        self.0.set_size(size)
     }
 }
 

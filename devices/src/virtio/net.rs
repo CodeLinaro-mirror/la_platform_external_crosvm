@@ -23,7 +23,7 @@ use virtio_sys::virtio_net::{
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorError, Queue, Reader, SignalableInterrupt, VirtioDevice,
+    copy_config, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice,
     Writer, TYPE_NET,
 };
 
@@ -327,7 +327,7 @@ pub enum Token {
 }
 
 struct Worker<T: TapT> {
-    interrupt: Arc<dyn SignalableInterrupt>,
+    interrupt: Arc<Interrupt>,
     mem: GuestMemory,
     rx_queue: Queue,
     tx_queue: Queue,
@@ -692,7 +692,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -718,7 +718,7 @@ where
             );
             return;
         }
-        let interrupt_arc = interrupt.by_arc();
+        let interrupt_arc = Arc::new(interrupt);
         for i in 0..vq_pairs {
             let tap = self.taps.remove(0);
             let acked_features = self.acked_features;

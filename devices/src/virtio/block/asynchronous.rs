@@ -34,7 +34,7 @@ use vm_memory::GuestMemory;
 
 use super::common::*;
 use crate::virtio::{
-    copy_config, DescriptorChain, DescriptorError, Queue, Reader, SignalableInterrupt,
+    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt,
     VirtioDevice, Writer, TYPE_BLOCK,
 };
 
@@ -234,7 +234,7 @@ async fn handle_queue(
     disk_state: Rc<AsyncMutex<DiskState>>,
     queue: Rc<RefCell<Queue>>,
     evt: EventAsync,
-    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
+    interrupt: Rc<RefCell<Interrupt>>,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
@@ -270,7 +270,7 @@ async fn handle_queue(
 
 async fn handle_irq_resample(
     ex: &Executor,
-    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
+    interrupt: Rc<RefCell<Interrupt>>,
 ) -> result::Result<(), ControlError> {
     let resample_evt = if let Some(resample_evt) = interrupt.borrow().get_resample_evt() {
         let resample_evt = resample_evt
@@ -305,7 +305,7 @@ async fn wait_kill(kill_evt: EventAsync) {
 
 async fn handle_command_tube(
     command_tube: &Option<AsyncTube>,
-    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
+    interrupt: Rc<RefCell<Interrupt>>,
     disk_state: Rc<AsyncMutex<DiskState>>,
 ) -> Result<(), ExecuteError> {
     let command_tube = match command_tube {
@@ -401,7 +401,7 @@ pub async fn flush_disk(
 // a resizing command.
 fn run_worker(
     ex: Executor,
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_state: &Rc<AsyncMutex<DiskState>>,
@@ -413,7 +413,7 @@ fn run_worker(
         return Err("Number of queues and events must match.".to_string());
     }
 
-    let interrupt = interrupt.by_rc();
+    let interrupt = Rc::new(RefCell::new(interrupt));
 
     // One flush timer per disk.
     let timer = Timer::new().expect("Failed to create a timer");
@@ -774,7 +774,7 @@ impl VirtioDevice for BlockAsync {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

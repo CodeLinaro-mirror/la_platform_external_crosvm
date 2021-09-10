@@ -1565,7 +1565,7 @@ pub fn process_out_queue<I: SignalableInterrupt>(
 }
 
 struct Worker {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     mem: GuestMemory,
     in_queue: Queue,
     out_queue: Queue,
@@ -1575,7 +1575,7 @@ struct Worker {
 impl Worker {
     fn new(
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         in_queue: Queue,
         out_queue: Queue,
         wayland_paths: Map<String, PathBuf>,
@@ -1777,7 +1777,7 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

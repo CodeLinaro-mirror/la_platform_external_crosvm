@@ -12,7 +12,7 @@ mod ac97_bus_master;
 mod ac97_mixer;
 #[cfg(feature = "audio")]
 mod ac97_regs;
-pub mod msix;
+mod msix;
 mod pci_configuration;
 mod pci_device;
 mod pci_root;

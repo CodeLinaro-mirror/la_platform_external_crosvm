@@ -18,7 +18,7 @@ use vmm_vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioF
 use crate::virtio::vhost::user::handler::VhostUserHandler;
 use crate::virtio::vhost::user::worker::Worker;
 use crate::virtio::vhost::user::Error;
-use crate::virtio::{SignalableInterrupt, Queue, VirtioDevice, VirtioNetConfig, TYPE_NET};
+use crate::virtio::{Interrupt, Queue, VirtioDevice, VirtioNetConfig, TYPE_NET};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -119,14 +119,14 @@ impl VirtioDevice for Net {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &*interrupt, &queues, &queue_evts)
+            .activate(&mem, &interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;
