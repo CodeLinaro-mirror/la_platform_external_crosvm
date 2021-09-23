@@ -95,6 +95,11 @@ impl SignalableInterrupt for Interrupt {
         }
     }
 
+    /// Get a reference to the interrupt event.
+    pub fn get_interrupt_evt(&self) -> &Event {
+        &self.interrupt_evt
+    }
+
     fn interrupt_resample(&self) {
         let _ = self.interrupt_resample_evt.read();
         self.do_interrupt_resample();
@@ -112,6 +117,27 @@ impl SignalableInterrupt for Interrupt {
         Arc::new(self.try_clone())
     }
 
+}
+
+impl<I: SignalableInterrupt> SignalableInterrupt for Arc<Mutex<I>> {
+    fn signal(&self, vector: u16, interrupt_status_mask: u32) {
+        self.lock().signal(vector, interrupt_status_mask);
+    }
+
+    fn signal_used_queue(&self, vector: u16) {
+        self.lock().signal_used_queue(vector);
+    }
+
+    fn signal_config_changed(&self) {
+        self.lock().signal_config_changed();
+    }
+
+    fn get_resample_evt(&self) -> Option<&Event> {
+        // Cannot get resample event from a borrowed item.
+        None
+    }
+
+    fn do_interrupt_resample(&self) {}
 }
 
 impl Interrupt {

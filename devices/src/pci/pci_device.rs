@@ -10,7 +10,8 @@ use resources::{Error as SystemAllocatorFaliure, SystemAllocator};
 
 use crate::bus::ConfigWriteResult;
 use crate::pci::pci_configuration::{
-    self, COMMAND_REG, COMMAND_REG_IO_SPACE_MASK, COMMAND_REG_MEMORY_SPACE_MASK,
+    self, PciBarConfiguration, COMMAND_REG, COMMAND_REG_IO_SPACE_MASK,
+    COMMAND_REG_MEMORY_SPACE_MASK,
 };
 use crate::pci::{PciAddress, PciInterruptPin};
 #[cfg(feature = "audio")]
@@ -26,7 +27,7 @@ pub enum Error {
     /// Registering an IO BAR failed.
     IoRegistrationFailed(u64, pci_configuration::Error),
     /// Create cras client failed.
-    #[cfg(feature = "audio")]
+    #[cfg(all(feature = "audio", feature = "audio_cras"))]
     CreateCrasClientFailed(libcras::Error),
     /// Create VioS client failed.
     #[cfg(feature = "audio")]
@@ -44,7 +45,7 @@ impl Display for Error {
 
         match self {
             CapabilitiesSetup(e) => write!(f, "failed to add capability {}", e),
-            #[cfg(feature = "audio")]
+            #[cfg(all(feature = "audio", feature = "audio_cras"))]
             CreateCrasClientFailed(e) => write!(f, "failed to create CRAS Client: {}", e),
             #[cfg(feature = "audio")]
             CreateViosClientFailed(e) => write!(f, "failed to create VioS Client: {}", e),
@@ -96,6 +97,9 @@ pub trait PciDevice: Send {
     ) -> Result<Vec<(u64, u64)>> {
         Ok(Vec::new())
     }
+
+    /// Returns the configuration of a base address register, if present.
+    fn get_bar_configuration(&self, bar_num: usize) -> Option<PciBarConfiguration>;
 
     /// Register any capabilties specified by the device.
     fn register_device_capabilities(&mut self) -> Result<()> {
@@ -211,6 +215,9 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
     fn allocate_device_bars(&mut self, resources: &mut SystemAllocator) -> Result<Vec<(u64, u64)>> {
         (**self).allocate_device_bars(resources)
     }
+    fn get_bar_configuration(&self, bar_num: usize) -> Option<PciBarConfiguration> {
+        (**self).get_bar_configuration(bar_num)
+    }
     fn register_device_capabilities(&mut self) -> Result<()> {
         (**self).register_device_capabilities()
     }
@@ -267,6 +274,10 @@ mod tests {
 
         fn allocate_address(&mut self, resources: &mut SystemAllocator) -> Result<PciAddress> {
             Err(Error::PciAllocationFailed)
+        }
+
+        fn get_bar_configuration(&self, bar_num: usize) -> Option<PciBarConfiguration> {
+            None
         }
     }
 

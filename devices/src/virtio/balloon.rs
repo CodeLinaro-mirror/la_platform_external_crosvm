@@ -178,7 +178,7 @@ async fn handle_queue<F>(
             error!("balloon: failed to process inflate addresses: {}", e);
         }
         queue.add_used(mem, index, 0);
-        interrupt.borrow_mut().signal_used_queue(queue.vector);
+        queue.trigger_interrupt(mem, &*interrupt.borrow());
     }
 }
 
@@ -238,7 +238,7 @@ async fn handle_stats_queue(
 
         // Request a new stats_desc to the guest.
         queue.add_used(&mem, index, 0);
-        interrupt.borrow_mut().signal_used_queue(queue.vector);
+        queue.trigger_interrupt(&mem, &*interrupt.borrow());
     }
 }
 
@@ -367,7 +367,7 @@ fn run_worker(
         pin_mut!(command);
 
         // Process any requests to resample the irq value.
-        let resample = handle_irq_resample(&ex, interrupt.clone());
+        let resample = handle_irq_resample(&ex, interrupt);
         pin_mut!(resample);
 
         // Exit if the kill event is triggered.

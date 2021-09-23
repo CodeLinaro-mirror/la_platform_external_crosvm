@@ -6,8 +6,14 @@
 set -e
 
 cargo2android() {
-  cargo2android.py --run --device --tests --dependencies $@
-  rm -r cargo.out target.tmp
+  # Some crates need special options to cargo2android.py, if there's a config file then use it.
+  if [[ -f "cargo2android.json" ]]; then
+    cargo2android.py --config cargo2android.json
+  else
+    cargo2android.py --run --device --tests $@
+  fi
+  rm -f cargo.out
+  rm -rf target.tmp || /bin/true
 }
 
 # Run in the main crosvm directory.
