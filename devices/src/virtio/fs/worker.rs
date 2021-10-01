@@ -6,15 +6,16 @@ use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::AsRawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use base::{error, Event, PollToken, SafeDescriptor, Tube, WaitContext};
 use fuse::filesystem::{FileSystem, ZeroCopyReader, ZeroCopyWriter};
+use sync::Mutex;
 use vm_control::{FsMappingRequest, VmResponse};
 use vm_memory::GuestMemory;
 
 use crate::virtio::fs::{Error, Result};
-use crate::virtio::{Queue, Reader, SignalableInterrupt, Writer};
+use crate::virtio::{Interrupt, Queue, Reader, SignalableInterrupt, Writer};
 
 impl fuse::Reader for Reader {}
 
@@ -55,10 +56,7 @@ impl Mapper {
     }
 
     fn process_request(&self, request: &FsMappingRequest) -> io::Result<()> {
-        let tube = self.tube.lock().map_err(|e| {
-            error!("failed to lock tube: {}", e);
-            io::Error::from_raw_os_error(libc::EINVAL)
-        })?;
+        let tube = self.tube.lock();
 
         tube.send(request).map_err(|e| {
             error!("failed to send request {:?}: {}", request, e);
@@ -128,7 +126,7 @@ pub struct Worker<F: FileSystem + Sync> {
     mem: GuestMemory,
     queue: Queue,
     server: Arc<fuse::Server<F>>,
-    irq: Arc<dyn SignalableInterrupt>,
+    irq: Arc<Interrupt>,
     tube: Arc<Mutex<Tube>>,
     slot: u32,
 }
@@ -138,7 +136,7 @@ impl<F: FileSystem + Sync> Worker<F> {
         mem: GuestMemory,
         queue: Queue,
         server: Arc<fuse::Server<F>>,
-        irq: Arc<dyn SignalableInterrupt>,
+        irq: Arc<Interrupt>,
         tube: Arc<Mutex<Tube>>,
         slot: u32,
     ) -> Worker<F> {
@@ -171,7 +169,7 @@ impl<F: FileSystem + Sync> Worker<F> {
         }
 
         if needs_interrupt {
-            self.irq.signal_used_queue(self.queue.vector);
+            self.queue.trigger_interrupt(&self.mem, &*self.irq);
         }
 
         Ok(())

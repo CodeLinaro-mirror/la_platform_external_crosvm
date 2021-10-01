@@ -6,9 +6,7 @@ use std::cmp::min;
 use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
 
-extern crate log;
-use log::{error, debug, info};
-
+use base::error;
 use cros_async::{AsyncError, EventAsync};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::{GuestAddress, GuestMemory};
@@ -223,8 +221,8 @@ pub struct Queue {
     /// Guest physical address of the used ring
     pub used_ring: GuestAddress,
 
-    next_avail: Wrapping<u16>,
-    next_used: Wrapping<u16>,
+    pub next_avail: Wrapping<u16>,
+    pub next_used: Wrapping<u16>,
 
     // Device feature bits accepted by the driver
     features: u64,
@@ -347,10 +345,12 @@ impl Queue {
     //
     // This value is only used if the `VIRTIO_F_EVENT_IDX` feature has been negotiated.
     fn set_avail_event(&mut self, mem: &GuestMemory, avail_index: Wrapping<u16>) {
+        // Ensure that all previous writes are available before this one.
+        fence(Ordering::Release);
+
         let avail_event_addr = self
             .used_ring
             .unchecked_add(4 + 8 * u64::from(self.actual_size()));
-        debug!("{}", format!("desc_table {} avail_index {}", self.desc_table, avail_index.0));
         mem.write_obj_at_addr(avail_index.0, avail_event_addr)
             .unwrap();
     }
@@ -361,6 +361,10 @@ impl Queue {
     #[allow(dead_code)]
     fn get_avail_flag(&self, mem: &GuestMemory, flag: u16) -> bool {
         let avail_flags: u16 = mem.read_obj_from_addr(self.avail_ring).unwrap();
+
+        // Don't allow subsequent reads to be ordered before the avail_flags read.
+        fence(Ordering::Acquire);
+
         avail_flags & flag == flag
     }
 
@@ -376,6 +380,10 @@ impl Queue {
             .avail_ring
             .unchecked_add(4 + 2 * u64::from(self.actual_size()));
         let used_event: u16 = mem.read_obj_from_addr(used_event_addr).unwrap();
+
+        // Prevent any reads after this from being ordered before the used_event read.
+        fence(Ordering::Acquire);
+
         Wrapping(used_event)
     }
 
@@ -396,6 +404,9 @@ impl Queue {
     //
     // Changes the bit specified by the mask in `flag` to `value`.
     fn set_used_flag(&mut self, mem: &GuestMemory, flag: u16, value: bool) {
+        // This fence ensures all descriptor writes are visible before the flag update.
+        fence(Ordering::Release);
+
         let mut used_flags: u16 = mem.read_obj_from_addr(self.used_ring).unwrap();
         if value {
             used_flags |= flag;
@@ -416,9 +427,7 @@ impl Queue {
         let avail_index = self.get_avail_index(mem);
         let avail_len = avail_index - self.next_avail;
 
-        debug!("{}", format!("desc_table {} avail_idx {} avail_len {}", self.desc_table, avail_index, avail_len.0));
         if avail_len.0 > queue_size || self.next_avail == avail_index {
-            debug!("{}", format!("desc_table {} peek returns none", self.desc_table));
             return None;
         }
 
@@ -490,13 +499,7 @@ impl Queue {
             .unwrap();
 
         self.next_used += Wrapping(1);
-        debug!("{}", format!("desc_table {} next_used {}", self.desc_table, self.next_used.0));
         self.set_used_index(mem, self.next_used);
-    }
-
-    /// Updates the index at which the driver should signal the device next.
-    pub fn update_int_required(&mut self, mem: &GuestMemory) {
-        self.set_avail_event(mem, self.get_avail_index(mem));
     }
 
     /// Enable / Disable guest notify device that requests are available on
@@ -508,9 +511,9 @@ impl Queue {
             self.notification_disable_count += 1;
         }
 
-        if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) != 0 {
-            self.update_int_required(mem);
-        } else {
+        // We should only set VIRTQ_USED_F_NO_NOTIFY when the VIRTIO_RING_F_EVENT_IDX feature has
+        // not been negotiated.
+        if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) == 0 {
             self.set_used_flag(
                 mem,
                 VIRTQ_USED_F_NO_NOTIFY,
@@ -529,13 +532,7 @@ impl Queue {
             // so no need to inject new interrupt.
             self.next_used - used_event - Wrapping(1) < self.next_used - self.last_used
         } else {
-            // TODO(b/172975852): This branch should check the flag that requests interrupt
-            // supression:
-            // ```
-            // !self.get_avail_flag(mem, VIRTQ_AVAIL_F_NO_INTERRUPT)
-            // ```
-            // Re-enable the flag check once the missing interrupt issue is debugged.
-            true
+            !self.get_avail_flag(mem, VIRTQ_AVAIL_F_NO_INTERRUPT)
         }
     }
 

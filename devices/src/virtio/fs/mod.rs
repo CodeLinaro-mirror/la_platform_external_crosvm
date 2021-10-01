@@ -5,12 +5,13 @@
 use std::fmt;
 use std::io;
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use base::{error, warn, AsRawDescriptor, Error as SysError, Event, RawDescriptor, Tube};
 use data_model::{DataInit, Le32};
 use resources::Alloc;
+use sync::Mutex;
 use vm_control::{FsMappingRequest, VmResponse};
 use vm_memory::GuestMemory;
 
@@ -18,7 +19,7 @@ use crate::pci::{
     PciAddress, PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciCapability,
 };
 use crate::virtio::{
-    copy_config, DescriptorError, SignalableInterrupt, PciCapabilityType, Queue, VirtioDevice,
+    copy_config, DescriptorError, Interrupt, PciCapabilityType, Queue, VirtioDevice,
     VirtioPciShmCap, TYPE_FS,
 };
 
@@ -238,7 +239,7 @@ impl VirtioDevice for Fs {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
@@ -249,7 +250,7 @@ impl VirtioDevice for Fs {
         let fs = self.fs.take().expect("missing file system implementation");
 
         let server = Arc::new(Server::new(fs));
-        let irq = interrupt.by_arc();
+        let irq = Arc::new(interrupt);
         let socket = self.tube.take().expect("missing mapping socket");
         let mut slot = 0;
 

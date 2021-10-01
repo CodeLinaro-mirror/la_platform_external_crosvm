@@ -150,13 +150,6 @@ impl SharedMemory {
         })
     }
 
-    pub fn from_filesize(mut file: File, size: u64) -> Result<SharedMemory> {
-        Ok(SharedMemory {
-            fd: file,
-            size: size,
-        })
-    }
-
     /// Gets the memfd seals that have already been added to this.
     ///
     /// This may fail if this instance was not constructed from a memfd.

@@ -14,7 +14,7 @@ use vm_control::{MemSlot, VmMsyncRequest, VmMsyncResponse};
 use vm_memory::{GuestAddress, GuestMemory};
 
 use super::{
-    copy_config, DescriptorChain, DescriptorError, Queue, Reader, SignalableInterrupt,
+    copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt,
     VirtioDevice, Writer, TYPE_PMEM,
 };
 
@@ -80,7 +80,7 @@ impl ::std::error::Error for Error {}
 type Result<T> = ::std::result::Result<T, Error>;
 
 struct Worker {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     queue: Queue,
     memory: GuestMemory,
     pmem_device_tube: Tube,
@@ -217,7 +217,7 @@ impl Worker {
                 }
             }
             if needs_interrupt {
-                self.interrupt.signal_used_queue(self.queue.vector);
+                self.queue.trigger_interrupt(&self.memory, &self.interrupt);
             }
         }
     }
@@ -309,7 +309,7 @@ impl VirtioDevice for Pmem {
     fn activate(
         &mut self,
         memory: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_events: Vec<Event>,
     ) {

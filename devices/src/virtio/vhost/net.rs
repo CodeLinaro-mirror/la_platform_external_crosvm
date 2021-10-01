@@ -4,7 +4,7 @@
 
 use std::mem;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::Path;
 use std::thread;
 
 use net_util::{MacAddress, TapT};
@@ -18,7 +18,7 @@ use super::control_socket::*;
 use super::worker::Worker;
 use super::{Error, Result};
 use crate::pci::MsixStatus;
-use crate::virtio::{Interrupt, SignalableInterrupt, Queue, VirtioDevice, TYPE_NET};
+use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_NET};
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 2;
@@ -45,7 +45,7 @@ where
     /// Create a new virtio network device with the given IP address and
     /// netmask.
     pub fn new(
-        vhost_net_device_path: &PathBuf,
+        vhost_net_device_path: &Path,
         base_features: u64,
         ip_addr: Ipv4Addr,
         netmask: Ipv4Addr,
@@ -191,7 +191,7 @@ where
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
@@ -355,6 +355,7 @@ pub mod tests {
     use crate::virtio::VIRTIO_MSI_NO_VECTOR;
     use crate::ProtectionType;
     use net_util::fakes::FakeTap;
+    use std::path::PathBuf;
     use std::result;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
@@ -414,13 +415,13 @@ pub mod tests {
         // Just testing that we don't panic, for now
         net.activate(
             guest_memory,
-            Box::new(Interrupt::new(
+            Interrupt::new(
                 Arc::new(AtomicUsize::new(0)),
                 Event::new().unwrap(),
                 Event::new().unwrap(),
                 None,
                 VIRTIO_MSI_NO_VECTOR,
-            )),
+            ),
             vec![Queue::new(1)],
             vec![Event::new().unwrap()],
         );

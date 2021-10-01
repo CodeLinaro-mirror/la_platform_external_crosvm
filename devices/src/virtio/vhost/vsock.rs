@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::{path::PathBuf, thread};
+use std::{path::Path, thread};
 
 use data_model::{DataInit, Le64};
 
@@ -13,7 +13,7 @@ use vm_memory::GuestMemory;
 
 use super::worker::Worker;
 use super::{Error, Result};
-use crate::virtio::{copy_config, SignalableInterrupt, Queue, VirtioDevice, TYPE_VSOCK};
+use crate::virtio::{copy_config, Interrupt, Queue, VirtioDevice, TYPE_VSOCK};
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 3;
@@ -32,7 +32,7 @@ pub struct Vsock {
 impl Vsock {
     /// Create a new virtio-vsock device with the given VM cid.
     pub fn new(
-        vhost_vsock_device_path: &PathBuf,
+        vhost_vsock_device_path: &Path,
         base_features: u64,
         cid: u64,
         mem: &GuestMemory,
@@ -148,7 +148,7 @@ impl VirtioDevice for Vsock {
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

@@ -9,12 +9,12 @@ use vhost::Vhost;
 
 use super::control_socket::{VhostDevRequest, VhostDevResponse};
 use super::{Error, Result};
-use crate::virtio::{Queue, SignalableInterrupt};
+use crate::virtio::{Interrupt, Queue, SignalableInterrupt};
 use libc::EIO;
 
 /// Worker that takes care of running the vhost device.
 pub struct Worker<T: Vhost> {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     queues: Vec<Queue>,
     pub vhost_handle: T,
     pub vhost_interrupt: Vec<Event>,
@@ -28,7 +28,7 @@ impl<T: Vhost> Worker<T> {
         queues: Vec<Queue>,
         vhost_handle: T,
         vhost_interrupt: Vec<Event>,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         acked_features: u64,
         kill_evt: Event,
         response_tube: Option<Tube>,
