@@ -8,8 +8,10 @@ use base::Event;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use sync::Mutex;
+use std::rc::Rc;
+use std::cell::RefCell;
 
-pub trait SignalableInterrupt {
+pub trait SignalableInterrupt: Send + Sync {
     /// Writes to the irqfd to VMM to deliver virtual interrupt to the guest.
     fn signal(&self, vector: u16, interrupt_status_mask: u32);
 
@@ -27,6 +29,24 @@ pub trait SignalableInterrupt {
     /// Reads the status and writes to the interrupt event. Doesn't read the resample event, it
     /// assumes the resample has been requested.
     fn do_interrupt_resample(&self);
+
+    /// Get a reference to the interrupt event.
+    fn get_interrupt_evt(&self) -> Option<&Event>;
+
+    /// Handle interrupt resampling event, reading the value from the event and doing the resample.
+    fn interrupt_resample(&self);
+
+    /// Get a reference to the msix configuration
+    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>>;
+
+    /// Get an interrupt object contained in reference counter.
+    fn as_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>>;
+
+    /// Get an interrupt object contained in automic reference counter.
+    fn as_arc(&self) -> Arc<dyn SignalableInterrupt>;
+
+    /// Get a reference
+    fn as_ref(&self) -> &dyn SignalableInterrupt;
 }
 
 pub struct Interrupt {
@@ -79,6 +99,31 @@ impl SignalableInterrupt for Interrupt {
             self.interrupt_evt.write(1).unwrap();
         }
     }
+
+    fn interrupt_resample(&self) {
+        let _ = self.interrupt_resample_evt.read();
+        self.do_interrupt_resample();
+    }
+
+    fn get_interrupt_evt(&self) -> Option<&Event> {
+        Some(&self.interrupt_evt)
+    }
+
+    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
+        &self.msix_config
+    }
+
+    fn as_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>> {
+        Rc::new(RefCell::new(self.try_clone()))
+    }
+
+    fn as_arc(&self) -> Arc<dyn SignalableInterrupt> {
+        Arc::new(self.try_clone())
+    }
+
+    fn as_ref(&self) -> &dyn SignalableInterrupt {
+        self
+    }
 }
 
 impl<I: SignalableInterrupt> SignalableInterrupt for Arc<Mutex<I>> {
@@ -100,6 +145,28 @@ impl<I: SignalableInterrupt> SignalableInterrupt for Arc<Mutex<I>> {
     }
 
     fn do_interrupt_resample(&self) {}
+
+    fn interrupt_resample(&self) {}
+
+    fn get_interrupt_evt(&self) -> Option<&Event> {
+        None
+    }
+
+    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
+        &None
+    }
+
+    fn as_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>> {
+        self.lock().as_rc()
+    }
+
+    fn as_arc(&self) -> Arc<dyn SignalableInterrupt> {
+        self.lock().as_arc()
+    }
+
+    fn as_ref(&self) -> &dyn SignalableInterrupt {
+        self
+    }
 }
 
 impl Interrupt {
@@ -119,19 +186,14 @@ impl Interrupt {
         }
     }
 
-    /// Get a reference to the interrupt event.
-    pub fn get_interrupt_evt(&self) -> &Event {
-        &self.interrupt_evt
+    fn try_clone(&self) -> Self {
+        Self{
+              interrupt_status: self.interrupt_status.clone(),
+              interrupt_evt: self.interrupt_evt.try_clone().unwrap(),
+              interrupt_resample_evt: self.interrupt_resample_evt.try_clone().unwrap(),
+              msix_config: self.msix_config.clone(),
+              config_msix_vector: self.config_msix_vector.clone(),
+            }
     }
 
-    /// Handle interrupt resampling event, reading the value from the event and doing the resample.
-    pub fn interrupt_resample(&self) {
-        let _ = self.interrupt_resample_evt.read();
-        self.do_interrupt_resample();
-    }
-
-    /// Get a reference to the msix configuration
-    pub fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
-        &self.msix_config
-    }
 }

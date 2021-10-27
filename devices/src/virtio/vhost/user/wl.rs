@@ -16,7 +16,7 @@ use crate::virtio::vhost::user::{Result, VhostUserHandler};
 use crate::virtio::wl::{
     QUEUE_SIZE, QUEUE_SIZES, VIRTIO_WL_F_SEND_FENCES, VIRTIO_WL_F_TRANS_FLAGS,
 };
-use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_WL};
+use crate::virtio::{SignalableInterrupt, Queue, VirtioDevice, TYPE_WL};
 
 pub struct Wl {
     kill_evt: Option<Event>,
@@ -84,14 +84,14 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &interrupt, &queues, &queue_evts)
+            .activate(&mem, &*interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;
@@ -116,7 +116,7 @@ impl VirtioDevice for Wl {
                     kill_evt,
                 };
 
-                if let Err(e) = worker.run(&ex, interrupt) {
+                if let Err(e) = worker.run(&ex, &*interrupt) {
                     error!("failed to start a worker: {}", e);
                 }
                 worker

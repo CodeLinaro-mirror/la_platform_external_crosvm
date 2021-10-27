@@ -199,12 +199,12 @@ async fn process_one_request(
 }
 
 /// Process one descriptor chain asynchronously.
-pub async fn process_one_chain<I: SignalableInterrupt>(
+pub async fn process_one_chain(
     queue: Rc<RefCell<Queue>>,
     avail_desc: DescriptorChain,
     disk_state: Rc<AsyncMutex<DiskState>>,
     mem: GuestMemory,
-    interrupt: &I,
+    interrupt: &dyn SignalableInterrupt,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
@@ -234,7 +234,7 @@ async fn handle_queue(
     disk_state: Rc<AsyncMutex<DiskState>>,
     queue: Rc<RefCell<Queue>>,
     evt: EventAsync,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
@@ -270,7 +270,7 @@ async fn handle_queue(
 
 async fn handle_irq_resample(
     ex: &Executor,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
 ) -> result::Result<(), ControlError> {
     let resample_evt = if let Some(resample_evt) = interrupt.borrow().get_resample_evt() {
         let resample_evt = resample_evt
@@ -305,7 +305,7 @@ async fn wait_kill(kill_evt: EventAsync) {
 
 async fn handle_command_tube(
     command_tube: &Option<AsyncTube>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     disk_state: Rc<AsyncMutex<DiskState>>,
 ) -> Result<(), ExecuteError> {
     let command_tube = match command_tube {
@@ -401,7 +401,7 @@ pub async fn flush_disk(
 // a resizing command.
 fn run_worker(
     ex: Executor,
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_state: &Rc<AsyncMutex<DiskState>>,
@@ -413,7 +413,7 @@ fn run_worker(
         return Err("Number of queues and events must match.".to_string());
     }
 
-    let interrupt = Rc::new(RefCell::new(interrupt));
+    let interrupt = interrupt.as_rc();
 
     // One flush timer per disk.
     let timer = Timer::new().expect("Failed to create a timer");
@@ -774,7 +774,7 @@ impl VirtioDevice for BlockAsync {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

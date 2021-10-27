@@ -250,7 +250,7 @@ impl Display for IommuError {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     mem: GuestMemory,
     page_mask: u64,
     // contains all pass-through endpoints that attach to the IOMMU device
@@ -624,7 +624,7 @@ impl Worker {
                 }
             }
             if needs_interrupt {
-                req_queue.trigger_interrupt(&self.mem, &self.interrupt);
+                req_queue.trigger_interrupt(&self.mem, &*self.interrupt);
             }
         }
         Ok(())
@@ -733,7 +733,7 @@ impl VirtioDevice for Iommu {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

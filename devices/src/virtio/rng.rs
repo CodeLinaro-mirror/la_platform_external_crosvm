@@ -33,7 +33,7 @@ impl Display for RngError {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     queue: Queue,
     mem: GuestMemory,
     random_file: File,
@@ -119,7 +119,7 @@ impl Worker {
                 }
             }
             if needs_interrupt {
-                self.queue.trigger_interrupt(&self.mem, &self.interrupt);
+                self.queue.trigger_interrupt(&self.mem, &*self.interrupt);
             }
         }
     }
@@ -185,7 +185,7 @@ impl VirtioDevice for Rng {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

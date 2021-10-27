@@ -51,6 +51,8 @@ use std::num::Wrapping;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 use base::{
     error, Event, FromRawDescriptor, IntoRawDescriptor, SafeDescriptor, SharedMemory,
@@ -72,6 +74,7 @@ use vmm_vhost::vhost_user::{
     Error as VhostError, Listener, Result as VhostResult, SlaveListener,
     VhostUserSlaveReqHandlerMut,
 };
+use devices::pci::MsixConfig;
 
 /// An event to deliver an interrupt to the guest.
 ///
@@ -80,6 +83,12 @@ use vmm_vhost::vhost_user::{
 // status. For this purpose, we need a mechanism to share interrupt status between the vmm and the
 // device process.
 pub struct CallEvent(Event);
+
+impl CallEvent {
+    pub fn try_clone(&self) -> Result<CallEvent, base::Error> {
+        self.0.try_clone().map(CallEvent)
+    }
+}
 
 impl SignalableInterrupt for CallEvent {
     fn signal(&self, _vector: u16, _interrupt_status_mask: u32) {
@@ -93,6 +102,28 @@ impl SignalableInterrupt for CallEvent {
     }
 
     fn do_interrupt_resample(&self) {}
+
+    fn get_interrupt_evt(&self) -> Option<&Event> {
+        None
+    }
+
+    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
+        &None
+    }
+
+    fn interrupt_resample(&self) {}
+
+    fn as_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>> {
+      Rc::new(RefCell::new(self.try_clone().unwrap()))
+    }
+
+    fn as_arc(&self) -> Arc<dyn SignalableInterrupt> {
+       Arc::new(self.try_clone().unwrap())
+    }
+
+    fn as_ref(&self) -> &dyn SignalableInterrupt {
+        self
+    }
 }
 
 /// Keeps a mapping from the vmm's virtual addresses to guest addresses.

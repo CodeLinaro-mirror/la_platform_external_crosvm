@@ -153,11 +153,11 @@ trait QueueReader {
 
 struct LocalQueueReader {
     queue: RefCell<Queue>,
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
 }
 
 impl LocalQueueReader {
-    fn new(queue: Queue, interrupt: &Arc<Interrupt>) -> Self {
+    fn new(queue: Queue, interrupt: &Arc<dyn SignalableInterrupt>) -> Self {
         Self {
             queue: RefCell::new(queue),
             interrupt: interrupt.clone(),
@@ -184,11 +184,11 @@ impl QueueReader for LocalQueueReader {
 #[derive(Clone)]
 struct SharedQueueReader {
     queue: Arc<Mutex<Queue>>,
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
 }
 
 impl SharedQueueReader {
-    fn new(queue: Queue, interrupt: &Arc<Interrupt>) -> Self {
+    fn new(queue: Queue, interrupt: &Arc<dyn SignalableInterrupt>) -> Self {
         Self {
             queue: Arc::new(Mutex::new(queue)),
             interrupt: interrupt.clone(),
@@ -766,7 +766,7 @@ impl Frontend {
 }
 
 struct Worker {
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
     exit_evt: Event,
     mem: GuestMemory,
     ctrl_queue: SharedQueueReader,
@@ -1181,7 +1181,7 @@ impl VirtioDevice for Gpu {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -1208,7 +1208,7 @@ impl VirtioDevice for Gpu {
 
         let resource_bridges = mem::replace(&mut self.resource_bridges, Vec::new());
 
-        let irq = Arc::new(interrupt);
+        let irq = interrupt.as_arc();
         let ctrl_queue = SharedQueueReader::new(queues.remove(0), &irq);
         let ctrl_evt = queue_evts.remove(0);
         let cursor_queue = LocalQueueReader::new(queues.remove(0), &irq);

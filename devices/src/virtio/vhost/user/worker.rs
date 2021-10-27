@@ -28,7 +28,7 @@ impl Worker {
     // Processes any requests to resample the irq value.
     async fn handle_irq_resample(
         resample_evt: EventAsync,
-        interrupt: Interrupt,
+        interrupt: &dyn SignalableInterrupt,
     ) -> Result<(), Error> {
         loop {
             let _ = resample_evt
@@ -47,7 +47,7 @@ impl Worker {
     }
 
     // Runs asynchronous tasks.
-    pub fn run(&mut self, ex: &Executor, interrupt: Interrupt) -> Result<(), String> {
+    pub fn run(&mut self, ex: &Executor, interrupt: &dyn SignalableInterrupt) -> Result<(), String> {
         let resample_evt = interrupt
             .get_resample_evt()
             .expect("resample event required")

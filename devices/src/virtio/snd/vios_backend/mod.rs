@@ -16,7 +16,7 @@ mod worker;
 
 use std::thread;
 
-use crate::virtio::{copy_config, DescriptorError, Interrupt, Queue, VirtioDevice, TYPE_SOUND};
+use crate::virtio::{copy_config, DescriptorError, SignalableInterrupt, Queue, VirtioDevice, TYPE_SOUND};
 use base::{error, Error as BaseError, Event, RawDescriptor};
 use data_model::{DataInit, Le32};
 use sync::Mutex;
@@ -105,7 +105,7 @@ impl VirtioDevice for Sound {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -148,7 +148,7 @@ impl VirtioDevice for Sound {
             .spawn(move || {
                 match Worker::try_new(
                     vios_client,
-                    Arc::new(interrupt),
+                    interrupt.as_arc(),
                     mem,
                     Arc::new(Mutex::new(control_queue)),
                     control_queue_evt,

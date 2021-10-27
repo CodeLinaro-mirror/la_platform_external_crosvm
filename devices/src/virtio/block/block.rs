@@ -15,7 +15,7 @@ use std::u32;
 use base::Error as SysError;
 use base::Result as SysResult;
 use base::{
-    error, info, iov_max, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer, Tube,
+    debug, error, info, iov_max, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer, Tube,
     WaitContext,
 };
 use data_model::DataInit;
@@ -146,7 +146,7 @@ impl ExecuteError {
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_image: Box<dyn DiskFile>,
@@ -238,8 +238,9 @@ impl Worker {
                 }
             };
 
+            debug!("{}", format!("add_used {}", desc_index));
             queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &self.interrupt);
+            queue.trigger_interrupt(&self.mem, &*self.interrupt);
             queue.set_notify(&self.mem, true);
         }
     }
@@ -507,6 +508,7 @@ impl Block {
                     .checked_shl(u32::from(SECTOR_SHIFT))
                     .ok_or(ExecuteError::OutOfRange)?;
                 check_range(offset, data_len as u64, disk_size)?;
+                debug!("{}", format!("Read {}", sector));
                 writer
                     .write_all_from_at(disk, data_len, offset)
                     .map_err(|desc_error| ExecuteError::ReadIo {
@@ -656,7 +658,7 @@ impl VirtioDevice for Block {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
