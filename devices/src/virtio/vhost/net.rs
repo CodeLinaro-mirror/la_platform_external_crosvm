@@ -18,7 +18,7 @@ use super::control_socket::*;
 use super::worker::Worker;
 use super::{Error, Result};
 use crate::pci::MsixStatus;
-use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_NET};
+use crate::virtio::{Interrupt, SignalableInterrupt, Queue, VirtioDevice, TYPE_NET};
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 2;
@@ -191,7 +191,7 @@ where
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
@@ -415,13 +415,13 @@ pub mod tests {
         // Just testing that we don't panic, for now
         net.activate(
             guest_memory,
-            Interrupt::new(
+            Box::new(Interrupt::new(
                 Arc::new(AtomicUsize::new(0)),
                 Event::new().unwrap(),
                 Event::new().unwrap(),
                 None,
                 VIRTIO_MSI_NO_VECTOR,
-            ),
+            )),
             vec![Queue::new(1)],
             vec![Event::new().unwrap()],
         );

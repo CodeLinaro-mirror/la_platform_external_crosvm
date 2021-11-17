@@ -16,7 +16,7 @@ use crate::virtio::console::{virtio_console_config, QUEUE_SIZE};
 use crate::virtio::vhost::user::handler::VhostUserHandler;
 use crate::virtio::vhost::user::worker::Worker;
 use crate::virtio::vhost::user::{Error, Result};
-use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_CONSOLE};
+use crate::virtio::{SignalableInterrupt, Queue, VirtioDevice, TYPE_CONSOLE};
 
 pub struct Console {
     kill_evt: Option<Event>,
@@ -87,14 +87,14 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &interrupt, &queues, &queue_evts)
+            .activate(&mem, &*interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;
@@ -118,7 +118,7 @@ impl VirtioDevice for Console {
                     kill_evt,
                 };
 
-                if let Err(e) = worker.run(&ex, interrupt) {
+                if let Err(e) = worker.run(&ex, &*interrupt) {
                     error!("failed to start a worker: {}", e);
                 }
                 worker

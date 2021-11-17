@@ -53,7 +53,7 @@ unsafe impl DataInit for virtio_console_config {}
 /// * `interrupt` - SignalableInterrupt used to signal that the queue has been used
 /// * `in_channel_opt` - Optional input channel to read data from
 /// * `receive_queue` - The receive virtio Queue
-pub fn handle_input<I: SignalableInterrupt>(
+pub fn handle_input<I: SignalableInterrupt + ?Sized>(
     mem: &GuestMemory,
     interrupt: &I,
     in_channel: &Receiver<Vec<u8>>,
@@ -98,7 +98,7 @@ pub fn handle_input<I: SignalableInterrupt>(
         if bytes_written > 0 {
             receive_queue.pop_peeked(&mem);
             receive_queue.add_used(&mem, desc_index, bytes_written);
-            receive_queue.trigger_interrupt(&mem, interrupt);
+            receive_queue.trigger_interrupt(&mem, interrupt.as_ref());
         }
 
         if disconnected {
@@ -125,7 +125,7 @@ pub fn handle_input<I: SignalableInterrupt>(
 /// * `interrupt` - SignalableInterrupt used to signal (if required) that the queue has been used
 /// * `transmit_queue` - The transmit virtio Queue
 /// * `output` - The output sink we are going to write the data into
-pub fn process_transmit_queue<I: SignalableInterrupt>(
+pub fn process_transmit_queue<I: SignalableInterrupt + ?Sized>(
     mem: &GuestMemory,
     interrupt: &I,
     transmit_queue: &mut Queue,
@@ -158,13 +158,13 @@ pub fn process_transmit_queue<I: SignalableInterrupt>(
     }
 
     if needs_interrupt {
-        transmit_queue.trigger_interrupt(mem, interrupt);
+        transmit_queue.trigger_interrupt(mem, interrupt.as_ref());
     }
 }
 
 struct Worker {
     mem: GuestMemory,
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     input: Option<Box<dyn io::Read + Send>>,
     output: Option<Box<dyn io::Write + Send>>,
 }
@@ -324,7 +324,7 @@ impl Worker {
                         }
                         process_transmit_queue(
                             &self.mem,
-                            &self.interrupt,
+                            &*self.interrupt,
                             &mut transmit_queue,
                             &mut output,
                         );
@@ -335,7 +335,7 @@ impl Worker {
                             break 'wait;
                         }
                         if let Some(ch) = in_channel.as_ref() {
-                            match handle_input(&self.mem, &self.interrupt, ch, &mut receive_queue) {
+                            match handle_input(&self.mem, &*self.interrupt, ch, &mut receive_queue) {
                                 Ok(()) => {}
                                 Err(ConsoleError::RxDisconnected) => {
                                     // Set in_channel to None so that future handle_input calls exit early.
@@ -354,7 +354,7 @@ impl Worker {
                             break 'wait;
                         }
                         if let Some(ch) = in_channel.as_ref() {
-                            match handle_input(&self.mem, &self.interrupt, ch, &mut receive_queue) {
+                            match handle_input(&self.mem, &*self.interrupt, ch, &mut receive_queue) {
                                 Ok(()) => {}
                                 Err(ConsoleError::RxDisconnected) => {
                                     // Set in_channel to None so that future handle_input calls exit early.
@@ -447,7 +447,7 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

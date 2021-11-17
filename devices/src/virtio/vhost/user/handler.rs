@@ -15,7 +15,7 @@ use vmm_vhost::vhost_user::{Master, VhostUserMaster};
 use vmm_vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 
 use crate::virtio::vhost::user::{Error, Result};
-use crate::virtio::{Interrupt, Queue};
+use crate::virtio::{SignalableInterrupt, Queue};
 
 fn set_features(vu: &mut Master, avail_features: u64, ack_features: u64) -> Result<u64> {
     let features = avail_features & ack_features;
@@ -222,7 +222,7 @@ impl VhostUserHandler {
     pub fn activate(
         &mut self,
         mem: &GuestMemory,
-        interrupt: &Interrupt,
+        interrupt: &dyn SignalableInterrupt,
         queues: &[Queue],
         queue_evts: &[Event],
     ) -> Result<()> {
@@ -238,7 +238,7 @@ impl VhostUserHandler {
             let queue_evt = &queue_evts[queue_index];
             let irqfd = msix_config
                 .get_irqfd(queue.vector as usize)
-                .unwrap_or_else(|| interrupt.get_interrupt_evt());
+                .unwrap_or_else(|| interrupt.get_interrupt_evt().unwrap());
             self.activate_vring(&mem, queue_index, queue, queue_evt, &irqfd)?;
         }
 

@@ -140,7 +140,7 @@ impl MemoryRegion {
 /// fds of the underlying memory regions.
 #[derive(Clone)]
 pub struct GuestMemory {
-    regions: Arc<[MemoryRegion]>,
+    pub regions: Arc<[MemoryRegion]>,
 }
 
 impl AsRawDescriptors for GuestMemory {
@@ -178,12 +178,8 @@ impl GuestMemory {
         Ok(shm)
     }
 
-    /// Creates a container for guest memory regions.
-    /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
-    pub fn new(ranges: &[(GuestAddress, u64)]) -> Result<GuestMemory> {
-        // Create shm
-
-        let shm = Arc::new(GuestMemory::create_shm(ranges)?);
+    pub fn create_mem_regions(ranges: &[(GuestAddress, u64)], shm: &Arc<SharedMemory>) -> Result<Vec<MemoryRegion>>
+    {
         // Create memory regions
         let mut regions = Vec::<MemoryRegion>::new();
         let mut offset = 0;
@@ -215,6 +211,18 @@ impl GuestMemory {
 
             offset += size as u64;
         }
+
+        Ok(regions)
+    }
+
+    /// Creates a container for guest memory regions.
+    /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
+    pub fn new(ranges: &[(GuestAddress, u64)]) -> Result<GuestMemory> {
+        // Create memfd
+
+        let shm = Arc::new(GuestMemory::create_shm(ranges)?);
+        // Create memory regions
+        let regions  = GuestMemory::create_mem_regions(ranges, &shm)?;
 
         Ok(GuestMemory {
             regions: Arc::from(regions),

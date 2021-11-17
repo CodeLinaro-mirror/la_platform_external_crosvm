@@ -1451,8 +1451,8 @@ impl WlState {
 pub struct DescriptorsExhausted;
 
 /// Handle incoming events and forward them to the VM over the input queue.
-pub fn process_in_queue<I: SignalableInterrupt>(
-    interrupt: &I,
+pub fn process_in_queue(
+    interrupt: &dyn SignalableInterrupt,
     in_queue: &mut Queue,
     mem: &GuestMemory,
     state: &mut WlState,
@@ -1522,8 +1522,8 @@ pub fn process_in_queue<I: SignalableInterrupt>(
 }
 
 /// Handle messages from the output queue and forward them to the display sever, if necessary.
-pub fn process_out_queue<I: SignalableInterrupt>(
-    interrupt: &I,
+pub fn process_out_queue(
+    interrupt: &dyn SignalableInterrupt,
     out_queue: &mut Queue,
     mem: &GuestMemory,
     state: &mut WlState,
@@ -1565,7 +1565,7 @@ pub fn process_out_queue<I: SignalableInterrupt>(
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     mem: GuestMemory,
     in_queue: Queue,
     out_queue: Queue,
@@ -1575,7 +1575,7 @@ struct Worker {
 impl Worker {
     fn new(
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         in_queue: Queue,
         out_queue: Queue,
         wayland_paths: Map<String, PathBuf>,
@@ -1660,7 +1660,7 @@ impl Worker {
                     Token::OutQueue => {
                         let _ = out_queue_evt.read();
                         process_out_queue(
-                            &self.interrupt,
+                            &*self.interrupt,
                             &mut self.out_queue,
                             &self.mem,
                             &mut self.state,
@@ -1669,7 +1669,7 @@ impl Worker {
                     Token::Kill => break 'wait,
                     Token::State => {
                         if let Err(DescriptorsExhausted) = process_in_queue(
-                            &self.interrupt,
+                            &*self.interrupt,
                             &mut self.in_queue,
                             &self.mem,
                             &mut self.state,
@@ -1777,7 +1777,7 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

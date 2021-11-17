@@ -13,7 +13,7 @@ use vm_memory::GuestMemory;
 
 use super::worker::Worker;
 use super::{Error, Result};
-use crate::virtio::{copy_config, Interrupt, Queue, VirtioDevice, TYPE_VSOCK};
+use crate::virtio::{copy_config, SignalableInterrupt, Queue, VirtioDevice, TYPE_VSOCK};
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 3;
@@ -148,7 +148,7 @@ impl VirtioDevice for Vsock {
     fn activate(
         &mut self,
         _: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

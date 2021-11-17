@@ -80,7 +80,7 @@ impl ::std::error::Error for Error {}
 type Result<T> = ::std::result::Result<T, Error>;
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     queue: Queue,
     memory: GuestMemory,
     pmem_device_tube: Tube,
@@ -217,7 +217,7 @@ impl Worker {
                 }
             }
             if needs_interrupt {
-                self.queue.trigger_interrupt(&self.memory, &self.interrupt);
+                self.queue.trigger_interrupt(&self.memory, &*self.interrupt);
             }
         }
     }
@@ -309,7 +309,7 @@ impl VirtioDevice for Pmem {
     fn activate(
         &mut self,
         memory: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_events: Vec<Event>,
     ) {
