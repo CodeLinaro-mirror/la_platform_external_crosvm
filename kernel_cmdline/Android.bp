@@ -15,12 +15,16 @@ rust_defaults {
     defaults: ["crosvm_defaults"],
     crate_name: "kernel_cmdline",
     srcs: ["src/kernel_cmdline.rs"],
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     edition: "2018",
     rustlibs: [
         "liblibc",
+        "libthiserror",
     ],
+    proc_macros: ["libremain"],
 }
 
 rust_test_host {
@@ -41,9 +45,13 @@ rust_library {
     defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "kernel_cmdline",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
     srcs: ["src/kernel_cmdline.rs"],
     edition: "2018",
     rustlibs: [
         "liblibc",
+        "libthiserror",
     ],
+    proc_macros: ["libremain"],
 }
