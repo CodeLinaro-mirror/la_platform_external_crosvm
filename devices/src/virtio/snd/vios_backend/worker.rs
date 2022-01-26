@@ -21,7 +21,7 @@ use super::{Result, SoundError};
 
 pub struct Worker {
     // Lock order: Must never hold more than one queue lock at the same time.
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
     control_queue: Arc<Mutex<Queue>>,
     control_queue_evt: Event,
     event_queue: Queue,
@@ -37,7 +37,7 @@ impl Worker {
     /// Creates a new virtio-snd worker.
     pub fn try_new(
         vios_client: Arc<VioSClient>,
-        interrupt: Arc<Interrupt>,
+        interrupt: Arc<dyn SignalableInterrupt>,
         guest_memory: GuestMemory,
         control_queue: Arc<Mutex<Queue>>,
         control_queue_evt: Event,
@@ -402,7 +402,7 @@ impl Worker {
             return None;
         }
         let mut query: virtio_snd_query_info = Default::default();
-        query.as_mut_slice().copy_from_slice(&read_buf);
+        query.as_mut_slice().copy_from_slice(read_buf);
         let start_id = query.start_id.to_native();
         let count = query.count.to_native();
         Some((start_id, count))
@@ -424,7 +424,7 @@ impl Worker {
             );
         }
         let mut params: virtio_snd_pcm_set_params = Default::default();
-        params.as_mut_slice().copy_from_slice(&read_buf);
+        params.as_mut_slice().copy_from_slice(read_buf);
         let stream_id = params.hdr.stream_id.to_native();
         if stream_id < self.vios_client.num_streams() {
             self.streams[stream_id as usize].send(StreamMsg::SetParams(desc, params))
@@ -465,7 +465,7 @@ impl Worker {
             );
         }
         let mut pcm_hdr: virtio_snd_pcm_hdr = Default::default();
-        pcm_hdr.as_mut_slice().copy_from_slice(&read_buf);
+        pcm_hdr.as_mut_slice().copy_from_slice(read_buf);
         let stream_id = pcm_hdr.stream_id.to_native();
         if stream_id < self.vios_client.num_streams() {
             self.streams[stream_id as usize].send(msg)
@@ -485,7 +485,7 @@ impl Worker {
                 },
                 &self.guest_memory,
                 &self.control_queue,
-                self.interrupt.deref(),
+                &*self.interrupt,
             )
         }
     }
@@ -514,7 +514,7 @@ impl Worker {
                 desc_index,
                 writer.bytes_written() as u32,
             );
-            queue_lock.trigger_interrupt(&self.guest_memory, self.interrupt.deref());
+            queue_lock.trigger_interrupt(&self.guest_memory, &*self.interrupt);
         }
         Ok(())
     }
@@ -527,7 +527,7 @@ impl Drop for Worker {
 }
 
 fn io_loop(
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
     guest_memory: GuestMemory,
     tx_queue: Arc<Mutex<Queue>>,
     tx_queue_evt: Event,
@@ -566,7 +566,7 @@ fn io_loop(
                     break 'wait;
                 }
             };
-            while let Some(avail_desc) = lock_pop_unlock(&queue, &guest_memory) {
+            while let Some(avail_desc) = lock_pop_unlock(queue, &guest_memory) {
                 let mut reader = Reader::new(guest_memory.clone(), avail_desc.clone())
                     .map_err(SoundError::Descriptor)?;
                 let xfer: virtio_snd_pcm_xfer = reader.read_obj().map_err(SoundError::QueueIO)?;

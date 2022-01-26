@@ -14,6 +14,7 @@ use base::Error as SysError;
 use base::{error, warn, AsRawDescriptor, Event, EventType, PollToken, RawDescriptor, WaitContext};
 use data_model::{DataInit, Le16, Le64};
 use net_util::{Error as TapError, MacAddress, TapT};
+use remain::sorted;
 use thiserror::Error as ThisError;
 use virtio_sys::virtio_net;
 use virtio_sys::virtio_net::{
@@ -29,29 +30,21 @@ use super::{
 
 const QUEUE_SIZE: u16 = 256;
 
+#[sorted]
 #[derive(ThisError, Debug)]
 pub enum NetError {
+    /// Cloning kill event failed.
+    #[error("failed to clone kill event: {0}")]
+    CloneKillEvent(SysError),
     /// Creating kill event failed.
     #[error("failed to create kill event: {0}")]
     CreateKillEvent(SysError),
     /// Creating WaitContext failed.
     #[error("failed to create wait context: {0}")]
     CreateWaitContext(SysError),
-    /// Cloning kill event failed.
-    #[error("failed to clone kill event: {0}")]
-    CloneKillEvent(SysError),
     /// Descriptor chain was invalid.
     #[error("failed to valildate descriptor chain: {0}")]
     DescriptorChain(DescriptorError),
-    /// Removing read event from the tap fd events failed.
-    #[error("failed to disable EPOLLIN on tap fd: {0}")]
-    WaitContextDisableTap(SysError),
-    /// Adding read event to the tap fd events failed.
-    #[error("failed to enable EPOLLIN on tap fd: {0}")]
-    WaitContextEnableTap(SysError),
-    /// Error while waiting for events.
-    #[error("error while waiting for events: {0}")]
-    WaitError(SysError),
     /// Error reading data from control queue.
     #[error("failed to read control message data: {0}")]
     ReadCtrlData(io::Error),
@@ -61,30 +54,39 @@ pub enum NetError {
     /// There are no more available descriptors to receive into.
     #[error("no rx descriptors available")]
     RxDescriptorsExhausted,
-    /// Open tap device failed.
-    #[error("failed to open tap device: {0}")]
-    TapOpen(TapError),
-    /// Couldn't get the MTU from the tap device.
-    #[error("failed to get tap interface MTU: {0}")]
-    TapGetMtu(TapError),
-    /// Setting tap IP failed.
-    #[error("failed to set tap IP: {0}")]
-    TapSetIp(TapError),
-    /// Setting tap netmask failed.
-    #[error("failed to set tap netmask: {0}")]
-    TapSetNetmask(TapError),
-    /// Setting tap mac address failed.
-    #[error("failed to set tap mac address: {0}")]
-    TapSetMacAddress(TapError),
-    /// Setting vnet header size failed.
-    #[error("failed to set vnet header size: {0}")]
-    TapSetVnetHdrSize(TapError),
     /// Enabling tap interface failed.
     #[error("failed to enable tap interface: {0}")]
     TapEnable(TapError),
+    /// Couldn't get the MTU from the tap device.
+    #[error("failed to get tap interface MTU: {0}")]
+    TapGetMtu(TapError),
+    /// Open tap device failed.
+    #[error("failed to open tap device: {0}")]
+    TapOpen(TapError),
+    /// Setting tap IP failed.
+    #[error("failed to set tap IP: {0}")]
+    TapSetIp(TapError),
+    /// Setting tap mac address failed.
+    #[error("failed to set tap mac address: {0}")]
+    TapSetMacAddress(TapError),
+    /// Setting tap netmask failed.
+    #[error("failed to set tap netmask: {0}")]
+    TapSetNetmask(TapError),
+    /// Setting vnet header size failed.
+    #[error("failed to set vnet header size: {0}")]
+    TapSetVnetHdrSize(TapError),
     /// Validating tap interface failed.
     #[error("failed to validate tap interface: {0}")]
     TapValidate(String),
+    /// Removing read event from the tap fd events failed.
+    #[error("failed to disable EPOLLIN on tap fd: {0}")]
+    WaitContextDisableTap(SysError),
+    /// Adding read event to the tap fd events failed.
+    #[error("failed to enable EPOLLIN on tap fd: {0}")]
+    WaitContextEnableTap(SysError),
+    /// Error while waiting for events.
+    #[error("error while waiting for events: {0}")]
+    WaitError(SysError),
     /// Failed writing an ack in response to a control message.
     #[error("failed to write control message ack: {0}")]
     WriteAck(io::Error),
@@ -137,8 +139,8 @@ pub struct VirtioNetConfig {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for VirtioNetConfig {}
 
-pub fn process_rx<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
+pub fn process_rx<T: TapT>(
+    interrupt: &dyn SignalableInterrupt,
     rx_queue: &mut Queue,
     mem: &GuestMemory,
     mut tap: &mut T,
@@ -201,8 +203,8 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
     }
 }
 
-pub fn process_tx<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
+pub fn process_tx<T: TapT>(
+    interrupt: &dyn SignalableInterrupt,
     tx_queue: &mut Queue,
     mem: &GuestMemory,
     mut tap: &mut T,
@@ -236,8 +238,8 @@ pub fn process_tx<I: SignalableInterrupt, T: TapT>(
     tx_queue.trigger_interrupt(mem, interrupt);
 }
 
-pub fn process_ctrl<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
+pub fn process_ctrl<T: TapT>(
+    interrupt: &SignalableInterrupt,
     ctrl_queue: &mut Queue,
     mem: &GuestMemory,
     tap: &mut T,
@@ -256,7 +258,7 @@ pub fn process_ctrl<I: SignalableInterrupt, T: TapT>(
             writer
                 .write_all(&[VIRTIO_NET_ERR as u8])
                 .map_err(NetError::WriteAck)?;
-            ctrl_queue.add_used(&mem, index, writer.bytes_written() as u32);
+            ctrl_queue.add_used(mem, index, writer.bytes_written() as u32);
             Ok(())
         };
 
@@ -303,7 +305,7 @@ pub fn process_ctrl<I: SignalableInterrupt, T: TapT>(
             ),
         }
 
-        ctrl_queue.add_used(&mem, index, writer.bytes_written() as u32);
+        ctrl_queue.add_used(mem, index, writer.bytes_written() as u32);
     }
 
     ctrl_queue.trigger_interrupt(mem, interrupt);
@@ -327,7 +329,7 @@ pub enum Token {
 }
 
 struct Worker<T: TapT> {
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
     mem: GuestMemory,
     rx_queue: Queue,
     tx_queue: Queue,
@@ -692,7 +694,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -718,7 +720,7 @@ where
             );
             return;
         }
-        let interrupt_arc = Arc::new(interrupt);
+        let interrupt_arc = interrupt.as_arc();
         for i in 0..vq_pairs {
             let tap = self.taps.remove(0);
             let acked_features = self.acked_features;

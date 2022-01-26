@@ -128,9 +128,33 @@ pub struct Worker<F: FileSystem + Sync> {
     mem: GuestMemory,
     queue: Queue,
     server: Arc<fuse::Server<F>>,
-    irq: Arc<Interrupt>,
+    irq: Arc<dyn SignalableInterrupt>,
     tube: Arc<Mutex<Tube>>,
     slot: u32,
+}
+
+pub fn process_fs_queue<I: SignalableInterrupt + ?Sized, F: FileSystem + Sync>(
+    mem: &GuestMemory,
+    interrupt: &I,
+    queue: &mut Queue,
+    server: &Arc<fuse::Server<F>>,
+    tube: &Arc<Mutex<Tube>>,
+    slot: u32,
+) -> Result<()> {
+    let mapper = Mapper::new(Arc::clone(tube), slot);
+    while let Some(avail_desc) = queue.pop(mem) {
+        let reader =
+            Reader::new(mem.clone(), avail_desc.clone()).map_err(Error::InvalidDescriptorChain)?;
+        let writer =
+            Writer::new(mem.clone(), avail_desc.clone()).map_err(Error::InvalidDescriptorChain)?;
+
+        let total = server.handle_message(reader, writer, &mapper)?;
+
+        queue.add_used(mem, avail_desc.index, total as u32);
+        queue.trigger_interrupt(mem, interrupt.as_ref());
+    }
+
+    Ok(())
 }
 
 impl<F: FileSystem + Sync> Worker<F> {
@@ -138,7 +162,7 @@ impl<F: FileSystem + Sync> Worker<F> {
         mem: GuestMemory,
         queue: Queue,
         server: Arc<fuse::Server<F>>,
-        irq: Arc<Interrupt>,
+        irq: Arc<dyn SignalableInterrupt>,
         tube: Arc<Mutex<Tube>>,
         slot: u32,
     ) -> Worker<F> {
@@ -150,31 +174,6 @@ impl<F: FileSystem + Sync> Worker<F> {
             tube,
             slot,
         }
-    }
-
-    fn process_queue(&mut self) -> Result<()> {
-        let mut needs_interrupt = false;
-
-        let mapper = Mapper::new(Arc::clone(&self.tube), self.slot);
-        while let Some(avail_desc) = self.queue.pop(&self.mem) {
-            let reader = Reader::new(self.mem.clone(), avail_desc.clone())
-                .map_err(Error::InvalidDescriptorChain)?;
-            let writer = Writer::new(self.mem.clone(), avail_desc.clone())
-                .map_err(Error::InvalidDescriptorChain)?;
-
-            let total = self.server.handle_message(reader, writer, &mapper)?;
-
-            self.queue
-                .add_used(&self.mem, avail_desc.index, total as u32);
-
-            needs_interrupt = true;
-        }
-
-        if needs_interrupt {
-            self.queue.trigger_interrupt(&self.mem, &*self.irq);
-        }
-
-        Ok(())
     }
 
     pub fn run(
@@ -230,7 +229,14 @@ impl<F: FileSystem + Sync> Worker<F> {
                 match event.token {
                     Token::QueueReady => {
                         queue_evt.read().map_err(Error::ReadQueueEvent)?;
-                        if let Err(e) = self.process_queue() {
+                        if let Err(e) = process_fs_queue(
+                            &self.mem,
+                            &*self.irq,
+                            &mut self.queue,
+                            &self.server,
+                            &self.tube,
+                            self.slot,
+                        ) {
                             error!("virtio-fs transport error: {}", e);
                             return Err(e);
                         }

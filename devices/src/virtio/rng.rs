@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::fmt::{self, Display};
 use std::fs::File;
 use std::io;
 use std::thread;
 
 use base::{error, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, WaitContext};
+use remain::sorted;
+use thiserror::Error;
 use vm_memory::GuestMemory;
 
 use super::{Interrupt, Queue, SignalableInterrupt, VirtioDevice, Writer, TYPE_RNG};
@@ -15,25 +16,17 @@ use super::{Interrupt, Queue, SignalableInterrupt, VirtioDevice, Writer, TYPE_RN
 const QUEUE_SIZE: u16 = 256;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
 
-#[derive(Debug)]
+#[sorted]
+#[derive(Error, Debug)]
 pub enum RngError {
     /// Can't access /dev/urandom
+    #[error("failed to access /dev/urandom: {0}")]
     AccessingRandomDev(io::Error),
 }
 pub type Result<T> = std::result::Result<T, RngError>;
 
-impl Display for RngError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::RngError::*;
-
-        match self {
-            AccessingRandomDev(e) => write!(f, "failed to access /dev/urandom: {}", e),
-        }
-    }
-}
-
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     queue: Queue,
     mem: GuestMemory,
     random_file: File,
@@ -119,7 +112,7 @@ impl Worker {
                 }
             }
             if needs_interrupt {
-                self.queue.trigger_interrupt(&self.mem, &self.interrupt);
+                self.queue.trigger_interrupt(&self.mem, &*self.interrupt);
             }
         }
     }
@@ -185,7 +178,7 @@ impl VirtioDevice for Rng {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

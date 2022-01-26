@@ -6,7 +6,7 @@ use std::cmp::min;
 use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
 
-use base::error;
+use base::{debug, error, info};
 use cros_async::{AsyncError, EventAsync};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::{GuestAddress, GuestMemory};
@@ -329,11 +329,10 @@ impl Queue {
     // All available ring entries between `self.next_avail` and `get_avail_index()` are available
     // to be processed by the device.
     fn get_avail_index(&self, mem: &GuestMemory) -> Wrapping<u16> {
+        fence(Ordering::SeqCst);
+
         let avail_index_addr = self.avail_ring.unchecked_add(2);
         let avail_index: u16 = mem.read_obj_from_addr(avail_index_addr).unwrap();
-
-        // Make sure following reads (e.g. desc_idx) don't pass the avail_index read.
-        fence(Ordering::Acquire);
 
         Wrapping(avail_index)
     }
@@ -345,12 +344,12 @@ impl Queue {
     //
     // This value is only used if the `VIRTIO_F_EVENT_IDX` feature has been negotiated.
     fn set_avail_event(&mut self, mem: &GuestMemory, avail_index: Wrapping<u16>) {
-        // Ensure that all previous writes are available before this one.
-        fence(Ordering::Release);
+        fence(Ordering::SeqCst);
 
         let avail_event_addr = self
             .used_ring
             .unchecked_add(4 + 8 * u64::from(self.actual_size()));
+        debug!("{}", format!("desc_table {} avail_index {}", self.desc_table, avail_index.0));
         mem.write_obj_at_addr(avail_index.0, avail_event_addr)
             .unwrap();
     }
@@ -358,12 +357,10 @@ impl Queue {
     // Query the value of a single-bit flag in the available ring.
     //
     // Returns `true` if `flag` is currently set (by the driver) in the available ring flags.
-    #[allow(dead_code)]
     fn get_avail_flag(&self, mem: &GuestMemory, flag: u16) -> bool {
-        let avail_flags: u16 = mem.read_obj_from_addr(self.avail_ring).unwrap();
+        fence(Ordering::SeqCst);
 
-        // Don't allow subsequent reads to be ordered before the avail_flags read.
-        fence(Ordering::Acquire);
+        let avail_flags: u16 = mem.read_obj_from_addr(self.avail_ring).unwrap();
 
         avail_flags & flag == flag
     }
@@ -376,13 +373,12 @@ impl Queue {
     //
     // This value is only valid if the `VIRTIO_F_EVENT_IDX` feature has been negotiated.
     fn get_used_event(&self, mem: &GuestMemory) -> Wrapping<u16> {
+        fence(Ordering::SeqCst);
+
         let used_event_addr = self
             .avail_ring
             .unchecked_add(4 + 2 * u64::from(self.actual_size()));
         let used_event: u16 = mem.read_obj_from_addr(used_event_addr).unwrap();
-
-        // Prevent any reads after this from being ordered before the used_event read.
-        fence(Ordering::Acquire);
 
         Wrapping(used_event)
     }
@@ -392,8 +388,7 @@ impl Queue {
     // This indicates to the driver that all entries up to (but not including) `used_index` have
     // been used by the device and may be processed by the driver.
     fn set_used_index(&mut self, mem: &GuestMemory, used_index: Wrapping<u16>) {
-        // This fence ensures all descriptor writes are visible before the index update.
-        fence(Ordering::Release);
+        fence(Ordering::SeqCst);
 
         let used_index_addr = self.used_ring.unchecked_add(2);
         mem.write_obj_at_addr(used_index.0, used_index_addr)
@@ -404,8 +399,7 @@ impl Queue {
     //
     // Changes the bit specified by the mask in `flag` to `value`.
     fn set_used_flag(&mut self, mem: &GuestMemory, flag: u16, value: bool) {
-        // This fence ensures all descriptor writes are visible before the flag update.
-        fence(Ordering::Release);
+        fence(Ordering::SeqCst);
 
         let mut used_flags: u16 = mem.read_obj_from_addr(self.used_ring).unwrap();
         if value {
@@ -427,7 +421,9 @@ impl Queue {
         let avail_index = self.get_avail_index(mem);
         let avail_len = avail_index - self.next_avail;
 
+        debug!("{}", format!("desc_table {} avail_idx {} avail_len {}", self.desc_table, avail_index, avail_len.0));
         if avail_len.0 > queue_size || self.next_avail == avail_index {
+            debug!("{}", format!("desc_table {} peek returns none", self.desc_table));
             return None;
         }
 
@@ -499,6 +495,7 @@ impl Queue {
             .unwrap();
 
         self.next_used += Wrapping(1);
+        debug!("{}", format!("desc_table {} next_used {}", self.desc_table, self.next_used.0));
         self.set_used_index(mem, self.next_used);
     }
 

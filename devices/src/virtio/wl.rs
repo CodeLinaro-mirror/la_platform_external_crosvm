@@ -59,6 +59,7 @@ use base::{
 use base::{ioctl_iow_nr, ioctl_with_ref};
 #[cfg(feature = "gpu")]
 use base::{IntoRawDescriptor, SafeDescriptor};
+use remain::sorted;
 use thiserror::Error as ThisError;
 use vm_memory::{GuestMemory, GuestMemoryError};
 
@@ -259,48 +260,49 @@ fn encode_resp(writer: &mut Writer, resp: WlResp) -> WlResult<()> {
 }
 
 #[allow(dead_code)]
+#[sorted]
 #[derive(ThisError, Debug)]
 enum WlError {
-    #[error("failed to create shared memory allocation: {0}")]
-    NewAlloc(Error),
-    #[error("failed to create pipe: {0}")]
-    NewPipe(Error),
-    #[error("failed to connect socket: {0}")]
-    SocketConnect(io::Error),
-    #[error("failed to set socket as non-blocking: {0}")]
-    SocketNonBlock(io::Error),
-    #[error("failed to control parent VM: {0}")]
-    VmControl(TubeError),
-    #[error("invalid response from parent VM")]
-    VmBadResponse,
     #[error("overflow in calculation")]
     CheckedOffset,
-    #[error("error parsing descriptor: {0}")]
-    ParseDesc(io::Error),
-    #[error("access violation in guest memory: {0}")]
-    GuestMemory(#[from] GuestMemoryError),
-    #[error("access violating in guest volatile memory: {0}")]
-    VolatileMemory(#[from] VolatileMemoryError),
-    #[error("failed to send on a socket: {0}")]
-    SendVfd(Error),
-    #[error("failed to write to a pipe: {0}")]
-    WritePipe(io::Error),
-    #[error("failed to recv on a socket: {0}")]
-    RecvVfd(Error),
-    #[error("failed to read a pipe: {0}")]
-    ReadPipe(io::Error),
-    #[error("failed to listen to descriptor on wait context: {0}")]
-    WaitContextAdd(Error),
     #[error("failed to synchronize DMABuf access: {0}")]
     DmabufSync(io::Error),
     #[error("failed to create shared memory from descriptor: {0}")]
     FromSharedMemory(Error),
-    #[error("failed to write response: {0}")]
-    WriteResponse(io::Error),
+    #[error("access violation in guest memory: {0}")]
+    GuestMemory(#[from] GuestMemoryError),
     #[error("invalid string: {0}")]
     InvalidString(std::str::Utf8Error),
+    #[error("failed to create shared memory allocation: {0}")]
+    NewAlloc(Error),
+    #[error("failed to create pipe: {0}")]
+    NewPipe(Error),
+    #[error("error parsing descriptor: {0}")]
+    ParseDesc(io::Error),
+    #[error("failed to read a pipe: {0}")]
+    ReadPipe(io::Error),
+    #[error("failed to recv on a socket: {0}")]
+    RecvVfd(Error),
+    #[error("failed to send on a socket: {0}")]
+    SendVfd(Error),
+    #[error("failed to connect socket: {0}")]
+    SocketConnect(io::Error),
+    #[error("failed to set socket as non-blocking: {0}")]
+    SocketNonBlock(io::Error),
     #[error("unknown socket name: {0}")]
     UnknownSocketName(String),
+    #[error("invalid response from parent VM")]
+    VmBadResponse,
+    #[error("failed to control parent VM: {0}")]
+    VmControl(TubeError),
+    #[error("access violating in guest volatile memory: {0}")]
+    VolatileMemory(#[from] VolatileMemoryError),
+    #[error("failed to listen to descriptor on wait context: {0}")]
+    WaitContextAdd(Error),
+    #[error("failed to write to a pipe: {0}")]
+    WritePipe(io::Error),
+    #[error("failed to write response: {0}")]
+    WriteResponse(io::Error),
 }
 
 type WlResult<T> = result::Result<T, WlError>;
@@ -1451,8 +1453,8 @@ impl WlState {
 pub struct DescriptorsExhausted;
 
 /// Handle incoming events and forward them to the VM over the input queue.
-pub fn process_in_queue<I: SignalableInterrupt>(
-    interrupt: &I,
+pub fn process_in_queue(
+    interrupt: &dyn SignalableInterrupt,
     in_queue: &mut Queue,
     mem: &GuestMemory,
     state: &mut WlState,
@@ -1522,8 +1524,8 @@ pub fn process_in_queue<I: SignalableInterrupt>(
 }
 
 /// Handle messages from the output queue and forward them to the display sever, if necessary.
-pub fn process_out_queue<I: SignalableInterrupt>(
-    interrupt: &I,
+pub fn process_out_queue(
+    interrupt: &dyn SignalableInterrupt,
     out_queue: &mut Queue,
     mem: &GuestMemory,
     state: &mut WlState,
@@ -1565,7 +1567,7 @@ pub fn process_out_queue<I: SignalableInterrupt>(
 }
 
 struct Worker {
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     mem: GuestMemory,
     in_queue: Queue,
     out_queue: Queue,
@@ -1575,7 +1577,7 @@ struct Worker {
 impl Worker {
     fn new(
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         in_queue: Queue,
         out_queue: Queue,
         wayland_paths: Map<String, PathBuf>,
@@ -1660,7 +1662,7 @@ impl Worker {
                     Token::OutQueue => {
                         let _ = out_queue_evt.read();
                         process_out_queue(
-                            &self.interrupt,
+                            &*self.interrupt,
                             &mut self.out_queue,
                             &self.mem,
                             &mut self.state,
@@ -1669,7 +1671,7 @@ impl Worker {
                     Token::Kill => break 'wait,
                     Token::State => {
                         if let Err(DescriptorsExhausted) = process_in_queue(
-                            &self.interrupt,
+                            &*self.interrupt,
                             &mut self.in_queue,
                             &self.mem,
                             &mut self.state,
@@ -1777,7 +1779,7 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

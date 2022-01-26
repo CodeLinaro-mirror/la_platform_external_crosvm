@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::virtio::{DescriptorChain, Interrupt, Queue, Reader, Writer};
+use crate::virtio::{DescriptorChain, SignalableInterrupt, Queue, Reader, Writer};
 use base::{error, set_rt_prio_limit, set_rt_round_robin, warn};
 use data_model::Le32;
 use sync::Mutex;
@@ -49,7 +49,7 @@ pub struct Stream {
     guest_memory: GuestMemory,
     control_queue: Arc<Mutex<Queue>>,
     io_queue: Arc<Mutex<Queue>>,
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
     capture: bool,
     current_state: StreamState,
     period: Duration,
@@ -64,7 +64,7 @@ impl Stream {
         stream_id: u32,
         vios_client: Arc<VioSClient>,
         guest_memory: GuestMemory,
-        interrupt: Arc<Interrupt>,
+        interrupt: Arc<dyn SignalableInterrupt>,
         control_queue: Arc<Mutex<Queue>>,
         io_queue: Arc<Mutex<Queue>>,
         capture: bool,
@@ -405,7 +405,7 @@ pub fn reply_control_op_status(
     desc: DescriptorChain,
     guest_memory: &GuestMemory,
     queue: &Arc<Mutex<Queue>>,
-    interrupt: &Interrupt,
+    interrupt: &dyn SignalableInterrupt,
 ) -> Result<()> {
     let desc_index = desc.index;
     let mut writer = Writer::new(guest_memory.clone(), desc).map_err(SoundError::Descriptor)?;
@@ -429,7 +429,7 @@ pub fn reply_pcm_buffer_status(
     desc: DescriptorChain,
     guest_memory: &GuestMemory,
     queue: &Arc<Mutex<Queue>>,
-    interrupt: &Interrupt,
+    interrupt: &dyn SignalableInterrupt,
 ) -> Result<()> {
     let desc_index = desc.index;
     let mut writer = Writer::new(guest_memory.clone(), desc).map_err(SoundError::Descriptor)?;
