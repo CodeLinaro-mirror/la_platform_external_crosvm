@@ -36,12 +36,12 @@ pub use self::acpi::ACPIPMResource;
 pub use self::bat::{BatteryError, GoldfishBattery};
 pub use self::bus::Error as BusError;
 pub use self::bus::{
-    Bus, BusAccessInfo, BusDevice, BusDeviceObj, BusDeviceSync, BusRange, BusResumeDevice,
+    Bus, BusAccessInfo, BusDevice, BusDeviceObj, BusDeviceSync, BusRange, BusResumeDevice, BusType,
     HostHotPlugKey, HotPlugBus,
 };
 pub use self::cmos::Cmos;
 #[cfg(feature = "direct")]
-pub use self::direct_io::DirectIo;
+pub use self::direct_io::{DirectIo, DirectMmio};
 #[cfg(feature = "direct")]
 pub use self::direct_irq::{DirectIrq, DirectIrqError};
 pub use self::i8042::I8042Device;
@@ -68,12 +68,3 @@ pub use self::usb::host_backend::host_backend_device_provider::HostBackendDevice
 pub use self::usb::xhci::xhci_controller::XhciController;
 pub use self::vfio::{VfioContainer, VfioDevice};
 pub use self::virtio::VirtioPciDevice;
-
-/// Whether the VM should be run in protected mode or not.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ProtectionType {
-    /// The VM should be run in the unprotected mode, where the host has access to its memory.
-    Unprotected,
-    /// The VM should be run in protected mode, so the host cannot access its memory directly.
-    Protected,
-}

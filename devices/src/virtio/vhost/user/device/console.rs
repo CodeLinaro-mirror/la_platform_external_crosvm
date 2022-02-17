@@ -15,10 +15,11 @@ use data_model::DataInit;
 
 use futures::future::{AbortHandle, Abortable};
 use getopts::Options;
+use hypervisor::ProtectionType;
 use once_cell::sync::OnceCell;
 use sync::Mutex;
 use vm_memory::GuestMemory;
-use vmm_vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
+use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::serial_device::{SerialDevice, SerialHardware, SerialParameters, SerialType};
 use crate::virtio::console::{
@@ -28,7 +29,6 @@ use crate::virtio::vhost::user::device::handler::{
     CallEvent, DeviceRequestHandler, VhostUserBackend,
 };
 use crate::virtio::{self, copy_config};
-use crate::ProtectionType;
 
 static CONSOLE_EXECUTOR: OnceCell<Executor> = OnceCell::new();
 
@@ -328,7 +328,7 @@ pub fn run_console_device(program_name: &str, args: std::env::Args) -> anyhow::R
     };
 
     if let Err(e) = run_console(&params, &socket) {
-        bail!("error occurred: {}", e);
+        bail!("error occurred: {:#}", e);
     }
 
     // Restore terminal capabilities back to what they were before

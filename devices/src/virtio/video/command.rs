@@ -17,6 +17,7 @@ use crate::virtio::video::control::*;
 use crate::virtio::video::format::*;
 use crate::virtio::video::params::Params;
 use crate::virtio::video::protocol::*;
+use crate::virtio::video::resource::{ResourceType, UnresolvedGuestResource};
 use crate::virtio::Reader;
 
 /// An error indicating a failure while reading a request from the guest.
@@ -53,6 +54,8 @@ pub enum VideoCmd {
     StreamCreate {
         stream_id: u32,
         coded_format: Format,
+        input_resource_type: ResourceType,
+        output_resource_type: ResourceType,
     },
     StreamDestroy {
         stream_id: u32,
@@ -65,7 +68,7 @@ pub enum VideoCmd {
         queue_type: QueueType,
         resource_id: u32,
         plane_offsets: Vec<u32>,
-        uuid: u128,
+        resource: UnresolvedGuestResource,
     },
     ResourceQueue {
         stream_id: u32,
@@ -85,11 +88,15 @@ pub enum VideoCmd {
     GetParams {
         stream_id: u32,
         queue_type: QueueType,
+        /// `true` if this command has been created from the GET_PARAMS_EXT guest command.
+        is_ext: bool,
     },
     SetParams {
         stream_id: u32,
         queue_type: QueueType,
         params: Params,
+        /// `true` if this command has been created from the SET_PARAMS_EXT guest command.
+        is_ext: bool,
     },
     QueryControl {
         query_ctrl_type: QueryCtrlType,
@@ -130,15 +137,27 @@ impl<'a> VideoCmd {
                     ..
                 } = r.read_obj()?;
 
-                if in_mem_type != VIRTIO_VIDEO_MEM_TYPE_VIRTIO_OBJECT
-                    || out_mem_type != VIRTIO_VIDEO_MEM_TYPE_VIRTIO_OBJECT
-                {
-                    error!("mem_type must be VIRTIO_OBJECT");
-                    return Err(InvalidArgument);
-                }
+                let input_resource_type = match in_mem_type.into() {
+                    VIRTIO_VIDEO_MEM_TYPE_VIRTIO_OBJECT => ResourceType::VirtioObject,
+                    _ => {
+                        error!("mem_type must be VIRTIO_OBJECT");
+                        return Err(InvalidArgument);
+                    }
+                };
+
+                let output_resource_type = match out_mem_type.into() {
+                    VIRTIO_VIDEO_MEM_TYPE_VIRTIO_OBJECT => ResourceType::VirtioObject,
+                    _ => {
+                        error!("mem_type must be VIRTIO_OBJECT");
+                        return Err(InvalidArgument);
+                    }
+                };
+
                 StreamCreate {
                     stream_id: hdr.stream_id.into(),
                     coded_format: coded_format.try_into()?,
+                    input_resource_type,
+                    output_resource_type,
                 }
             }
             VIRTIO_VIDEO_CMD_STREAM_DESTROY => {
@@ -186,14 +205,14 @@ impl<'a> VideoCmd {
                     .map(|x| Into::<u32>::into(*x))
                     .collect::<Vec<u32>>();
 
-                let virtio_video_object_entry { uuid } = r.read_obj()?;
+                let resource = r.read_obj()?;
 
                 ResourceCreate {
                     stream_id: hdr.stream_id.into(),
                     queue_type: queue_type.try_into()?,
                     resource_id: resource_id.into(),
                     plane_offsets,
-                    uuid: u128::from_be_bytes(uuid),
+                    resource,
                 }
             }
             VIRTIO_VIDEO_CMD_RESOURCE_QUEUE => {
@@ -241,6 +260,7 @@ impl<'a> VideoCmd {
                 GetParams {
                     stream_id: hdr.stream_id.into(),
                     queue_type: queue_type.try_into()?,
+                    is_ext: false,
                 }
             }
             VIRTIO_VIDEO_CMD_SET_PARAMS => {
@@ -249,6 +269,7 @@ impl<'a> VideoCmd {
                     stream_id: hdr.stream_id.into(),
                     queue_type: params.queue_type.try_into()?,
                     params: params.try_into()?,
+                    is_ext: false,
                 }
             }
             VIRTIO_VIDEO_CMD_QUERY_CONTROL => {
@@ -330,6 +351,23 @@ impl<'a> VideoCmd {
                 SetControl {
                     stream_id: hdr.stream_id.into(),
                     ctrl_val,
+                }
+            }
+            VIRTIO_VIDEO_CMD_GET_PARAMS_EXT => {
+                let virtio_video_get_params_ext { queue_type, .. } = r.read_obj()?;
+                GetParams {
+                    stream_id: hdr.stream_id.into(),
+                    queue_type: queue_type.try_into()?,
+                    is_ext: true,
+                }
+            }
+            VIRTIO_VIDEO_CMD_SET_PARAMS_EXT => {
+                let virtio_video_set_params_ext { params } = r.read_obj()?;
+                SetParams {
+                    stream_id: hdr.stream_id.into(),
+                    queue_type: params.base.queue_type.try_into()?,
+                    params: params.try_into()?,
+                    is_ext: true,
                 }
             }
             _ => return Err(ReadCmdError::InvalidCmdType(hdr.type_.into())),

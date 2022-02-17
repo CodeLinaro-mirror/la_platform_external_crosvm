@@ -48,7 +48,6 @@ open: return ENOENT
 openat: 1
 preadv: 1
 pwritev: 1
-readlinkat: 1
 renameat2: 1
 setresgid32: 1
 setresuid32: 1
@@ -61,3 +60,4 @@ utimensat_time64: 1
 prctl: arg0 == PR_SET_NAME || arg0 == PR_SET_SECUREBITS || arg0 == PR_GET_SECUREBITS
 capget: 1
 capset: 1
+unshare: 1

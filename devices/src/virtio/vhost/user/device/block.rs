@@ -13,12 +13,13 @@ use futures::future::{AbortHandle, Abortable};
 use getopts::Options;
 use once_cell::sync::OnceCell;
 use sync::Mutex;
-use vmm_vhost::vhost_user::message::*;
+use vmm_vhost::message::*;
 
 use base::{error, iov_max, warn, Event, Timer};
 use cros_async::{sync::Mutex as AsyncMutex, EventAsync, Executor, TimerAsync};
 use data_model::DataInit;
 use disk::create_async_disk_file;
+use hypervisor::ProtectionType;
 use vm_memory::GuestMemory;
 
 use crate::virtio::block::asynchronous::{flush_disk, process_one_chain};
@@ -27,7 +28,6 @@ use crate::virtio::vhost::user::device::handler::{
     CallEvent, DeviceRequestHandler, VhostUserBackend,
 };
 use crate::virtio::{self, base_features, copy_config, Queue};
-use crate::ProtectionType;
 
 static BLOCK_EXECUTOR: OnceCell<Executor> = OnceCell::new();
 

@@ -50,6 +50,7 @@ rust_binary {
     ],
     rustlibs: [
         "libacpi_tables",
+        "libanyhow",
         "libarch",
         "libassertions",
         "libaudio_streams",
@@ -115,14 +116,18 @@ rust_binary {
     ],
 }
 
-rust_defaults {
-    name: "crosvm_test_defaults",
+rust_test {
+    name: "crosvm_test_src_crosvm",
     defaults: ["crosvm_defaults"],
+    host_supported: true,
     crate_name: "crosvm",
-    srcs: ["src/crosvm.rs"],
     cargo_env_compat: true,
+    srcs: ["src/crosvm.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
     edition: "2018",
     features: [
         "audio",
@@ -133,6 +138,7 @@ rust_defaults {
     ],
     rustlibs: [
         "libacpi_tables",
+        "libanyhow",
         "libarch",
         "libassertions",
         "libaudio_streams",
@@ -163,14 +169,6 @@ rust_defaults {
         "libenumn",
         "libremain",
     ],
-}
-
-rust_test_host {
-    name: "crosvm_host_test_src_crosvm",
-    defaults: ["crosvm_test_defaults"],
-    test_options: {
-        unit_test: true,
-    },
     arch: {
         x86_64: {
             rustlibs: ["libx86_64_rust"],
@@ -199,43 +197,17 @@ rust_test_host {
 }
 
 rust_test {
-    name: "crosvm_device_test_src_crosvm",
-    defaults: ["crosvm_test_defaults"],
-    arch: {
-        x86_64: {
-            rustlibs: ["libx86_64_rust"],
-        },
-        arm64: {
-            rustlibs: ["libaarch64"],
-        },
-    },
-    target: {
-        linux_glibc_x86_64: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
-        },
-    },
-    ld_flags: [
-        "-Wl,--rpath,\\$$ORIGIN",
-        "-Wl,--rpath,\\$$ORIGIN/../../lib64",
-    ],
-}
-
-rust_defaults {
-    name: "crosvm_test_defaults_crosvm",
+    name: "crosvm_test_src_main",
     defaults: ["crosvm_defaults"],
+    host_supported: true,
     crate_name: "crosvm",
-    srcs: ["src/main.rs"],
     cargo_env_compat: true,
+    srcs: ["src/main.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
     edition: "2018",
     features: [
         "audio",
@@ -246,6 +218,7 @@ rust_defaults {
     ],
     rustlibs: [
         "libacpi_tables",
+        "libanyhow",
         "libarch",
         "libassertions",
         "libaudio_streams",
@@ -277,44 +250,6 @@ rust_defaults {
         "libenumn",
         "libremain",
     ],
-}
-
-rust_test_host {
-    name: "crosvm_host_test_src_main",
-    defaults: ["crosvm_test_defaults_crosvm"],
-    test_options: {
-        unit_test: true,
-    },
-    arch: {
-        x86_64: {
-            rustlibs: ["libx86_64_rust"],
-        },
-        arm64: {
-            rustlibs: ["libaarch64"],
-        },
-    },
-    target: {
-        linux_glibc_x86_64: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
-        },
-    },
-    ld_flags: [
-        "-Wl,--rpath,\\$$ORIGIN",
-        "-Wl,--rpath,\\$$ORIGIN/../../lib64",
-    ],
-}
-
-rust_test {
-    name: "crosvm_device_test_src_main",
-    defaults: ["crosvm_test_defaults_crosvm"],
     arch: {
         x86_64: {
             rustlibs: ["libx86_64_rust"],
@@ -359,6 +294,7 @@ rust_library {
     ],
     rustlibs: [
         "libacpi_tables",
+        "libanyhow",
         "libarch",
         "libassertions",
         "libaudio_streams",

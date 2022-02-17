@@ -12,13 +12,13 @@ import subprocess
 import sys
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Dict, Iterable, List, NamedTuple, Set
+from typing import Dict, Iterable, List, NamedTuple
 import typing
 
 import test_target
 from test_target import TestTarget
 import testvm
-from test_config import CRATE_OPTIONS, TestOption
+from test_config import CRATE_OPTIONS, TestOption, BUILD_FEATURES
 
 USAGE = """\
 Runs tests for crosvm locally, in a vm or on a remote device.
@@ -82,15 +82,18 @@ class Executable(NamedTuple):
         return f"{self.crate_name}:{self.cargo_target}"
 
 
-def should_build_crate(crate: str, target_arch: Arch):
-    options = CRATE_OPTIONS.get(crate, [])
-    if TestOption.DO_NOT_BUILD in options:
-        return False
-    if TestOption.BUILD_ARM_ONLY in options:
-        return target_arch == "aarch64" or target_arch == "armhf"
-    if TestOption.BUILD_X86_ONLY in options:
-        return target_arch == "x86_64"
-    return True
+def get_workspace_excludes(target_arch: Arch):
+    for crate, options in CRATE_OPTIONS.items():
+        if TestOption.DO_NOT_BUILD in options:
+            yield crate
+        elif TestOption.BUILD_ARM_ONLY in options and (
+            target_arch != "aarch64" and target_arch != "armhf"
+        ):
+            yield crate
+        elif TestOption.BUILD_X86_ONLY in options and target_arch != "x86_64":
+            yield crate
+        elif TestOption.DO_NOT_BUILD_ARMHF in options and target_arch == "armhf":
+            yield crate
 
 
 def should_run_executable(executable: Executable, target_arch: Arch):
@@ -101,13 +104,9 @@ def should_run_executable(executable: Executable, target_arch: Arch):
         return target_arch == "aarch64" or target_arch == "armhf"
     if TestOption.RUN_X86_ONLY in options:
         return target_arch == "x86_64"
+    if TestOption.DO_NOT_RUN_ARMHF in options and target_arch == "armhf":
+        return False
     return True
-
-
-def list_main_crates():
-    yield "crosvm"
-    for path in CROSVM_ROOT.glob("*/Cargo.toml"):
-        yield path.parent.name
 
 
 def list_common_crates():
@@ -132,6 +131,8 @@ def cargo(
         "--message-format=json-diagnostic-rendered-ansi",
         *flags,
     ]
+    if VERBOSE:
+        print("$", " ".join(cmd))
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -179,22 +180,11 @@ def cargo(
 
 
 def cargo_build_executables(
-    crates: List[str] = [],
+    flags: list[str],
     cwd: Path = Path("."),
-    features: Set[str] = set(),
     env: Dict[str, str] = {},
 ) -> Iterable[Executable]:
     """Build all test binaries for the given list of crates."""
-    flags: list[str] = []
-    if features:
-        flags += [
-            "--no-default-features",
-            "--features",
-            ",".join(features),
-        ]
-    for crate in crates:
-        flags += ["-p", crate]
-
     # Run build first, to make sure compiler errors of building non-test
     # binaries are caught.
     yield from cargo("build", cwd, flags, env)
@@ -219,26 +209,25 @@ def build_all_binaries(target: TestTarget, target_arch: Arch):
     build_env = os.environ.copy()
     build_env.update(test_target.get_cargo_env(target, target_arch))
 
-    main_crates = [
-        crate
-        for crate in list_main_crates()
-        if should_build_crate(crate, target_arch)
-    ]
-
-    print("Building tests for:", ", ".join(main_crates))
+    print("Building crosvm workspace")
     yield from cargo_build_executables(
-        main_crates, env=build_env, features=set(["all-linux"])
+        [
+            "--features=" + BUILD_FEATURES[target_arch],
+            "--verbose",
+            "--workspace",
+            *[
+                f"--exclude={crate}"
+                for crate in get_workspace_excludes(target_arch)
+            ],
+        ],
+        cwd=CROSVM_ROOT,
+        env=build_env,
     )
-
-    common_crates = [
-        crate
-        for crate in list_common_crates()
-        if should_build_crate(crate, target_arch)
-    ]
 
     with Pool(PARALLELISM) as pool:
         for executables in pool.imap(
-            functools.partial(build_common_crate, build_env), common_crates
+            functools.partial(build_common_crate, build_env),
+            list_common_crates(),
         ):
             yield from executables
 
@@ -401,17 +390,8 @@ def main():
         sys.exit(-1)
 
 
-def verify_crate_options():
-    """Verify that CRATE_OPTIONS are for existing crates."""
-    all_crates = list(list_main_crates()) + list(list_common_crates())
-    for crate, _ in CRATE_OPTIONS.items():
-        if crate not in all_crates:
-            raise Exception("No such crate: %s" % crate)
-
-
 if __name__ == "__main__":
     try:
-        verify_crate_options()
         main()
     except subprocess.CalledProcessError as e:
         print("Command failed:", e.cmd)

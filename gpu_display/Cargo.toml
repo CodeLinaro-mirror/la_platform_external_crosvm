@@ -8,13 +8,13 @@ edition = "2018"
 x = []
 
 [dependencies]
-data_model = { path = "../data_model" }
+data_model = { path = "../common/data_model" }
 libc = "*"
-base = { path = "../base" }
+base = { path = "../common/base" }
 linux_input_sys = { path = "../linux_input_sys" }
 remain = "*"
 thiserror = "*"
 
 [build-dependencies]
-cc = "=1.0.25"
+cc = "1.0.25"
 pkg-config = "0.3.11"

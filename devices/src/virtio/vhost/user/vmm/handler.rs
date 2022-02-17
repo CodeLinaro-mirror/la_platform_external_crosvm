@@ -8,23 +8,27 @@ use std::path::Path;
 
 use base::{AsRawDescriptor, Event, Tube};
 use vm_memory::GuestMemory;
-use vmm_vhost::vhost_user::message::{
-    VhostUserConfigFlags, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
+use vmm_vhost::message::{
+    MasterReq, VhostUserConfigFlags, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
 };
-use vmm_vhost::vhost_user::{Master, VhostUserMaster};
-use vmm_vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
+use vmm_vhost::{
+    connection::socket::Endpoint as SocketEndpoint, Master, VhostBackend, VhostUserMaster,
+    VhostUserMemoryRegionInfo, VringConfigData,
+};
 
 use crate::virtio::vhost::user::vmm::{Error, Result};
 use crate::virtio::{SignalableInterrupt, Queue};
 
-fn set_features(vu: &mut Master, avail_features: u64, ack_features: u64) -> Result<u64> {
+type SocketMaster = Master<SocketEndpoint<MasterReq>>;
+
+fn set_features(vu: &mut SocketMaster, avail_features: u64, ack_features: u64) -> Result<u64> {
     let features = avail_features & ack_features;
     vu.set_features(features).map_err(Error::SetFeatures)?;
     Ok(features)
 }
 
 pub struct VhostUserHandler {
-    vu: Master,
+    vu: SocketMaster,
     pub avail_features: u64,
     acked_features: u64,
     protocol_features: VhostUserProtocolFeatures,
@@ -41,7 +45,8 @@ impl VhostUserHandler {
         allow_protocol_features: VhostUserProtocolFeatures,
     ) -> Result<Self> {
         Self::new(
-            Master::connect(path, max_queue_num).map_err(Error::SocketConnectOnMasterCreate)?,
+            SocketMaster::connect(path, max_queue_num)
+                .map_err(Error::SocketConnectOnMasterCreate)?,
             allow_features,
             init_features,
             allow_protocol_features,
@@ -58,7 +63,7 @@ impl VhostUserHandler {
         allow_protocol_features: VhostUserProtocolFeatures,
     ) -> Result<Self> {
         Self::new(
-            Master::from_stream(sock, max_queue_num),
+            SocketMaster::from_stream(sock, max_queue_num),
             allow_features,
             init_features,
             allow_protocol_features,
@@ -67,7 +72,7 @@ impl VhostUserHandler {
 
     /// Creates a `VhostUserHandler` instance with features and protocol features initialized.
     fn new(
-        mut vu: Master,
+        mut vu: SocketMaster,
         allow_features: u64,
         init_features: u64,
         allow_protocol_features: VhostUserProtocolFeatures,

@@ -7,7 +7,6 @@
 
 pub mod panic_hook;
 pub mod argument;
-pub mod error;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 pub mod gdb;
 #[path = "linux.rs"]
@@ -22,16 +21,21 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use arch::{Pstore, VcpuAffinity};
+use base::RawDescriptor;
 use devices::serial_device::{SerialHardware, SerialParameters};
 #[cfg(feature = "audio_cras")]
 use devices::virtio::cras_backend::Parameters as CrasSndParameters;
 use devices::virtio::fs::passthrough;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::GpuParameters;
+#[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
+use devices::virtio::VideoBackendType;
 #[cfg(feature = "audio")]
 use devices::Ac97Parameters;
-use devices::ProtectionType;
+#[cfg(feature = "direct")]
+use devices::BusRange;
 use devices::StubPciParameters;
+use hypervisor::ProtectionType;
 use libc::{getegid, geteuid};
 use vm_control::BatteryType;
 
@@ -95,9 +99,10 @@ pub struct GidMap {
 
 /// Direct IO forwarding options
 #[cfg(feature = "direct")]
+#[derive(Debug)]
 pub struct DirectIoOption {
     pub path: PathBuf,
-    pub ranges: Vec<(u64, u64)>,
+    pub ranges: Vec<BusRange>,
 }
 
 pub const DEFAULT_TOUCH_DEVICE_HEIGHT: u32 = 1024;
@@ -294,10 +299,21 @@ impl VfioCommand {
     }
 }
 
+pub enum VhostVsockDeviceParameter {
+    Path(PathBuf),
+    Fd(RawDescriptor),
+}
+
+impl Default for VhostVsockDeviceParameter {
+    fn default() -> Self {
+        VhostVsockDeviceParameter::Path(PathBuf::from(VHOST_VSOCK_PATH))
+    }
+}
+
 /// Aggregate of all configurable options for a running VM.
 pub struct Config {
     pub kvm_device_path: PathBuf,
-    pub vhost_vsock_device_path: PathBuf,
+    pub vhost_vsock_device: Option<VhostVsockDeviceParameter>,
     pub vhost_net_device_path: PathBuf,
     pub vcpu_count: Option<usize>,
     pub rt_cpus: Vec<usize>,
@@ -306,7 +322,7 @@ pub struct Config {
     pub cpu_capacity: BTreeMap<usize, u32>, // CPU index -> capacity
     pub per_vm_core_scheduling: bool,
     #[cfg(feature = "audio_cras")]
-    pub cras_snd: Option<CrasSndParameters>,
+    pub cras_snds: Vec<CrasSndParameters>,
     pub delay_rt: bool,
     pub no_smt: bool,
     pub memory: Option<u64>,
@@ -330,6 +346,7 @@ pub struct Config {
     pub net_vq_pairs: Option<u16>,
     pub vhost_net: bool,
     pub tap_fd: Vec<RawFd>,
+    pub tap_name: Vec<String>,
     pub cid: Option<u64>,
     pub wayland_socket_paths: BTreeMap<String, PathBuf>,
     pub x_display: Option<String>,
@@ -357,8 +374,10 @@ pub struct Config {
     pub virtio_input_evdevs: Vec<PathBuf>,
     pub split_irqchip: bool,
     pub vfio: Vec<VfioCommand>,
-    pub video_dec: bool,
-    pub video_enc: bool,
+    #[cfg(feature = "video-decoder")]
+    pub video_dec: Option<VideoBackendType>,
+    #[cfg(feature = "video-encoder")]
+    pub video_enc: Option<VideoBackendType>,
     pub acpi_tables: Vec<PathBuf>,
     pub protected_vm: ProtectionType,
     pub battery_type: Option<BatteryType>,
@@ -393,7 +412,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             kvm_device_path: PathBuf::from(KVM_PATH),
-            vhost_vsock_device_path: PathBuf::from(VHOST_VSOCK_PATH),
+            vhost_vsock_device: None,
             vhost_net_device_path: PathBuf::from(VHOST_NET_PATH),
             vcpu_count: None,
             rt_cpus: Vec::new(),
@@ -402,7 +421,7 @@ impl Default for Config {
             cpu_capacity: BTreeMap::new(),
             per_vm_core_scheduling: false,
             #[cfg(feature = "audio_cras")]
-            cras_snd: None,
+            cras_snds: Vec::new(),
             delay_rt: false,
             no_smt: false,
             memory: None,
@@ -426,6 +445,7 @@ impl Default for Config {
             net_vq_pairs: None,
             vhost_net: false,
             tap_fd: Vec::new(),
+            tap_name: Vec::new(),
             cid: None,
             #[cfg(feature = "gpu")]
             gpu_parameters: None,
@@ -453,8 +473,10 @@ impl Default for Config {
             virtio_input_evdevs: Vec::new(),
             split_irqchip: false,
             vfio: Vec::new(),
-            video_dec: false,
-            video_enc: false,
+            #[cfg(feature = "video-decoder")]
+            video_dec: None,
+            #[cfg(feature = "video-encoder")]
+            video_enc: None,
             acpi_tables: Vec::new(),
             protected_vm: ProtectionType::Unprotected,
             battery_type: None,

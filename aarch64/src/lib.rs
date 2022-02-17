@@ -3,8 +3,7 @@
 // found in the LICENSE file.
 
 use std::collections::BTreeMap;
-use std::error::Error as StdError;
-use std::io::{self};
+use std::io;
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -13,9 +12,10 @@ use base::{Event, MemoryMappingBuilder};
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::{
     Bus, BusDeviceObj, BusError, IrqChip, IrqChipAArch64, PciAddress, PciConfigMmio, PciDevice,
-    ProtectionType,
 };
-use hypervisor::{DeviceKind, Hypervisor, HypervisorCap, VcpuAArch64, VcpuFeature, VmAArch64};
+use hypervisor::{
+    DeviceKind, Hypervisor, HypervisorCap, ProtectionType, VcpuAArch64, VcpuFeature, VmAArch64,
+};
 use minijail::Minijail;
 use remain::sorted;
 use resources::SystemAllocator;
@@ -68,9 +68,19 @@ const PSR_A_BIT: u64 = 0x00000100;
 const PSR_D_BIT: u64 = 0x00000200;
 
 macro_rules! offset__of {
-    ($str:ty, $($field:ident).+ $([$idx:expr])*) => {
-        unsafe { &(*(0 as *const $str))$(.$field)*  $([$idx])* as *const _ as usize }
-    }
+    ($type:path, $field:tt) => {{
+        // Check that the field actually exists. This will generate a compiler error if the field is
+        // accessed through a Deref impl.
+        #[allow(clippy::unneeded_field_pattern)]
+        let $type { $field: _, .. };
+
+        // Get a pointer to the uninitialized field.  This is taken from the docs for `addr_of_mut`.
+        let mut uninit = ::std::mem::MaybeUninit::<$type>::uninit();
+        let field_ptr = unsafe { ::std::ptr::addr_of_mut!((*uninit.as_mut_ptr()).$field) };
+
+        // Now get the offset.
+        (field_ptr as usize) - (uninit.as_mut_ptr() as usize)
+    }};
 }
 
 const KVM_REG_ARM64: u64 = 0x6000000000000000;
@@ -87,18 +97,14 @@ const KVM_REG_ARM_CORE: u64 = 0x0010 << KVM_REG_ARM_COPROC_SHIFT;
 /// register number, e.g. `arm64_core_reg!(regs, 5)` for `x5`. This is different
 /// to work around `offset__of!(kvm_sys::user_pt_regs, regs[$x])` not working.
 macro_rules! arm64_core_reg {
-    ($reg: tt) => {
-        KVM_REG_ARM64
-            | KVM_REG_SIZE_U64
-            | KVM_REG_ARM_CORE
-            | ((offset__of!(kvm_sys::user_pt_regs, $reg) / 4) as u64)
-    };
-    (regs, $x: literal) => {
-        KVM_REG_ARM64
-            | KVM_REG_SIZE_U64
-            | KVM_REG_ARM_CORE
-            | (((offset__of!(kvm_sys::user_pt_regs, regs) + ($x * size_of::<u64>())) / 4) as u64)
-    };
+    ($reg: tt) => {{
+        let off = (offset__of!(kvm_sys::user_pt_regs, $reg) / 4) as u64;
+        KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE | off
+    }};
+    (regs, $x: literal) => {{
+        let off = ((offset__of!(kvm_sys::user_pt_regs, regs) + ($x * size_of::<u64>())) / 4) as u64;
+        KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE | off
+    }};
 }
 
 fn get_kernel_addr() -> GuestAddress {
@@ -152,8 +158,6 @@ pub enum Error {
     CloneIrqChip(base::Error),
     #[error("the given kernel command line was invalid: {0}")]
     Cmdline(kernel_cmdline::Error),
-    #[error("error creating devices: {0}")]
-    CreateDevices(Box<dyn StdError>),
     #[error("unable to make an Event: {0}")]
     CreateEvent(base::Error),
     #[error("FDT could not be created: {0}")]
@@ -170,12 +174,10 @@ pub enum Error {
     CreateSocket(io::Error),
     #[error("failed to create VCPU: {0}")]
     CreateVcpu(base::Error),
-    #[error("failed to create vm: {0}")]
-    CreateVm(Box<dyn StdError>),
     #[error("vm created wrong kind of vcpu")]
     DowncastVcpu,
     #[error("failed to finalize IRQ chip: {0}")]
-    FinalizeIrqChip(Box<dyn StdError>),
+    FinalizeIrqChip(base::Error),
     #[error("failed to get PSCI version: {0}")]
     GetPsciVersion(base::Error),
     #[error("failed to get serial cmdline: {0}")]
@@ -254,6 +256,7 @@ impl arch::LinuxArch for AArch64 {
     fn build_vm<V, Vcpu>(
         mut components: VmComponents,
         _exit_evt: &Event,
+        _reset_evt: &Event,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
@@ -275,6 +278,38 @@ impl arch::LinuxArch for AArch64 {
 
         let mem = vm.get_memory().clone();
 
+        // separate out image loading from other setup to get a specific error for
+        // image loading
+        let mut initrd = None;
+        let image_size = match components.vm_image {
+            VmImage::Bios(ref mut bios) => {
+                arch::load_image(&mem, bios, get_bios_addr(), AARCH64_BIOS_MAX_LEN)
+                    .map_err(Error::BiosLoadFailure)?
+            }
+            VmImage::Kernel(ref mut kernel_image) => {
+                let kernel_size =
+                    arch::load_image(&mem, kernel_image, get_kernel_addr(), u64::max_value())
+                        .map_err(Error::KernelLoadFailure)?;
+                let kernel_end = get_kernel_addr().offset() + kernel_size as u64;
+                initrd = match components.initrd_image {
+                    Some(initrd_file) => {
+                        let mut initrd_file = initrd_file;
+                        let initrd_addr =
+                            (kernel_end + (AARCH64_INITRD_ALIGN - 1)) & !(AARCH64_INITRD_ALIGN - 1);
+                        let initrd_max_size =
+                            components.memory_size - (initrd_addr - AARCH64_PHYS_MEM_START);
+                        let initrd_addr = GuestAddress(initrd_addr);
+                        let initrd_size =
+                            arch::load_image(&mem, &mut initrd_file, initrd_addr, initrd_max_size)
+                                .map_err(Error::InitrdLoadFailure)?;
+                        Some((initrd_addr, initrd_size))
+                    }
+                    None => None,
+                };
+                kernel_size
+            }
+        };
+
         let mut use_pmu = vm
             .get_hypervisor()
             .check_capability(&HypervisorCap::ArmPmuV3);
@@ -293,6 +328,7 @@ impl arch::LinuxArch for AArch64 {
                 vcpu_id,
                 use_pmu,
                 has_bios,
+                image_size,
                 components.protected_vm,
             )?;
             has_pvtime &= vcpu.has_pvtime_support();
@@ -300,9 +336,7 @@ impl arch::LinuxArch for AArch64 {
             kvm_vcpu_ids.push(vcpu_id);
         }
 
-        irq_chip
-            .finalize()
-            .map_err(|e| Error::FinalizeIrqChip(Box::new(e)))?;
+        irq_chip.finalize().map_err(Error::FinalizeIrqChip)?;
 
         if has_pvtime {
             let pvtime_mem = MemoryMappingBuilder::new(AARCH64_PVTIME_IPA_MAX_SIZE as usize)
@@ -318,7 +352,7 @@ impl arch::LinuxArch for AArch64 {
         }
 
         if components.protected_vm == ProtectionType::Protected {
-            vm.enable_protected_vm(
+            vm.load_protected_vm_firmware(
                 GuestAddress(AARCH64_PROTECTED_VM_FW_START),
                 AARCH64_PROTECTED_VM_FW_MAX_SIZE,
             )
@@ -360,8 +394,9 @@ impl arch::LinuxArch for AArch64 {
             (devices::AARCH64_GIC_NR_IRQS - AARCH64_IRQ_BASE) as usize,
         )
         .map_err(Error::CreatePciRoot)?;
-        let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci)));
 
+        let pci_root = Arc::new(Mutex::new(pci));
+        let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci_root.clone(), 8)));
         let (platform_devices, _others): (Vec<_>, Vec<_>) = others
             .into_iter()
             .partition(|(dev, _)| dev.as_platform_device().is_some());
@@ -430,37 +465,6 @@ impl arch::LinuxArch for AArch64 {
             }
             None => (high_mmio_base, high_mmio_size),
         };
-        let mut initrd = None;
-
-        // separate out image loading from other setup to get a specific error for
-        // image loading
-        match components.vm_image {
-            VmImage::Bios(ref mut bios) => {
-                arch::load_image(&mem, bios, get_bios_addr(), AARCH64_BIOS_MAX_LEN)
-                    .map_err(Error::BiosLoadFailure)?;
-            }
-            VmImage::Kernel(ref mut kernel_image) => {
-                let kernel_size =
-                    arch::load_image(&mem, kernel_image, get_kernel_addr(), u64::max_value())
-                        .map_err(Error::KernelLoadFailure)?;
-                let kernel_end = get_kernel_addr().offset() + kernel_size as u64;
-                initrd = match components.initrd_image {
-                    Some(initrd_file) => {
-                        let mut initrd_file = initrd_file;
-                        let initrd_addr =
-                            (kernel_end + (AARCH64_INITRD_ALIGN - 1)) & !(AARCH64_INITRD_ALIGN - 1);
-                        let initrd_max_size =
-                            components.memory_size - (initrd_addr - AARCH64_PHYS_MEM_START);
-                        let initrd_addr = GuestAddress(initrd_addr);
-                        let initrd_size =
-                            arch::load_image(&mem, &mut initrd_file, initrd_addr, initrd_max_size)
-                                .map_err(Error::InitrdLoadFailure)?;
-                        Some((initrd_addr, initrd_size))
-                    }
-                    None => None,
-                };
-            }
-        }
 
         fdt::create_fdt(
             AARCH64_FDT_MAX_SIZE as usize,
@@ -498,8 +502,8 @@ impl arch::LinuxArch for AArch64 {
             delay_rt: components.delay_rt,
             bat_control: None,
             resume_notify_devices: Vec::new(),
-            root_config: pci_bus,
-            hotplug_bus: None,
+            root_config: pci_root,
+            hotplug_bus: Vec::new(),
         })
     }
 
@@ -599,6 +603,7 @@ impl AArch64 {
         vcpu_id: usize,
         use_pmu: bool,
         has_bios: bool,
+        image_size: usize,
         protected_vm: ProtectionType,
     ) -> Result<()> {
         let mut features = vec![VcpuFeature::PsciV0_2];
@@ -636,6 +641,12 @@ impl AArch64 {
             let fdt_addr = (AARCH64_PHYS_MEM_START + fdt_offset(mem_size, has_bios)) as u64;
             vcpu.set_one_reg(arm64_core_reg!(regs, 0), fdt_addr)
                 .map_err(Error::SetReg)?;
+
+            /* X2 -- image size */
+            if protected_vm == ProtectionType::Protected {
+                vcpu.set_one_reg(arm64_core_reg!(regs, 2), image_size as u64)
+                    .map_err(Error::SetReg)?;
+            }
         }
 
         Ok(())

@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     convert::{self, TryFrom, TryInto},
-    fs::File,
+    fs::{File, OpenOptions},
     mem::size_of,
     num::Wrapping,
     os::unix::{io::AsRawFd, net::UnixListener},
@@ -21,10 +22,11 @@ use base::{
 use cros_async::{AsyncWrapper, Executor};
 use data_model::{DataInit, Le64};
 use getopts::Options;
+use hypervisor::ProtectionType;
 use once_cell::sync::OnceCell;
 use vhost::{self, Vhost, Vsock};
 use vm_memory::GuestMemory;
-use vmm_vhost::vhost_user::{
+use vmm_vhost::{
     message::{
         VhostUserConfigFlags, VhostUserInflight, VhostUserMemoryRegion, VhostUserProtocolFeatures,
         VhostUserSingleMemoryRegion, VhostUserVirtioFeatures, VhostUserVringAddrFlags,
@@ -33,16 +35,13 @@ use vmm_vhost::vhost_user::{
     Error, Result, SlaveReqHandler, VhostUserSlaveReqHandlerMut,
 };
 
-use crate::{
-    virtio::{
-        base_features,
-        vhost::{
-            user::device::handler::{create_guest_memory, vmm_va_to_gpa, MappingInfo},
-            vsock,
-        },
-        Queue,
+use crate::virtio::{
+    base_features,
+    vhost::{
+        user::device::handler::{create_guest_memory, vmm_va_to_gpa, MappingInfo},
+        vsock,
     },
-    ProtectionType,
+    Queue,
 };
 
 static VSOCK_EXECUTOR: OnceCell<Executor> = OnceCell::new();
@@ -63,7 +62,14 @@ struct VsockBackend {
 
 impl VsockBackend {
     fn new<P: AsRef<Path>>(cid: u64, vhost_socket: P) -> anyhow::Result<VsockBackend> {
-        let handle = Vsock::new(vhost_socket).context("failed to create `Vsock`")?;
+        let handle = Vsock::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(vhost_socket)
+                .context("failed to open `Vsock` socket")?,
+        );
 
         let features = handle.get_features().context("failed to get features")?;
         let protocol_features = VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::CONFIG;

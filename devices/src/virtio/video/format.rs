@@ -46,6 +46,7 @@ pub enum Profile {
 impl_try_from_le32_for_enumn!(Profile, "profile");
 
 impl Profile {
+    #[cfg(any(feature = "video-encoder", feature = "libvda"))]
     pub fn to_format(&self) -> Format {
         use Profile::*;
         match self {
@@ -125,6 +126,7 @@ pub enum BitrateMode {
 }
 impl_try_from_le32_for_enumn!(BitrateMode, "bitrate_mode");
 
+#[allow(dead_code)]
 #[derive(Debug, Copy, Clone)]
 pub enum Bitrate {
     /// Constant bitrate.
@@ -133,6 +135,7 @@ pub enum Bitrate {
     VBR { target: u32, peak: u32 },
 }
 
+#[cfg(feature = "video-encoder")]
 impl Bitrate {
     pub fn mode(&self) -> BitrateMode {
         match self {
@@ -218,6 +221,7 @@ impl Response for FormatDesc {
     }
 }
 
+#[cfg(feature = "video-encoder")]
 fn clamp_size(size: u32, min: u32, step: u32) -> u32 {
     match step {
         0 | 1 => size,
@@ -234,6 +238,7 @@ fn clamp_size(size: u32, min: u32, step: u32) -> u32 {
 
 /// Parses a slice of valid frame formats and the desired resolution
 /// and returns the closest available resolution.
+#[cfg(feature = "video-encoder")]
 pub fn find_closest_resolution(
     frame_formats: &[FrameFormat],
     desired_width: u32,

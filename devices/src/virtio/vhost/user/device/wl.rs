@@ -19,16 +19,16 @@ use base::{
 use cros_async::{AsyncWrapper, EventAsync, Executor, IoSourceExt};
 use futures::future::{AbortHandle, Abortable};
 use getopts::Options;
+use hypervisor::ProtectionType;
 use once_cell::sync::OnceCell;
 use sync::Mutex;
 use vm_memory::GuestMemory;
-use vmm_vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
+use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::device::handler::{
     CallEvent, DeviceRequestHandler, VhostUserBackend,
 };
 use crate::virtio::{base_features, wl, Queue};
-use crate::ProtectionType;
 
 static WL_EXECUTOR: OnceCell<Executor> = OnceCell::new();
 

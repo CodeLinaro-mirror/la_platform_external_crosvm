@@ -5,16 +5,42 @@
 use libc::{EINVAL, ENOMEM, ENOSYS, ENXIO};
 
 use base::{
-    errno_result, error, ioctl_with_mut_ref, ioctl_with_ref, Error, MemoryMappingBuilder, Result,
+    errno_result, error, ioctl_with_mut_ref, ioctl_with_ref, ioctl_with_val, Error,
+    MemoryMappingBuilder, Result,
 };
 use kvm_sys::*;
 use vm_memory::GuestAddress;
 
-use super::{KvmCap, KvmVcpu, KvmVm};
+use super::{Kvm, KvmCap, KvmVcpu, KvmVm};
 use crate::{
-    ClockState, DeviceKind, Hypervisor, IrqSourceChip, PsciVersion, VcpuAArch64, VcpuFeature, Vm,
-    VmAArch64, VmCap,
+    ClockState, DeviceKind, Hypervisor, IrqSourceChip, ProtectionType, PsciVersion, VcpuAArch64,
+    VcpuFeature, Vm, VmAArch64, VmCap,
 };
+
+impl Kvm {
+    // Compute the machine type, which should be the IPA range for the VM
+    // Ideally, this would take a description of the memory map and return
+    // the closest machine type for this VM. Here, we just return the maximum
+    // the kernel support.
+    pub fn get_vm_type(&self, protection_type: ProtectionType) -> Result<u32> {
+        // Safe because we know self is a real kvm fd
+        let ipa_size = match unsafe {
+            ioctl_with_val(self, KVM_CHECK_EXTENSION(), KVM_CAP_ARM_VM_IPA_SIZE.into())
+        } {
+            // Not supported? Use 0 as the machine type, which implies 40bit IPA
+            ret if ret < 0 => 0,
+            ipa => ipa as u32,
+        };
+        let protection_flag = match protection_type {
+            ProtectionType::Unprotected => 0,
+            ProtectionType::Protected | ProtectionType::ProtectedWithoutFirmware => {
+                KVM_VM_TYPE_ARM_PROTECTED
+            }
+        };
+        // Use the lower 8 bits representing the IPA space as the machine type
+        Ok((ipa_size & KVM_VM_TYPE_ARM_IPA_SIZE_MASK) | protection_flag)
+    }
+}
 
 impl KvmVm {
     /// Checks if a particular `VmCap` is available, or returns None if arch-independent
@@ -67,6 +93,17 @@ impl KvmVm {
         }?;
         Ok(info)
     }
+
+    fn set_protected_vm_firmware_ipa(&self, fw_addr: GuestAddress) -> Result<()> {
+        // Safe because none of the args are pointers.
+        unsafe {
+            self.enable_raw_capability(
+                KvmCap::ArmProtectedVm,
+                KVM_CAP_ARM_PROTECTED_VM_FLAGS_SET_FW_IPA,
+                &[fw_addr.0, 0, 0, 0],
+            )
+        }
+    }
 }
 
 #[repr(C)]
@@ -80,13 +117,17 @@ impl VmAArch64 for KvmVm {
         &self.kvm
     }
 
-    fn enable_protected_vm(&mut self, fw_addr: GuestAddress, fw_max_size: u64) -> Result<()> {
+    fn load_protected_vm_firmware(
+        &mut self,
+        fw_addr: GuestAddress,
+        fw_max_size: u64,
+    ) -> Result<()> {
         if !self.check_capability(VmCap::Protected) {
             return Err(Error::new(ENOSYS));
         }
         let info = self.get_protected_vm_info()?;
-        let memslot = if info.firmware_size == 0 {
-            u64::MAX
+        if info.firmware_size == 0 {
+            Err(Error::new(EINVAL))
         } else {
             if info.firmware_size > fw_max_size {
                 return Err(Error::new(ENOMEM));
@@ -94,15 +135,8 @@ impl VmAArch64 for KvmVm {
             let mem = MemoryMappingBuilder::new(info.firmware_size as usize)
                 .build()
                 .map_err(|_| Error::new(EINVAL))?;
-            self.add_memory_region(fw_addr, Box::new(mem), false, false)? as u64
-        };
-        // Safe because none of the args are pointers.
-        unsafe {
-            self.enable_raw_capability(
-                KvmCap::ArmProtectedVm,
-                KVM_CAP_ARM_PROTECTED_VM_FLAGS_ENABLE,
-                &[memslot, 0, 0, 0],
-            )
+            self.add_memory_region(fw_addr, Box::new(mem), false, false)?;
+            self.set_protected_vm_firmware_ipa(fw_addr)
         }
     }
 
@@ -314,7 +348,7 @@ mod tests {
     fn set_gsi_routing() {
         let kvm = Kvm::new().unwrap();
         let gm = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
-        let vm = KvmVm::new(&kvm, gm).unwrap();
+        let vm = KvmVm::new(&kvm, gm, ProtectionType::Unprotected).unwrap();
         vm.create_irq_chip().unwrap();
         vm.set_gsi_routing(&[]).unwrap();
         vm.set_gsi_routing(&[IrqRoute {
