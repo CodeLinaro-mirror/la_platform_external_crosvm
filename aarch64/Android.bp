@@ -29,6 +29,7 @@ rust_library {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libmemoffset",
         "libminijail_rust",
         "libresources",
         "libsync_rust",
@@ -42,6 +43,9 @@ rust_library {
         // crosvm_defaults enables it and the more specific target apparently takes precedence over
         // the less specific arch.
         linux_glibc_x86_64: {
+            enabled: false,
+        },
+        linux_musl_x86_64: {
             enabled: false,
         },
     },
