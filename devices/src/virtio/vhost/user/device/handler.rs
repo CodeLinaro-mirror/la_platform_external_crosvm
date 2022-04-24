@@ -1050,6 +1050,9 @@ mod tests {
                     .unwrap();
             }
 
+            // The VMM side is supposed to stop before the device side.
+            drop(vmm_handler);
+
             vmm_bar.wait();
         });
 
@@ -1088,5 +1091,10 @@ mod tests {
         }
 
         dev_bar.wait();
+
+        match listener.handle_request() {
+            Err(VhostError::ClientExit) => (),
+            r => panic!("Err(ClientExit) was expected but {:?}", r),
+        }
     }
 }
