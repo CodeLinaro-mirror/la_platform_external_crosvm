@@ -3,13 +3,14 @@
 // found in the LICENSE file.
 
 use super::{INTERRUPT_STATUS_CONFIG_CHANGED, INTERRUPT_STATUS_USED_RING, VIRTIO_MSI_NO_VECTOR};
+use crate::irq_event::IrqLevelEvent;
 use crate::pci::MsixConfig;
 use base::Event;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use sync::Mutex;
-use std::rc::Rc;
-use std::cell::RefCell;
 
 pub trait SignalableInterrupt: Send + Sync {
     /// Writes to the irqfd to VMM to deliver virtual interrupt to the guest.
@@ -51,8 +52,7 @@ pub trait SignalableInterrupt: Send + Sync {
 
 pub struct Interrupt {
     interrupt_status: Arc<AtomicUsize>,
-    interrupt_evt: Event,
-    interrupt_resample_evt: Event,
+    interrupt_evt: IrqLevelEvent,
     msix_config: Option<Arc<Mutex<MsixConfig>>>,
     config_msix_vector: u16,
 }
@@ -82,7 +82,7 @@ impl SignalableInterrupt for Interrupt {
             == 0
         {
             // Write to irqfd to inject INTx interrupt
-            self.interrupt_evt.write(1).unwrap();
+            self.interrupt_evt.trigger().unwrap();
         }
     }
 
@@ -91,22 +91,22 @@ impl SignalableInterrupt for Interrupt {
     }
 
     fn get_resample_evt(&self) -> Option<&Event> {
-        Some(&self.interrupt_resample_evt)
+        Some(self.interrupt_evt.get_resample())
     }
 
     fn do_interrupt_resample(&self) {
         if self.interrupt_status.load(Ordering::SeqCst) != 0 {
-            self.interrupt_evt.write(1).unwrap();
+            self.interrupt_evt.trigger().unwrap();
         }
     }
 
     fn interrupt_resample(&self) {
-        let _ = self.interrupt_resample_evt.read();
+        let _ = self.interrupt_evt.get_resample();
         self.do_interrupt_resample();
     }
 
     fn get_interrupt_evt(&self) -> Option<&Event> {
-        Some(&self.interrupt_evt)
+        Some(&self.interrupt_evt.get_trigger())
     }
 
     fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
@@ -172,15 +172,13 @@ impl<I: SignalableInterrupt> SignalableInterrupt for Arc<Mutex<I>> {
 impl Interrupt {
     pub fn new(
         interrupt_status: Arc<AtomicUsize>,
-        interrupt_evt: Event,
-        interrupt_resample_evt: Event,
+        interrupt_evt: IrqLevelEvent,
         msix_config: Option<Arc<Mutex<MsixConfig>>>,
         config_msix_vector: u16,
     ) -> Interrupt {
         Interrupt {
             interrupt_status,
             interrupt_evt,
-            interrupt_resample_evt,
             msix_config,
             config_msix_vector,
         }
@@ -190,10 +188,8 @@ impl Interrupt {
         Self{
               interrupt_status: self.interrupt_status.clone(),
               interrupt_evt: self.interrupt_evt.try_clone().unwrap(),
-              interrupt_resample_evt: self.interrupt_resample_evt.try_clone().unwrap(),
               msix_config: self.msix_config.clone(),
               config_msix_vector: self.config_msix_vector.clone(),
             }
     }
-
 }

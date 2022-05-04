@@ -53,6 +53,7 @@ rust_binary {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libcrosvm",
         "libdata_model",
         "libdevices",
@@ -96,6 +97,11 @@ rust_binary {
                 "gpu",
             ],
         },
+        android: {
+            shared_libs: [
+                "libprocessgroup",
+            ],
+        },
         darwin: {
             enabled: false,
         },
@@ -108,6 +114,9 @@ rust_binary {
                 "libgdbstub",
                 "libgdbstub_arch",
                 "libthiserror",
+            ],
+            shared_libs: [
+                "libprocessgroup",
             ],
         },
         linux_bionic_arm64: {
@@ -152,12 +161,14 @@ rust_test {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libdata_model",
         "libdevices",
         "libdisk",
         "libhypervisor",
         "libkernel_cmdline",
         "libkernel_loader",
+        "liblazy_static",
         "liblibc",
         "liblibcras",
         "libminijail_rust",
@@ -238,6 +249,7 @@ rust_test {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libcrosvm",
         "libdata_model",
         "libdevices",
@@ -245,6 +257,7 @@ rust_test {
         "libhypervisor",
         "libkernel_cmdline",
         "libkernel_loader",
+        "liblazy_static",
         "liblibc",
         "liblibcras",
         "libminijail_rust",
@@ -320,6 +333,7 @@ rust_library {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libdata_model",
         "libdevices",
         "libdisk",
@@ -362,6 +376,11 @@ rust_library {
                 "gpu",
             ],
         },
+        android: {
+            shared_libs: [
+                "libprocessgroup",
+            ],
+        },
         host_linux: {
             features: [
                 "gdb",
@@ -371,6 +390,9 @@ rust_library {
                 "libgdbstub",
                 "libgdbstub_arch",
                 "libthiserror",
+            ],
+            shared_libs: [
+                "libprocessgroup",
             ],
         },
     },

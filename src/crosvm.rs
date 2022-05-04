@@ -14,7 +14,7 @@ pub mod platform;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net;
 use std::ops::RangeInclusive;
 use std::os::unix::io::RawFd;
@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use arch::{Pstore, VcpuAffinity};
-use base::RawDescriptor;
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::virtio::block::block::DiskOption;
 #[cfg(feature = "audio_cras")]
@@ -30,6 +29,7 @@ use devices::virtio::cras_backend::Parameters as CrasSndParameters;
 use devices::virtio::fs::passthrough;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::GpuParameters;
+use devices::virtio::vhost::vsock::VhostVsockDeviceParameter;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 use devices::virtio::VideoBackendType;
 #[cfg(feature = "audio")]
@@ -45,7 +45,6 @@ use uuid::Uuid;
 use vm_control::BatteryType;
 
 static KVM_PATH: &str = "/dev/kvm";
-static VHOST_VSOCK_PATH: &str = "/dev/vhost-vsock";
 static VHOST_NET_PATH: &str = "/dev/vhost-net";
 static SECCOMP_POLICY_DIR: &str = "/usr/share/policy/crosvm";
 
@@ -273,7 +272,7 @@ impl VfioCommand {
     fn validate_params(kind: &str, value: &str) -> Result<(), argument::Error> {
         match kind {
             "guest-address" => {
-                if value.eq_ignore_ascii_case("auto") || PciAddress::from_string(value).is_ok() {
+                if value.eq_ignore_ascii_case("auto") || PciAddress::from_str(value).is_ok() {
                     Ok(())
                 } else {
                     Err(argument::Error::InvalidValue {
@@ -308,7 +307,7 @@ impl VfioCommand {
     pub fn guest_address(&self) -> Option<PciAddress> {
         self.params
             .get("guest-address")
-            .and_then(|addr| PciAddress::from_string(addr).ok())
+            .and_then(|addr| PciAddress::from_str(addr).ok())
     }
 
     pub fn iommu_dev_type(&self) -> IommuDevType {
@@ -318,17 +317,6 @@ impl VfioCommand {
             }
         }
         IommuDevType::NoIommu
-    }
-}
-
-pub enum VhostVsockDeviceParameter {
-    Path(PathBuf),
-    Fd(RawDescriptor),
-}
-
-impl Default for VhostVsockDeviceParameter {
-    fn default() -> Self {
-        VhostVsockDeviceParameter::Path(PathBuf::from(VHOST_VSOCK_PATH))
     }
 }
 
@@ -346,6 +334,23 @@ pub struct FileBackedMappingParameters {
 pub struct HostPcieRootPortParameters {
     pub host_path: PathBuf,
     pub hp_gpe: Option<u32>,
+}
+
+#[derive(Debug)]
+pub struct JailConfig {
+    pub pivot_root: PathBuf,
+    pub seccomp_policy_dir: PathBuf,
+    pub seccomp_log_failures: bool,
+}
+
+impl Default for JailConfig {
+    fn default() -> Self {
+        JailConfig {
+            pivot_root: PathBuf::from(option_env!("DEFAULT_PIVOT_ROOT").unwrap_or("/var/empty")),
+            seccomp_policy_dir: PathBuf::from(SECCOMP_POLICY_DIR),
+            seccomp_log_failures: false,
+        }
+    }
 }
 
 /// Aggregate of all configurable options for a running VM.
@@ -371,6 +376,8 @@ pub struct Config {
     pub executable_path: Option<Executable>,
     pub android_fstab: Option<PathBuf>,
     pub initrd_path: Option<PathBuf>,
+    pub jail_config: Option<JailConfig>,
+    pub jail_enabled: bool,
     pub params: Vec<String>,
     pub socket_path: Option<PathBuf>,
     pub balloon_control: Option<PathBuf>,
@@ -391,9 +398,6 @@ pub struct Config {
     pub wayland_socket_paths: BTreeMap<String, PathBuf>,
     pub x_display: Option<String>,
     pub shared_dirs: Vec<SharedDir>,
-    pub sandbox: bool,
-    pub seccomp_policy_dir: PathBuf,
-    pub seccomp_log_failures: bool,
     #[cfg(feature = "gpu")]
     pub gpu_parameters: Option<GpuParameters>,
     #[cfg(feature = "gpu")]
@@ -448,6 +452,8 @@ pub struct Config {
     #[cfg(feature = "direct")]
     pub direct_edge_irq: Vec<u32>,
     #[cfg(feature = "direct")]
+    pub direct_wake_irq: Vec<u32>,
+    #[cfg(feature = "direct")]
     pub direct_gpe: Vec<u32>,
     pub dmi_path: Option<PathBuf>,
     pub no_legacy: bool,
@@ -461,10 +467,12 @@ pub struct Config {
     #[cfg(feature = "direct")]
     pub pcie_rp: Vec<HostPcieRootPortParameters>,
     pub rng: bool,
-    pub pivot_root: Option<PathBuf>,
     pub force_s2idle: bool,
     pub strict_balloon: bool,
     pub mmio_address_ranges: Vec<RangeInclusive<u64>>,
+    pub userspace_msr: BTreeSet<u32>,
+    #[cfg(target_os = "android")]
+    pub task_profiles: Vec<String>,
 }
 
 impl Default for Config {
@@ -491,6 +499,12 @@ impl Default for Config {
             executable_path: None,
             android_fstab: None,
             initrd_path: None,
+            // We initialize the jail configuration with a default value so jail-related options can
+            // apply irrespective of whether jail is enabled or not. `jail_config` will then be
+            // assigned `None` if it turns out that `jail_enabled` is `false` after we parse all the
+            // arguments.
+            jail_config: Some(Default::default()),
+            jail_enabled: !cfg!(feature = "default-no-sandbox"),
             params: Vec::new(),
             socket_path: None,
             balloon_control: None,
@@ -518,9 +532,6 @@ impl Default for Config {
             display_window_keyboard: false,
             display_window_mouse: false,
             shared_dirs: Vec::new(),
-            sandbox: !cfg!(feature = "default-no-sandbox"),
-            seccomp_policy_dir: PathBuf::from(SECCOMP_POLICY_DIR),
-            seccomp_log_failures: false,
             #[cfg(feature = "audio")]
             ac97_parameters: Vec::new(),
             #[cfg(feature = "audio")]
@@ -569,6 +580,8 @@ impl Default for Config {
             #[cfg(feature = "direct")]
             direct_edge_irq: Vec::new(),
             #[cfg(feature = "direct")]
+            direct_wake_irq: Vec::new(),
+            #[cfg(feature = "direct")]
             direct_gpe: Vec::new(),
             dmi_path: None,
             no_legacy: false,
@@ -581,10 +594,12 @@ impl Default for Config {
             #[cfg(feature = "direct")]
             pcie_rp: Vec::new(),
             rng: true,
-            pivot_root: None,
             force_s2idle: false,
             strict_balloon: false,
             mmio_address_ranges: Vec::new(),
+            userspace_msr: BTreeSet::new(),
+            #[cfg(target_os = "android")]
+            task_profiles: Vec::new(),
         }
     }
 }
