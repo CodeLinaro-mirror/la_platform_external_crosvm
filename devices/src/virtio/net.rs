@@ -239,7 +239,7 @@ pub fn process_tx<T: TapT>(
 }
 
 pub fn process_ctrl<T: TapT>(
-    interrupt: &SignalableInterrupt,
+    interrupt: &dyn SignalableInterrupt,
     ctrl_queue: &mut Queue,
     mem: &GuestMemory,
     tap: &mut T,
