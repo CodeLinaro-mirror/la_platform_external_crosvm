@@ -57,7 +57,7 @@ unsafe impl DataInit for virtio_console_config {}
 /// * `interrupt` - SignalableInterrupt used to signal that the queue has been used
 /// * `buffer` - Ring buffer providing data to put into the guest
 /// * `receive_queue` - The receive virtio Queue
-pub fn handle_input<I: SignalableInterrupt + ?Sized>(
+pub fn handle_input<I: SignalableInterrupt>(
     mem: &GuestMemory,
     interrupt: &I,
     buffer: &mut VecDeque<u8>,
@@ -91,9 +91,9 @@ pub fn handle_input<I: SignalableInterrupt + ?Sized>(
         let bytes_written = writer.bytes_written() as u32;
 
         if bytes_written > 0 {
-            receive_queue.pop_peeked(&mem);
-            receive_queue.add_used(&mem, desc_index, bytes_written);
-            receive_queue.trigger_interrupt(&mem, interrupt.as_ref());
+            receive_queue.pop_peeked(mem);
+            receive_queue.add_used(mem, desc_index, bytes_written);
+            receive_queue.trigger_interrupt(mem, interrupt);
         }
 
         if bytes_written == 0 {
@@ -110,7 +110,7 @@ pub fn handle_input<I: SignalableInterrupt + ?Sized>(
 /// * `interrupt` - SignalableInterrupt used to signal (if required) that the queue has been used
 /// * `transmit_queue` - The transmit virtio Queue
 /// * `output` - The output sink we are going to write the data into
-pub fn process_transmit_queue<I: SignalableInterrupt + ?Sized>(
+pub fn process_transmit_queue<I: SignalableInterrupt>(
     mem: &GuestMemory,
     interrupt: &I,
     transmit_queue: &mut Queue,
@@ -143,13 +143,13 @@ pub fn process_transmit_queue<I: SignalableInterrupt + ?Sized>(
     }
 
     if needs_interrupt {
-        transmit_queue.trigger_interrupt(mem, interrupt.as_ref());
+        transmit_queue.trigger_interrupt(mem, interrupt);
     }
 }
 
 struct Worker {
     mem: GuestMemory,
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     input: Option<Arc<Mutex<VecDeque<u8>>>>,
     output: Box<dyn io::Write + Send>,
     kill_evt: Event,
@@ -287,7 +287,7 @@ impl Worker {
                         }
                         process_transmit_queue(
                             &self.mem,
-                            &*self.interrupt,
+                            &self.interrupt,
                             &mut self.transmit_queue,
                             &mut self.output,
                         );
@@ -300,9 +300,9 @@ impl Worker {
                         if let Some(in_buf_ref) = self.input.as_ref() {
                             match handle_input(
                                 &self.mem,
-                                &*self.interrupt,
+                                &self.interrupt,
                                 in_buf_ref.lock().deref_mut(),
-                                &mut self.receive_queue
+                                &mut self.receive_queue,
                             ) {
                                 Ok(()) => {}
                                 // Console errors are no-ops, so just continue.
@@ -320,7 +320,7 @@ impl Worker {
                         if let Some(in_buf_ref) = self.input.as_ref() {
                             match handle_input(
                                 &self.mem,
-                                &*self.interrupt,
+                                &self.interrupt,
                                 in_buf_ref.lock().deref_mut(),
                                 &mut self.receive_queue,
                             ) {
@@ -421,7 +421,7 @@ impl VirtioDevice for Console {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
