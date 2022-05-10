@@ -37,7 +37,7 @@ use vmm_vhost::{
 
 use crate::virtio::descriptor_utils::Error as DescriptorUtilsError;
 use crate::virtio::{
-    copy_config, DescriptorChain, SignalableInterrupt, PciCapabilityType, Queue, Reader,
+    copy_config, DescriptorChain, Interrupt, PciCapabilityType, Queue, Reader, SignalableInterrupt,
     VirtioDevice, VirtioPciCap, Writer, TYPE_VHOST_USER,
 };
 use crate::PciAddress;
@@ -304,7 +304,7 @@ struct Vring {
 // vice-versa.
 struct Worker {
     mem: GuestMemory,
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     rx_queue: Queue,
     tx_queue: Queue,
 
@@ -526,7 +526,7 @@ impl Worker {
                     // The driver is able to deal with a descriptor with 0 bytes written.
                     self.rx_queue.pop_peeked(&self.mem);
                     self.rx_queue.add_used(&self.mem, index, bytes_written);
-                    if !self.rx_queue.trigger_interrupt(&self.mem, &*self.interrupt) {
+                    if !self.rx_queue.trigger_interrupt(&self.mem, &self.interrupt) {
                         // This interrupt should always be injected. We'd rather fail
                         // fast if there is an error.
                         panic!("failed to send interrupt");
@@ -846,7 +846,7 @@ impl Worker {
                 Err(e) => error!("failed to create Reader: {}", e),
             }
             self.tx_queue.add_used(&self.mem, index, 0);
-            if !self.tx_queue.trigger_interrupt(&self.mem, &*self.interrupt) {
+            if !self.tx_queue.trigger_interrupt(&self.mem, &self.interrupt) {
                 panic!("failed inject tx queue interrupt");
             }
         }
@@ -934,7 +934,7 @@ impl VirtioPciDoorbellCap {
 // Used to store parameters passed in the |activate| function.
 struct ActivateParams {
     mem: GuestMemory,
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     queues: Vec<Queue>,
     queue_evts: Vec<Event>,
 }
@@ -1348,7 +1348,7 @@ impl VirtioDevice for VirtioVhostUser {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

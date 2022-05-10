@@ -13,7 +13,7 @@ use crate::{
     virtio::{
         gpu::QUEUE_SIZES,
         vhost::user::vmm::{worker::Worker, Result, VhostUserHandler},
-        virtio_gpu_config, SignalableInterrupt, PciCapabilityType, Queue, VirtioDevice, VirtioPciShmCap,
+        virtio_gpu_config, Interrupt, PciCapabilityType, Queue, VirtioDevice, VirtioPciShmCap,
         GPU_BAR_NUM, GPU_BAR_OFFSET, GPU_BAR_SIZE, TYPE_GPU, VIRTIO_GPU_F_CONTEXT_INIT,
         VIRTIO_GPU_F_CREATE_GUEST_HANDLE, VIRTIO_GPU_F_RESOURCE_BLOB, VIRTIO_GPU_F_RESOURCE_SYNC,
         VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
@@ -141,14 +141,14 @@ impl VirtioDevice for Gpu {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &*interrupt, &queues, &queue_evts)
+            .activate(&mem, &interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;
@@ -172,7 +172,7 @@ impl VirtioDevice for Gpu {
                     kill_evt,
                 };
 
-                if let Err(e) = worker.run(&*interrupt) {
+                if let Err(e) = worker.run(interrupt) {
                     error!("failed to start a worker: {}", e);
                 }
                 worker

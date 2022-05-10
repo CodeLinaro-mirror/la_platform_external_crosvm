@@ -21,7 +21,7 @@ use super::{Result, SoundError};
 
 pub struct Worker {
     // Lock order: Must never hold more than one queue lock at the same time.
-    interrupt: Arc<dyn SignalableInterrupt>,
+    interrupt: Arc<Interrupt>,
     control_queue: Arc<Mutex<Queue>>,
     control_queue_evt: Event,
     event_queue: Queue,
@@ -37,7 +37,7 @@ impl Worker {
     /// Creates a new virtio-snd worker.
     pub fn try_new(
         vios_client: Arc<VioSClient>,
-        interrupt: Arc<dyn SignalableInterrupt>,
+        interrupt: Arc<Interrupt>,
         guest_memory: GuestMemory,
         control_queue: Arc<Mutex<Queue>>,
         control_queue_evt: Event,
@@ -485,7 +485,7 @@ impl Worker {
                 },
                 &self.guest_memory,
                 &self.control_queue,
-                &*self.interrupt,
+                self.interrupt.deref(),
             )
         }
     }
@@ -514,7 +514,7 @@ impl Worker {
                 desc_index,
                 writer.bytes_written() as u32,
             );
-            queue_lock.trigger_interrupt(&self.guest_memory, &*self.interrupt);
+            queue_lock.trigger_interrupt(&self.guest_memory, self.interrupt.deref());
         }
         Ok(())
     }
@@ -527,7 +527,7 @@ impl Drop for Worker {
 }
 
 fn io_loop(
-    interrupt: Arc<dyn SignalableInterrupt>,
+    interrupt: Arc<Interrupt>,
     guest_memory: GuestMemory,
     tx_queue: Arc<Mutex<Queue>>,
     tx_queue_evt: Event,
