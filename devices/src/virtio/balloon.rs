@@ -242,7 +242,7 @@ async fn handle_queue<F>(
     mut queue: Queue,
     mut queue_event: EventAsync,
     inflate_tube: &Option<Tube>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     mut desc_handler: F,
 ) where
     F: FnMut(GuestAddress, u64),
@@ -289,7 +289,7 @@ async fn handle_stats_queue(
     mut stats_rx: mpsc::Receiver<u64>,
     command_tube: &Tube,
     state: Arc<AsyncMutex<BalloonState>>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
 ) {
     // Consume the first stats buffer sent from the guest at startup. It was not
     // requested by anyone, and the stats are stale.
@@ -345,7 +345,7 @@ async fn handle_stats_queue(
 
 async fn handle_event(
     state: Arc<AsyncMutex<BalloonState>>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     r: &mut Reader,
     command_tube: &Tube,
 ) -> Result<()> {
@@ -380,7 +380,7 @@ async fn handle_events_queue(
     mut queue: Queue,
     mut queue_event: EventAsync,
     state: Arc<AsyncMutex<BalloonState>>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     command_tube: &Tube,
 ) -> Result<()> {
     loop {
@@ -405,7 +405,7 @@ async fn handle_events_queue(
 // requesting that the guest balloon be adjusted or to report guest memory statistics.
 async fn handle_command_tube(
     command_tube: &AsyncTube,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     state: Arc<AsyncMutex<BalloonState>>,
     mut stats_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
@@ -451,13 +451,13 @@ fn run_worker(
     mut queues: Vec<Queue>,
     command_tube: Tube,
     inflate_tube: Option<Tube>,
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     kill_evt: Event,
     mem: GuestMemory,
     state: Arc<AsyncMutex<BalloonState>>,
 ) -> Option<Tube> {
     // Wrap the interrupt in a `RefCell` so it can be shared between async functions.
-    let interrupt = Rc::new(RefCell::new(interrupt));
+    let interrupt = interrupt.as_rc();
 
     let ex = Executor::new().unwrap();
     let command_tube = AsyncTube::new(&ex, command_tube).unwrap();
@@ -688,7 +688,7 @@ impl VirtioDevice for Balloon {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

@@ -10,7 +10,7 @@ use cros_async::{select2, Executor, SelectResult};
 use futures::pin_mut;
 use vm_memory::GuestMemory;
 
-use crate::virtio::{async_utils, Interrupt, Queue};
+use crate::virtio::{async_utils, SignalableInterrupt, Queue};
 
 pub struct Worker {
     pub queues: Vec<Queue>,
@@ -20,10 +20,10 @@ pub struct Worker {
 
 impl Worker {
     // Runs asynchronous tasks.
-    pub fn run(&mut self, interrupt: Interrupt) -> Result<(), String> {
+    pub fn run(&mut self, interrupt: &dyn SignalableInterrupt) -> Result<(), String> {
         let ex = Executor::new().expect("failed to create an executor");
 
-        let interrupt = Rc::new(RefCell::new(interrupt));
+        let interrupt = interrupt.as_rc();
         let resample = async_utils::handle_irq_resample(&ex, interrupt);
         pin_mut!(resample);
 
