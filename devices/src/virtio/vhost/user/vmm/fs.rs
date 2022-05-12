@@ -16,7 +16,7 @@ use vmm_vhost::Error as VhostUserError;
 use crate::virtio::fs::{virtio_fs_config, FS_MAX_TAG_LEN, QUEUE_SIZE};
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
 use crate::virtio::{copy_config, TYPE_FS};
-use crate::virtio::{Interrupt, Queue, VirtioDevice};
+use crate::virtio::{SignalableInterrupt, Queue, VirtioDevice};
 
 pub struct Fs {
     cfg: virtio_fs_config,
@@ -116,14 +116,14 @@ impl VirtioDevice for Fs {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &interrupt, &queues, &queue_evts)
+            .activate(&mem, &*interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;
@@ -147,7 +147,7 @@ impl VirtioDevice for Fs {
                     kill_evt,
                 };
 
-                if let Err(e) = worker.run(interrupt) {
+                if let Err(e) = worker.run(&*interrupt) {
                     error!("failed to start a worker: {}", e);
                 }
                 worker

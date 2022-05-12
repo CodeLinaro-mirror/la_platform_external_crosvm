@@ -13,7 +13,7 @@ pub mod direct_irq;
 mod i8042;
 mod irq_event;
 pub mod irqchip;
-mod pci;
+pub mod pci;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod pit;
 pub mod pl030;

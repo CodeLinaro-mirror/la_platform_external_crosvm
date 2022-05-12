@@ -53,6 +53,8 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base::{
@@ -73,6 +75,7 @@ use vmm_vhost::{
 };
 
 use vmm_vhost::{Error as VhostError, Result as VhostResult, VhostUserSlaveReqHandlerMut};
+use crate::pci::MsixConfig;
 
 use crate::vfio::{VfioDevice, VfioRegionAddr};
 use crate::virtio::vhost::user::device::vvu::{
@@ -90,6 +93,12 @@ use crate::virtio::{Queue, SignalableInterrupt};
 // device process.
 pub struct CallEvent(Event);
 
+impl CallEvent {
+    pub fn try_clone(&self) -> Result<CallEvent, base::Error> {
+        self.0.try_clone().map(CallEvent)
+    }
+}
+
 impl SignalableInterrupt for CallEvent {
     fn signal(&self, _vector: u16, _interrupt_status_mask: u32) {
         self.0.write(1).unwrap();
@@ -102,6 +111,28 @@ impl SignalableInterrupt for CallEvent {
     }
 
     fn do_interrupt_resample(&self) {}
+
+    fn get_interrupt_evt(&self) -> Option<&Event> {
+        None
+    }
+
+    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
+        &None
+    }
+
+    fn interrupt_resample(&self) {}
+
+    fn as_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>> {
+      Rc::new(RefCell::new(self.try_clone().unwrap()))
+    }
+
+    fn as_arc(&self) -> Arc<dyn SignalableInterrupt> {
+       Arc::new(self.try_clone().unwrap())
+    }
+
+    fn as_ref(&self) -> &dyn SignalableInterrupt {
+        self
+    }
 }
 
 impl From<File> for CallEvent {
@@ -306,6 +337,28 @@ impl SignalableInterrupt for Doorbell {
             Self::Call(evt) => evt.do_interrupt_resample(),
             Self::Vfio(evt) => evt.do_interrupt_resample(),
         }
+    }
+
+    fn interrupt_resample(&self) { todo!() }
+
+    fn get_interrupt_evt(&self) -> Option<&Event> {
+        None
+    }
+
+    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
+        &None
+    }
+
+    fn as_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>> {
+        todo!()
+    }
+
+    fn as_arc(&self) -> Arc<dyn SignalableInterrupt> {
+        todo!()
+    }
+
+    fn as_ref(&self) -> &dyn SignalableInterrupt {
+        self
     }
 }
 

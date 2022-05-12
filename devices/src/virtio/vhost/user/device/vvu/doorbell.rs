@@ -3,11 +3,15 @@
 // found in the LICENSE file.
 
 use std::sync::Arc;
+use sync::Mutex;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 use base::Event;
 
 use crate::vfio::{VfioDevice, VfioRegionAddr};
 use crate::virtio::SignalableInterrupt;
+use crate::pci::MsixConfig;
 
 /// Doorbell region in the VVU device's additional BAR.
 /// Writing to this area will sends a signal to the sibling VM's vhost-user device.
@@ -30,4 +34,28 @@ impl SignalableInterrupt for DoorbellRegion {
     }
 
     fn do_interrupt_resample(&self) {}
+
+    fn interrupt_resample(&self) {
+        todo!()
+    }
+
+    fn get_interrupt_evt(&self) -> Option<&Event> {
+        None
+    }
+
+    fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
+        &None
+    }
+
+    fn as_rc(&self) -> Rc<RefCell<dyn SignalableInterrupt>> {
+        todo!()
+    }
+
+    fn as_arc(&self) -> Arc<dyn SignalableInterrupt> {
+        todo!()
+    }
+
+    fn as_ref(&self) -> &dyn SignalableInterrupt {
+        self
+    }
 }

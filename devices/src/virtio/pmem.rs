@@ -20,7 +20,7 @@ use vm_memory::{GuestAddress, GuestMemory};
 
 use super::{
     async_utils, copy_config, DescriptorChain, DescriptorError, Interrupt, Queue, Reader,
-    VirtioDevice, Writer, TYPE_PMEM,
+    SignalableInterrupt, VirtioDevice, Writer, TYPE_PMEM,
 };
 
 const QUEUE_SIZE: u16 = 256;
@@ -142,7 +142,7 @@ async fn handle_queue(
     mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     pmem_device_tube: Tube,
     mapping_arena_slot: u32,
     mapping_size: usize,
@@ -178,14 +178,14 @@ fn run_worker(
     queue_evt: Event,
     queue: Queue,
     pmem_device_tube: Tube,
-    interrupt: Interrupt,
+    interrupt: Box<dyn SignalableInterrupt>,
     kill_evt: Event,
     mem: GuestMemory,
     mapping_arena_slot: u32,
     mapping_size: usize,
 ) {
     // Wrap the interrupt in a `RefCell` so it can be shared between async functions.
-    let interrupt = Rc::new(RefCell::new(interrupt));
+    let interrupt = interrupt.as_rc();
 
     let ex = Executor::new().unwrap();
 
@@ -302,7 +302,7 @@ impl VirtioDevice for Pmem {
     fn activate(
         &mut self,
         memory: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_events: Vec<Event>,
     ) {

@@ -428,12 +428,12 @@ impl VirtioPciDevice {
 
         let mem = self.mem.clone();
 
-        let interrupt = Interrupt::new(
+        let interrupt = Box::new(Interrupt::new(
             self.interrupt_status.clone(),
             interrupt_evt,
             Some(self.msix_config.clone()),
             self.common_config.msix_config,
-        );
+        ));
 
         match self.clone_queue_evts() {
             Ok(queue_evts) => {

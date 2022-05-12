@@ -17,7 +17,7 @@ use vmm_vhost::{
 };
 
 use crate::virtio::vhost::user::vmm::{Error, Result};
-use crate::virtio::{Interrupt, Queue};
+use crate::virtio::{SignalableInterrupt, Queue};
 
 type SocketMaster = Master<SocketEndpoint<MasterReq>>;
 
@@ -252,7 +252,7 @@ impl VhostUserHandler {
     pub fn activate(
         &mut self,
         mem: &GuestMemory,
-        interrupt: &Interrupt,
+        interrupt: &dyn SignalableInterrupt,
         queues: &[Queue],
         queue_evts: &[Event],
     ) -> Result<()> {
@@ -268,7 +268,7 @@ impl VhostUserHandler {
             let queue_evt = &queue_evts[queue_index];
             let irqfd = msix_config
                 .get_irqfd(queue.vector as usize)
-                .unwrap_or_else(|| interrupt.get_interrupt_evt());
+                .unwrap_or_else(|| interrupt.get_interrupt_evt().unwrap());
             self.activate_vring(mem, queue_index, queue, queue_evt, irqfd)?;
         }
 
