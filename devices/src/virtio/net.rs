@@ -139,8 +139,8 @@ pub struct VirtioNetConfig {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for VirtioNetConfig {}
 
-pub fn process_rx<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
+pub fn process_rx<T: TapT>(
+    interrupt: &dyn SignalableInterrupt,
     rx_queue: &mut Queue,
     mem: &GuestMemory,
     mut tap: &mut T,
@@ -203,8 +203,8 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
     }
 }
 
-pub fn process_tx<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
+pub fn process_tx<T: TapT>(
+    interrupt: &dyn SignalableInterrupt,
     tx_queue: &mut Queue,
     mem: &GuestMemory,
     mut tap: &mut T,
@@ -238,8 +238,8 @@ pub fn process_tx<I: SignalableInterrupt, T: TapT>(
     tx_queue.trigger_interrupt(mem, interrupt);
 }
 
-pub fn process_ctrl<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
+pub fn process_ctrl<T: TapT>(
+    interrupt: &dyn SignalableInterrupt,
     ctrl_queue: &mut Queue,
     mem: &GuestMemory,
     tap: &mut T,
@@ -329,7 +329,7 @@ pub enum Token {
 }
 
 struct Worker<T: TapT> {
-    interrupt: Arc<Interrupt>,
+    interrupt: Arc<dyn SignalableInterrupt>,
     mem: GuestMemory,
     rx_queue: Queue,
     tx_queue: Queue,
@@ -707,7 +707,7 @@ where
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
@@ -733,7 +733,7 @@ where
             );
             return;
         }
-        let interrupt_arc = Arc::new(interrupt);
+        let interrupt_arc = interrupt.as_arc();
         for i in 0..vq_pairs {
             let tap = self.taps.remove(0);
             let acked_features = self.acked_features;

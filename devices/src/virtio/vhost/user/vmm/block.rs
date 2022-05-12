@@ -14,7 +14,7 @@ use vm_memory::GuestMemory;
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
-use crate::virtio::{block::common::virtio_blk_config, Interrupt, Queue, VirtioDevice, TYPE_BLOCK};
+use crate::virtio::{block::common::virtio_blk_config, SignalableInterrupt, Queue, VirtioDevice, TYPE_BLOCK};
 
 const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
 const VIRTIO_BLK_F_RO: u32 = 5;
@@ -117,14 +117,14 @@ impl VirtioDevice for Block {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &interrupt, &queues, &queue_evts)
+            .activate(&mem, &*interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;
@@ -148,7 +148,7 @@ impl VirtioDevice for Block {
                     kill_evt,
                 };
 
-                if let Err(e) = worker.run(interrupt) {
+                if let Err(e) = worker.run(&*interrupt) {
                     error!("failed to start a worker: {}", e);
                 }
                 worker

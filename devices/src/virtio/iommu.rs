@@ -456,11 +456,11 @@ impl Worker {
         Ok((reply_len as usize) + size_of::<virtio_iommu_req_tail>())
     }
 
-    async fn request_queue<I: SignalableInterrupt>(
+    async fn request_queue(
         &mut self,
         mut queue: Queue,
         mut queue_event: EventAsync,
-        interrupt: &I,
+        interrupt: &dyn SignalableInterrupt,
         endpoints: &Rc<RefCell<BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>>>>,
     ) -> Result<()> {
         loop {
@@ -591,7 +591,7 @@ impl Worker {
         mut queues: Vec<Queue>,
         queue_evts: Vec<Event>,
         kill_evt: Event,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         endpoints: BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>>,
         translate_response_senders: Option<BTreeMap<u32, Tube>>,
         translate_request_rx: Option<Tube>,
@@ -602,7 +602,7 @@ impl Worker {
             .into_iter()
             .map(|e| EventAsync::new(e.0, &ex).expect("Failed to create async event for queue"))
             .collect();
-        let interrupt = Rc::new(RefCell::new(interrupt));
+        let interrupt = interrupt.as_rc();
         let interrupt_ref = &*interrupt.borrow();
 
         let (req_queue, req_evt) = (queues.remove(0), evts_async.remove(0));
@@ -832,7 +832,7 @@ impl VirtioDevice for Iommu {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

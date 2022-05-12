@@ -15,7 +15,7 @@ use vm_memory::GuestMemory;
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error};
-use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_MAC80211_HWSIM, VIRTIO_F_VERSION_1};
+use crate::virtio::{SignalableInterrupt, Queue, VirtioDevice, TYPE_MAC80211_HWSIM, VIRTIO_F_VERSION_1};
 
 use std::result::Result;
 
@@ -70,13 +70,13 @@ impl Mac80211Hwsim {
     fn activate_internal(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) -> Result<(), Mac80211HwsimError> {
         self.handler
             .borrow_mut()
-            .activate(&mem, &interrupt, &queues, &queue_evts)
+            .activate(&mem, &*interrupt, &queues, &queue_evts)
             .map_err(Mac80211HwsimError::ActivateQueue)?;
 
         let (self_kill_evt, kill_evt) = Event::new()
@@ -93,7 +93,7 @@ impl Mac80211Hwsim {
                     mem,
                     kill_evt,
                 };
-                if let Err(e) = worker.run(interrupt) {
+                if let Err(e) = worker.run(&*interrupt) {
                     error!("failed to start a worker: {}", e);
                 }
                 worker
@@ -146,7 +146,7 @@ impl VirtioDevice for Mac80211Hwsim {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {

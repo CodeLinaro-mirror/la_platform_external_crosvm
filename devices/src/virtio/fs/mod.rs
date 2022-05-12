@@ -20,7 +20,7 @@ use crate::pci::{
     PciAddress, PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciCapability,
 };
 use crate::virtio::{
-    copy_config, DescriptorError, Interrupt, PciCapabilityType, Queue, VirtioDevice,
+    copy_config, DescriptorError, SignalableInterrupt, PciCapabilityType, Queue, VirtioDevice,
     VirtioPciShmCap, TYPE_FS,
 };
 
@@ -228,7 +228,7 @@ impl VirtioDevice for Fs {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Interrupt,
+        interrupt: Box<dyn SignalableInterrupt>,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
@@ -240,7 +240,7 @@ impl VirtioDevice for Fs {
         let use_dax = fs.cfg().use_dax;
 
         let server = Arc::new(Server::new(fs));
-        let irq = Arc::new(interrupt);
+        let irq = interrupt.as_arc();
         let socket = self.tube.take().expect("missing mapping socket");
         let mut slot = 0;
 
