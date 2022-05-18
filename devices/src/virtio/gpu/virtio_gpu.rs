@@ -559,15 +559,9 @@ impl VirtioGpu {
         Ok(OkNoData)
     }
 
-    /// Polls the Rutabaga backend.
-    pub fn poll(&self) {
-        self.rutabaga.poll();
-    }
-
-    /// Gets a pollable eventfd that signals the device to wakeup and poll the
-    /// Rutabaga backend.
-    pub fn poll_descriptor(&self) -> Option<SafeDescriptor> {
-        self.rutabaga.poll_descriptor()
+    /// Returns an array of RutabagaFence, describing completed fences.
+    pub fn fence_poll(&mut self) -> Vec<RutabagaFence> {
+        self.rutabaga.poll()
     }
 
     /// Creates a 3D resource with the given properties and resource_id.
@@ -775,8 +769,14 @@ impl VirtioGpu {
     }
 
     /// Creates a rutabaga context.
-    pub fn create_context(&mut self, ctx_id: u32, context_init: u32) -> VirtioGpuResult {
-        self.rutabaga.create_context(ctx_id, context_init)?;
+    pub fn create_context(
+        &mut self,
+        ctx_id: u32,
+        context_init: u32,
+        context_name: Option<&str>,
+    ) -> VirtioGpuResult {
+        self.rutabaga
+            .create_context(ctx_id, context_init, context_name)?;
         Ok(OkNoData)
     }
 

@@ -7,19 +7,21 @@ pub mod descriptor;
 pub mod descriptor_reflection;
 mod errno;
 pub mod external_mapping;
+mod notifiers;
 pub mod scoped_event_macro;
+pub mod syslog;
+mod timer;
 mod tube;
 
-#[cfg(unix)]
-pub mod unix;
-
-#[cfg(windows)]
-pub mod windows;
+pub mod sys;
+pub use sys::platform;
 
 pub use alloc::LayoutAllocation;
 pub use errno::{errno_result, Error, Result};
 pub use external_mapping::{Error as ExternalMappingError, Result as ExternalMappingResult, *};
+pub use notifiers::*;
 pub use scoped_event_macro::*;
+pub use timer::{FakeTimer, Timer};
 pub use tube::{Error as TubeError, RecvTube, Result as TubeResult, SendTube, Tube};
 
 cfg_if::cfg_if! {
@@ -27,12 +29,10 @@ cfg_if::cfg_if! {
         mod event;
         mod ioctl;
         mod mmap;
-        mod notifiers;
         mod shm;
-        mod timer;
         mod wait_context;
 
-        pub use unix as platform;
+        pub use sys::unix;
 
         pub use unix::net::*;
         pub use unix::ioctl::*;
@@ -44,13 +44,10 @@ cfg_if::cfg_if! {
         pub use mmap::{
             MemoryMapping, MemoryMappingBuilder, MemoryMappingBuilderUnix, Unix as MemoryMappingUnix,
         };
-        pub use notifiers::*;
         pub use shm::{SharedMemory, Unix as SharedMemoryUnix};
-        pub use timer::{FakeTimer, Timer};
         pub use wait_context::{EventToken, EventType, TriggeredEvent, WaitContext};
      } else if #[cfg(windows)] {
-        pub use windows as platform;
-        pub use tube::{set_duplicate_handle_tube, set_alias_pid, DuplicateHandleTube};
+        pub use tube::{deserialize_and_recv, serialize_and_send, set_duplicate_handle_tube, set_alias_pid, DuplicateHandleTube};
      } else {
         compile_error!("Unsupported platform");
      }
@@ -60,4 +57,5 @@ pub use crate::descriptor::{
     AsRawDescriptor, AsRawDescriptors, Descriptor, FromRawDescriptor, IntoRawDescriptor,
     SafeDescriptor,
 };
+pub use log::*;
 pub use platform::*;

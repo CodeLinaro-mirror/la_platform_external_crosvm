@@ -47,7 +47,7 @@ use devices::{
 };
 use hypervisor::Vm;
 use minijail::{self, Minijail};
-use net_util::{MacAddress, Tap, TapT};
+use net_util::{sys::unix::Tap, MacAddress};
 use resources::{Alloc, MmioType, SystemAllocator};
 use sync::Mutex;
 use vm_memory::GuestAddress;
@@ -996,7 +996,7 @@ pub fn create_pmem_device(
 
 pub fn create_iommu_device(
     cfg: &Config,
-    phys_max_addr: u64,
+    iova_max_addr: u64,
     endpoints: BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>>,
     hp_endpoints_ranges: Vec<RangeInclusive<u32>>,
     translate_response_senders: Option<BTreeMap<u32, Tube>>,
@@ -1006,7 +1006,7 @@ pub fn create_iommu_device(
     let dev = virtio::Iommu::new(
         virtio::base_features(cfg.protected_vm),
         endpoints,
-        phys_max_addr,
+        iova_max_addr,
         hp_endpoints_ranges,
         translate_response_senders,
         translate_request_rx,
@@ -1201,7 +1201,7 @@ pub fn create_vfio_platform_device(
     ))
 }
 
-/// Setup for devices with VIRTIO_F_ACCESS_PLATFORM
+/// Setup for devices with virtio-iommu
 pub fn setup_virtio_access_platform(
     resources: &mut SystemAllocator,
     iommu_attached_endpoints: &mut BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>>,

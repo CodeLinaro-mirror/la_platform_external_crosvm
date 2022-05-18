@@ -10,26 +10,6 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
-rust_test_host {
-    name: "base_poll_token_derive_test_poll_token_derive",
-    defaults: ["crosvm_defaults"],
-    crate_name: "base_poll_token_derive",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    srcs: ["poll_token_derive.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libproc_macro2",
-        "libquote",
-        "libsyn",
-    ],
-}
-
 rust_proc_macro {
     name: "libbase_poll_token_derive",
     defaults: ["crosvm_defaults"],

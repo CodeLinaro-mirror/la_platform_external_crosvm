@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright 2021 The Chromium OS Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file
@@ -9,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, cast
 import typing
 import sys
-import testvm
+from . import testvm
 import os
 
 USAGE = """Choose to run tests locally, in a vm or on a remote machine.
@@ -99,7 +98,7 @@ class Ssh:
             "scp",
             *flags,
             *self.opts,
-            *files,
+            *(str(f) for f in files),
             f"{self.hostname}:{remote_dir}",
         ]
         subprocess.run(scp_cmd, check=True)
@@ -118,7 +117,7 @@ class TestTarget(object):
     def default(cls):
         return cls(os.environ.get("CROSVM_TEST_TARGET", "host"))
 
-    def __init__(self, target_str: str):
+    def __init__(self, target_str: str, build_arch: str = None):
         """target_str can be "vm:arch", "ssh:hostname" or just "host" """
         self.target_str = target_str
         parts = target_str.split(":")
@@ -132,6 +131,8 @@ class TestTarget(object):
             self.is_host = True
         else:
             raise Exception(f"Invalid target {target_str}")
+        if build_arch:
+            self.__arch = cast(Arch, build_arch)
 
     @property
     def arch(self) -> Arch:

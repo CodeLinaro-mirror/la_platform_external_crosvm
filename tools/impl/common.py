@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+from math import ceil
 import os
 import re
 import shutil
@@ -102,6 +103,11 @@ class Command(object):
     >>> Command('echo "abcd"').pipe(wc('-c')).stdout()
     '5'
 
+    Programs will be looked up in PATH or absolute paths to programs can be supplied as well:
+
+    >>> Command('/usr/bin/env').executable
+    PosixPath('/usr/bin/env')
+
     ## Executing
 
     Once built, commands can be executed using `Command.fg()`, to run the command in the
@@ -115,17 +121,26 @@ class Command(object):
     this API.
     """
 
-    def __init__(self, *args: Any, stdin_cmd: Optional[Command] = None):
+    def __init__(
+        self,
+        *args: Any,
+        stdin_cmd: Optional[Command] = None,
+        env_vars: dict[str, str] = {},
+    ):
         self.args = Command.__parse_cmd(args)
         self.stdin_cmd = stdin_cmd
+        self.env_vars = env_vars
         if len(self.args) > 0:
             executable = self.args[0]
-            path = shutil.which(executable)
-            if not path:
-                raise ValueError(f'Required program "{executable}" cannot be found in PATH.')
-            elif very_verbose():
-                print(f"Using {executable}: {path}")
-            self.executable = Path(path)
+            if Path(executable).exists:
+                self.executable = Path(executable)
+            else:
+                path = shutil.which(executable)
+                if not path:
+                    raise ValueError(f'Required program "{executable}" cannot be found in PATH.')
+                elif very_verbose():
+                    print(f"Using {executable}: {path}")
+                self.executable = Path(path)
 
     ### High level execution API
 
@@ -164,26 +179,35 @@ class Command(object):
                 stdout=PIPE,
                 stderr=STDOUT,
                 stdin=self.__stdin_stream(),
+                env={**os.environ, **self.env_vars},
                 text=True,
             )
         else:
             result = subprocess.run(
                 self.args,
                 stdin=self.__stdin_stream(),
+                env={**os.environ, **self.env_vars},
+                text=True,
             )
 
         if result.returncode != 0:
-            if quiet and result.stdout:
+            if quiet and check and result.stdout:
                 print(result.stdout)
             if check:
                 raise subprocess.CalledProcessError(result.returncode, str(self), result.stdout)
         return result.returncode
 
-    def stdout(self):
+    def stdout(self, check: bool = True):
         """
         Runs a program and returns stdout. Stderr is still directed to the user.
         """
-        return self.run(stderr=None).stdout.strip()
+        return self.run(stderr=None, check=check).stdout.strip()
+
+    def lines(self):
+        """
+        Runs a program and returns stdout line by line. Stderr is still directed to the user.
+        """
+        return self.stdout().splitlines()
 
     def write_to(self, filename: Path):
         """
@@ -208,9 +232,10 @@ class Command(object):
         if len(args) == 1 and isinstance(args[0], Command):
             cmd = Command(stdin_cmd=self)
             cmd.args = args[0].args
+            cmd.env_vars = self.env_vars.copy()
             return cmd
         else:
-            return Command(*args, stdin_cmd=self)
+            return Command(*args, stdin_cmd=self, env_vars=self.env_vars)
 
     ### Lower level execution API
 
@@ -234,6 +259,7 @@ class Command(object):
             stdout=subprocess.PIPE,
             stderr=stderr,
             stdin=self.__stdin_stream(),
+            env={**os.environ, **self.env_vars},
             check=check,
             text=True,
         )
@@ -249,8 +275,15 @@ class Command(object):
             stdout=subprocess.PIPE,
             stderr=stderr,
             stdin=self.__stdin_stream(),
+            env={**os.environ, **self.env_vars},
             text=True,
         )
+
+    def env(self, key: str, value: str):
+        cmd = Command()
+        cmd.args = self.args
+        cmd.env_vars = {**self.env_vars, key: value}
+        return cmd
 
     def foreach(self, arguments: Iterable[Any], batch_size: int = 1):
         """
@@ -282,6 +315,7 @@ class Command(object):
         """
         cmd = Command()
         cmd.args = [*self.args, *Command.__parse_cmd(args)]
+        cmd.env_vars = self.env_vars
         return cmd
 
     def __iter__(self):
@@ -413,14 +447,17 @@ class QuotedString(object):
 T = TypeVar("T")
 
 
-def batched(source: Iterable[T], batch_size: int) -> Iterable[list[T]]:
+def batched(source: Iterable[T], max_batch_size: int) -> Iterable[list[T]]:
     """
     Returns an iterator over batches of elements from source_list.
 
-    >>> list(batched([1, 2, 3, 4, 5], batch_size=2))
+    >>> list(batched([1, 2, 3, 4, 5], 2))
     [[1, 2], [3, 4], [5]]
     """
     source_list = list(source)
+    # Calculate batch size that spreads elements evenly across all batches
+    batch_count = ceil(len(source_list) / max_batch_size)
+    batch_size = ceil(len(source_list) / batch_count)
     for index in range(0, len(source_list), batch_size):
         yield source_list[index : min(index + batch_size, len(source_list))]
 
@@ -433,16 +470,24 @@ parallel = ParallelCommands
 
 
 def run_main(main_fn: Callable[..., Any]):
+    run_commands(default_fn=main_fn)
+
+
+def run_commands(*functions: Callable[..., Any], default_fn: Optional[Callable[..., Any]] = None):
     """
-    Runs the main function using argh to translate command line arguments into function arguments.
+    Allow the user to call the provided functions with command line arguments translated to
+    function arguments via argh: https://pythonhosted.org/argh
     """
     try:
         # Add global verbose arguments
         parser = argparse.ArgumentParser()
         __add_verbose_args(parser)
 
-        # Register main method as argh command
-        argh.set_default_command(parser, main_fn)  # type: ignore
+        # Add provided commands to parser. Do not use sub-commands if we just got one function.
+        if functions:
+            argh.add_commands(parser, functions)  # type: ignore
+        if default_fn:
+            argh.set_default_command(parser, default_fn)  # type: ignore
 
         # Call main method
         argh.dispatch(parser)  # type: ignore
@@ -479,6 +524,23 @@ def __add_verbose_args(parser: argparse.ArgumentParser):
         default=False,
         help="Print more debug output",
     )
+
+
+def find_source_files(extension: str, ignore: list[str] = []):
+    for file in Path(".").glob(f"**/*.{extension}"):
+        if file.is_relative_to("third_party"):
+            continue
+        if "target" in file.parts:
+            continue
+        if str(file) in ignore:
+            continue
+        yield file
+
+
+def find_scripts(path: Path, shebang: str):
+    for file in path.glob("*"):
+        if file.is_file() and file.open(errors="ignore").read(512).startswith(f"#!{shebang}"):
+            yield file
 
 
 if __name__ == "__main__":

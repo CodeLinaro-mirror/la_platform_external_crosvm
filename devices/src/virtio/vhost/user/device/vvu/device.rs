@@ -40,6 +40,7 @@ async fn process_rxq(
             let mut buf = vec![0; slice.size()];
             slice.copy_to(&mut buf);
             rxq_sender.send(buf)?;
+            // Increment the event counter as we sent one buffer.
             rxq_evt.write(1).context("process_rxq")?;
         }
     }
@@ -65,11 +66,11 @@ fn run_worker(
     tx_queue: Arc<Mutex<UserQueue>>,
     tx_irq: Event,
 ) -> Result<()> {
-    let rx_irq = EventAsync::new(rx_irq.0, &ex).context("failed to create async event")?;
+    let rx_irq = EventAsync::new(rx_irq, &ex).context("failed to create async event")?;
     let rxq = process_rxq(rx_irq, rx_queue, rx_sender, rx_evt);
     pin_mut!(rxq);
 
-    let tx_irq = EventAsync::new(tx_irq.0, &ex).context("failed to create async event")?;
+    let tx_irq = EventAsync::new(tx_irq, &ex).context("failed to create async event")?;
     let txq = process_txq(tx_irq, Arc::clone(&tx_queue));
     pin_mut!(txq);
 
@@ -235,6 +236,12 @@ impl VfioDeviceTrait for VvuDevice {
                     .context("failed to receive data")
                     .map_err(RecvIntoBufsError::Fatal)?;
                 rxq_buf.append(&mut data);
+                // Decrement the event counter as we received one buffer.
+                self.rxq_evt
+                    .read()
+                    .and_then(|c| self.rxq_evt.write(c - 1))
+                    .context("failed to decrease event counter")
+                    .map_err(RecvIntoBufsError::Fatal)?;
             }
 
             buf.clone_from_slice(&rxq_buf[..len]);

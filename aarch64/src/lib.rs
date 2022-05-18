@@ -8,15 +8,17 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
-use arch::{get_serial_cmdline, GetSerialCmdlineError, RunnableLinuxVm, VmComponents, VmImage};
+use arch::{
+    get_serial_cmdline, GetSerialCmdlineError, MsrExitHandler, RunnableLinuxVm, VmComponents,
+    VmImage,
+};
 use base::{Event, MemoryMappingBuilder};
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::{
     Bus, BusDeviceObj, BusError, IrqChip, IrqChipAArch64, PciAddress, PciConfigMmio, PciDevice,
 };
 use hypervisor::{
-    arm64_core_reg, DeviceKind, Hypervisor, HypervisorCap, ProtectionType, VcpuAArch64,
-    VcpuFeature, Vm, VmAArch64,
+    DeviceKind, Hypervisor, HypervisorCap, ProtectionType, VcpuAArch64, VcpuFeature, Vm, VmAArch64,
 };
 use minijail::Minijail;
 use remain::sorted;
@@ -226,7 +228,7 @@ impl arch::LinuxArch for AArch64 {
         ramoops_region: Option<arch::pstore::RamoopsRegion>,
         devs: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipAArch64,
-        kvm_vcpu_ids: &mut Vec<usize>,
+        vcpu_ids: &mut Vec<usize>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmAArch64,
@@ -294,7 +296,7 @@ impl arch::LinuxArch for AArch64 {
             )?;
             has_pvtime &= vcpu.has_pvtime_support();
             vcpus.push(vcpu);
-            kvm_vcpu_ids.push(vcpu_id);
+            vcpu_ids.push(vcpu_id);
         }
 
         irq_chip.finalize().map_err(Error::FinalizeIrqChip)?;
@@ -483,6 +485,7 @@ impl arch::LinuxArch for AArch64 {
         _has_bios: bool,
         _no_smt: bool,
         _host_cpu_topology: bool,
+        _itmt: bool,
     ) -> std::result::Result<(), Self::Error> {
         // AArch64 doesn't configure vcpus on the vcpu thread, so nothing to do here.
         Ok(())
@@ -602,7 +605,7 @@ impl AArch64 {
 
         // All interrupts masked
         let pstate = PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT | PSR_MODE_EL1H;
-        vcpu.set_one_reg(arm64_core_reg!(pstate), pstate)
+        vcpu.set_one_reg(hypervisor::VcpuRegAArch64::Pstate, pstate)
             .map_err(Error::SetReg)?;
 
         // Other cpus are powered off initially
@@ -613,9 +616,9 @@ impl AArch64 {
                 get_kernel_addr()
             };
             let entry_addr_reg_id = if protected_vm == ProtectionType::Protected {
-                arm64_core_reg!(regs, 1)
+                hypervisor::VcpuRegAArch64::W1
             } else {
-                arm64_core_reg!(pc)
+                hypervisor::VcpuRegAArch64::Pc
             };
             vcpu.set_one_reg(entry_addr_reg_id, entry_addr.offset())
                 .map_err(Error::SetReg)?;
@@ -623,12 +626,12 @@ impl AArch64 {
             /* X0 -- fdt address */
             let mem_size = guest_mem.memory_size();
             let fdt_addr = (AARCH64_PHYS_MEM_START + fdt_offset(mem_size, has_bios)) as u64;
-            vcpu.set_one_reg(arm64_core_reg!(regs, 0), fdt_addr)
+            vcpu.set_one_reg(hypervisor::VcpuRegAArch64::W0, fdt_addr)
                 .map_err(Error::SetReg)?;
 
             /* X2 -- image size */
             if protected_vm == ProtectionType::Protected {
-                vcpu.set_one_reg(arm64_core_reg!(regs, 2), image_size as u64)
+                vcpu.set_one_reg(hypervisor::VcpuRegAArch64::W2, image_size as u64)
                     .map_err(Error::SetReg)?;
             }
         }
@@ -636,3 +639,8 @@ impl AArch64 {
         Ok(())
     }
 }
+
+#[derive(Default)]
+pub struct MsrAArch64;
+
+impl MsrExitHandler for MsrAArch64 {}

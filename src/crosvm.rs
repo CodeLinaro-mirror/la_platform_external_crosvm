@@ -13,14 +13,14 @@ pub mod platform;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net;
 use std::ops::RangeInclusive;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use arch::{Pstore, VcpuAffinity};
+use arch::{MsrConfig, Pstore, VcpuAffinity};
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::virtio::block::block::DiskOption;
 #[cfg(feature = "audio_cras")]
@@ -28,7 +28,6 @@ use devices::virtio::cras_backend::Parameters as CrasSndParameters;
 use devices::virtio::fs::passthrough;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::GpuParameters;
-use devices::virtio::vhost::vsock::VhostVsockDeviceParameter;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 use devices::virtio::VideoBackendType;
 #[cfg(feature = "audio")]
@@ -355,7 +354,7 @@ impl Default for JailConfig {
 /// Aggregate of all configurable options for a running VM.
 pub struct Config {
     pub kvm_device_path: PathBuf,
-    pub vhost_vsock_device: Option<VhostVsockDeviceParameter>,
+    pub vhost_vsock_device: Option<PathBuf>,
     pub vhost_net_device_path: PathBuf,
     pub vcpu_count: Option<usize>,
     pub vcpu_cgroup_path: Option<PathBuf>,
@@ -469,7 +468,8 @@ pub struct Config {
     pub force_s2idle: bool,
     pub strict_balloon: bool,
     pub mmio_address_ranges: Vec<RangeInclusive<u64>>,
-    pub userspace_msr: BTreeSet<u32>,
+    pub userspace_msr: BTreeMap<u32, MsrConfig>,
+    pub itmt: bool,
     #[cfg(target_os = "android")]
     pub task_profiles: Vec<String>,
 }
@@ -596,7 +596,8 @@ impl Default for Config {
             force_s2idle: false,
             strict_balloon: false,
             mmio_address_ranges: Vec::new(),
-            userspace_msr: BTreeSet::new(),
+            userspace_msr: BTreeMap::new(),
+            itmt: false,
             #[cfg(target_os = "android")]
             task_profiles: Vec::new(),
         }

@@ -22,6 +22,7 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libacpi_tables",
+        "libanyhow",
         "libarch",
         "libassertions",
         "libbase_rust",
@@ -77,6 +78,7 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libacpi_tables",
+        "libanyhow",
         "libarch",
         "libassertions",
         "libbase_rust",

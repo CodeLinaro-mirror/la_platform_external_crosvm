@@ -63,6 +63,7 @@ rust_binary {
         "libkernel_loader",
         "liblibc",
         "liblibcras",
+        "liblog_rust",
         "libminijail_rust",
         "libnet_util",
         "libp9",
@@ -72,6 +73,7 @@ rust_binary {
         "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
+        "libterminal_size",
         "libthiserror",
         "libuuid",
         "libvhost",
@@ -171,6 +173,7 @@ rust_test {
         "liblazy_static",
         "liblibc",
         "liblibcras",
+        "liblog_rust",
         "libminijail_rust",
         "libnet_util",
         "libp9",
@@ -180,6 +183,7 @@ rust_test {
         "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
+        "libterminal_size",
         "libthiserror",
         "libuuid",
         "libvhost",
@@ -205,6 +209,11 @@ rust_test {
                 "gpu",
             ],
         },
+        android: {
+            shared_libs: [
+                "libprocessgroup",
+            ],
+        },
         host_linux: {
             features: [
                 "gdb",
@@ -214,6 +223,9 @@ rust_test {
                 "libgdbstub",
                 "libgdbstub_arch",
                 "libthiserror",
+            ],
+            shared_libs: [
+                "libprocessgroup",
             ],
         },
     },
@@ -260,6 +272,7 @@ rust_test {
         "liblazy_static",
         "liblibc",
         "liblibcras",
+        "liblog_rust",
         "libminijail_rust",
         "libnet_util",
         "libp9",
@@ -269,6 +282,7 @@ rust_test {
         "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
+        "libterminal_size",
         "libthiserror",
         "libuuid",
         "libvhost",
@@ -294,6 +308,11 @@ rust_test {
                 "gpu",
             ],
         },
+        android: {
+            shared_libs: [
+                "libprocessgroup",
+            ],
+        },
         host_linux: {
             features: [
                 "gdb",
@@ -303,6 +322,9 @@ rust_test {
                 "libgdbstub",
                 "libgdbstub_arch",
                 "libthiserror",
+            ],
+            shared_libs: [
+                "libprocessgroup",
             ],
         },
     },
@@ -342,6 +364,7 @@ rust_library {
         "libkernel_loader",
         "liblibc",
         "liblibcras",
+        "liblog_rust",
         "libminijail_rust",
         "libnet_util",
         "libp9",
@@ -351,6 +374,7 @@ rust_library {
         "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
+        "libterminal_size",
         "libthiserror",
         "libuuid",
         "libvhost",

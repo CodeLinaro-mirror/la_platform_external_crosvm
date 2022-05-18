@@ -2,13 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::{
-    mem,
-    ops::Deref,
-    os::unix::io::{AsRawFd, FromRawFd, IntoRawFd},
-    ptr,
-    time::Duration,
-};
+use std::{mem, ops::Deref, ptr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,19 +39,19 @@ impl Event {
 
 impl AsRawDescriptor for Event {
     fn as_raw_descriptor(&self) -> RawDescriptor {
-        self.0.as_raw_fd()
+        self.0.as_raw_descriptor()
     }
 }
 
 impl FromRawDescriptor for Event {
     unsafe fn from_raw_descriptor(descriptor: RawDescriptor) -> Self {
-        Event(EventFd::from_raw_fd(descriptor))
+        Event(EventFd::from_raw_descriptor(descriptor))
     }
 }
 
 impl IntoRawDescriptor for Event {
     fn into_raw_descriptor(self) -> RawDescriptor {
-        self.0.into_raw_fd()
+        self.0.into_raw_descriptor()
     }
 }
 
