@@ -23,6 +23,9 @@ use data_model::Le64;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use sync::Mutex;
+use log::debug;
+use cros_async::{AsyncError, EventAsync};
+use data_model::{DataInit, Le16, Le32, Le64};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -550,6 +553,8 @@ impl Queue {
             avail_event_addr,
         )
         .unwrap();
+        debug!("{}", format!("desc_table {} avail_index {}", self.desc_table, avail_index.0));
+        write_obj_at_addr_wrapper(mem, &self.iommu, avail_index.0, avail_event_addr).unwrap();
     }
 
     // Query the value of a single-bit flag in the available ring.
@@ -623,7 +628,9 @@ impl Queue {
         let avail_index = self.get_avail_index(mem);
         let avail_len = avail_index - self.next_avail;
 
+        debug!("{}", format!("desc_table {} avail_idx {} avail_len {}", self.desc_table, avail_index, avail_len.0));
         if avail_len.0 > queue_size || self.next_avail == avail_index {
+            debug!("{}", format!("desc_table {} peek returns none", self.desc_table));
             return None;
         }
 
@@ -716,6 +723,7 @@ impl Queue {
         .unwrap();
 
         self.next_used += Wrapping(1);
+        debug!("{}", format!("desc_table {} next_used {}", self.desc_table, self.next_used.0));
         self.set_used_index(mem, self.next_used);
     }
 
