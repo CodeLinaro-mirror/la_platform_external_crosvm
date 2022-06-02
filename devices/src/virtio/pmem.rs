@@ -142,7 +142,7 @@ async fn handle_queue(
     mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
-    interrupt: Rc<RefCell<SignalableInterrupt>>,
+    interrupt: Rc<RefCell<dyn SignalableInterrupt>>,
     pmem_device_tube: Tube,
     mapping_arena_slot: u32,
     mapping_size: usize,

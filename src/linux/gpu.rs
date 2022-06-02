@@ -10,23 +10,23 @@ use std::path::PathBuf;
 
 use devices::virtio::vhost::user::vmm::Gpu as VhostUserGpu;
 
-use crate::VhostUserOption;
+use crate::{JailConfig, VhostUserOption};
 
 use super::*;
 
 pub fn create_vhost_user_gpu_device(
     cfg: &Config,
     opt: &VhostUserOption,
-    host_tube: Tube,
-    device_tube: Tube,
+    gpu_tubes: (Tube, Tube),
+    device_control_tube: Tube,
 ) -> DeviceResult {
     // The crosvm gpu device expects us to connect the tube before it will accept a vhost-user
     // connection.
     let dev = VhostUserGpu::new(
         virtio::base_features(cfg.protected_vm),
         &opt.socket,
-        host_tube,
-        device_tube,
+        gpu_tubes,
+        device_control_tube,
     )
     .context("failed to set up vhost-user gpu device")?;
 
@@ -37,8 +37,8 @@ pub fn create_vhost_user_gpu_device(
     })
 }
 
-pub fn gpu_jail(cfg: &Config, policy: &str) -> Result<Option<Minijail>> {
-    match simple_jail(cfg, policy)? {
+pub fn gpu_jail(jail_config: &Option<JailConfig>, policy: &str) -> Result<Option<Minijail>> {
+    match simple_jail(jail_config, policy)? {
         Some(mut jail) => {
             // Create a tmpfs in the device's root directory so that we can bind mount the
             // dri directory into it.  The size=67108864 is size=64*1024*1024 or size=64MB.
@@ -190,12 +190,12 @@ pub fn create_gpu_device(
         render_server_fd,
         event_devices,
         map_request,
-        cfg.sandbox,
+        cfg.jail_config.is_some(),
         virtio::base_features(cfg.protected_vm),
         cfg.wayland_socket_paths.clone(),
     );
 
-    let jail = match gpu_jail(cfg, "gpu_device")? {
+    let jail = match gpu_jail(&cfg.jail_config, "gpu_device")? {
         Some(mut jail) => {
             // Prepare GPU shader disk cache directory.
             let (cache_dir, cache_size) = cfg
@@ -203,7 +203,7 @@ pub fn create_gpu_device(
                 .as_ref()
                 .map(|params| (params.cache_path.as_ref(), params.cache_size.as_ref()))
                 .unwrap();
-            let cache_info = get_gpu_cache_info(cache_dir, cache_size, cfg.sandbox);
+            let cache_info = get_gpu_cache_info(cache_dir, cache_size, cfg.jail_config.is_some());
 
             if let Some(dir) = cache_info.directory {
                 jail.mount_bind(dir, dir, true)?;
@@ -271,12 +271,12 @@ pub fn start_gpu_render_server(
         UnixSeqpacket::pair().context("failed to create render server socket")?;
 
     let mut env = None;
-    let jail = match gpu_jail(cfg, "gpu_render_server")? {
+    let jail = match gpu_jail(&cfg.jail_config, "gpu_render_server")? {
         Some(mut jail) => {
             let cache_info = get_gpu_cache_info(
                 render_server_parameters.cache_path.as_ref(),
                 render_server_parameters.cache_size.as_ref(),
-                cfg.sandbox,
+                true,
             );
 
             if let Some(dir) = cache_info.directory {

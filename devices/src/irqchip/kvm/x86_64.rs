@@ -24,7 +24,7 @@ use crate::irqchip::{
     Ioapic, IrqEvent, IrqEventIndex, Pic, VcpuRunState, IOAPIC_BASE_ADDRESS,
     IOAPIC_MEM_LENGTH_BYTES,
 };
-use crate::{Bus, IrqChip, IrqChipCap, IrqChipX86_64, Pit, PitError};
+use crate::{Bus, IrqChip, IrqChipCap, IrqChipX86_64, IrqEdgeEvent, IrqLevelEvent, Pit, PitError};
 
 /// PIT tube 0 timer is connected to IRQ 0
 const PIT_CHANNEL0_IRQ: u32 = 0;
@@ -164,6 +164,8 @@ pub struct KvmSplitIrqChip {
     /// locked the ioapic and the ioapic sends a AddMsiRoute signal to the main thread (which
     /// itself may be busy trying to call service_irq).
     delayed_ioapic_irq_events: Arc<Mutex<Vec<usize>>>,
+    /// Event which is meant to trigger process of any irqs events that were delayed.
+    delayed_ioapic_irq_trigger: Event,
     /// Array of Events that devices will use to assert ioapic pins.
     irq_events: Arc<Mutex<Vec<Option<IrqEvent>>>>,
 }
@@ -195,18 +197,20 @@ impl KvmSplitIrqChip {
     ) -> Result<Self> {
         let ioapic_pins = ioapic_pins.unwrap_or(vm.get_ioapic_num_pins()?);
         vm.enable_split_irqchip(ioapic_pins)?;
-        let pit_evt = Event::new()?;
+        let pit_evt = IrqEdgeEvent::new()?;
         let pit = Arc::new(Mutex::new(
-            Pit::new(pit_evt.try_clone()?, Arc::new(Mutex::new(Clock::new()))).map_err(
-                |e| match e {
-                    PitError::CloneEvent(err) => err,
-                    PitError::CreateEvent(err) => err,
-                    PitError::CreateWaitContext(err) => err,
-                    PitError::WaitError(err) => err,
-                    PitError::TimerCreateError(err) => err,
-                    PitError::SpawnThread(_) => Error::new(libc::EIO),
-                },
-            )?,
+            Pit::new(
+                pit_evt.get_trigger().try_clone()?,
+                Arc::new(Mutex::new(Clock::new())),
+            )
+            .map_err(|e| match e {
+                PitError::CloneEvent(err) => err,
+                PitError::CreateEvent(err) => err,
+                PitError::CreateWaitContext(err) => err,
+                PitError::WaitError(err) => err,
+                PitError::TimerCreateError(err) => err,
+                PitError::SpawnThread(_) => Error::new(libc::EIO),
+            })?,
         ));
 
         let mut chip = KvmSplitIrqChip {
@@ -218,8 +222,18 @@ impl KvmSplitIrqChip {
             ioapic: Arc::new(Mutex::new(Ioapic::new(irq_tube, ioapic_pins)?)),
             ioapic_pins,
             delayed_ioapic_irq_events: Arc::new(Mutex::new(Vec::new())),
+            delayed_ioapic_irq_trigger: Event::new()?,
             irq_events: Arc::new(Mutex::new(Default::default())),
         };
+
+        // crosvm-direct requires 1:1 GSI mapping between host and guest. The predefined IRQ
+        // numbering will be exposed to the guest with no option to allocate it dynamically.
+        // Tell the IOAPIC to fill in IRQ output events with 1:1 GSI mapping upfront so that
+        // IOAPIC wont assign a new GSI but use the same as for host instead.
+        #[cfg(feature = "direct")]
+        chip.ioapic
+            .lock()
+            .init_direct_gsi(|gsi, event| chip.vm.register_irqfd(gsi as u32, &event, None))?;
 
         // Setup standard x86 irq routes
         let mut routes = kvm_default_irq_routing_table(ioapic_pins);
@@ -229,7 +243,7 @@ impl KvmSplitIrqChip {
         // Set the routes so they get sent to KVM
         chip.set_irq_routes(&routes)?;
 
-        chip.register_irq_event(PIT_CHANNEL0_IRQ, &pit_evt, None)?;
+        chip.register_edge_irq_event(PIT_CHANNEL0_IRQ, &pit_evt)?;
         Ok(chip)
     }
 }
@@ -281,48 +295,6 @@ impl KvmSplitIrqChip {
             .get_external_interrupt()
             .map(|vector| vector as u32)
     }
-}
-
-/// Convenience function for determining whether or not two irq routes conflict.
-/// Returns true if they conflict.
-fn routes_conflict(route: &IrqRoute, other: &IrqRoute) -> bool {
-    // They don't conflict if they have different GSIs.
-    if route.gsi != other.gsi {
-        return false;
-    }
-
-    // If they're both MSI with the same GSI then they conflict.
-    if let (IrqSource::Msi { .. }, IrqSource::Msi { .. }) = (route.source, other.source) {
-        return true;
-    }
-
-    // If the route chips match and they have the same GSI then they conflict.
-    if let (
-        IrqSource::Irqchip {
-            chip: route_chip, ..
-        },
-        IrqSource::Irqchip {
-            chip: other_chip, ..
-        },
-    ) = (route.source, other.source)
-    {
-        return route_chip == other_chip;
-    }
-
-    // Otherwise they do not conflict.
-    false
-}
-
-/// This IrqChip only works with Kvm so we only implement it for KvmVcpu.
-impl IrqChip for KvmSplitIrqChip {
-    /// Add a vcpu to the irq chip.
-    fn add_vcpu(&mut self, vcpu_id: usize, vcpu: &dyn Vcpu) -> Result<()> {
-        let vcpu: &KvmVcpu = vcpu
-            .downcast_ref()
-            .expect("KvmSplitIrqChip::add_vcpu called with non-KvmVcpu");
-        self.vcpus.lock()[vcpu_id] = Some(vcpu.try_clone()?);
-        Ok(())
-    }
 
     /// Register an event that can trigger an interrupt for a particular GSI.
     fn register_irq_event(
@@ -368,6 +340,73 @@ impl IrqChip for KvmSplitIrqChip {
         } else {
             self.vm.unregister_irqfd(irq, irq_event)
         }
+    }
+}
+
+/// Convenience function for determining whether or not two irq routes conflict.
+/// Returns true if they conflict.
+fn routes_conflict(route: &IrqRoute, other: &IrqRoute) -> bool {
+    // They don't conflict if they have different GSIs.
+    if route.gsi != other.gsi {
+        return false;
+    }
+
+    // If they're both MSI with the same GSI then they conflict.
+    if let (IrqSource::Msi { .. }, IrqSource::Msi { .. }) = (route.source, other.source) {
+        return true;
+    }
+
+    // If the route chips match and they have the same GSI then they conflict.
+    if let (
+        IrqSource::Irqchip {
+            chip: route_chip, ..
+        },
+        IrqSource::Irqchip {
+            chip: other_chip, ..
+        },
+    ) = (route.source, other.source)
+    {
+        return route_chip == other_chip;
+    }
+
+    // Otherwise they do not conflict.
+    false
+}
+
+/// This IrqChip only works with Kvm so we only implement it for KvmVcpu.
+impl IrqChip for KvmSplitIrqChip {
+    /// Add a vcpu to the irq chip.
+    fn add_vcpu(&mut self, vcpu_id: usize, vcpu: &dyn Vcpu) -> Result<()> {
+        let vcpu: &KvmVcpu = vcpu
+            .downcast_ref()
+            .expect("KvmSplitIrqChip::add_vcpu called with non-KvmVcpu");
+        self.vcpus.lock()[vcpu_id] = Some(vcpu.try_clone()?);
+        Ok(())
+    }
+
+    /// Register an event that can trigger an interrupt for a particular GSI.
+    fn register_edge_irq_event(
+        &mut self,
+        irq: u32,
+        irq_event: &IrqEdgeEvent,
+    ) -> Result<Option<IrqEventIndex>> {
+        self.register_irq_event(irq, irq_event.get_trigger(), None)
+    }
+
+    fn unregister_edge_irq_event(&mut self, irq: u32, irq_event: &IrqEdgeEvent) -> Result<()> {
+        self.unregister_irq_event(irq, irq_event.get_trigger())
+    }
+
+    fn register_level_irq_event(
+        &mut self,
+        irq: u32,
+        irq_event: &IrqLevelEvent,
+    ) -> Result<Option<IrqEventIndex>> {
+        self.register_irq_event(irq, irq_event.get_trigger(), Some(irq_event.get_resample()))
+    }
+
+    fn unregister_level_irq_event(&mut self, irq: u32, irq_event: &IrqLevelEvent) -> Result<()> {
+        self.unregister_irq_event(irq, irq_event.get_trigger())
     }
 
     /// Route an IRQ line to an interrupt controller, or to a particular MSI vector.
@@ -456,6 +495,7 @@ impl IrqChip for KvmSplitIrqChip {
                             }
                         } else {
                             self.delayed_ioapic_irq_events.lock().push(event_index);
+                            self.delayed_ioapic_irq_trigger.write(1).unwrap();
                         }
                     }
                     _ => {}
@@ -540,6 +580,7 @@ impl IrqChip for KvmSplitIrqChip {
             ioapic: self.ioapic.clone(),
             ioapic_pins: self.ioapic_pins,
             delayed_ioapic_irq_events: self.delayed_ioapic_irq_events.clone(),
+            delayed_ioapic_irq_trigger: Event::new()?,
             irq_events: self.irq_events.clone(),
         })
     }
@@ -632,7 +673,15 @@ impl IrqChip for KvmSplitIrqChip {
                 }
             });
 
+        if self.delayed_ioapic_irq_events.lock().is_empty() {
+            self.delayed_ioapic_irq_trigger.read()?;
+        }
+
         Ok(())
+    }
+
+    fn irq_delayed_event_token(&self) -> Result<Option<Event>> {
+        Ok(Some(self.delayed_ioapic_irq_trigger.try_clone()?))
     }
 
     fn check_capability(&self, c: IrqChipCap) -> bool {
@@ -883,8 +932,8 @@ mod tests {
         assert_eq!(tokens[0].1, 0);
 
         // register another irq event
-        let evt = Event::new().expect("failed to create event");
-        chip.register_irq_event(6, &evt, None)
+        let evt = IrqEdgeEvent::new().expect("failed to create event");
+        chip.register_edge_irq_event(6, &evt)
             .expect("failed to register irq event");
 
         let tokens = chip
@@ -895,7 +944,7 @@ mod tests {
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].1, 0);
         assert_eq!(tokens[1].1, 6);
-        assert_eq!(tokens[1].2, evt);
+        assert_eq!(tokens[1].2, *evt.get_trigger());
     }
 
     #[test]
@@ -904,31 +953,33 @@ mod tests {
 
         let mmio_bus = Bus::new();
         let io_bus = Bus::new();
-        let mut resources = SystemAllocator::new(SystemAllocatorConfig {
-            io: Some(MemRegion {
-                base: 0xc000,
-                size: 0x4000,
-            }),
-            low_mmio: MemRegion {
-                base: 0,
-                size: 2048,
+        let mut resources = SystemAllocator::new(
+            SystemAllocatorConfig {
+                io: Some(MemRegion {
+                    base: 0xc000,
+                    size: 0x4000,
+                }),
+                low_mmio: MemRegion {
+                    base: 0,
+                    size: 2048,
+                },
+                high_mmio: MemRegion {
+                    base: 0x1_0000_0000,
+                    size: 0x2_0000_0000,
+                },
+                platform_mmio: None,
+                first_irq: 5,
             },
-            high_mmio: MemRegion {
-                base: 0x1_0000_0000,
-                size: 0x2_0000_0000,
-            },
-            platform_mmio: None,
-            first_irq: 5,
-        })
+            None,
+            &[],
+        )
         .expect("failed to create SystemAllocator");
 
-        // setup an event and a resample event for irq line 1
-        let evt = Event::new().expect("failed to create event");
-        let mut resample_evt = Event::new().expect("failed to create event");
-
+        // Set up a level-triggered interrupt line 1
+        let evt = IrqLevelEvent::new().expect("failed to create event");
         let evt_index = chip
-            .register_irq_event(1, &evt, Some(&resample_evt))
-            .expect("failed to register_irq_event")
+            .register_level_irq_event(1, &evt)
+            .expect("failed to register irq event")
             .expect("register_irq_event should not return None");
 
         // Once we finalize devices, the pic/pit/ioapic should be attached to io and mmio busses
@@ -963,7 +1014,7 @@ mod tests {
         assert!(state.special_fully_nested_mode);
 
         // Need to write to the irq event before servicing it
-        evt.write(1).expect("failed to write to event");
+        evt.trigger().expect("failed to write to event");
 
         // if we assert irq line one, and then get the resulting interrupt, an auto-eoi should
         // occur and cause the resample_event to be written to
@@ -979,6 +1030,8 @@ mod tests {
             0x9
         );
 
+        // Clone resample event because read_timeout() needs a mutable reference.
+        let resample_evt = evt.get_resample().try_clone().unwrap();
         assert_eq!(
             resample_evt
                 .read_timeout(std::time::Duration::from_secs(1))
@@ -1033,27 +1086,31 @@ mod tests {
 
         let mmio_bus = Bus::new();
         let io_bus = Bus::new();
-        let mut resources = SystemAllocator::new(SystemAllocatorConfig {
-            io: Some(MemRegion {
-                base: 0xc000,
-                size: 0x4000,
-            }),
-            low_mmio: MemRegion {
-                base: 0,
-                size: 2048,
+        let mut resources = SystemAllocator::new(
+            SystemAllocatorConfig {
+                io: Some(MemRegion {
+                    base: 0xc000,
+                    size: 0x4000,
+                }),
+                low_mmio: MemRegion {
+                    base: 0,
+                    size: 2048,
+                },
+                high_mmio: MemRegion {
+                    base: 0x1_0000_0000,
+                    size: 0x2_0000_0000,
+                },
+                platform_mmio: None,
+                first_irq: 5,
             },
-            high_mmio: MemRegion {
-                base: 0x1_0000_0000,
-                size: 0x2_0000_0000,
-            },
-            platform_mmio: None,
-            first_irq: 5,
-        })
+            None,
+            &[],
+        )
         .expect("failed to create SystemAllocator");
 
         // setup an event and a resample event for irq line 1
         let evt = Event::new().expect("failed to create event");
-        let mut resample_evt = Event::new().expect("failed to create event");
+        let resample_evt = Event::new().expect("failed to create event");
 
         chip.register_irq_event(1, &evt, Some(&resample_evt))
             .expect("failed to register_irq_event");

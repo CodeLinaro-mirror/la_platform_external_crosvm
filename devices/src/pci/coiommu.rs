@@ -33,10 +33,11 @@ use base::{
 use data_model::DataInit;
 use hypervisor::Datamatch;
 use resources::{Alloc, MmioType, SystemAllocator};
+use serde::{Deserialize, Serialize};
 use sync::Mutex;
 use thiserror::Error as ThisError;
 
-use vm_control::{VmMemoryRequest, VmMemoryResponse};
+use vm_control::{VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
 use vm_memory::{GuestAddress, GuestMemory};
 
 use crate::pci::pci_configuration::{
@@ -84,7 +85,7 @@ enum Error {
 const UNPIN_DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 const UNPIN_GEN_DEFAULT_THRES: u64 = 10;
 /// Holds the coiommu unpin policy
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CoIommuUnpinPolicy {
     Off,
     Lru,
@@ -117,7 +118,7 @@ impl fmt::Display for CoIommuUnpinPolicy {
 }
 
 /// Holds the parameters for a coiommu device
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct CoIommuParameters {
     pub unpin_policy: CoIommuUnpinPolicy,
     pub unpin_interval: Duration,
@@ -1074,11 +1075,13 @@ impl CoIommuDev {
         gpa: u64,
         read_only: bool,
     ) -> Result<()> {
-        let request = VmMemoryRequest::RegisterMmapMemory {
-            descriptor,
-            size,
-            offset,
-            gpa,
+        let request = VmMemoryRequest::RegisterMemory {
+            source: VmMemorySource::Descriptor {
+                descriptor,
+                offset,
+                size: size as u64,
+            },
+            dest: VmMemoryDestination::GuestPhysicalAddress(gpa),
             read_only,
         };
         self.send_msg(&request)

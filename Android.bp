@@ -40,7 +40,7 @@ rust_binary {
     crate_name: "crosvm",
     cargo_env_compat: true,
     srcs: ["src/main.rs"],
-    edition: "2018",
+    edition: "2021",
     features: [
         "audio",
         "usb",
@@ -53,6 +53,7 @@ rust_binary {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libcrosvm",
         "libdata_model",
         "libdevices",
@@ -68,9 +69,11 @@ rust_binary {
         "libresources",
         "librutabaga_gfx",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libuuid",
         "libvhost",
         "libvm_control",
         "libvm_memory",
@@ -94,6 +97,11 @@ rust_binary {
                 "gpu",
             ],
         },
+        android: {
+            shared_libs: [
+                "libprocessgroup",
+            ],
+        },
         darwin: {
             enabled: false,
         },
@@ -106,6 +114,9 @@ rust_binary {
                 "libgdbstub",
                 "libgdbstub_arch",
                 "libthiserror",
+            ],
+            shared_libs: [
+                "libprocessgroup",
             ],
         },
         linux_bionic_arm64: {
@@ -122,6 +133,7 @@ rust_binary {
         "-Wl,--rpath,\\$$ORIGIN",
         "-Wl,--rpath,\\$$ORIGIN/../../lib64",
     ],
+
 }
 
 rust_test {
@@ -136,7 +148,7 @@ rust_test {
     test_options: {
         unit_test: true,
     },
-    edition: "2018",
+    edition: "2021",
     features: [
         "audio",
         "usb",
@@ -149,12 +161,14 @@ rust_test {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libdata_model",
         "libdevices",
         "libdisk",
         "libhypervisor",
         "libkernel_cmdline",
         "libkernel_loader",
+        "liblazy_static",
         "liblibc",
         "liblibcras",
         "libminijail_rust",
@@ -163,9 +177,11 @@ rust_test {
         "libresources",
         "librutabaga_gfx",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libuuid",
         "libvhost",
         "libvm_control",
         "libvm_memory",
@@ -205,6 +221,7 @@ rust_test {
         "-Wl,--rpath,\\$$ORIGIN",
         "-Wl,--rpath,\\$$ORIGIN/../../lib64",
     ],
+
 }
 
 rust_test {
@@ -219,7 +236,7 @@ rust_test {
     test_options: {
         unit_test: true,
     },
-    edition: "2018",
+    edition: "2021",
     features: [
         "audio",
         "usb",
@@ -232,6 +249,7 @@ rust_test {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libcrosvm",
         "libdata_model",
         "libdevices",
@@ -239,6 +257,7 @@ rust_test {
         "libhypervisor",
         "libkernel_cmdline",
         "libkernel_loader",
+        "liblazy_static",
         "liblibc",
         "liblibcras",
         "libminijail_rust",
@@ -247,9 +266,11 @@ rust_test {
         "libresources",
         "librutabaga_gfx",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libuuid",
         "libvhost",
         "libvm_control",
         "libvm_memory",
@@ -289,6 +310,7 @@ rust_test {
         "-Wl,--rpath,\\$$ORIGIN",
         "-Wl,--rpath,\\$$ORIGIN/../../lib64",
     ],
+
 }
 
 rust_library {
@@ -298,7 +320,7 @@ rust_library {
     crate_name: "crosvm",
     cargo_env_compat: true,
     srcs: ["src/crosvm.rs"],
-    edition: "2018",
+    edition: "2021",
     features: [
         "audio",
         "usb",
@@ -311,6 +333,7 @@ rust_library {
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libcfg_if",
         "libdata_model",
         "libdevices",
         "libdisk",
@@ -325,9 +348,11 @@ rust_library {
         "libresources",
         "librutabaga_gfx",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libuuid",
         "libvhost",
         "libvm_control",
         "libvm_memory",
@@ -351,6 +376,11 @@ rust_library {
                 "gpu",
             ],
         },
+        android: {
+            shared_libs: [
+                "libprocessgroup",
+            ],
+        },
         host_linux: {
             features: [
                 "gdb",
@@ -361,12 +391,16 @@ rust_library {
                 "libgdbstub_arch",
                 "libthiserror",
             ],
+            shared_libs: [
+                "libprocessgroup",
+            ],
         },
     },
     ld_flags: [
         "-Wl,--rpath,\\$$ORIGIN",
         "-Wl,--rpath,\\$$ORIGIN/../../lib64",
     ],
+
 }
 
 rust_defaults {

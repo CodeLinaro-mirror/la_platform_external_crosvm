@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use audio_streams::shm_streams::{NullShmStreamSource, ShmStreamSource};
-use base::{error, AsRawDescriptor, Event, RawDescriptor};
+use base::{error, AsRawDescriptor, RawDescriptor};
 #[cfg(feature = "audio_cras")]
 use libcras::{CrasClient, CrasClientType, CrasSocketType, CrasSysError};
 use remain::sorted;
@@ -28,6 +28,7 @@ use crate::pci::{PciAddress, PciDeviceError, PciInterruptPin};
 use crate::virtio::snd::vios_backend::Error as VioSError;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::virtio::snd::vios_backend::VioSShmStreamSource;
+use crate::IrqLevelEvent;
 
 // Use 82801AA because it's what qemu does.
 const PCI_DEVICE_ID_INTEL_82801AA_5: u16 = 0x2415;
@@ -114,8 +115,7 @@ pub struct Ac97Dev {
     pci_address: Option<PciAddress>,
     // The irq events are temporarily saved here. They need to be passed to the device after the
     // jail forks. This happens when the bus is first written.
-    irq_evt: Option<Event>,
-    irq_resample_evt: Option<Event>,
+    irq_evt: Option<IrqLevelEvent>,
     bus_master: Ac97BusMaster,
     mixer: Ac97Mixer,
     backend: Ac97Backend,
@@ -145,7 +145,6 @@ impl Ac97Dev {
             config_regs,
             pci_address: None,
             irq_evt: None,
-            irq_resample_evt: None,
             bus_master: Ac97BusMaster::new(mem, audio_server),
             mixer: Ac97Mixer::new(),
             backend,
@@ -304,12 +303,10 @@ impl PciDevice for Ac97Dev {
 
     fn assign_irq(
         &mut self,
-        irq_evt: &Event,
-        irq_resample_evt: &Event,
+        irq_evt: &IrqLevelEvent,
         irq_num: Option<u32>,
     ) -> Option<(u32, PciInterruptPin)> {
         self.irq_evt = Some(irq_evt.try_clone().ok()?);
-        self.irq_resample_evt = Some(irq_resample_evt.try_clone().ok()?);
         let gsi = irq_num?;
         let pin = self.pci_address.map_or(
             PciInterruptPin::IntA,
@@ -404,10 +401,8 @@ impl PciDevice for Ac97Dev {
             rds.append(&mut server_fds);
         }
         if let Some(irq_evt) = &self.irq_evt {
-            rds.push(irq_evt.as_raw_descriptor());
-        }
-        if let Some(irq_resample_evt) = &self.irq_resample_evt {
-            rds.push(irq_resample_evt.as_raw_descriptor());
+            rds.push(irq_evt.get_trigger().as_raw_descriptor());
+            rds.push(irq_evt.get_resample().as_raw_descriptor());
         }
         rds
     }
@@ -431,10 +426,8 @@ impl PciDevice for Ac97Dev {
             a if a >= bar0 && a < bar0 + MIXER_REGS_SIZE => self.write_mixer(addr - bar0, data),
             a if a >= bar1 && a < bar1 + MASTER_REGS_SIZE => {
                 // Check if the irq needs to be passed to the device.
-                if let (Some(irq_evt), Some(irq_resample_evt)) =
-                    (self.irq_evt.take(), self.irq_resample_evt.take())
-                {
-                    self.bus_master.set_irq_event(irq_evt, irq_resample_evt);
+                if let Some(irq_evt) = self.irq_evt.take() {
+                    self.bus_master.set_irq_event(irq_evt);
                 }
                 self.write_bus_master(addr - bar1, data)
             }
@@ -455,22 +448,26 @@ mod tests {
         let mem = GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)]).unwrap();
         let mut ac97_dev =
             Ac97Dev::new(mem, Ac97Backend::NULL, Box::new(MockShmStreamSource::new()));
-        let mut allocator = SystemAllocator::new(SystemAllocatorConfig {
-            io: Some(MemRegion {
-                base: 0xc000,
-                size: 0x4000,
-            }),
-            low_mmio: MemRegion {
-                base: 0x2000_0000,
-                size: 0x1000_0000,
+        let mut allocator = SystemAllocator::new(
+            SystemAllocatorConfig {
+                io: Some(MemRegion {
+                    base: 0xc000,
+                    size: 0x4000,
+                }),
+                low_mmio: MemRegion {
+                    base: 0x2000_0000,
+                    size: 0x1000_0000,
+                },
+                high_mmio: MemRegion {
+                    base: 0x3000_0000,
+                    size: 0x1000_0000,
+                },
+                platform_mmio: None,
+                first_irq: 5,
             },
-            high_mmio: MemRegion {
-                base: 0x3000_0000,
-                size: 0x1000_0000,
-            },
-            platform_mmio: None,
-            first_irq: 5,
-        })
+            None,
+            &[],
+        )
         .unwrap();
         assert!(ac97_dev.allocate_address(&mut allocator).is_ok());
         assert!(ac97_dev.allocate_io_bars(&mut allocator).is_ok());

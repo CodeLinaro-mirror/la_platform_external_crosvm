@@ -2,20 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::convert::TryFrom;
-use std::fs::File;
-use std::io::{Stderr, Stdin, Stdout};
-use std::mem;
-use std::mem::ManuallyDrop;
-use std::net::UdpSocket;
-use std::ops::Drop;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
+use std::{
+    convert::TryFrom,
+    fs::File,
+    io::{Stderr, Stdin, Stdout},
+    mem,
+    mem::ManuallyDrop,
+    net::UdpSocket,
+    ops::Drop,
+    os::unix::{
+        io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+        net::{UnixDatagram, UnixListener, UnixStream},
+    },
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::net::{UnixSeqpacket, UnlinkUnixSeqpacketListener};
-use crate::{errno_result, PollToken, Result};
+use super::{
+    errno_result,
+    net::{UnixSeqpacket, UnlinkUnixSeqpacketListener},
+    PollToken, Result,
+};
 
 pub type RawDescriptor = RawFd;
 
@@ -49,7 +56,7 @@ pub fn clone_descriptor(descriptor: &dyn AsRawDescriptor) -> Result<RawDescripto
 /// Clones `fd`, returning a new file descriptor that refers to the same open file description as
 /// `fd`. The cloned fd will have the `FD_CLOEXEC` flag set but will not share any other file
 /// descriptor flags with `fd`.
-pub fn clone_fd(fd: &dyn AsRawFd) -> Result<RawFd> {
+fn clone_fd(fd: &dyn AsRawFd) -> Result<RawFd> {
     // Safe because this doesn't modify any memory and we check the return value.
     let ret = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if ret < 0 {
@@ -63,7 +70,7 @@ pub fn clone_fd(fd: &dyn AsRawFd) -> Result<RawFd> {
 #[derive(Serialize, Deserialize, Debug, Eq)]
 #[serde(transparent)]
 pub struct SafeDescriptor {
-    #[serde(with = "crate::with_raw_descriptor")]
+    #[serde(with = "super::with_raw_descriptor")]
     descriptor: RawDescriptor,
 }
 
@@ -271,6 +278,7 @@ AsRawDescriptor!(UnixDatagram);
 AsRawDescriptor!(UnixListener);
 AsRawDescriptor!(UnixStream);
 FromRawDescriptor!(File);
+FromRawDescriptor!(UnixStream);
 FromRawDescriptor!(UnixDatagram);
 IntoRawDescriptor!(File);
 IntoRawDescriptor!(UnixDatagram);

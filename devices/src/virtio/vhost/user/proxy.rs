@@ -16,13 +16,14 @@ use std::os::unix::net::UnixListener;
 use std::thread;
 
 use base::{
-    error, info, AsRawDescriptor, Event, EventType, FromRawDescriptor, IntoRawDescriptor,
-    PollToken, RawDescriptor, SafeDescriptor, Tube, TubeError, WaitContext,
+    error, AsRawDescriptor, Event, EventType, FromRawDescriptor, IntoRawDescriptor, PollToken,
+    RawDescriptor, SafeDescriptor, Tube, TubeError, WaitContext,
 };
 use data_model::{DataInit, Le32};
 use libc::{recv, MSG_DONTWAIT, MSG_PEEK};
 use resources::Alloc;
-use vm_control::{VmMemoryRequest, VmMemoryResponse};
+use uuid::Uuid;
+use vm_control::{VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
 use vm_memory::GuestMemory;
 use vmm_vhost::{
     connection::socket::Endpoint as SocketEndpoint,
@@ -45,7 +46,7 @@ use crate::{
         PciBarConfiguration, PciBarIndex, PciBarPrefetchable, PciBarRegionType, PciCapability,
         PciCapabilityID,
     },
-    virtio::VIRTIO_MSI_NO_VECTOR,
+    virtio::{VIRTIO_F_ACCESS_PLATFORM, VIRTIO_MSI_NO_VECTOR},
 };
 
 use remain::sorted;
@@ -70,17 +71,6 @@ const CONFIG_UUID_SIZE: usize = 16;
 const VIRTIO_VHOST_USER_STATUS_SLAVE_UP: u8 = 0;
 
 const BAR_INDEX: u8 = 2;
-// Bar size represents the amount of memory to be mapped for a sibling VM. Each
-// Virtio Vhost User Slave implementation requires access to the entire sibling
-// memory. It's assumed that sibling VM memory would be <= 8GB, hence this
-// constant value.
-//
-// TODO(abhishekbh): Understand why shared memory region size and overall bar
-// size differ in the QEMU implementation. The metadata required to map sibling
-// memory is about 16 MB per GB of sibling memory per device. Therefore, it is
-// in our interest to not waste space here and correlate it tightly to the
-// actual maximum memory a sibling VM can have.
-const BAR_SIZE: u64 = 1 << 33;
 
 // Bar configuration.
 // All offsets are from the starting of bar `BAR_INDEX`.
@@ -91,8 +81,8 @@ const NOTIFICATIONS_OFFSET: u64 = DOORBELL_OFFSET + DOORBELL_SIZE;
 const NOTIFICATIONS_SIZE: u64 = 0x1000;
 const SHARED_MEMORY_OFFSET: u64 = NOTIFICATIONS_OFFSET + NOTIFICATIONS_SIZE;
 // TODO(abhishekbh): Copied from qemu with VVU support. This should be same as
-// `BAR_SIZE` but it's significantly lower than the memory allocated to a
-// sibling VM. Figure out how these two are related.
+// VirtioVhostUser.device_bar_size, but it's significantly  lower than the
+// memory allocated to a sibling VM. Figure out how these two are related.
 const SHARED_MEMORY_SIZE: u64 = 0x1000;
 
 // Notifications region related constants.
@@ -186,6 +176,9 @@ pub enum Error {
     /// There are no more available descriptors to receive into.
     #[error("no rx descriptors available")]
     RxDescriptorsExhausted,
+    /// Sibling is disconnected.
+    #[error("sibling disconnected")]
+    SiblingDisconnected,
     /// Failed to receive a memory mapping request from the main process.
     #[error("receiving mapping request from tube failed: {0}")]
     TubeReceiveFailure(TubeError),
@@ -237,11 +230,11 @@ impl Default for VirtioVhostUserConfig {
 }
 
 impl VirtioVhostUserConfig {
-    fn is_slave_up(&mut self) -> bool {
+    fn is_slave_up(&self) -> bool {
         self.check_status_bit(VIRTIO_VHOST_USER_STATUS_SLAVE_UP)
     }
 
-    fn check_status_bit(&mut self, bit: u8) -> bool {
+    fn check_status_bit(&self, bit: u8) -> bool {
         let status = self.status.to_native();
         status & (1 << bit) > 0
     }
@@ -395,6 +388,9 @@ impl Worker {
                                     .map_err(Error::WaitContextDisableSiblingVmSocket)?;
                                 sibling_socket_polling_enabled = false;
                             }
+                            // TODO(b/216407443): Handle sibling disconnection. The sibling sends
+                            // 0-length data the proxy device forwards it to the guest so that the
+                            // VVU backend can get notified that the connection is closed.
                             Err(e) => return Err(e),
                         }
                     }
@@ -461,102 +457,95 @@ impl Worker {
         // - Parse the Vhost-user sibling message. If it's not an action type message
         //   then copy the message as is to the Rx buffer and forward it to the
         //   device backend.
-        let mut exhausted_queue = false;
+        //
         // Peek if any data is left on the Vhost-user sibling socket. If no, then
         // nothing to forwad to the device backend.
-        while self.is_sibling_data_available() {
-            if let Some(desc) = self.rx_queue.peek(&self.mem) {
-                // To successfully receive attached file descriptors, we need to
-                // receive messages and corresponding attached file descriptors in
-                // this way:
-                // - receive messsage header and optional attached files.
-                // - receive optional message body and payload according size field
-                //   in message header.
-                // - forward it to the device backend.
-                let (hdr, files) = self
-                    .slave_req_helper
-                    .as_mut()
-                    .recv_header()
-                    .map_err(Error::ReadSiblingHeader)?;
-                check_attached_files(&hdr, &files)?;
-                let buf = self.get_sibling_msg_data(&hdr)?;
+        while self.is_sibling_data_available()? {
+            let desc = self
+                .rx_queue
+                .peek(&self.mem)
+                .ok_or(Error::RxDescriptorsExhausted)?;
+            // To successfully receive attached file descriptors, we need to
+            // receive messages and corresponding attached file descriptors in
+            // this way:
+            // - receive messsage header and optional attached files.
+            // - receive optional message body and payload according size field
+            //   in message header.
+            // - forward it to the device backend.
+            let (hdr, files) = self
+                .slave_req_helper
+                .as_mut()
+                .recv_header()
+                .map_err(Error::ReadSiblingHeader)?;
+            check_attached_files(&hdr, &files)?;
+            let buf = self.get_sibling_msg_data(&hdr)?;
 
-                let index = desc.index;
-                let bytes_written = {
-                    if is_action_request(&hdr) {
-                        // TODO(abhishekbh): Implement action messages.
-                        let res = match hdr.get_code() {
-                            MasterReq::SET_MEM_TABLE => {
-                                // Map the sibling memory in this process and forward the sibling
-                                // memory info to the slave. Only if the mapping succeeds send info
-                                // along to the slave, else send a failed Ack back to the master.
-                                self.set_mem_table(&hdr, &buf, files)
-                            }
-                            MasterReq::SET_VRING_CALL => self.set_vring_call(&hdr, &buf, files),
-                            MasterReq::SET_VRING_KICK => {
-                                self.set_vring_kick(wait_ctx, &hdr, &buf, files)
-                            }
-                            _ => {
-                                unimplemented!("unimplemented action message:{:?}", hdr.get_code());
-                            }
-                        };
-
-                        // If the "action" in response to the action messages
-                        // failed then no bytes have been written to the virt
-                        // queue. Else, the action is done. Now forward the
-                        // message to the virt queue and return how many bytes
-                        // were written.
-                        match res {
-                            Ok(()) => self.forward_msg_to_device(desc, &hdr, &buf),
-                            Err(e) => Err(e),
+            let index = desc.index;
+            let bytes_written = {
+                if is_action_request(&hdr) {
+                    // TODO(abhishekbh): Implement action messages.
+                    let res = match hdr.get_code() {
+                        MasterReq::SET_MEM_TABLE => {
+                            // Map the sibling memory in this process and forward the
+                            // sibling memory info to the slave. Only if the mapping
+                            // succeeds send info along to the slave, else send a failed
+                            // Ack back to the master.
+                            self.set_mem_table(&hdr, &buf, files)
                         }
-                    } else {
-                        // If no special processing required. Forward this message as is
-                        // to the device backend.
-                        self.forward_msg_to_device(desc, &hdr, &buf)
-                    }
-                };
-
-                // If some bytes were written to the virt queue, now it's time
-                // to add a used buffer and notify the guest. Else if there was
-                // an error of any sort, we notify the sibling by sending an ACK
-                // with failure.
-                match bytes_written {
-                    Ok(bytes_written) => {
-                        // The driver is able to deal with a descriptor with 0 bytes written.
-                        self.rx_queue.pop_peeked(&self.mem);
-                        self.rx_queue.add_used(&self.mem, index, bytes_written);
-                        if !self.rx_queue.trigger_interrupt(&self.mem, &*self.interrupt) {
-                            // This interrupt should always be injected. We'd rather fail fast
-                            // if there is an error.
-                            panic!("failed to send interrupt");
+                        MasterReq::SET_VRING_CALL => self.set_vring_call(&hdr, &buf, files),
+                        MasterReq::SET_VRING_KICK => {
+                            self.set_vring_kick(wait_ctx, &hdr, &buf, files)
                         }
+                        _ => {
+                            unimplemented!("unimplemented action message:{:?}", hdr.get_code());
+                        }
+                    };
+
+                    // If the "action" in response to the action messages
+                    // failed then no bytes have been written to the virt
+                    // queue. Else, the action is done. Now forward the
+                    // message to the virt queue and return how many bytes
+                    // were written.
+                    match res {
+                        Ok(()) => self.forward_msg_to_device(desc, &hdr, &buf),
+                        Err(e) => Err(e),
                     }
-                    Err(e) => {
-                        error!("failed to forward message to the device: {}", e);
-                        self.slave_req_helper
-                            .send_ack_message(&hdr, false)
-                            .map_err(Error::FailedAck)?;
+                } else {
+                    // If no special processing required. Forward this message as is
+                    // to the device backend.
+                    self.forward_msg_to_device(desc, &hdr, &buf)
+                }
+            };
+
+            // If some bytes were written to the virt queue, now it's time
+            // to add a used buffer and notify the guest. Else if there was
+            // an error of any sort, we notify the sibling by sending an ACK
+            // with failure.
+            match bytes_written {
+                Ok(bytes_written) => {
+                    // The driver is able to deal with a descriptor with 0 bytes written.
+                    self.rx_queue.pop_peeked(&self.mem);
+                    self.rx_queue.add_used(&self.mem, index, bytes_written);
+                    if !self.rx_queue.trigger_interrupt(&self.mem, &*self.interrupt) {
+                        // This interrupt should always be injected. We'd rather fail
+                        // fast if there is an error.
+                        panic!("failed to send interrupt");
                     }
                 }
-            } else {
-                // No buffer left to fill up. No point processing any data
-                // from the Vhost-user sibling.
-                exhausted_queue = true;
-                break;
+                Err(e) => {
+                    error!("failed to forward message to the device: {}", e);
+                    self.slave_req_helper
+                        .send_ack_message(&hdr, false)
+                        .map_err(Error::FailedAck)?;
+                }
             }
         }
 
-        if exhausted_queue {
-            Err(Error::RxDescriptorsExhausted)
-        } else {
-            info!("no more data available on the sibling socket");
-            Ok(())
-        }
+        Ok(())
     }
 
-    // Returns true iff any data is available on the sibling socket.
-    fn is_sibling_data_available(&self) -> bool {
+    // Returns the sibling connection status.
+    fn is_sibling_data_available(&self) -> Result<bool> {
         // Peek if any data is left on the Vhost-user sibling socket. If no, then
         // nothing to forwad to the device backend.
         let mut peek_buf = [0; 1];
@@ -571,9 +560,16 @@ impl Worker {
             )
         };
 
-        // TODO(abhishekbh): Should we log on < 0 ?. Peek should
-        // succeed.
-        peek_ret > 0
+        match peek_ret {
+            0 => Err(Error::SiblingDisconnected),
+            ret if ret < 0 => match base::Error::last() {
+                // EAGAIN means that no data is available. Any other error means that the sibling
+                // has disconnected.
+                e if e.errno() == libc::EAGAIN => Ok(false),
+                _ => Err(Error::SiblingDisconnected),
+            },
+            _ => Ok(true),
+        }
     }
 
     // Returns any data attached to a Vhost-user sibling message.
@@ -700,18 +696,18 @@ impl Worker {
         }
 
         for (region, file) in contexts.iter().zip(files.into_iter()) {
-            // TODO(abhishekbh): Figure out how to accomodate each |region|'s
-            // mmap offset. During testing it was 0 but we should probably account for it.
-            if region.mmap_offset != 0 {
-                error!("Region mmap offset is not 0");
-            }
-
-            let request = VmMemoryRequest::RegisterFdAtPciBarOffset(
-                self.pci_bar,
-                SafeDescriptor::from(file),
-                region.memory_size as usize,
-                self.mem_offset as u64,
-            );
+            let request = VmMemoryRequest::RegisterMemory {
+                source: VmMemorySource::Descriptor {
+                    descriptor: SafeDescriptor::from(file),
+                    offset: region.mmap_offset,
+                    size: region.memory_size,
+                },
+                dest: VmMemoryDestination::ExistingAllocation {
+                    allocation: self.pci_bar,
+                    offset: self.mem_offset as u64,
+                },
+                read_only: false,
+            };
             self.process_memory_mapping_request(&request)?;
             self.mem_offset += region.memory_size as usize;
         }
@@ -946,6 +942,14 @@ struct ActivateParams {
 pub struct VirtioVhostUser {
     base_features: u64,
 
+    // Represents the amount of memory to be mapped for a sibling VM. Each
+    // Virtio Vhost User Slave implementation requires access to the entire sibling
+    // memory.
+    //
+    // TODO(abhishekbh): Understand why shared memory region size and overall bar
+    // size differ in the QEMU implementation.
+    device_bar_size: u64,
+
     // Bound socket waiting to accept a socket connection from the Vhost-user
     // sibling.
     listener: Option<UnixListener>,
@@ -987,14 +991,21 @@ impl VirtioVhostUser {
         listener: UnixListener,
         main_process_tube: Tube,
         pci_address: Option<PciAddress>,
+        uuid: Option<Uuid>,
+        max_sibling_mem_size: u64,
     ) -> Result<VirtioVhostUser> {
+        let device_bar_size = max_sibling_mem_size
+            .checked_next_power_of_two()
+            .expect("Sibling too large");
+
         Ok(VirtioVhostUser {
-            base_features,
+            base_features: base_features | 1 << VIRTIO_F_ACCESS_PLATFORM,
+            device_bar_size,
             listener: Some(listener),
             config: VirtioVhostUserConfig {
                 status: Le32::from(0),
                 max_vhost_queues: Le32::from(MAX_VHOST_DEVICE_QUEUES as u32),
-                uuid: [0; CONFIG_UUID_SIZE],
+                uuid: *uuid.unwrap_or_default().as_bytes(),
             },
             kill_evt: None,
             worker_thread: None,
@@ -1183,7 +1194,10 @@ impl VirtioVhostUser {
                 };
                 let rx_queue_evt = activate_params.queue_evts.remove(0);
                 let tx_queue_evt = activate_params.queue_evts.remove(0);
-                let _ = worker.run(rx_queue_evt, tx_queue_evt, main_thread_tube, kill_evt);
+                if let Err(e) = worker.run(rx_queue_evt, tx_queue_evt, main_thread_tube, kill_evt) {
+                    // TODO(b/216407443): Handle sibling reconnect events.
+                    error!("worker thread exited: {}", e);
+                }
                 Ok(worker)
             });
 
@@ -1323,7 +1337,7 @@ impl VirtioDevice for VirtioVhostUser {
 
         vec![PciBarConfiguration::new(
             BAR_INDEX as usize,
-            BAR_SIZE as u64,
+            self.device_bar_size,
             PciBarRegionType::Memory64BitRegion,
             // NotPrefetchable so as to exit on every read / write event in the
             // guest.

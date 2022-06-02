@@ -15,7 +15,7 @@ use crate::pci::pci_configuration::{
     HEADER_TYPE_MULTIFUNCTION_MASK, HEADER_TYPE_REG,
 };
 use crate::pci::pci_device::{Error, PciDevice};
-use crate::pci::{PciAddress, PCI_VENDOR_ID_INTEL};
+use crate::pci::{PciAddress, PciId, PCI_VENDOR_ID_INTEL};
 use crate::{Bus, BusAccessInfo, BusDevice, BusType};
 use resources::SystemAllocator;
 
@@ -314,6 +314,10 @@ impl BusDevice for PciConfigIo {
         format!("pci config io-port 0x{:03x}", self.config_address)
     }
 
+    fn device_id(&self) -> u32 {
+        PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
+    }
+
     fn read(&mut self, info: BusAccessInfo, data: &mut [u8]) {
         // `offset` is relative to 0xcf8
         let value = match info.offset {
@@ -387,6 +391,10 @@ impl BusDevice for PciConfigMmio {
         "pci config mmio".to_owned()
     }
 
+    fn device_id(&self) -> u32 {
+        PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
+    }
+
     fn read(&mut self, info: BusAccessInfo, data: &mut [u8]) {
         // Only allow reads to the register boundary.
         let start = info.offset as usize % 4;
@@ -440,6 +448,10 @@ impl BusDevice for PciVirtualConfigMmio {
         "pci virtual config mmio".to_owned()
     }
 
+    fn device_id(&self) -> u32 {
+        PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
+    }
+
     fn read(&mut self, info: BusAccessInfo, data: &mut [u8]) {
         let value = if info.offset % 4 != 0 || data.len() != 4 {
             error!(
@@ -456,10 +468,7 @@ impl BusDevice for PciVirtualConfigMmio {
                 .lock()
                 .virtual_config_space_read(address, register)
         };
-        data[0] = value as u8;
-        data[1] = (value >> (1 * 8)) as u8;
-        data[2] = (value >> (2 * 8)) as u8;
-        data[3] = (value >> (3 * 8)) as u8;
+        data[0..4].copy_from_slice(&value.to_le_bytes()[..]);
     }
 
     fn write(&mut self, info: BusAccessInfo, data: &[u8]) {
@@ -472,10 +481,8 @@ impl BusDevice for PciVirtualConfigMmio {
             );
             return;
         }
-        let value = (data[0] as u32)
-            | ((data[1] as u32) << (1 * 8))
-            | ((data[2] as u32) << (2 * 8))
-            | ((data[3] as u32) << (3 * 8));
+        // Unwrap is safe as we verified length above
+        let value = u32::from_le_bytes(data.try_into().unwrap());
         let (address, register) =
             PciAddress::from_config_address(info.offset as u32, self.register_bit_num);
         self.pci_root

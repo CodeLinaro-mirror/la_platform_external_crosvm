@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use sys_util::{Result as SysResult, TimerFd};
 
-use crate::{AsyncResult, Error, Executor, IntoAsync, IoSourceExt};
+use super::{AsyncResult, Error, Executor, IntoAsync, IoSourceExt};
+
 #[cfg(test)]
-use crate::{FdExecutor, URingExecutor};
+use super::{FdExecutor, URingExecutor};
 
 /// An async version of sys_util::TimerFd.
 pub struct TimerAsync {
@@ -23,12 +24,12 @@ impl TimerAsync {
 
     #[cfg(test)]
     pub(crate) fn new_poll(timer: TimerFd, ex: &FdExecutor) -> AsyncResult<TimerAsync> {
-        crate::executor::async_poll_from(timer, ex).map(|io_source| TimerAsync { io_source })
+        super::executor::async_poll_from(timer, ex).map(|io_source| TimerAsync { io_source })
     }
 
     #[cfg(test)]
     pub(crate) fn new_uring(timer: TimerFd, ex: &URingExecutor) -> AsyncResult<TimerAsync> {
-        crate::executor::async_uring_from(timer, ex).map(|io_source| TimerAsync { io_source })
+        super::executor::async_uring_from(timer, ex).map(|io_source| TimerAsync { io_source })
     }
 
     /// Gets the next value from the timer.
@@ -57,8 +58,7 @@ impl IntoAsync for TimerFd {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::uring_executor::use_uring;
+    use super::{super::uring_executor::use_uring, *};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -69,13 +69,10 @@ mod tests {
 
         async fn this_test(ex: &URingExecutor) {
             let tfd = TimerFd::new().expect("failed to create timerfd");
-            assert_eq!(tfd.is_armed().unwrap(), false);
 
             let dur = Duration::from_millis(200);
             let now = Instant::now();
             tfd.reset(dur, None).expect("failed to arm timer");
-
-            assert_eq!(tfd.is_armed().unwrap(), true);
 
             let t = TimerAsync::new_uring(tfd, ex).unwrap();
             let count = t.next_val().await.expect("unable to wait for timer");
@@ -92,13 +89,10 @@ mod tests {
     fn one_shot_fd() {
         async fn this_test(ex: &FdExecutor) {
             let tfd = TimerFd::new().expect("failed to create timerfd");
-            assert_eq!(tfd.is_armed().unwrap(), false);
 
             let dur = Duration::from_millis(200);
             let now = Instant::now();
             tfd.reset(dur, None).expect("failed to arm timer");
-
-            assert_eq!(tfd.is_armed().unwrap(), true);
 
             let t = TimerAsync::new_poll(tfd, ex).unwrap();
             let count = t.next_val().await.expect("unable to wait for timer");

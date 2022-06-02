@@ -21,7 +21,9 @@ use crate::pci::pci_configuration::{
 };
 use crate::pci::pci_device::{PciDevice, Result};
 use crate::pci::{PciAddress, PciDeviceError};
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct StubPciParameters {
     pub address: PciAddress,
     pub vendor_id: u16,
@@ -156,22 +158,26 @@ mod test {
 
     #[test]
     fn address_allocation() {
-        let mut allocator = SystemAllocator::new(SystemAllocatorConfig {
-            io: Some(MemRegion {
-                base: 0x1000,
-                size: 0x2000,
-            }),
-            low_mmio: MemRegion {
-                base: 0x2000_0000,
-                size: 0x1000_0000,
+        let mut allocator = SystemAllocator::new(
+            SystemAllocatorConfig {
+                io: Some(MemRegion {
+                    base: 0x1000,
+                    size: 0x2000,
+                }),
+                low_mmio: MemRegion {
+                    base: 0x2000_0000,
+                    size: 0x1000_0000,
+                },
+                high_mmio: MemRegion {
+                    base: 0x1_0000_0000,
+                    size: 0x1000_0000,
+                },
+                platform_mmio: None,
+                first_irq: 5,
             },
-            high_mmio: MemRegion {
-                base: 0x1_0000_0000,
-                size: 0x1000_0000,
-            },
-            platform_mmio: None,
-            first_irq: 5,
-        })
+            None,
+            &[],
+        )
         .unwrap();
         let mut device = StubPciDevice::new(&CONFIG);
 

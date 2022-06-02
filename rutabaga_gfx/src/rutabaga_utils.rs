@@ -22,7 +22,11 @@ use vulkano::image::ImageCreationError;
 #[cfg(feature = "vulkano")]
 use vulkano::instance::InstanceCreationError;
 #[cfg(feature = "vulkano")]
-use vulkano::memory::DeviceMemoryAllocError;
+use vulkano::memory::DeviceMemoryAllocationError;
+#[cfg(feature = "vulkano")]
+use vulkano::memory::DeviceMemoryExportError;
+#[cfg(feature = "vulkano")]
+use vulkano::memory::MemoryMapError;
 
 /// Represents a buffer.  `base` contains the address of a buffer, while `len` contains the length
 /// of the buffer.
@@ -196,8 +200,8 @@ pub enum RutabagaError {
     #[error("invalid resource id")]
     InvalidResourceId,
     /// Indicates an error in the RutabagaBuilder.
-    #[error("invalid rutabaga build parameters")]
-    InvalidRutabagaBuild,
+    #[error("invalid rutabaga build parameters: {0}")]
+    InvalidRutabagaBuild(&'static str),
     /// An error with the RutabagaHandle
     #[error("invalid rutabaga handle")]
     InvalidRutabagaHandle,
@@ -229,7 +233,11 @@ pub enum RutabagaError {
     /// Device memory allocation error
     #[cfg(feature = "vulkano")]
     #[error("vulkano device memory allocation failure {0}")]
-    VkDeviceMemoryAllocError(DeviceMemoryAllocError),
+    VkDeviceMemoryAllocationError(DeviceMemoryAllocationError),
+    /// Device memory export error
+    #[cfg(feature = "vulkano")]
+    #[error("vulkano device memory export failure {0}")]
+    VkDeviceMemoryExportError(DeviceMemoryExportError),
     /// Image creation error
     #[cfg(feature = "vulkano")]
     #[error("vulkano image creation failure {0}")]
@@ -238,6 +246,10 @@ pub enum RutabagaError {
     #[cfg(feature = "vulkano")]
     #[error("vulkano instance creation failure {0}")]
     VkInstanceCreationError(InstanceCreationError),
+    /// Memory map  error
+    #[cfg(feature = "vulkano")]
+    #[error("vullano memory map failure {0}")]
+    VkMemoryMapError(MemoryMapError),
     /// Volatile memory error
     #[error("noticed a volatile memory error {0}")]
     VolatileMemoryError(VolatileMemoryError),
@@ -384,6 +396,7 @@ const GFXSTREAM_RENDERER_FLAGS_USE_GLES: u32 = 1 << 4;
 const GFXSTREAM_RENDERER_FLAGS_NO_VK_BIT: u32 = 1 << 5;
 const GFXSTREAM_RENDERER_FLAGS_NO_SYNCFD_BIT: u32 = 1 << 20;
 const GFXSTREAM_RENDERER_FLAGS_GUEST_USES_ANGLE: u32 = 1 << 21;
+const GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB: u32 = 1 << 23;
 
 /// gfxstream flag struct.
 #[derive(Copy, Clone, Default)]
@@ -436,6 +449,11 @@ impl GfxstreamFlags {
     /// Use ANGLE as the guest GLES driver.
     pub fn use_guest_angle(self, v: bool) -> GfxstreamFlags {
         self.set_flag(GFXSTREAM_RENDERER_FLAGS_GUEST_USES_ANGLE, v)
+    }
+
+    /// Use async fence completion callback.
+    pub fn use_async_fence_cb(self, v: bool) -> GfxstreamFlags {
+        self.set_flag(GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB, v)
     }
 }
 
@@ -498,7 +516,7 @@ pub struct RutabagaChannel {
 }
 
 /// Enumeration of possible rutabaga components.
-#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum RutabagaComponentType {
     Rutabaga2D,
     VirglRenderer,

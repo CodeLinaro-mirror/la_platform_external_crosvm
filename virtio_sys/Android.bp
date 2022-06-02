@@ -18,26 +18,7 @@ rust_library {
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
-    edition: "2018",
-    rustlibs: [
-        "libbase_rust",
-    ],
-}
-
-rust_test {
-    name: "virtio_sys_test_src_lib",
-    defaults: ["crosvm_defaults"],
-    host_supported: true,
-    crate_name: "virtio_sys",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2018",
+    edition: "2021",
     rustlibs: [
         "libbase_rust",
     ],

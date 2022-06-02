@@ -8,15 +8,10 @@ use anyhow::{anyhow, bail, Context};
 use argh::FromArgs;
 use async_task::Task;
 use base::{
-    clone_descriptor, error,
-    net::{UnixSeqpacketListener, UnlinkUnixSeqpacketListener},
-    warn, Event, FromRawDescriptor, IntoRawDescriptor, SafeDescriptor, TimerFd, Tube,
+    clone_descriptor, error, warn, Event, FromRawDescriptor, IntoRawDescriptor, SafeDescriptor,
+    Tube, UnixSeqpacketListener, UnlinkUnixSeqpacketListener,
 };
-use cros_async::{AsyncWrapper, EventAsync, Executor, IoSourceExt, TimerAsync};
-use futures::{
-    future::{select, Either},
-    pin_mut,
-};
+use cros_async::{AsyncTube, AsyncWrapper, EventAsync, Executor, IoSourceExt};
 use hypervisor::ProtectionType;
 use sync::Mutex;
 use vm_memory::GuestMemory;
@@ -53,42 +48,15 @@ async fn run_ctrl_queue(
     reader: SharedReader,
     mem: GuestMemory,
     kick_evt: EventAsync,
-    mut timer: TimerAsync,
     state: Rc<RefCell<gpu::Frontend>>,
 ) {
     loop {
-        if state.borrow().has_pending_fences() {
-            if let Err(e) = timer.reset(gpu::FENCE_POLL_INTERVAL, None) {
-                error!("Failed to reset fence timer: {}", e);
-                break;
-            }
-
-            let kick_value = kick_evt.next_val();
-            let timer_value = timer.next_val();
-            pin_mut!(kick_value);
-            pin_mut!(timer_value);
-            match select(kick_value, timer_value).await {
-                Either::Left((res, _)) => {
-                    if let Err(e) = res {
-                        error!("Failed to read kick event for ctrl queue: {}", e);
-                        break;
-                    }
-                }
-                Either::Right((res, _)) => {
-                    if let Err(e) = res {
-                        error!("Failed to read timer for ctrl queue: {}", e);
-                        break;
-                    }
-                }
-            }
-        } else if let Err(e) = kick_evt.next_val().await {
+        if let Err(e) = kick_evt.next_val().await {
             error!("Failed to read kick event for ctrl queue: {}", e);
-            break;
         }
 
         let mut state = state.borrow_mut();
         let needs_interrupt = state.process_queue(&mem, &reader);
-        state.fence_poll();
 
         if needs_interrupt {
             reader.signal_used(&mem);
@@ -126,7 +94,7 @@ async fn run_resource_bridge(tube: Box<dyn IoSourceExt<Tube>>, state: Rc<RefCell
         }
 
         if let Err(e) = state.borrow_mut().process_resource_bridge(tube.as_source()) {
-            error!("Failed to process resource bridge: {}", e);
+            error!("Failed to process resource bridge: {:#}", e);
             break;
         }
     }
@@ -195,9 +163,10 @@ impl VhostUserBackend for GpuBackend {
     }
 
     fn set_device_request_channel(&mut self, channel: File) -> anyhow::Result<()> {
-        let tube = unsafe { Tube::from_raw_descriptor(channel.into_raw_descriptor()) }
-            .into_async_tube(&self.ex)
-            .context("failed to create AsyncTube")?;
+        let tube = AsyncTube::new(&self.ex, unsafe {
+            Tube::from_raw_descriptor(channel.into_raw_descriptor())
+        })
+        .context("failed to create AsyncTube")?;
 
         // We need a PciAddress in order to initialize the pci bar but this isn't part of the
         // vhost-user protocol. Instead we expect this to be the first message the crosvm main
@@ -213,11 +182,19 @@ impl VhostUserBackend for GpuBackend {
                     }
                 };
 
-                if let Err(e) = tube.send(&response) {
+                if let Err(e) = tube.send(response).await {
                     error!("Failed to send `PciBarConfiguration`: {}", e);
                 }
 
-                gpu.borrow_mut().set_device_tube(tube.into());
+                let device_tube: Tube = match tube.next().await {
+                    Ok(tube) => tube,
+                    Err(e) => {
+                        error!("Failed to get device tube: {}", e);
+                        return;
+                    }
+                };
+
+                gpu.borrow_mut().set_device_tube(device_tube);
             })
             .detach();
 
@@ -297,13 +274,9 @@ impl VhostUserBackend for GpuBackend {
             self.display_worker = Some(task);
         }
 
-        let timer = TimerFd::new()
-            .context("failed to create TimerFd")
-            .and_then(|t| TimerAsync::new(t, &self.ex).context("failed to create TimerAsync"))?;
         let task = self
             .ex
-            .spawn_local(run_ctrl_queue(reader, mem, kick_evt, timer, state));
-
+            .spawn_local(run_ctrl_queue(reader, mem, kick_evt, state));
         self.workers[idx] = Some(task);
         Ok(())
     }

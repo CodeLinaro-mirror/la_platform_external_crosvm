@@ -26,10 +26,10 @@ use devices::{
 use hypervisor::{IoEventAddress, ProtectionType, Vm};
 use minijail::Minijail;
 use remain::sorted;
-use resources::{MmioType, SystemAllocator};
+use resources::{MmioType, SystemAllocator, SystemAllocatorConfig};
 use sync::Mutex;
 use thiserror::Error;
-use vm_control::{BatControl, BatteryType};
+use vm_control::{BatControl, BatteryType, PmResource};
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
@@ -101,6 +101,8 @@ pub struct VmComponents {
     pub host_cpu_topology: bool,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub force_s2idle: bool,
+    #[cfg(feature = "direct")]
+    pub direct_gpe: Vec<u32>,
 }
 
 /// Holds the elements needed to run a Linux VM. Created by `build_vm`.
@@ -123,6 +125,7 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub bat_control: Option<BatControl>,
     #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
     pub gdb: Option<(u32, Tube)>,
+    pub pm: Option<Arc<Mutex<dyn PmResource>>>,
     /// Devices to be notified before the system resumes from the S3 suspended state.
     pub resume_notify_devices: Vec<Arc<Mutex<dyn BusResumeDevice>>>,
     pub root_config: Arc<Mutex<PciRoot>>,
@@ -150,12 +153,16 @@ pub trait LinuxArch {
         components: &VmComponents,
     ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error>;
 
-    /// Creates a new `SystemAllocator` that fits the given `Vm`'s memory layout.
+    /// Gets the configuration for a new `SystemAllocator` that fits the given `Vm`'s memory layout.
+    ///
+    /// This is the per-architecture template for constructing the `SystemAllocator`. Platform
+    /// agnostic modifications may be made to this configuration, but the final `SystemAllocator`
+    /// will be at least as strict as this configuration.
     ///
     /// # Arguments
     ///
     /// * `vm` - The virtual machine to be used as a template for the `SystemAllocator`.
-    fn create_system_allocator<V: Vm>(vm: &V) -> SystemAllocator;
+    fn get_system_allocator_config<V: Vm>(vm: &V) -> SystemAllocatorConfig;
 
     /// Takes `VmComponents` and generates a `RunnableLinuxVm`.
     ///
@@ -167,7 +174,7 @@ pub trait LinuxArch {
     /// * `reset_evt` - Event used by sub-devices to request that crosvm exit because guest
     ///     requested reset.
     /// * `system_allocator` - Allocator created by this trait's implementation of
-    ///   `create_system_allocator`.
+    ///   `get_system_allocator_config`.
     /// * `serial_parameters` - Definitions for how the serial devices should be configured.
     /// * `serial_jail` - Jail used for serial devices created here.
     /// * `battery` - Defines what battery device will be created.
@@ -332,6 +339,9 @@ pub enum DeviceRegistrationError {
     /// Failed to register irq event with VM.
     #[error("failed to register irq event to VM: {0}")]
     RegisterIrqfd(base::Error),
+    /// Could not setup VFIO platform IRQ for the device.
+    #[error("Setting up VFIO platform IRQ: {0}")]
+    SetupVfioPlatformIrq(anyhow::Error),
 }
 
 /// Config a PCI device for used by this vm.
@@ -357,16 +367,15 @@ pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
         .map_err(DeviceRegistrationError::AllocateDeviceAddrs)?;
 
     // Do not suggest INTx for hot-plug devices.
-    let intx_event = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
-    let intx_resample = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
+    let intx_event = devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
 
-    if let Some((gsi, _pin)) = device.assign_irq(&intx_event, &intx_resample, None) {
+    if let Some((gsi, _pin)) = device.assign_irq(&intx_event, None) {
         resources.reserve_irq(gsi);
 
         linux
             .irq_chip
             .as_irq_chip_mut()
-            .register_irq_event(gsi, &intx_event, Some(&intx_resample))
+            .register_level_irq_event(gsi, &intx_event)
             .map_err(DeviceRegistrationError::RegisterIrqfd)?;
     }
 
@@ -440,23 +449,31 @@ pub fn generate_platform_bus(
             .get_platform_irqs()
             .map_err(DeviceRegistrationError::AllocateIrqResource)?;
         for irq in irqs.into_iter() {
-            let irqfd = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
-            keep_rds.push(irqfd.as_raw_descriptor());
-            let irq_resample_fd = if device.irq_is_automask(&irq) {
-                let evt = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
-                keep_rds.push(evt.as_raw_descriptor());
-                Some(evt)
-            } else {
-                None
-            };
-
             let irq_num = resources
                 .allocate_irq()
                 .ok_or(DeviceRegistrationError::AllocateIrq)?;
-            irq_chip
-                .register_irq_event(irq_num, &irqfd, irq_resample_fd.as_ref())
-                .map_err(DeviceRegistrationError::RegisterIrqfd)?;
-            device.assign_platform_irq(irqfd, irq_resample_fd, irq.index);
+
+            if device.irq_is_automask(&irq) {
+                let irq_evt =
+                    devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
+                irq_chip
+                    .register_level_irq_event(irq_num, &irq_evt)
+                    .map_err(DeviceRegistrationError::RegisterIrqfd)?;
+                device
+                    .assign_level_platform_irq(&irq_evt, irq.index)
+                    .map_err(DeviceRegistrationError::SetupVfioPlatformIrq)?;
+                keep_rds.extend(irq_evt.as_raw_descriptors());
+            } else {
+                let irq_evt =
+                    devices::IrqEdgeEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
+                irq_chip
+                    .register_edge_irq_event(irq_num, &irq_evt)
+                    .map_err(DeviceRegistrationError::RegisterIrqfd)?;
+                device
+                    .assign_edge_platform_irq(&irq_evt, irq.index)
+                    .map_err(DeviceRegistrationError::SetupVfioPlatformIrq)?;
+                keep_rds.extend(irq_evt.as_raw_descriptors());
+            }
         }
 
         let arced_dev: Arc<Mutex<dyn BusDevice>> = if let Some(jail) = jail {
@@ -576,16 +593,16 @@ pub fn generate_pci_root(
             irq
         };
 
-        let intx_event = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
-        let intx_resample = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
+        let intx_event =
+            devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
 
-        if let Some((gsi, pin)) = device.assign_irq(&intx_event, &intx_resample, Some(irq_num)) {
+        if let Some((gsi, pin)) = device.assign_irq(&intx_event, Some(irq_num)) {
             // reserve INTx if needed and non-default.
             if gsi != irq_num {
                 resources.reserve_irq(gsi);
             };
             irq_chip
-                .register_irq_event(gsi, &intx_event, Some(&intx_resample))
+                .register_level_irq_event(gsi, &intx_event)
                 .map_err(DeviceRegistrationError::RegisterIrqfd)?;
 
             pci_irqs.push((device_addrs[dev_idx], gsi, pin));
@@ -666,11 +683,10 @@ pub fn add_goldfish_battery(
         )
         .map_err(DeviceRegistrationError::AllocateIoResource)?;
 
-    let irq_evt = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
-    let irq_resample_evt = Event::new().map_err(DeviceRegistrationError::EventCreate)?;
+    let irq_evt = devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
 
     irq_chip
-        .register_irq_event(irq_num, &irq_evt, Some(&irq_resample_evt))
+        .register_level_irq_event(irq_num, &irq_evt)
         .map_err(DeviceRegistrationError::RegisterIrqfd)?;
 
     let (control_tube, response_tube) =
@@ -683,16 +699,10 @@ pub fn add_goldfish_battery(
     #[cfg(not(feature = "power-monitor-powerd"))]
     let create_monitor = None;
 
-    let goldfish_bat = devices::GoldfishBattery::new(
-        mmio_base,
-        irq_num,
-        irq_evt,
-        irq_resample_evt,
-        response_tube,
-        create_monitor,
-    )
-    .map_err(DeviceRegistrationError::RegisterBattery)?;
-    Aml::to_aml_bytes(&goldfish_bat, amls);
+    let goldfish_bat =
+        devices::GoldfishBattery::new(mmio_base, irq_num, irq_evt, response_tube, create_monitor)
+            .map_err(DeviceRegistrationError::RegisterBattery)?;
+    goldfish_bat.to_aml_bytes(amls);
 
     match battery_jail.as_ref() {
         Some(jail) => {
