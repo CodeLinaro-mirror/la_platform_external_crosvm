@@ -26,8 +26,6 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libfutures",
-        "libsync_rust",
-        "libsys_util",
         "libthiserror",
     ],
     proc_macros: [
@@ -47,7 +45,6 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libfutures",
-        "libsync_rust",
         "libthiserror",
     ],
     proc_macros: [

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright 2021 The Chromium OS Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -15,14 +14,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, NamedTuple
 import typing
 
-import test_target
-from test_target import TestTarget
-import testvm
-from test_config import CRATE_OPTIONS, TestOption, BUILD_FEATURES
-from check_code_hygiene import (
-    has_platform_dependent_code,
-    has_crlf_line_endings,
-)
+from . import test_target, testvm
+from .test_target import TestTarget
+from .test_config import CRATE_OPTIONS, TestOption, BUILD_FEATURES
 
 USAGE = """\
 Runs tests for crosvm locally, in a vm or on a remote device.
@@ -132,7 +126,8 @@ def should_run_executable(executable: Executable, target_arch: Arch):
 def list_common_crates(target_arch: Arch):
     excluded_crates = list(get_workspace_excludes(target_arch))
     for path in COMMON_ROOT.glob("**/Cargo.toml"):
-        if not path.parent.name in excluded_crates:
+        # TODO(b/213147081): remove this once common/cros_async is gone.
+        if not path.parent.name in excluded_crates and path.parent.name != "cros_async":
             yield Crate(name=path.parent.name, path=path.parent)
 
 
@@ -141,7 +136,11 @@ def exclude_crosvm(target_arch: Arch):
 
 
 def cargo(
-    cargo_command: str, cwd: Path, flags: list[str], env: dict[str, str], build_arch: Arch
+    cargo_command: str,
+    cwd: Path,
+    flags: list[str],
+    env: dict[str, str],
+    build_arch: Arch,
 ) -> Iterable[Executable]:
     """
     Executes a cargo command and returns the list of test binaries generated.
@@ -287,9 +286,8 @@ def execute_test(target: TestTarget, executable: Executable):
     binary_path = executable.binary_path
 
     if executable.arch == "win64" and executable.kind != "proc-macro" and os.name != "nt":
-        args.insert(0, binary_path)
-        binary_path = "wine64"
-
+        args.insert(0, str(binary_path))
+        binary_path = Path("wine64")
 
     # proc-macros and their tests are executed on the host.
     if executable.kind == "proc-macro":
@@ -328,6 +326,7 @@ def execute_all(
     repeat: int,
 ):
     """Executes all tests in the `executables` list in parallel."""
+
     executables = [e for e in executables if should_run_executable(e, target.arch)]
     if repeat > 1:
         executables = executables * repeat
@@ -393,7 +392,9 @@ def main():
     os.environ["RUST_BACKTRACE"] = "1"
 
     target = (
-        test_target.TestTarget(args.target) if args.target else test_target.TestTarget.default()
+        test_target.TestTarget(args.target, args.arch)
+        if args.target
+        else test_target.TestTarget.default()
     )
     print("Test target:", target)
 
@@ -404,18 +405,6 @@ def main():
     if target.vm:
         testvm.build_if_needed(target.vm)
         testvm.up(target.vm)
-
-    hygiene, error = has_platform_dependent_code(Path("common/sys_util_core"))
-    if not hygiene:
-        print("Error: Platform dependent code not allowed in sys_util_core crate.")
-        print("Offending line: " + error)
-        sys.exit(-1)
-
-    crlf_endings = has_crlf_line_endings()
-    if crlf_endings:
-        print("Error: Following files have crlf(dos) line encodings")
-        print(*crlf_endings)
-        sys.exit(-1)
 
     executables = list(build_all_binaries(target, build_arch))
 

@@ -20,11 +20,10 @@ index a3fe04d9..55ab423c 100644
      },
      edition: "2021",
      rustlibs: [
-@@ -44,14 +42,31 @@ rust_test {
+@@ -44,13 +42,31 @@ rust_test {
          "libbase_poll_token_derive",
          "libremain",
      ],
--    static_libs: ["libstdio_fileno"],
 +    target: {
 +        android: {
 +            rustlibs: ["libandroid_log_sys"],
@@ -54,11 +53,10 @@ index a3fe04d9..55ab423c 100644
      host_supported: true,
      crate_name: "base",
      cargo_env_compat: true,
-@@ -77,5 +92,23 @@ rust_library {
+@@ -77,4 +92,23 @@ rust_library {
          "libbase_poll_token_derive",
          "libremain",
      ],
--    static_libs: ["libstdio_fileno"],
 +    target: {
 +        android: {
 +            rustlibs: ["libandroid_log_sys"],

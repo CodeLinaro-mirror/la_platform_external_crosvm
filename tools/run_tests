@@ -1,2 +1,5 @@
-#!/usr/bin/env bash
-python3 $(dirname $0)/impl/test_runner.py "$@"
+#!/usr/bin/env python3
+from impl.test_runner import main
+
+if __name__ == "__main__":
+    main()

@@ -21,7 +21,6 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "liblibc",
-        "libsys_util",
     ],
     proc_macros: ["libwire_format_derive"],
 }
@@ -42,7 +41,6 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "liblibc",
-        "libsys_util",
     ],
     proc_macros: ["libwire_format_derive"],
 }

@@ -34,7 +34,7 @@ use base::{
 };
 use kvm::{Cap, Datamatch, IoeventAddress, Kvm, Vcpu, VcpuExit, Vm};
 use minijail::{self, Minijail};
-use net_util::{Tap, TapT};
+use net_util::{sys::unix::Tap, TapTCommon};
 use vm_memory::{GuestMemory, MemoryPolicy};
 
 use self::process::*;
@@ -511,12 +511,10 @@ pub fn run_config(cfg: Config) -> Result<()> {
     #[cfg(feature = "gpu")]
     let gpu_render_server_parameters = if let Some(parameters) = &cfg.gpu_render_server_parameters {
         Some(parameters)
+    } else if cfg!(feature = "plugin-render-server") {
+        Some(&_default_render_server_params)
     } else {
-        if cfg!(feature = "plugin-render-server") {
-            Some(&_default_render_server_params)
-        } else {
-            None
-        }
+        None
     };
 
     #[cfg(feature = "gpu")]
