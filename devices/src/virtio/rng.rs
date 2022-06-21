@@ -26,7 +26,7 @@ pub enum RngError {
 pub type Result<T> = std::result::Result<T, RngError>;
 
 struct Worker {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     queue: Queue,
     mem: GuestMemory,
     random_file: File,
@@ -112,7 +112,7 @@ impl Worker {
                 }
             }
             if needs_interrupt {
-                self.queue.trigger_interrupt(&self.mem, &*self.interrupt);
+                self.queue.trigger_interrupt(&self.mem, &self.interrupt);
             }
         }
     }
@@ -178,7 +178,7 @@ impl VirtioDevice for Rng {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

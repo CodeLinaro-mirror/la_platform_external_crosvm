@@ -14,7 +14,7 @@ use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 use crate::virtio::snd::layout::virtio_snd_config;
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
 use crate::virtio::TYPE_SOUND;
-use crate::virtio::{SignalableInterrupt, Queue, VirtioDevice};
+use crate::virtio::{Interrupt, Queue, VirtioDevice};
 
 // A vhost-user snd device.
 pub struct Snd {
@@ -94,14 +94,14 @@ impl VirtioDevice for Snd {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &*interrupt, &queues, &queue_evts)
+            .activate(&mem, &interrupt, &queues, &queue_evts)
         {
             error!("failed to activate queues: {}", e);
             return;
@@ -126,7 +126,7 @@ impl VirtioDevice for Snd {
                     kill_evt,
                 };
 
-                if let Err(e) = worker.run(&*interrupt) {
+                if let Err(e) = worker.run(interrupt) {
                     error!("failed to start a worker: {}", e);
                 }
                 worker

@@ -5,7 +5,6 @@
 //! The root level module that includes the config and aggregate of the submodules for running said
 //! configs.
 
-pub mod panic_hook;
 pub mod argument;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 pub mod gdb;
