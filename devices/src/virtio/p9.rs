@@ -62,7 +62,7 @@ pub enum P9Error {
 pub type P9Result<T> = result::Result<T, P9Error>;
 
 struct Worker {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     mem: GuestMemory,
     queue: Queue,
     server: p9::Server,
@@ -83,7 +83,7 @@ impl Worker {
             self.queue
                 .add_used(&self.mem, avail_desc.index, writer.bytes_written() as u32);
         }
-        self.queue.trigger_interrupt(&self.mem, &*self.interrupt);
+        self.queue.trigger_interrupt(&self.mem, &self.interrupt);
 
         Ok(())
     }
@@ -202,7 +202,7 @@ impl VirtioDevice for P9 {
     fn activate(
         &mut self,
         guest_mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {

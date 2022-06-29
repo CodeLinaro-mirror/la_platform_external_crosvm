@@ -263,7 +263,7 @@ mod tests {
         fn activate(
             &mut self,
             _mem: GuestMemory,
-            _interrupt: Box<dyn SignalableInterrupt>,
+            _interrupt: Interrupt,
             _queues: Vec<Queue>,
             _queue_evts: Vec<Event>,
         ) {

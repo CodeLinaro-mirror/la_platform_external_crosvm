@@ -10,7 +10,8 @@ use std::sync::Arc;
 use sync::Mutex;
 
 use anyhow::{bail, Context};
-use base::{debug, error, info};
+use base::error;
+use log::debug;
 use cros_async::{AsyncError, EventAsync};
 use data_model::{DataInit, Le16, Le32, Le64};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;

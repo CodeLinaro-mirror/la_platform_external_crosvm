@@ -14,8 +14,9 @@ use std::u32;
 use base::Error as SysError;
 use base::Result as SysResult;
 use base::{
-    debug, error, info, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer, Tube, WaitContext,
+    error, info, warn, AsRawDescriptor, Event, PollToken, RawDescriptor, Timer, Tube, WaitContext,
 };
+use log::debug;
 use data_model::DataInit;
 use disk::DiskFile;
 
@@ -149,7 +150,7 @@ pub struct DiskOption {
 }
 
 struct Worker {
-    interrupt: Box<dyn SignalableInterrupt>,
+    interrupt: Interrupt,
     queues: Vec<Queue>,
     mem: GuestMemory,
     disk_image: Box<dyn DiskFile>,
@@ -245,7 +246,7 @@ impl Worker {
 
             debug!("{}", format!("add_used {}", desc_index));
             queue.add_used(&self.mem, desc_index, len as u32);
-            queue.trigger_interrupt(&self.mem, &*self.interrupt);
+            queue.trigger_interrupt(&self.mem, &self.interrupt);
             queue.set_notify(&self.mem, true);
         }
     }
@@ -658,7 +659,7 @@ impl VirtioDevice for Block {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Box<dyn SignalableInterrupt>,
+        interrupt: Interrupt,
         queues: Vec<Queue>,
         mut queue_evts: Vec<Event>,
     ) {
