@@ -26,6 +26,7 @@ rust_library {
         "libdevices",
         "libhypervisor",
         "libkernel_cmdline",
+        "libkernel_loader",
         "libkvm",
         "libkvm_sys",
         "liblibc",

@@ -9,34 +9,32 @@
 #[macro_use]
 pub mod win;
 
-#[path = "win/ioctl.rs"]
 #[macro_use]
 pub mod ioctl;
 #[macro_use]
 pub mod syslog;
-mod clock;
-#[path = "win/console.rs"]
 mod console;
 mod descriptor;
-#[path = "win/event.rs"]
 mod event;
 mod events;
 pub mod file_traits;
-#[path = "win/get_filesystem_type.rs"]
 mod get_filesystem_type;
 mod gmtime;
 mod mmap;
-#[path = "win/named_pipes.rs"]
+mod mmap_platform;
 pub mod named_pipes;
+pub mod platform_timer_resolution;
 mod poll;
-#[path = "win/priority.rs"]
 mod priority;
 // Add conditional compile?
-#[path = "win/sched.rs"]
+mod punch_hole;
 mod sched;
 mod shm;
+mod shm_platform;
 mod stream_channel;
+mod stream_channel_platform;
 mod timer;
+mod wait;
 
 pub mod thread;
 
@@ -48,7 +46,6 @@ pub use crate::descriptor_reflection::{
 };
 pub use crate::errno::{Error, Result, *};
 pub use base_poll_token_derive::*;
-pub use clock::{Clock, FakeClock};
 pub use console::*;
 pub use descriptor::*;
 pub use event::*;
@@ -61,6 +58,7 @@ pub use poll::*;
 pub use priority::*;
 pub use sched::*;
 pub use shm::*;
+pub use shm_platform::*;
 pub use stream_channel::*;
 pub use timer::*;
 pub use win::*;
@@ -70,7 +68,8 @@ pub use file_traits::{
     FileSetLen, FileSync,
 };
 pub use mmap::Error as MmapError;
-pub use write_zeroes::{PunchHole, WriteZeroes, WriteZeroesAt};
+pub(crate) use punch_hole::file_punch_hole;
+pub(crate) use write_zeroes::file_write_zeroes_at;
 
 use std::cell::Cell;
 

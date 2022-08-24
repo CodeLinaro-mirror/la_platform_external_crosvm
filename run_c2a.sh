@@ -30,7 +30,7 @@ else
 fi
 
 C2A=${C2A:-cargo2android.py}
-echo "Using $C2A to run this script."
+echo "Processing \"$1\" using $C2A $C2A_ARGS"
 $C2A $C2A_ARGS
 rm -f cargo.out
 rm -rf target.tmp || /bin/true

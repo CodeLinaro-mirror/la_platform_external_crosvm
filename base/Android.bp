@@ -36,6 +36,7 @@ rust_test {
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libuuid",
     ],
     proc_macros: [
         "libbase_poll_token_derive",
@@ -85,6 +86,7 @@ rust_library {
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libuuid",
     ],
     proc_macros: [
         "libbase_poll_token_derive",

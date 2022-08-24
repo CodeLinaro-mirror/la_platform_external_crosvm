@@ -6,6 +6,8 @@ use std::future::Future;
 
 use async_task::Task;
 
+use base::{AsRawDescriptors, RawDescriptor};
+
 use super::{
     poll_source::Error as PollError, uring_executor::use_uring, FdExecutor, PollSource,
     URingExecutor, UringSource,
@@ -40,7 +42,7 @@ pub(crate) fn async_poll_from<'a, F: IntoAsync + Send + 'a>(
 /// represented on the POSIX side as an enum, rather than a trait. This leads to some code &
 /// interface duplication, but as far as we understand that is unavoidable.
 ///
-/// See https://chromium-review.googlesource.com/c/chromiumos/platform/crosvm/+/2571401/2..6/cros_async/src/executor.rs#b75
+/// See <https://chromium-review.googlesource.com/c/chromiumos/platform/crosvm/+/2571401/2..6/cros_async/src/executor.rs#b75>
 /// for further details.
 ///
 /// # Examples
@@ -349,6 +351,15 @@ impl Executor {
         match self {
             Executor::Uring(ex) => Ok(ex.run_until(f)?),
             Executor::Fd(ex) => Ok(ex.run_until(f).map_err(PollError::Executor)?),
+        }
+    }
+}
+
+impl AsRawDescriptors for Executor {
+    fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
+        match self {
+            Executor::Uring(ex) => ex.as_raw_descriptors(),
+            Executor::Fd(ex) => ex.as_raw_descriptors(),
         }
     }
 }

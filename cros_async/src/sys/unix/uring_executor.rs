@@ -57,9 +57,7 @@ use std::{
     fs::File,
     future::Future,
     io,
-    mem::{
-        MaybeUninit, {self},
-    },
+    mem::{self, MaybeUninit},
     os::unix::io::{FromRawFd, RawFd},
     pin::Pin,
     sync::{
@@ -67,13 +65,11 @@ use std::{
         Arc, Weak,
     },
     task::{Context, Poll, Waker},
-    thread::{
-        ThreadId, {self},
-    },
+    thread::{self, ThreadId},
 };
 
 use async_task::Task;
-use base::{warn, AsRawDescriptor, WatchingEvents};
+use base::{trace, warn, AsRawDescriptor, RawDescriptor, WatchingEvents};
 use futures::task::noop_waker;
 use io_uring::URingContext;
 use once_cell::sync::Lazy;
@@ -427,6 +423,10 @@ impl RawExecutor {
                 continue;
             }
 
+            trace!(
+                "Waiting on events, {} pending ops",
+                self.ring.lock().ops.len()
+            );
             let events = self.ctx.wait().map_err(Error::URingEnter)?;
 
             // Set the state back to PROCESSING to prevent any tasks woken up by the loop below from
@@ -492,7 +492,7 @@ impl RawExecutor {
     // Remove the waker for the given token if it hasn't fired yet.
     fn cancel_operation(&self, token: WakerToken) {
         let mut ring = self.ring.lock();
-        if let Some(op) = ring.ops.get_mut(token.0) {
+        let submit_cancel = if let Some(op) = ring.ops.get_mut(token.0) {
             match op {
                 OpStatus::Nop => panic!("`cancel_operation` called on nop"),
                 OpStatus::Pending(data) => {
@@ -500,18 +500,29 @@ impl RawExecutor {
                         panic!("uring operation canceled more than once");
                     }
 
+                    if let Some(waker) = data.waker.take() {
+                        waker.wake();
+                    }
                     // Clear the waker as it is no longer needed.
                     data.waker = None;
                     data.canceled = true;
 
                     // Keep the rest of the op data as the uring might still be accessing either
                     // the source of the backing memory so it needs to live until the kernel
-                    // completes the operation.  TODO: cancel the operation in the uring.
+                    // completes the operation.
+                    true
                 }
                 OpStatus::Completed(_) => {
                     ring.ops.remove(token.0);
+                    false
                 }
             }
+        } else {
+            false
+        };
+        std::mem::drop(ring);
+        if submit_cancel {
+            let _best_effort = self.submit_cancel_async(token.0);
         }
     }
 
@@ -583,6 +594,19 @@ impl RawExecutor {
             waker: None,
             canceled: false,
         }));
+
+        Ok(WakerToken(next_op_token))
+    }
+
+    fn submit_cancel_async(&self, token: usize) -> Result<WakerToken> {
+        let mut ring = self.ring.lock();
+        let entry = ring.ops.vacant_entry();
+        let next_op_token = entry.key();
+        self.ctx
+            .async_cancel(usize_to_u64(token), usize_to_u64(next_op_token))
+            .map_err(Error::SubmittingOp)?;
+
+        entry.insert(OpStatus::Nop);
 
         Ok(WakerToken(next_op_token))
     }
@@ -726,6 +750,12 @@ impl RawExecutor {
     }
 }
 
+impl AsRawDescriptor for RawExecutor {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        self.ctx.as_raw_descriptor()
+    }
+}
+
 impl WeakWake for RawExecutor {
     fn wake_by_ref(weak_self: &Weak<Self>) {
         if let Some(arc_self) = weak_self.upgrade() {
@@ -736,25 +766,20 @@ impl WeakWake for RawExecutor {
 
 impl Drop for RawExecutor {
     fn drop(&mut self) {
-        // Wake up any futures still waiting on uring operations.
-        let ring = self.ring.get_mut();
-        for (_, op) in ring.ops.iter_mut() {
-            match op {
-                OpStatus::Nop => {}
-                OpStatus::Pending(data) => {
-                    // If the operation wasn't already canceled then wake up the future waiting on
-                    // it. When polled that future will get an ExecutorGone error anyway so there's
-                    // no point in waiting until the operation completes to wake it up.
-                    if !data.canceled {
-                        if let Some(waker) = data.waker.take() {
-                            waker.wake();
-                        }
-                    }
-
-                    data.canceled = true;
-                }
-                OpStatus::Completed(_) => {}
-            }
+        // Submit cancellations for all operations
+        #[allow(clippy::needless_collect)]
+        let ops: Vec<_> = self
+            .ring
+            .get_mut()
+            .ops
+            .iter_mut()
+            .filter_map(|op| match op.1 {
+                OpStatus::Pending(data) if !data.canceled => Some(op.0),
+                _ => None,
+            })
+            .collect();
+        for token in ops {
+            self.cancel_operation(WakerToken(token));
         }
 
         // Since the RawExecutor is wrapped in an Arc it may end up being dropped from a different
@@ -765,7 +790,18 @@ impl Drop for RawExecutor {
         // Now run the executor loop once more to poll any futures we just woke up.
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let res = self.run(&mut cx, async {});
+        let res = self.run(
+            &mut cx,
+            // make sure all pending uring operations are completed as kernel may
+            // try to write to memory that we may drop
+            futures::future::poll_fn(|_cx| {
+                if self.ring.lock().ops.is_empty() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }),
+        );
 
         if let Err(e) = res {
             warn!("Failed to drive uring to completion: {}", e);
@@ -836,6 +872,12 @@ impl URingExecutor {
             tag: self.raw.register_source(Arc::new(duped_fd)),
             ex: Arc::downgrade(&self.raw),
         })
+    }
+}
+
+impl AsRawDescriptor for URingExecutor {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        self.raw.as_raw_descriptor()
     }
 }
 

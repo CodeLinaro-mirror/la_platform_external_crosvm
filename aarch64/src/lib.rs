@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! ARM 64-bit architecture support.
+
 #![cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 
 use std::collections::BTreeMap;
@@ -9,8 +11,8 @@ use std::io;
 use std::sync::Arc;
 
 use arch::{
-    get_serial_cmdline, GetSerialCmdlineError, MsrExitHandler, RunnableLinuxVm, VmComponents,
-    VmImage,
+    get_serial_cmdline, GetSerialCmdlineError, MsrConfig, MsrExitHandlerError, RunnableLinuxVm,
+    VmComponents, VmImage,
 };
 use base::{Event, MemoryMappingBuilder};
 use devices::serial_device::{SerialHardware, SerialParameters};
@@ -18,7 +20,8 @@ use devices::{
     Bus, BusDeviceObj, BusError, IrqChip, IrqChipAArch64, PciAddress, PciConfigMmio, PciDevice,
 };
 use hypervisor::{
-    DeviceKind, Hypervisor, HypervisorCap, ProtectionType, VcpuAArch64, VcpuFeature, Vm, VmAArch64,
+    DeviceKind, Hypervisor, HypervisorCap, ProtectionType, VcpuAArch64, VcpuFeature,
+    VcpuRegAArch64, Vm, VmAArch64,
 };
 use minijail::Minijail;
 use remain::sorted;
@@ -55,7 +58,7 @@ const AARCH64_PROTECTED_VM_FW_START: u64 =
     AARCH64_PHYS_MEM_START - AARCH64_PROTECTED_VM_FW_MAX_SIZE;
 
 const AARCH64_PVTIME_IPA_MAX_SIZE: u64 = 0x10000;
-const AARCH64_PVTIME_IPA_START: u64 = AARCH64_PROTECTED_VM_FW_START - AARCH64_PVTIME_IPA_MAX_SIZE;
+const AARCH64_PVTIME_IPA_START: u64 = AARCH64_MMIO_BASE - AARCH64_PVTIME_IPA_MAX_SIZE;
 const AARCH64_PVTIME_SIZE: u64 = 64;
 
 // These constants indicate the placement of the GIC registers in the physical
@@ -152,10 +155,14 @@ pub enum Error {
     InitrdLoadFailure(arch::LoadImageError),
     #[error("kernel could not be loaded: {0}")]
     KernelLoadFailure(arch::LoadImageError),
+    #[error("error loading Kernel from Elf image: {0}")]
+    LoadElfKernel(kernel_loader::Error),
     #[error("failed to map arm pvtime memory: {0}")]
     MapPvtimeError(base::Error),
     #[error("failed to protect vm: {0}")]
     ProtectVm(base::Error),
+    #[error("pVM firmware could not be loaded: {0}")]
+    PvmFwLoadFailure(arch::LoadImageError),
     #[error("ramoops address is different from high_mmio_base: {0} vs {1}")]
     RamoopsAddress(u64, u64),
     #[error("failed to register irq fd: {0}")]
@@ -178,12 +185,6 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Returns a Vec of the valid memory addresses.
-/// These should be used to configure the GuestMemory structure for the platfrom.
-pub fn arch_memory_regions(size: u64) -> Vec<(GuestAddress, u64)> {
-    vec![(GuestAddress(AARCH64_PHYS_MEM_START), size)]
-}
-
 fn fdt_offset(mem_size: u64, has_bios: bool) -> u64 {
     // TODO(rammuthiah) make kernel and BIOS startup use FDT from the same location. ARCVM startup
     // currently expects the kernel at 0x80080000 and the FDT at the end of RAM for unknown reasons.
@@ -203,10 +204,23 @@ pub struct AArch64;
 impl arch::LinuxArch for AArch64 {
     type Error = Error;
 
+    /// Returns a Vec of the valid memory addresses.
+    /// These should be used to configure the GuestMemory structure for the platform.
     fn guest_memory_layout(
         components: &VmComponents,
     ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error> {
-        Ok(arch_memory_regions(components.memory_size))
+        let mut memory_regions =
+            vec![(GuestAddress(AARCH64_PHYS_MEM_START), components.memory_size)];
+
+        // Allocate memory for the pVM firmware.
+        if components.protected_vm == ProtectionType::UnprotectedWithFirmware {
+            memory_regions.push((
+                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
+                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+            ));
+        }
+
+        Ok(memory_regions)
     }
 
     fn get_system_allocator_config<V: Vm>(vm: &V) -> SystemAllocatorConfig {
@@ -250,10 +264,18 @@ impl arch::LinuxArch for AArch64 {
                     .map_err(Error::BiosLoadFailure)?
             }
             VmImage::Kernel(ref mut kernel_image) => {
-                let kernel_size =
-                    arch::load_image(&mem, kernel_image, get_kernel_addr(), u64::max_value())
-                        .map_err(Error::KernelLoadFailure)?;
-                let kernel_end = get_kernel_addr().offset() + kernel_size as u64;
+                let kernel_end: u64;
+                let kernel_size: usize;
+                let elf_result = kernel_loader::load_kernel(&mem, get_kernel_addr(), kernel_image);
+                if elf_result == Err(kernel_loader::Error::InvalidElfMagicNumber) {
+                    kernel_size =
+                        arch::load_image(&mem, kernel_image, get_kernel_addr(), u64::max_value())
+                            .map_err(Error::KernelLoadFailure)?;
+                    kernel_end = get_kernel_addr().offset() + kernel_size as u64;
+                } else {
+                    kernel_end = elf_result.map_err(Error::LoadElfKernel)?;
+                    kernel_size = kernel_end as usize - get_kernel_addr().offset() as usize;
+                }
                 initrd = match components.initrd_image {
                     Some(initrd_file) => {
                         let mut initrd_file = initrd_file;
@@ -314,12 +336,28 @@ impl arch::LinuxArch for AArch64 {
             .map_err(Error::MapPvtimeError)?;
         }
 
-        if components.protected_vm == ProtectionType::Protected {
-            vm.load_protected_vm_firmware(
-                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
-                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
-            )
-            .map_err(Error::ProtectVm)?;
+        match components.protected_vm {
+            ProtectionType::Protected => {
+                // Allocate memory for the pVM firmware and tell the hypervisor to load it.
+                vm.load_protected_vm_firmware(
+                    GuestAddress(AARCH64_PROTECTED_VM_FW_START),
+                    AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+                )
+                .map_err(Error::ProtectVm)?;
+            }
+            ProtectionType::UnprotectedWithFirmware => {
+                // Load pVM firmware ourself, as the VM is not really protected.
+                // `components.pvm_fw` is safe to unwrap because `protected_vm` is
+                // `UnprotectedWithFirmware`.
+                arch::load_image(
+                    &mem,
+                    &mut components.pvm_fw.unwrap(),
+                    GuestAddress(AARCH64_PROTECTED_VM_FW_START),
+                    AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+                )
+                .map_err(Error::PvmFwLoadFailure)?;
+            }
+            ProtectionType::Unprotected | ProtectionType::ProtectedWithoutFirmware => {}
         }
 
         for (vcpu_id, vcpu) in vcpus.iter().enumerate() {
@@ -605,7 +643,7 @@ impl AArch64 {
 
         // All interrupts masked
         let pstate = PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT | PSR_MODE_EL1H;
-        vcpu.set_one_reg(hypervisor::VcpuRegAArch64::Pstate, pstate)
+        vcpu.set_one_reg(VcpuRegAArch64::Pstate, pstate)
             .map_err(Error::SetReg)?;
 
         // Other cpus are powered off initially
@@ -615,23 +653,35 @@ impl AArch64 {
             } else {
                 get_kernel_addr()
             };
-            let entry_addr_reg_id = if protected_vm == ProtectionType::Protected {
-                hypervisor::VcpuRegAArch64::W1
-            } else {
-                hypervisor::VcpuRegAArch64::Pc
-            };
-            vcpu.set_one_reg(entry_addr_reg_id, entry_addr.offset())
-                .map_err(Error::SetReg)?;
+            match protected_vm {
+                ProtectionType::Protected => {
+                    vcpu.set_one_reg(VcpuRegAArch64::W1, entry_addr.offset())
+                        .map_err(Error::SetReg)?;
+                }
+                ProtectionType::UnprotectedWithFirmware => {
+                    vcpu.set_one_reg(VcpuRegAArch64::Pc, AARCH64_PROTECTED_VM_FW_START)
+                        .map_err(Error::SetReg)?;
+                    vcpu.set_one_reg(VcpuRegAArch64::W1, entry_addr.offset())
+                        .map_err(Error::SetReg)?;
+                }
+                ProtectionType::Unprotected | ProtectionType::ProtectedWithoutFirmware => {
+                    vcpu.set_one_reg(VcpuRegAArch64::Pc, entry_addr.offset())
+                        .map_err(Error::SetReg)?;
+                }
+            }
 
             /* X0 -- fdt address */
             let mem_size = guest_mem.memory_size();
             let fdt_addr = (AARCH64_PHYS_MEM_START + fdt_offset(mem_size, has_bios)) as u64;
-            vcpu.set_one_reg(hypervisor::VcpuRegAArch64::W0, fdt_addr)
+            vcpu.set_one_reg(VcpuRegAArch64::W0, fdt_addr)
                 .map_err(Error::SetReg)?;
 
             /* X2 -- image size */
-            if protected_vm == ProtectionType::Protected {
-                vcpu.set_one_reg(hypervisor::VcpuRegAArch64::W2, image_size as u64)
+            if matches!(
+                protected_vm,
+                ProtectionType::Protected | ProtectionType::UnprotectedWithFirmware
+            ) {
+                vcpu.set_one_reg(VcpuRegAArch64::W2, image_size as u64)
                     .map_err(Error::SetReg)?;
             }
         }
@@ -640,7 +690,27 @@ impl AArch64 {
     }
 }
 
-#[derive(Default)]
-pub struct MsrAArch64;
+pub struct MsrHandlers;
 
-impl MsrExitHandler for MsrAArch64 {}
+impl MsrHandlers {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn read(&self, _index: u32) -> Option<u64> {
+        None
+    }
+
+    pub fn write(&self, _index: u32, _data: u64) -> Option<()> {
+        None
+    }
+
+    pub fn add_handler(
+        &mut self,
+        _index: u32,
+        _msr_config: MsrConfig,
+        _cpu_id: usize,
+    ) -> std::result::Result<(), MsrExitHandlerError> {
+        Ok(())
+    }
+}

@@ -18,11 +18,23 @@ use libc::{
     EPOLLRDHUP, EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD,
 };
 use log::warn;
+use smallvec::SmallVec;
 
 use super::{errno_result, Result};
-use crate::{AsRawDescriptor, FromRawDescriptor, IntoRawDescriptor, RawDescriptor};
+use crate::{
+    AsRawDescriptor, EventType, FromRawDescriptor, IntoRawDescriptor, RawDescriptor, TriggeredEvent,
+};
 
 const POLL_CONTEXT_MAX_EVENTS: usize = 16;
+
+fn convert_to_watching_events(event_type: EventType) -> WatchingEvents {
+    match event_type {
+        EventType::None => WatchingEvents::empty(),
+        EventType::Read => WatchingEvents::empty().set_read(),
+        EventType::Write => WatchingEvents::empty().set_write(),
+        EventType::ReadWrite => WatchingEvents::empty().set_read().set_write(),
+    }
+}
 
 /// EpollEvents wraps raw epoll_events, it should only be used with EpollContext.
 pub struct EpollEvents(RefCell<[epoll_event; POLL_CONTEXT_MAX_EVENTS]>);
@@ -179,16 +191,6 @@ pub struct PollEvents<'a, T> {
 }
 
 impl<'a, T: PollToken> PollEvents<'a, T> {
-    /// Copies the events to an owned structure so the reference to this (and by extension
-    /// `PollContext`) can be dropped.
-    pub fn to_owned(&self) -> PollEventsOwned<T> {
-        PollEventsOwned {
-            count: self.count,
-            events: RefCell::new(*self.events),
-            tokens: PhantomData,
-        }
-    }
-
     /// Iterates over each event.
     pub fn iter(&self) -> PollEventIter<slice::Iter<epoll_event>, T> {
         PollEventIter {
@@ -232,24 +234,6 @@ impl<'a, T: PollToken> IntoIterator for &'a PollEvents<'_, T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
-    }
-}
-
-/// A deep copy of the event records from `PollEvents`.
-pub struct PollEventsOwned<T> {
-    count: usize,
-    events: RefCell<[epoll_event; POLL_CONTEXT_MAX_EVENTS]>,
-    tokens: PhantomData<T>, // Needed to satisfy usage of T
-}
-
-impl<T: PollToken> PollEventsOwned<T> {
-    /// Takes a reference to the events so that they can be iterated via methods in `PollEvents`.
-    pub fn as_ref(&self) -> PollEvents<T> {
-        PollEvents {
-            count: self.count,
-            events: self.events.borrow(),
-            tokens: PhantomData,
-        }
     }
 }
 
@@ -497,25 +481,7 @@ impl<T: PollToken> IntoRawDescriptor for EpollContext<T> {
 
 /// Used to poll multiple objects that have file descriptors.
 ///
-/// # Example
-///
-/// ```
-/// # use base::platform::{Result, EventFd, PollContext, PollEvents};
-/// # fn test() -> Result<()> {
-///     let evt1 = EventFd::new()?;
-///     let evt2 = EventFd::new()?;
-///     evt2.write(1)?;
-///
-///     let ctx: PollContext<u32> = PollContext::new()?;
-///     ctx.add(&evt1, 1)?;
-///     ctx.add(&evt2, 2)?;
-///
-///     let pollevents: PollEvents<u32> = ctx.wait()?;
-///     let tokens: Vec<u32> = pollevents.iter_readable().map(|e| e.token()).collect();
-///     assert_eq!(&tokens[..], &[2]);
-/// #   Ok(())
-/// # }
-/// ```
+/// See [`crate::WaitContext`] for an example that uses the cross-platform wrapper.
 pub struct PollContext<T> {
     epoll_ctx: EpollContext<T>,
 
@@ -576,13 +542,23 @@ impl<T: PollToken> PollContext<T> {
         self.add_fd_with_events(fd, WatchingEvents::empty().set_read(), token)
     }
 
-    /// Adds the given `fd` to this context, watching for the specified events and associates the
-    /// given 'token' with those events.
+    /// Adds the given `descriptor` to this context, watching for the specified events and
+    /// associates the given 'token' with those events.
     ///
-    /// A `fd` can only be added once and does not need to be kept open. If the `fd` is dropped and
-    /// there were no duplicated file descriptors (i.e. adding the same descriptor with a different
-    /// FD number) added to this context, events will not be reported by `wait` anymore.
-    pub fn add_fd_with_events(
+    /// A `descriptor` can only be added once and does not need to be kept open. If the `descriptor`
+    /// is dropped and there were no duplicated file descriptors (i.e. adding the same descriptor
+    /// with a different FD number) added to this context, events will not be reported by `wait`
+    /// anymore.
+    pub fn add_for_event(
+        &self,
+        descriptor: &dyn AsRawDescriptor,
+        event_type: EventType,
+        token: T,
+    ) -> Result<()> {
+        self.add_fd_with_events(descriptor, convert_to_watching_events(event_type), token)
+    }
+
+    fn add_fd_with_events(
         &self,
         fd: &dyn AsRawDescriptor,
         events: WatchingEvents,
@@ -595,9 +571,10 @@ impl<T: PollToken> PollContext<T> {
     }
 
     /// If `fd` was previously added to this context, the watched events will be replaced with
-    /// `events` and the token associated with it will be replaced with the given `token`.
-    pub fn modify(&self, fd: &dyn AsRawDescriptor, events: WatchingEvents, token: T) -> Result<()> {
-        self.epoll_ctx.modify(fd, events, token)
+    /// `event_type` and the token associated with it will be replaced with the given `token`.
+    pub fn modify(&self, fd: &dyn AsRawDescriptor, event_type: EventType, token: T) -> Result<()> {
+        self.epoll_ctx
+            .modify(fd, convert_to_watching_events(event_type), token)
     }
 
     /// Deletes the given `fd` from this context.
@@ -659,10 +636,7 @@ impl<T: PollToken> PollContext<T> {
     /// return immediately. The consequence of not handling an event perpetually while calling
     /// `wait` is that the callers loop will degenerated to busy loop polling, pinning a CPU to
     /// ~100% usage.
-    ///
-    /// # Panics
-    /// Panics if the returned `PollEvents` structure is not dropped before subsequent `wait` calls.
-    pub fn wait(&self) -> Result<PollEvents<T>> {
+    pub fn wait(&self) -> Result<SmallVec<[TriggeredEvent<T>; 16]>> {
         self.wait_timeout(Duration::new(i64::MAX as u64, 0))
     }
 
@@ -670,11 +644,19 @@ impl<T: PollToken> PollContext<T> {
     ///
     /// This may return earlier than `timeout` with zero events if the duration indicated exceeds
     /// system limits.
-    pub fn wait_timeout(&self, timeout: Duration) -> Result<PollEvents<T>> {
+    pub fn wait_timeout(&self, timeout: Duration) -> Result<SmallVec<[TriggeredEvent<T>; 16]>> {
         let events = self.epoll_ctx.wait_timeout(&self.events, timeout)?;
         let hangups = events.iter_hungup().count();
         self.check_for_hungup_busy_loop(hangups);
-        Ok(events)
+        Ok(events
+            .iter()
+            .map(|event| TriggeredEvent {
+                token: event.token(),
+                is_readable: event.readable(),
+                is_writable: event.writable(),
+                is_hungup: event.hungup(),
+            })
+            .collect())
     }
 }
 
@@ -692,23 +674,23 @@ impl<T: PollToken> IntoRawDescriptor for PollContext<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::EventFd, *};
+    use super::{super::Event, *};
     use base_poll_token_derive::PollToken;
     use std::{os::unix::net::UnixStream, time::Instant};
 
     #[test]
     fn poll_context() {
-        let evt1 = EventFd::new().unwrap();
-        let evt2 = EventFd::new().unwrap();
+        let evt1 = Event::new().unwrap();
+        let evt2 = Event::new().unwrap();
         evt1.write(1).unwrap();
         evt2.write(1).unwrap();
         let ctx: PollContext<u32> = PollContext::build_with(&[(&evt1, 1), (&evt2, 2)]).unwrap();
 
         let mut evt_count = 0;
         while evt_count < 2 {
-            for event in ctx.wait().unwrap().iter_readable() {
+            for event in ctx.wait().unwrap().iter().filter(|e| e.is_readable) {
                 evt_count += 1;
-                match event.token() {
+                match event.token {
                     1 => {
                         evt1.read().unwrap();
                         ctx.delete(&evt1).unwrap();
@@ -730,15 +712,15 @@ mod tests {
         let ctx: PollContext<usize> = PollContext::new().unwrap();
         let mut evts = Vec::with_capacity(EVT_COUNT);
         for i in 0..EVT_COUNT {
-            let evt = EventFd::new().unwrap();
+            let evt = Event::new().unwrap();
             evt.write(1).unwrap();
             ctx.add(&evt, i).unwrap();
             evts.push(evt);
         }
         let mut evt_count = 0;
         while evt_count < EVT_COUNT {
-            for event in ctx.wait().unwrap().iter_readable() {
-                evts[event.token()].read().unwrap();
+            for event in ctx.wait().unwrap().iter().filter(|e| e.is_readable) {
+                evts[event.token].read().unwrap();
                 evt_count += 1;
             }
         }

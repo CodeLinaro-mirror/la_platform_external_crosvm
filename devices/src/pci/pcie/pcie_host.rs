@@ -88,8 +88,8 @@ impl PciHostConfig {
     }
 }
 
-// Find the added pcie endpoint device
-fn visit_children(dir: &Path) -> Result<PathBuf> {
+// Find all the added pcie endpoint devices
+fn visit_children(dir: &Path, children: &mut Vec<PathBuf>) -> Result<()> {
     // Each pci device has a sysfs directory
     if !dir.is_dir() {
         bail!("{} isn't directory", dir.display());
@@ -100,7 +100,8 @@ fn visit_children(dir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("failed to read {}", class_path.display()))?;
     // If the device isn't pci bridge, it is the target pcie endpoint device
     if !class_id.starts_with("0x0604".as_bytes()) {
-        return Ok(dir.to_path_buf());
+        children.push(dir.to_path_buf());
+        return Ok(());
     }
 
     // Loop device sysfs subdirectory
@@ -126,15 +127,9 @@ fn visit_children(dir: &Path) -> Result<PathBuf> {
             continue;
         }
         let child_path = dir.join(name);
-        match visit_children(child_path.as_path()) {
-            Ok(child) => return Ok(child),
-            Err(_) => continue,
-        }
+        visit_children(child_path.as_path(), children)?;
     }
-    Err(anyhow!(
-        "pcie child endpoint device isn't exist in {}",
-        dir.display()
-    ))
+    Ok(())
 }
 
 struct HotplugWorker {
@@ -161,49 +156,79 @@ impl HotplugWorker {
             return Ok(());
         }
 
-        // Probe the new added pcied endpoint device
-        let child = visit_children(host_sysfs.as_path())?;
+        // Probe the new added pcie endpoint devices
+        let mut children: Vec<PathBuf> = Vec::new();
+        visit_children(host_sysfs.as_path(), &mut children)?;
 
-        // In order to bind device to vfio-pci driver, get device VID and DID
-        let vendor_path = child.join("vendor");
-        let vendor_id = read(vendor_path.as_path())
-            .with_context(|| format!("failed to read {}", vendor_path.display()))?;
-        // Remove the first two elements 0x
-        let prefix: &str = "0x";
-        let vendor = match vendor_id.strip_prefix(prefix.as_bytes()) {
-            Some(v) => v.to_vec(),
-            None => vendor_id,
-        };
-        let device_path = child.join("device");
-        let device_id = read(device_path.as_path())
-            .with_context(|| format!("failed to read {}", device_path.display()))?;
-        // Remove the first two elements 0x
-        let device = match device_id.strip_prefix(prefix.as_bytes()) {
-            Some(d) => d.to_vec(),
-            None => device_id,
-        };
-        let new_id = vec![
-            String::from_utf8_lossy(&vendor),
-            String::from_utf8_lossy(&device),
-        ]
-        .join(" ");
-        write("/sys/bus/pci/drivers/vfio-pci/new_id", &new_id)
-            .with_context(|| format!("failed to write {} into vfio-pci/new_id", new_id))?;
+        // Without reverse children, physical larger BDF device is at the top, it will be
+        // added into guest first with smaller virtual function number, so physical smaller
+        // BDF device has larger virtual function number, phyiscal larger BDF device has
+        // smaller virtual function number. During hotplug out process, host pcie root port
+        // driver remove physical smaller BDF pcie endpoint device first, so host vfio-pci
+        // driver send plug out event first for smaller BDF device and wait for this device
+        // removed from crosvm, when crosvm receives this plug out event, crosvm will remove
+        // all the children devices, crosvm remove smaller virtual function number device
+        // first, this isn't the target device which host vfio-pci driver is waiting for.
+        // Host vfio-pci driver holds a lock when it is waiting, when crosvm remove another
+        // device throgh vfio-pci which try to get the same lock, so deadlock happens in
+        // host kernel.
+        //
+        // In order to fix the deadlock, children is reversed, so physical smaller BDF
+        // device has smaller virtual function number, and it will have the same order
+        // between host kernel and crosvm during hotplug out process.
+        children.reverse();
+        while let Some(child) = children.pop() {
+            // In order to bind device to vfio-pci driver, get device VID and DID
+            let vendor_path = child.join("vendor");
+            let vendor_id = read(vendor_path.as_path())
+                .with_context(|| format!("failed to read {}", vendor_path.display()))?;
+            // Remove the first two elements 0x
+            let prefix: &str = "0x";
+            let vendor = match vendor_id.strip_prefix(prefix.as_bytes()) {
+                Some(v) => v.to_vec(),
+                None => vendor_id,
+            };
+            let device_path = child.join("device");
+            let device_id = read(device_path.as_path())
+                .with_context(|| format!("failed to read {}", device_path.display()))?;
+            // Remove the first two elements 0x
+            let device = match device_id.strip_prefix(prefix.as_bytes()) {
+                Some(d) => d.to_vec(),
+                None => device_id,
+            };
+            let new_id = vec![
+                String::from_utf8_lossy(&vendor),
+                String::from_utf8_lossy(&device),
+            ]
+            .join(" ");
+            if Path::new("/sys/bus/pci/drivers/vfio-pci-pm/new_id").exists() {
+                let _ = write("/sys/bus/pci/drivers/vfio-pci-pm/new_id", &new_id);
+            }
+            // This is normal - either the kernel doesn't support vfio-pci-pm driver,
+            // or the device failed to attach to vfio-pci-pm driver (most likely due to
+            // lack of power management capability).
+            if !child.join("driver/unbind").exists() {
+                write("/sys/bus/pci/drivers/vfio-pci/new_id", &new_id)
+                    .with_context(|| format!("failed to write {} into vfio-pci/new_id", new_id))?;
+            }
 
-        // Request to hotplug the new added pcie device into guest
-        let request = VmRequest::VfioCommand {
-            vfio_path: child.clone(),
-            add: true,
-        };
-        vm_socket
-            .lock()
-            .send(&request)
-            .with_context(|| format!("failed to send hotplug request for {}", child.display()))?;
-        vm_socket.lock().recv::<VmResponse>().with_context(|| {
-            format!("failed to receive hotplug response for {}", child.display())
-        })?;
+            // Request to hotplug the new added pcie device into guest
+            let request = VmRequest::VfioCommand {
+                vfio_path: child.clone(),
+                add: true,
+                hp_interrupt: children.is_empty(),
+            };
+            vm_socket.lock().send(&request).with_context(|| {
+                format!("failed to send hotplug request for {}", child.display())
+            })?;
+            vm_socket.lock().recv::<VmResponse>().with_context(|| {
+                format!("failed to receive hotplug response for {}", child.display())
+            })?;
 
-        *child_exist = true;
+            if !*child_exist {
+                *child_exist = true;
+            }
+        }
 
         Ok(())
     }

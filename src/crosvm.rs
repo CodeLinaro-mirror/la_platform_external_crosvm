@@ -39,6 +39,8 @@ use hypervisor::ProtectionType;
 use libc::{getegid, geteuid};
 #[cfg(feature = "gpu")]
 use platform::GpuRenderServerParameters;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use resources::MemRegion;
 use uuid::Uuid;
 use vm_control::BatteryType;
 
@@ -352,85 +354,105 @@ impl Default for JailConfig {
 }
 
 /// Aggregate of all configurable options for a running VM.
+#[remain::sorted]
 pub struct Config {
-    pub kvm_device_path: PathBuf,
-    pub vhost_vsock_device: Option<PathBuf>,
-    pub vhost_net_device_path: PathBuf,
-    pub vcpu_count: Option<usize>,
-    pub vcpu_cgroup_path: Option<PathBuf>,
-    pub rt_cpus: Vec<usize>,
-    pub vcpu_affinity: Option<VcpuAffinity>,
-    pub cpu_clusters: Vec<Vec<usize>>,
+    #[cfg(feature = "audio")]
+    pub ac97_parameters: Vec<Ac97Parameters>,
+    pub acpi_tables: Vec<PathBuf>,
+    pub android_fstab: Option<PathBuf>,
+    pub balloon: bool,
+    pub balloon_bias: i64,
+    pub balloon_control: Option<PathBuf>,
+    pub battery_type: Option<BatteryType>,
+    pub cid: Option<u64>,
+    pub coiommu_param: Option<devices::CoIommuParameters>,
     pub cpu_capacity: BTreeMap<usize, u32>, // CPU index -> capacity
-    pub per_vm_core_scheduling: bool,
+    pub cpu_clusters: Vec<Vec<usize>>,
     #[cfg(feature = "audio_cras")]
     pub cras_snds: Vec<CrasSndParameters>,
     pub delay_rt: bool,
-    pub no_smt: bool,
-    pub memory: Option<u64>,
-    pub swiotlb: Option<u64>,
-    pub hugepages: bool,
-    pub memory_file: Option<PathBuf>,
-    pub executable_path: Option<Executable>,
-    pub android_fstab: Option<PathBuf>,
-    pub initrd_path: Option<PathBuf>,
-    pub jail_config: Option<JailConfig>,
-    pub jail_enabled: bool,
-    pub params: Vec<String>,
-    pub socket_path: Option<PathBuf>,
-    pub balloon_control: Option<PathBuf>,
-    pub plugin_root: Option<PathBuf>,
-    pub plugin_mounts: Vec<BindMount>,
-    pub plugin_gid_maps: Vec<GidMap>,
+    #[cfg(feature = "direct")]
+    pub direct_edge_irq: Vec<u32>,
+    #[cfg(feature = "direct")]
+    pub direct_gpe: Vec<u32>,
+    #[cfg(feature = "direct")]
+    pub direct_level_irq: Vec<u32>,
+    #[cfg(feature = "direct")]
+    pub direct_mmio: Option<DirectIoOption>,
+    #[cfg(feature = "direct")]
+    pub direct_pmio: Option<DirectIoOption>,
+    #[cfg(feature = "direct")]
+    pub direct_wake_irq: Vec<u32>,
     pub disks: Vec<DiskOption>,
-    pub pmem_devices: Vec<DiskOption>,
-    pub pstore: Option<Pstore>,
-    pub host_ip: Option<net::Ipv4Addr>,
-    pub netmask: Option<net::Ipv4Addr>,
-    pub mac_address: Option<net_util::MacAddress>,
-    pub net_vq_pairs: Option<u16>,
-    pub vhost_net: bool,
-    pub tap_fd: Vec<RawFd>,
-    pub tap_name: Vec<String>,
-    pub cid: Option<u64>,
-    pub wayland_socket_paths: BTreeMap<String, PathBuf>,
-    pub x_display: Option<String>,
-    pub shared_dirs: Vec<SharedDir>,
+    pub display_window_keyboard: bool,
+    pub display_window_mouse: bool,
+    pub dmi_path: Option<PathBuf>,
+    pub executable_path: Option<Executable>,
+    pub file_backed_mappings: Vec<FileBackedMappingParameters>,
+    pub force_s2idle: bool,
+    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    pub gdb: Option<u32>,
     #[cfg(feature = "gpu")]
     pub gpu_parameters: Option<GpuParameters>,
     #[cfg(feature = "gpu")]
     pub gpu_render_server_parameters: Option<GpuRenderServerParameters>,
+    pub host_cpu_topology: bool,
+    pub host_ip: Option<net::Ipv4Addr>,
+    pub hugepages: bool,
+    pub init_memory: Option<u64>,
+    pub initrd_path: Option<PathBuf>,
+    pub itmt: bool,
+    pub jail_config: Option<JailConfig>,
+    pub jail_enabled: bool,
+    pub kvm_device_path: PathBuf,
+    pub mac_address: Option<net_util::MacAddress>,
+    pub memory: Option<u64>,
+    pub memory_file: Option<PathBuf>,
+    pub mmio_address_ranges: Vec<RangeInclusive<u64>>,
+    pub net_vq_pairs: Option<u16>,
+    pub netmask: Option<net::Ipv4Addr>,
+    pub no_legacy: bool,
+    pub no_smt: bool,
+    pub params: Vec<String>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub pcie_ecam: Option<MemRegion>,
+    #[cfg(feature = "direct")]
+    pub pcie_rp: Vec<HostPcieRootPortParameters>,
+    pub per_vm_core_scheduling: bool,
+    pub plugin_gid_maps: Vec<GidMap>,
+    pub plugin_mounts: Vec<BindMount>,
+    pub plugin_root: Option<PathBuf>,
+    pub pmem_devices: Vec<DiskOption>,
+    pub privileged_vm: bool,
+    pub protected_vm: ProtectionType,
+    pub pstore: Option<Pstore>,
+    /// Must be `Some` iff `protected_vm == ProtectionType::UnprotectedWithFirmware`.
+    pub pvm_fw: Option<PathBuf>,
+    pub rng: bool,
+    pub rt_cpus: Vec<usize>,
+    pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
+    pub shared_dirs: Vec<SharedDir>,
+    pub socket_path: Option<PathBuf>,
     pub software_tpm: bool,
-    pub display_window_keyboard: bool,
-    pub display_window_mouse: bool,
-    #[cfg(feature = "audio")]
-    pub ac97_parameters: Vec<Ac97Parameters>,
     #[cfg(feature = "audio")]
     pub sound: Option<PathBuf>,
-    pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
-    pub syslog_tag: Option<String>,
-    pub usb: bool,
-    pub virtio_single_touch: Vec<TouchDeviceOption>,
-    pub virtio_multi_touch: Vec<TouchDeviceOption>,
-    pub virtio_trackpad: Vec<TouchDeviceOption>,
-    pub virtio_mice: Vec<PathBuf>,
-    pub virtio_keyboard: Vec<PathBuf>,
-    pub virtio_switches: Vec<PathBuf>,
-    pub virtio_input_evdevs: Vec<PathBuf>,
-    pub virtio_iommu: bool,
     pub split_irqchip: bool,
+    pub strict_balloon: bool,
+    pub stub_pci_devices: Vec<StubPciParameters>,
+    pub swiotlb: Option<u64>,
+    pub syslog_tag: Option<String>,
+    pub tap_fd: Vec<RawFd>,
+    pub tap_name: Vec<String>,
+    #[cfg(target_os = "android")]
+    pub task_profiles: Vec<String>,
+    pub usb: bool,
+    pub userspace_msr: BTreeMap<u32, MsrConfig>,
+    pub vcpu_affinity: Option<VcpuAffinity>,
+    pub vcpu_cgroup_path: Option<PathBuf>,
+    pub vcpu_count: Option<usize>,
     pub vfio: Vec<VfioCommand>,
-    #[cfg(feature = "video-decoder")]
-    pub video_dec: Option<VideoBackendType>,
-    #[cfg(feature = "video-encoder")]
-    pub video_enc: Option<VideoBackendType>,
-    pub acpi_tables: Vec<PathBuf>,
-    pub protected_vm: ProtectionType,
-    pub battery_type: Option<BatteryType>,
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    pub gdb: Option<u32>,
-    pub balloon: bool,
-    pub balloon_bias: i64,
+    pub vhost_net: bool,
+    pub vhost_net_device_path: PathBuf,
     pub vhost_user_blk: Vec<VhostUserOption>,
     pub vhost_user_console: Vec<VhostUserOption>,
     pub vhost_user_fs: Vec<VhostUserFsOption>,
@@ -441,165 +463,153 @@ pub struct Config {
     pub vhost_user_snd: Vec<VhostUserOption>,
     pub vhost_user_vsock: Vec<VhostUserOption>,
     pub vhost_user_wl: Vec<VhostUserWlOption>,
-    #[cfg(feature = "direct")]
-    pub direct_pmio: Option<DirectIoOption>,
-    #[cfg(feature = "direct")]
-    pub direct_mmio: Option<DirectIoOption>,
-    #[cfg(feature = "direct")]
-    pub direct_level_irq: Vec<u32>,
-    #[cfg(feature = "direct")]
-    pub direct_edge_irq: Vec<u32>,
-    #[cfg(feature = "direct")]
-    pub direct_wake_irq: Vec<u32>,
-    #[cfg(feature = "direct")]
-    pub direct_gpe: Vec<u32>,
-    pub dmi_path: Option<PathBuf>,
-    pub no_legacy: bool,
-    pub host_cpu_topology: bool,
-    pub privileged_vm: bool,
-    pub stub_pci_devices: Vec<StubPciParameters>,
+    pub vhost_vsock_device: Option<PathBuf>,
+    #[cfg(feature = "video-decoder")]
+    pub video_dec: Option<VideoBackendType>,
+    #[cfg(feature = "video-encoder")]
+    pub video_enc: Option<VideoBackendType>,
+    pub virtio_input_evdevs: Vec<PathBuf>,
+    pub virtio_iommu: bool,
+    pub virtio_keyboard: Vec<PathBuf>,
+    pub virtio_mice: Vec<PathBuf>,
+    pub virtio_multi_touch: Vec<TouchDeviceOption>,
+    pub virtio_single_touch: Vec<TouchDeviceOption>,
+    pub virtio_switches: Vec<PathBuf>,
+    pub virtio_trackpad: Vec<TouchDeviceOption>,
     pub vvu_proxy: Vec<VvuOption>,
-    pub coiommu_param: Option<devices::CoIommuParameters>,
-    pub file_backed_mappings: Vec<FileBackedMappingParameters>,
-    pub init_memory: Option<u64>,
-    #[cfg(feature = "direct")]
-    pub pcie_rp: Vec<HostPcieRootPortParameters>,
-    pub rng: bool,
-    pub force_s2idle: bool,
-    pub strict_balloon: bool,
-    pub mmio_address_ranges: Vec<RangeInclusive<u64>>,
-    pub userspace_msr: BTreeMap<u32, MsrConfig>,
-    pub itmt: bool,
-    #[cfg(target_os = "android")]
-    pub task_profiles: Vec<String>,
+    pub wayland_socket_paths: BTreeMap<String, PathBuf>,
+    pub x_display: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
-            kvm_device_path: PathBuf::from(KVM_PATH),
-            vhost_vsock_device: None,
-            vhost_net_device_path: PathBuf::from(VHOST_NET_PATH),
-            vcpu_count: None,
-            vcpu_cgroup_path: None,
-            rt_cpus: Vec::new(),
-            vcpu_affinity: None,
-            cpu_clusters: Vec::new(),
-            cpu_capacity: BTreeMap::new(),
-            per_vm_core_scheduling: false,
+            #[cfg(feature = "audio")]
+            ac97_parameters: Vec::new(),
+            acpi_tables: Vec::new(),
+            android_fstab: None,
+            balloon: true,
+            balloon_bias: 0,
+            balloon_control: None,
+            battery_type: None,
+            cid: None,
+            coiommu_param: None,
             #[cfg(feature = "audio_cras")]
             cras_snds: Vec::new(),
+            cpu_capacity: BTreeMap::new(),
+            cpu_clusters: Vec::new(),
             delay_rt: false,
-            no_smt: false,
-            memory: None,
-            swiotlb: None,
-            hugepages: false,
-            memory_file: None,
+            #[cfg(feature = "direct")]
+            direct_edge_irq: Vec::new(),
+            #[cfg(feature = "direct")]
+            direct_gpe: Vec::new(),
+            #[cfg(feature = "direct")]
+            direct_level_irq: Vec::new(),
+            #[cfg(feature = "direct")]
+            direct_mmio: None,
+            #[cfg(feature = "direct")]
+            direct_pmio: None,
+            #[cfg(feature = "direct")]
+            direct_wake_irq: Vec::new(),
+            disks: Vec::new(),
+            display_window_keyboard: false,
+            display_window_mouse: false,
+            dmi_path: None,
             executable_path: None,
-            android_fstab: None,
+            file_backed_mappings: Vec::new(),
+            force_s2idle: false,
+            #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+            gdb: None,
+            #[cfg(feature = "gpu")]
+            gpu_parameters: None,
+            #[cfg(feature = "gpu")]
+            gpu_render_server_parameters: None,
+            host_cpu_topology: false,
+            host_ip: None,
+            hugepages: false,
+            init_memory: None,
             initrd_path: None,
+            itmt: false,
             // We initialize the jail configuration with a default value so jail-related options can
             // apply irrespective of whether jail is enabled or not. `jail_config` will then be
             // assigned `None` if it turns out that `jail_enabled` is `false` after we parse all the
             // arguments.
             jail_config: Some(Default::default()),
             jail_enabled: !cfg!(feature = "default-no-sandbox"),
-            params: Vec::new(),
-            socket_path: None,
-            balloon_control: None,
-            plugin_root: None,
-            plugin_mounts: Vec::new(),
-            plugin_gid_maps: Vec::new(),
-            disks: Vec::new(),
-            pmem_devices: Vec::new(),
-            pstore: None,
-            host_ip: None,
-            netmask: None,
+            kvm_device_path: PathBuf::from(KVM_PATH),
             mac_address: None,
+            memory: None,
+            memory_file: None,
+            mmio_address_ranges: Vec::new(),
             net_vq_pairs: None,
-            vhost_net: false,
-            tap_fd: Vec::new(),
-            tap_name: Vec::new(),
-            cid: None,
-            #[cfg(feature = "gpu")]
-            gpu_parameters: None,
-            #[cfg(feature = "gpu")]
-            gpu_render_server_parameters: None,
-            software_tpm: false,
-            wayland_socket_paths: BTreeMap::new(),
-            x_display: None,
-            display_window_keyboard: false,
-            display_window_mouse: false,
+            netmask: None,
+            no_legacy: false,
+            no_smt: false,
+            params: Vec::new(),
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            pcie_ecam: None,
+            #[cfg(feature = "direct")]
+            pcie_rp: Vec::new(),
+            per_vm_core_scheduling: false,
+            plugin_gid_maps: Vec::new(),
+            plugin_mounts: Vec::new(),
+            plugin_root: None,
+            pmem_devices: Vec::new(),
+            privileged_vm: false,
+            protected_vm: ProtectionType::Unprotected,
+            pstore: None,
+            pvm_fw: None,
+            rng: true,
+            rt_cpus: Vec::new(),
+            serial_parameters: BTreeMap::new(),
             shared_dirs: Vec::new(),
-            #[cfg(feature = "audio")]
-            ac97_parameters: Vec::new(),
+            socket_path: None,
+            software_tpm: false,
             #[cfg(feature = "audio")]
             sound: None,
-            serial_parameters: BTreeMap::new(),
-            syslog_tag: None,
-            usb: true,
-            virtio_single_touch: Vec::new(),
-            virtio_multi_touch: Vec::new(),
-            virtio_trackpad: Vec::new(),
-            virtio_mice: Vec::new(),
-            virtio_keyboard: Vec::new(),
-            virtio_switches: Vec::new(),
-            virtio_input_evdevs: Vec::new(),
-            virtio_iommu: false,
             split_irqchip: false,
+            strict_balloon: false,
+            stub_pci_devices: Vec::new(),
+            swiotlb: None,
+            syslog_tag: None,
+            tap_fd: Vec::new(),
+            tap_name: Vec::new(),
+            #[cfg(target_os = "android")]
+            task_profiles: Vec::new(),
+            usb: true,
+            userspace_msr: BTreeMap::new(),
+            vcpu_affinity: None,
+            vcpu_cgroup_path: None,
+            vcpu_count: None,
             vfio: Vec::new(),
-            #[cfg(feature = "video-decoder")]
-            video_dec: None,
-            #[cfg(feature = "video-encoder")]
-            video_enc: None,
-            acpi_tables: Vec::new(),
-            protected_vm: ProtectionType::Unprotected,
-            battery_type: None,
-            #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-            gdb: None,
-            balloon: true,
-            balloon_bias: 0,
+            vhost_net: false,
+            vhost_net_device_path: PathBuf::from(VHOST_NET_PATH),
             vhost_user_blk: Vec::new(),
             vhost_user_console: Vec::new(),
-            vhost_user_gpu: Vec::new(),
             vhost_user_fs: Vec::new(),
+            vhost_user_gpu: Vec::new(),
             vhost_user_mac80211_hwsim: None,
             vhost_user_net: Vec::new(),
             #[cfg(feature = "audio")]
             vhost_user_snd: Vec::new(),
             vhost_user_vsock: Vec::new(),
             vhost_user_wl: Vec::new(),
+            vhost_vsock_device: None,
+            #[cfg(feature = "video-decoder")]
+            video_dec: None,
+            #[cfg(feature = "video-encoder")]
+            video_enc: None,
+            virtio_input_evdevs: Vec::new(),
+            virtio_iommu: false,
+            virtio_keyboard: Vec::new(),
+            virtio_mice: Vec::new(),
+            virtio_multi_touch: Vec::new(),
+            virtio_single_touch: Vec::new(),
+            virtio_switches: Vec::new(),
+            virtio_trackpad: Vec::new(),
             vvu_proxy: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_pmio: None,
-            #[cfg(feature = "direct")]
-            direct_mmio: None,
-            #[cfg(feature = "direct")]
-            direct_level_irq: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_edge_irq: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_wake_irq: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_gpe: Vec::new(),
-            dmi_path: None,
-            no_legacy: false,
-            host_cpu_topology: false,
-            privileged_vm: false,
-            stub_pci_devices: Vec::new(),
-            coiommu_param: None,
-            file_backed_mappings: Vec::new(),
-            init_memory: None,
-            #[cfg(feature = "direct")]
-            pcie_rp: Vec::new(),
-            rng: true,
-            force_s2idle: false,
-            strict_balloon: false,
-            mmio_address_ranges: Vec::new(),
-            userspace_msr: BTreeMap::new(),
-            itmt: false,
-            #[cfg(target_os = "android")]
-            task_profiles: Vec::new(),
+            wayland_socket_paths: BTreeMap::new(),
+            x_display: None,
         }
     }
 }
