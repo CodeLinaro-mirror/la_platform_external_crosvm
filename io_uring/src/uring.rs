@@ -572,6 +572,28 @@ impl URingContext {
         })
     }
 
+    /// Attempt to cancel an already issued request. addr must contain the user_data field of the
+    /// request that should be cancelled. The cancellation request will complete with one of the
+    /// following results codes. If found, the res field of the cqe will contain 0. If not found,
+    /// res will contain -ENOENT. If found and attempted cancelled, the res field will contain
+    /// -EALREADY. In this case, the request may or may not terminate. In general, requests that
+    /// are interruptible (like socket IO) will get cancelled, while disk IO requests cannot be
+    /// cancelled if already started.
+    pub fn async_cancel(&self, addr: UserData, user_data: UserData) -> Result<()> {
+        self.submit_ring.lock().prep_next_sqe(|sqe, _iovec| {
+            sqe.opcode = IORING_OP_ASYNC_CANCEL as u8;
+            sqe.user_data = user_data;
+            sqe.set_addr(addr);
+
+            sqe.len = 0;
+            sqe.fd = 0;
+            sqe.set_off(0);
+            sqe.set_buf_index(0);
+            sqe.ioprio = 0;
+            sqe.flags = 0;
+        })
+    }
+
     // Calls io_uring_enter, submitting any new sqes that have been added to the submit queue and
     // waiting for `wait_nr` operations to complete.
     fn enter(&self, wait_nr: u64) -> Result<()> {
@@ -892,7 +914,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use base::{pipe, PollContext};
+    use base::{pipe, WaitContext};
     use sync::{Condvar, Mutex};
     use tempfile::{tempfile, TempDir};
 
@@ -1062,11 +1084,11 @@ mod tests {
         f.write_all(&buf).unwrap();
         f.write_all(&buf).unwrap();
 
-        let ctx: PollContext<u64> = PollContext::build_with(&[(&uring, 1)]).unwrap();
+        let ctx: WaitContext<u64> = WaitContext::build_with(&[(&uring, 1)]).unwrap();
         {
             // Test that the uring context isn't readable before any events are complete.
             let events = ctx.wait_timeout(Duration::from_millis(1)).unwrap();
-            assert!(events.iter_readable().next().is_none());
+            assert!(events.iter().next().is_none());
         }
 
         unsafe {
@@ -1077,8 +1099,9 @@ mod tests {
             uring.submit().unwrap();
             // Poll for completion with epoll.
             let events = ctx.wait().unwrap();
-            let event = events.iter_readable().next().unwrap();
-            assert_eq!(event.token(), 1);
+            let event = events.iter().next().unwrap();
+            assert!(event.is_readable);
+            assert_eq!(event.token, 1);
             let (user_data, res) = uring.wait().unwrap().next().unwrap();
             assert_eq!(user_data, 55_u64);
             assert_eq!(res.unwrap(), buf.len() as u32);

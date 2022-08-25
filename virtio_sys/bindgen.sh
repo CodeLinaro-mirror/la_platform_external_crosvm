@@ -20,12 +20,40 @@ unsafe impl DataInit for virtio_net_hdr_mrg_rxbuf {}"
 bindgen_generate \
     --allowlist-type='vhost_.*' \
     --allowlist-var='VHOST_.*' \
-    --allowlist-var='VIRTIO_.*' \
     "${BINDGEN_LINUX_X86_HEADERS}/include/linux/vhost.h" \
     -- \
     -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
     | replace_linux_int_types \
     > virtio_sys/src/vhost.rs
+
+bindgen_generate \
+    --allowlist-var='VIRTIO_.*' \
+    --allowlist-type='virtio_.*' \
+    "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_config.h" \
+    -- \
+    -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
+    | replace_linux_int_types \
+    > virtio_sys/src/virtio_config.rs
+
+VIRTIO_IDS_EXTRAS="
+//! This file defines virtio device IDs. IDs with large values (counting down
+//! from 63) are nonstandard and not defined by the virtio specification.
+
+// Added by virtio_sys/bindgen.sh - do not edit the generated file.
+// TODO(abhishekbh): Fix this after this device is accepted upstream.
+pub const VIRTIO_ID_VHOST_USER: u32 = 61;
+"
+
+bindgen_generate \
+    --raw-line "${VIRTIO_IDS_EXTRAS}" \
+    --allowlist-var='VIRTIO_.*' \
+    --allowlist-type='virtio_.*' \
+    "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_ids.h" \
+    -- \
+    -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
+    | replace_linux_int_types \
+    | rustfmt \
+    > virtio_sys/src/virtio_ids.rs
 
 bindgen_generate \
     --raw-line "${VIRTIO_NET_EXTRA}" \

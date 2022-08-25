@@ -827,6 +827,14 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
     } else {
         None
     };
+    let pvm_fw_image = if let Some(pvm_fw_path) = &cfg.pvm_fw {
+        Some(
+            open_file(pvm_fw_path, OpenOptions::new().read(true))
+                .with_context(|| format!("failed to open pvm_fw {}", pvm_fw_path.display()))?,
+        )
+    } else {
+        None
+    };
 
     let vm_image = match cfg.executable_path {
         Some(Executable::Kernel(ref kernel_path)) => VmImage::Kernel(
@@ -851,7 +859,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             ProtectionType::Protected | ProtectionType::ProtectedWithoutFirmware => {
                 Some(64 * 1024 * 1024)
             }
-            ProtectionType::Unprotected => None,
+            ProtectionType::Unprotected | ProtectionType::UnprotectedWithFirmware => None,
         }
     };
 
@@ -901,6 +909,9 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         itmt: cfg.itmt,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         force_s2idle: cfg.force_s2idle,
+        pvm_fw: pvm_fw_image,
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        pcie_ecam: cfg.pcie_ecam,
     })
 }
 
@@ -970,7 +981,11 @@ fn run_kvm(cfg: Config, components: VmComponents, guest_mem: GuestMemory) -> Res
     }
 
     // Check that the VM was actually created in protected mode as expected.
-    if cfg.protected_vm != ProtectionType::Unprotected && !vm.check_capability(VmCap::Protected) {
+    if matches!(
+        cfg.protected_vm,
+        ProtectionType::Protected | ProtectionType::ProtectedWithoutFirmware
+    ) && !vm.check_capability(VmCap::Protected)
+    {
         bail!("Failed to create protected VM");
     }
     let vm_clone = vm.try_clone().context("failed to clone vm")?;
@@ -1297,6 +1312,22 @@ where
         irqs.push(direct_irq);
     }
 
+    // Reserve direct mmio range in advance.
+    #[cfg(feature = "direct")]
+    if let Some(mmio) = &cfg.direct_mmio {
+        for range in mmio.ranges.iter() {
+            sys_allocator
+                .reserve_mmio(range.base, range.len)
+                .with_context(|| {
+                    format!(
+                        "failed to reserved direct mmio: {:x}-{:x}",
+                        range.base,
+                        range.base + range.len - 1,
+                    )
+                })?;
+        }
+    };
+
     let mut iommu_attached_endpoints: BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>> =
         BTreeMap::new();
     let mut iova_max_addr: Option<u64> = None;
@@ -1500,6 +1531,7 @@ fn add_vfio_device<V: VmArch, Vcpu: VcpuArch>(
     control_tubes: &mut Vec<TaggedControlTube>,
     iommu_host_tube: &Option<Tube>,
     vfio_path: &Path,
+    hp_interrupt: bool,
 ) -> Result<()> {
     let host_os_str = vfio_path
         .file_name()
@@ -1558,7 +1590,9 @@ fn add_vfio_device<V: VmArch, Vcpu: VcpuArch>(
     let host_key = HostHotPlugKey::Vfio { host_addr };
     let mut hp_bus = hp_bus.lock();
     hp_bus.add_hotplug_device(host_key, pci_address);
-    hp_bus.hot_plug(pci_address);
+    if hp_interrupt {
+        hp_bus.hot_plug(pci_address);
+    }
     Ok(())
 }
 
@@ -1567,6 +1601,7 @@ fn remove_vfio_device<V: VmArch, Vcpu: VcpuArch>(
     sys_allocator: &mut SystemAllocator,
     iommu_host_tube: &Option<Tube>,
     vfio_path: &Path,
+    _hp_interrupt: bool,
 ) -> Result<()> {
     let host_os_str = vfio_path
         .file_name()
@@ -1609,6 +1644,7 @@ fn handle_vfio_command<V: VmArch, Vcpu: VcpuArch>(
     iommu_host_tube: &Option<Tube>,
     vfio_path: &Path,
     add: bool,
+    hp_interrupt: bool,
 ) -> VmResponse {
     let ret = if add {
         add_vfio_device(
@@ -1618,9 +1654,16 @@ fn handle_vfio_command<V: VmArch, Vcpu: VcpuArch>(
             add_tubes,
             iommu_host_tube,
             vfio_path,
+            hp_interrupt,
         )
     } else {
-        remove_vfio_device(linux, sys_allocator, iommu_host_tube, vfio_path)
+        remove_vfio_device(
+            linux,
+            sys_allocator,
+            iommu_host_tube,
+            vfio_path,
+            hp_interrupt,
+        )
     };
 
     match ret {
@@ -1938,17 +1981,20 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 Ok(request) => {
                                     let mut run_mode_opt = None;
                                     let response = match request {
-                                        VmRequest::VfioCommand { vfio_path, add } => {
-                                            handle_vfio_command(
-                                                &mut linux,
-                                                &mut sys_allocator,
-                                                &cfg,
-                                                &mut add_tubes,
-                                                &iommu_host_tube,
-                                                &vfio_path,
-                                                add,
-                                            )
-                                        }
+                                        VmRequest::VfioCommand {
+                                            vfio_path,
+                                            add,
+                                            hp_interrupt,
+                                        } => handle_vfio_command(
+                                            &mut linux,
+                                            &mut sys_allocator,
+                                            &cfg,
+                                            &mut add_tubes,
+                                            &iommu_host_tube,
+                                            &vfio_path,
+                                            add,
+                                            hp_interrupt,
+                                        ),
                                         _ => request.execute(
                                             &mut run_mode_opt,
                                             balloon_host_tube.as_ref(),

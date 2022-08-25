@@ -14,7 +14,7 @@ use crate::virtio::{
         user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result},
         vsock,
     },
-    Interrupt, Queue, VirtioDevice, TYPE_VSOCK, VIRTIO_F_VERSION_1,
+    DeviceType, Interrupt, Queue, VirtioDevice,
 };
 
 pub struct Vsock {
@@ -29,14 +29,7 @@ impl Vsock {
         let socket = UnixStream::connect(socket_path).map_err(Error::SocketConnect)?;
 
         let init_features = VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
-        let allow_features = init_features
-            | base_features
-            | 1 << VIRTIO_F_VERSION_1
-            | 1 << virtio_sys::vhost::VIRTIO_RING_F_INDIRECT_DESC
-            | 1 << virtio_sys::vhost::VIRTIO_RING_F_EVENT_IDX
-            | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY
-            | 1 << virtio_sys::vhost::VHOST_F_LOG_ALL
-            | 1 << virtio_sys::vhost::VIRTIO_F_ANY_LAYOUT;
+        let allow_features = init_features | base_features;
         let allow_protocol_features =
             VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::CONFIG;
 
@@ -86,8 +79,8 @@ impl VirtioDevice for Vsock {
         }
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_VSOCK
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Vsock
     }
 
     fn queue_max_sizes(&self) -> &[u16] {

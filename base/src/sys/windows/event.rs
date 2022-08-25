@@ -30,7 +30,10 @@ use winapi::{
 };
 
 use super::{errno_result, Error, RawDescriptor, Result};
-use crate::descriptor::{AsRawDescriptor, FromRawDescriptor, IntoRawDescriptor, SafeDescriptor};
+use crate::{
+    descriptor::{AsRawDescriptor, FromRawDescriptor, IntoRawDescriptor, SafeDescriptor},
+    Event as CrateEvent,
+};
 
 /// A safe wrapper around Windows synchapi methods used to mimic Linux eventfd (man 2 eventfd).
 /// Since the eventfd isn't using "EFD_SEMAPHORE", we don't need to keep count so we can just use
@@ -39,6 +42,36 @@ use crate::descriptor::{AsRawDescriptor, FromRawDescriptor, IntoRawDescriptor, S
 #[serde(transparent)]
 pub struct Event {
     event_handle: SafeDescriptor,
+}
+
+pub trait EventExt {
+    fn reset(&self) -> Result<()>;
+    fn new_with_manual_reset(manual_reset: bool) -> Result<CrateEvent>;
+    fn new_auto_reset() -> Result<CrateEvent>;
+    fn open(name: &str) -> Result<CrateEvent>;
+    fn create_event_with_name(name: &str) -> Result<CrateEvent>;
+}
+
+impl EventExt for CrateEvent {
+    fn reset(&self) -> Result<()> {
+        self.0.reset()
+    }
+
+    fn new_with_manual_reset(manual_reset: bool) -> Result<CrateEvent> {
+        Event::new_with_manual_reset(manual_reset).map(CrateEvent)
+    }
+
+    fn new_auto_reset() -> Result<CrateEvent> {
+        CrateEvent::new_with_manual_reset(false)
+    }
+
+    fn open(name: &str) -> Result<CrateEvent> {
+        Event::open(name).map(CrateEvent)
+    }
+
+    fn create_event_with_name(name: &str) -> Result<CrateEvent> {
+        Event::create_event_with_name(name).map(CrateEvent)
+    }
 }
 
 /// Wrapper around the return value of doing a read on an EventFd which distinguishes between

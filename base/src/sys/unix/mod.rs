@@ -21,7 +21,6 @@ pub mod ioctl;
 pub mod syslog;
 mod acpi_event;
 mod capabilities;
-mod clock;
 mod descriptor;
 mod eventfd;
 mod file_flags;
@@ -56,19 +55,21 @@ pub use crate::{
 pub use acpi_event::*;
 pub use base_poll_token_derive::*;
 pub use capabilities::drop_capabilities;
-pub use clock::{Clock, FakeClock};
 pub use descriptor::*;
-pub use eventfd::*;
+// EventFd is deprecated. Use Event instead. EventFd will be removed as soon as rest of the current
+// users migrate.
+// TODO(b:231344063): Remove EventFd.
+pub use eventfd::{EventFd as Event, EventFd, EventReadResult};
 pub use file_flags::*;
 pub use get_filesystem_type::*;
 pub use ioctl::*;
 pub use mmap::*;
 pub use netlink::*;
-pub use poll::*;
+pub use poll::{EpollContext, EpollEvents, PollContext as EventContext, PollToken, WatchingEvents};
 pub use priority::*;
 pub use sched::*;
 pub use scoped_signal_handler::*;
-pub use shm::*;
+pub use shm::{kernel_has_memfd, MemfdSeals, SharedMemory, Unix as SharedMemoryUnix};
 pub use signal::*;
 pub use signalfd::*;
 pub use sock_ctrl_msg::*;
@@ -82,7 +83,7 @@ pub use file_traits::{
 };
 pub use mmap::Error as MmapError;
 pub use signalfd::Error as SignalFdError;
-pub use write_zeroes::{PunchHole, WriteZeroes, WriteZeroesAt};
+pub(crate) use write_zeroes::{file_punch_hole, file_write_zeroes_at};
 
 use std::{
     cell::Cell,

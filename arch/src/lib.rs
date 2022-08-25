@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! Virtual machine architecture support code.
+
 pub mod android;
 pub mod fdt;
 pub mod pstore;
@@ -46,6 +48,7 @@ use {
 use {
     devices::IrqChipX86_64 as IrqChipArch,
     hypervisor::{HypervisorX86_64 as HypervisorArch, VcpuX86_64 as VcpuArch, VmX86_64 as VmArch},
+    resources::MemRegion,
 };
 
 pub use serial::{
@@ -106,6 +109,11 @@ pub struct VmComponents {
     pub force_s2idle: bool,
     #[cfg(feature = "direct")]
     pub direct_gpe: Vec<u32>,
+    /// A file to load as pVM firmware. Must be `Some` iff
+    /// `protected_vm == ProtectionType::UnprotectedWithFirmware`.
+    pub pvm_fw: Option<File>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub pcie_ecam: Option<MemRegion>,
 }
 
 /// Holds the elements needed to run a Linux VM. Created by `build_vm`.
@@ -844,7 +852,7 @@ where
 /// Read and write permissions setting
 ///
 /// Wrap read_allow and write_allow to store them in MsrHandlers level.
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default)]
 pub struct MsrRWType {
     pub read_allow: bool,
     pub write_allow: bool,
@@ -898,7 +906,7 @@ impl Default for MsrValueFrom {
 ///
 /// MsrConfig will be collected with its corresponding MSR's index.
 /// eg, (msr_index, msr_config)
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub struct MsrConfig {
     /// If support RDMSR/WRMSR emulation in crosvm?
     pub rw_type: MsrRWType,
@@ -922,23 +930,4 @@ pub enum MsrExitHandlerError {
     HandlerCreateFailed,
     #[error("Error parameter")]
     InvalidParam,
-}
-
-pub trait MsrExitHandler {
-    fn read(&self, _index: u32) -> Option<u64> {
-        None
-    }
-
-    fn write(&self, _index: u32, _data: u64) -> Option<()> {
-        None
-    }
-
-    fn add_handler(
-        &mut self,
-        _index: u32,
-        _msr_config: MsrConfig,
-        _cpu_id: usize,
-    ) -> std::result::Result<(), MsrExitHandlerError> {
-        Ok(())
-    }
 }

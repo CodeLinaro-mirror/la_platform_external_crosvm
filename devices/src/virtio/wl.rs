@@ -70,7 +70,7 @@ use vm_control::GpuMemoryDesc;
 use super::resource_bridge::{
     get_resource_info, BufferInfo, ResourceBridgeError, ResourceInfo, ResourceRequest,
 };
-use super::{Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice, Writer, TYPE_WL};
+use super::{DeviceType, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice, Writer};
 use vm_control::{MemSlot, VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
 
 const VIRTWL_SEND_MAX_ALLOCS: usize = 28;
@@ -642,8 +642,8 @@ impl WlVfd {
                 desc,
             } => {
                 let mut vfd = WlVfd::default();
-                let vfd_shm =
-                    SharedMemory::from_safe_descriptor(descriptor).map_err(WlError::NewAlloc)?;
+                let vfd_shm = SharedMemory::from_safe_descriptor(descriptor, None)
+                    .map_err(WlError::NewAlloc)?;
                 vfd.guest_shared_memory = Some(vfd_shm);
                 vfd.slot = Some((slot, pfn, vm));
                 vfd.is_dmabuf = true;
@@ -1799,8 +1799,8 @@ impl VirtioDevice for Wl {
         keep_rds
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_WL
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Wl
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
