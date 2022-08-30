@@ -13,6 +13,8 @@ use std::convert::TryFrom;
 use std::mem::{size_of, transmute};
 use std::os::raw::{c_char, c_void};
 use std::os::unix::io::AsRawFd;
+use std::panic::catch_unwind;
+use std::process::abort;
 use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +45,47 @@ struct VirglRendererContext {
     ctx_id: u32,
 }
 
+fn import_resource(resource: &mut RutabagaResource) {
+    if (resource.import_mask & (1 << (RutabagaComponentType::VirglRenderer as u32))) != 0 {
+        return;
+    }
+
+    if let Some(handle) = &resource.handle {
+        if handle.handle_type == RUTABAGA_MEM_HANDLE_TYPE_DMABUF {
+            // TODO: b/234881451 -- update virgl_renderer and uncomment lines below. Remove
+            // abort() call. The abort call is currently in use since Android isn't using the calls
+            // below.
+            std::process::abort();
+//            if let Ok(dmabuf_fd) = base::clone_descriptor(&handle.os_handle) {
+//                // Safe because we are being passed a valid fd
+//                unsafe {
+//                    let dmabuf_size = libc::lseek64(dmabuf_fd, 0, libc::SEEK_END);
+//                    libc::lseek64(dmabuf_fd, 0, libc::SEEK_SET);
+//                    let args = virgl_renderer_resource_import_blob_args {
+//                        res_handle: resource.resource_id,
+//                        blob_mem: resource.blob_mem,
+//                        fd_type: VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF,
+//                        fd: dmabuf_fd,
+//                        size: dmabuf_size as u64,
+//                    };
+//                    let ret = virgl_renderer_resource_import_blob(&args);
+//                    if ret != 0 {
+//                        // import_blob can fail if we've previously imported this resource,
+//                        // but in any case virglrenderer does not take ownership of the fd
+//                        // in error paths
+//                        //
+//                        // Because of the re-import case we must still fall through to the
+//                        // virgl_renderer_ctx_attach_resource() call.
+//                        libc::close(dmabuf_fd);
+//                        return;
+//                    }
+//                    resource.import_mask |= 1 << (RutabagaComponentType::VirglRenderer as u32);
+//                }
+//            }
+        }
+    }
+}
+
 impl RutabagaContext for VirglRendererContext {
     fn submit_cmd(&mut self, commands: &mut [u8]) -> RutabagaResult<()> {
         if commands.len() % size_of::<u32>() != 0 {
@@ -62,6 +105,8 @@ impl RutabagaContext for VirglRendererContext {
     }
 
     fn attach(&mut self, resource: &mut RutabagaResource) {
+        import_resource(resource);
+
         // The context id and resource id must be valid because the respective instances ensure
         // their lifetime.
         unsafe {
@@ -79,6 +124,18 @@ impl RutabagaContext for VirglRendererContext {
 
     fn component_type(&self) -> RutabagaComponentType {
         RutabagaComponentType::VirglRenderer
+    }
+
+    fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
+        let ret = unsafe {
+            virgl_renderer_context_create_fence(
+                fence.ctx_id,
+                fence.flags,
+                fence.ring_idx as u64,
+                fence.fence_id,
+            )
+        };
+        ret_to_res(ret)
     }
 }
 
@@ -117,6 +174,28 @@ extern "C" fn debug_callback(fmt: *const ::std::os::raw::c_char, ap: stdio::va_l
     }
 }
 
+/// TODO(ryanneph): re-evaluate if "ring_idx: u8" can be used instead so we can drop this in favor
+/// of the common write_context_fence() from renderer_utils before promoting to
+/// cfg(feature = "virgl_renderer").
+#[cfg(feature = "virgl_renderer_next")]
+extern "C" fn write_context_fence(cookie: *mut c_void, ctx_id: u32, ring_idx: u64, fence_id: u64) {
+    catch_unwind(|| {
+        assert!(!cookie.is_null());
+        let cookie = unsafe { &*(cookie as *mut VirglCookie) };
+
+        // Call fence completion callback
+        if let Some(handler) = &cookie.fence_handler {
+            handler.call(RutabagaFence {
+                flags: RUTABAGA_FLAG_FENCE | RUTABAGA_FLAG_INFO_RING_IDX,
+                fence_id,
+                ctx_id,
+                ring_idx: ring_idx as u8,
+            });
+        }
+    })
+    .unwrap_or_else(|_| abort())
+}
+
 const VIRGL_RENDERER_CALLBACKS: &virgl_renderer_callbacks = &virgl_renderer_callbacks {
     #[cfg(not(feature = "virgl_renderer_next"))]
     version: 1,
@@ -127,7 +206,10 @@ const VIRGL_RENDERER_CALLBACKS: &virgl_renderer_callbacks = &virgl_renderer_call
     destroy_gl_context: None,
     make_current: None,
     get_drm_fd: None,
+    #[cfg(not(feature = "virgl_renderer_next"))]
     write_context_fence: None,
+    #[cfg(feature = "virgl_renderer_next")]
+    write_context_fence: Some(write_context_fence),
     #[cfg(not(feature = "virgl_renderer_next"))]
     get_server_fd: None,
     #[cfg(feature = "virgl_renderer_next")]
@@ -405,6 +487,7 @@ impl RutabagaComponent for VirglRenderer {
             info_3d: self.query(resource_id).ok(),
             vulkan_info: None,
             backing_iovecs: None,
+            import_mask: 1 << (RutabagaComponentType::VirglRenderer as u32),
         })
     }
 
@@ -570,6 +653,7 @@ impl RutabagaComponent for VirglRenderer {
                 info_3d: self.query(resource_id).ok(),
                 vulkan_info: None,
                 backing_iovecs: iovec_opt,
+                import_mask: 1 << (RutabagaComponentType::VirglRenderer as u32),
             })
         }
         #[cfg(not(feature = "virgl_renderer_next"))]

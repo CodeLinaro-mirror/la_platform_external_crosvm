@@ -3,10 +3,12 @@
 // found in the LICENSE file.
 
 use std::fmt::{self, Display};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, stdin, stdout};
 use std::path::PathBuf;
 
+#[cfg(windows)]
+use base::platform::Console as WinConsole;
 use base::{error, open_file, syslog, AsRawDescriptor, Event, FileSync, RawDescriptor};
 use hypervisor::ProtectionType;
 use remain::sorted;
@@ -38,6 +40,12 @@ pub enum Error {
     #[error("Serial device type {0} not implemented")]
     Unimplemented(SerialType),
 }
+
+/// Trait for types that can be used as input for a serial device.
+pub trait SerialInput: io::Read + AsRawDescriptor + Send {}
+impl SerialInput for File {}
+#[cfg(windows)]
+impl SerialInput for WinConsole {}
 
 /// Enum for possible type of serial devices
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -78,6 +86,7 @@ impl Display for SerialType {
 pub enum SerialHardware {
     Serial,        // Standard PC-style (8250/16550 compatible) UART
     VirtioConsole, // virtio-console device
+    Debugcon,      // Bochs style debug port
 }
 
 impl Default for SerialHardware {
@@ -91,6 +100,7 @@ impl Display for SerialHardware {
         let s = match &self {
             SerialHardware::Serial => "serial".to_string(),
             SerialHardware::VirtioConsole => "virtio-console".to_string(),
+            SerialHardware::Debugcon => "debugcon".to_string(),
         };
 
         write!(f, "{}", s)
@@ -99,6 +109,11 @@ impl Display for SerialHardware {
 
 fn serial_parameters_default_num() -> u8 {
     1
+}
+
+fn serial_parameters_default_debugcon_port() -> u16 {
+    // Default to the port bochs uses.
+    0xe9
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -115,6 +130,8 @@ pub struct SerialParameters {
     pub earlycon: bool,
     pub stdin: bool,
     pub out_timestamp: bool,
+    #[serde(default = "serial_parameters_default_debugcon_port")]
+    pub debugcon_port: u16,
 }
 
 impl SerialParameters {
@@ -132,7 +149,7 @@ impl SerialParameters {
     ) -> std::result::Result<T, Error> {
         let evt = evt.try_clone().map_err(Error::CloneEvent)?;
         keep_rds.push(evt.as_raw_descriptor());
-        let input: Option<Box<dyn io::Read + Send>> = if let Some(input_path) = &self.input {
+        let input: Option<Box<dyn SerialInput>> = if let Some(input_path) = &self.input {
             let input_path = input_path.as_path();
 
             let input_file = open_file(input_path, OpenOptions::new().read(true))
@@ -158,10 +175,7 @@ impl SerialParameters {
             SerialType::Syslog => {
                 syslog::push_descriptors(keep_rds);
                 (
-                    Some(Box::new(syslog::Syslogger::new(
-                        syslog::Priority::Info,
-                        syslog::Facility::Daemon,
-                    ))),
+                    Some(Box::new(syslog::Syslogger::new(base::syslog::Level::Info))),
                     None,
                 )
             }
@@ -219,6 +233,7 @@ mod tests {
                 earlycon: false,
                 stdin: false,
                 out_timestamp: false,
+                debugcon_port: 0xe9,
             }
         );
 
@@ -245,6 +260,8 @@ mod tests {
         assert_eq!(params.hardware, SerialHardware::Serial);
         let params = from_serial_arg("hardware=virtio-console").unwrap();
         assert_eq!(params.hardware, SerialHardware::VirtioConsole);
+        let params = from_serial_arg("hardware=debugcon").unwrap();
+        assert_eq!(params.hardware, SerialHardware::Debugcon);
         let params = from_serial_arg("hardware=foobar");
         assert!(params.is_err());
 
@@ -290,8 +307,12 @@ mod tests {
         let params = from_serial_arg("stdin=foobar");
         assert!(params.is_err());
 
+        // debugcon port parameter
+        let params = from_serial_arg("debugcon_port=1026").unwrap();
+        assert_eq!(params.debugcon_port, 1026);
+
         // all together
-        let params = from_serial_arg("type=stdout,path=/some/path,hardware=virtio-console,num=5,earlycon,console,stdin,input=/some/input,out_timestamp").unwrap();
+        let params = from_serial_arg("type=stdout,path=/some/path,hardware=virtio-console,num=5,earlycon,console,stdin,input=/some/input,out_timestamp,debugcon_port=12").unwrap();
         assert_eq!(
             params,
             SerialParameters {
@@ -304,6 +325,7 @@ mod tests {
                 earlycon: true,
                 stdin: true,
                 out_timestamp: true,
+                debugcon_port: 12,
             }
         );
 

@@ -7,9 +7,14 @@
     feature = "audio"
 ))]
 use std::str::FromStr;
+use std::thread::sleep;
 use std::{path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, Result};
+
+use base::{kill_process_group, reap_child, warn};
+#[cfg(feature = "gpu")]
+use devices::virtio::gpu::{GpuDisplayParameters, GpuParameters};
 #[cfg(feature = "gpu")]
 use devices::virtio::vhost::user::device::run_gpu_device;
 use devices::virtio::vhost::user::device::{
@@ -23,6 +28,7 @@ use devices::virtio::{
 use devices::Ac97Backend;
 #[cfg(feature = "audio")]
 use devices::Ac97Parameters;
+use devices::SerialParameters;
 
 use crate::argument::{self, Argument};
 #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
@@ -79,6 +85,34 @@ fn parse_gpu_render_server_options(s: Option<&str>) -> argument::Result<GpuRende
     }
 }
 
+#[cfg(feature = "gpu")]
+pub fn is_gpu_backend_deprecated(_backend: &str) -> bool {
+    false
+}
+
+pub fn use_host_cpu_topology() -> bool {
+    true
+}
+
+pub fn get_vcpu_count() -> argument::Result<usize> {
+    // Safe because we pass a flag for this call and the host supports this system call
+    Ok(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) } as usize)
+}
+
+#[cfg(feature = "gfxstream")]
+pub fn use_vulkan() -> bool {
+    true
+}
+
+// Doesn't do anything on unix.
+pub fn check_serial_params(_serial_params: &SerialParameters) -> argument::Result<()> {
+    Ok(())
+}
+
+pub fn net_vq_pairs_expected() -> bool {
+    true
+}
+
 pub fn get_arguments() -> Vec<Argument> {
     vec![
           #[cfg(feature = "audio_cras")]
@@ -98,6 +132,8 @@ pub fn get_arguments() -> Vec<Argument> {
           Argument::value("host_ip",
                           "IP",
                           "IP address to assign to host tap interface."),
+          Argument::value("netmask", "NETMASK", "Netmask for VM subnet."),
+          Argument::value("mac", "MAC", "MAC address for VM."),
           Argument::value("tap-name",
                           "NAME",
                           "Name of a configured persistent TAP interface to use for networking. A different virtual network card will be added each time this argument is given."),
@@ -130,6 +166,71 @@ pub fn get_arguments() -> Vec<Argument> {
                               unpin_limit=NUM - Unpin limit for each unpin cycle, in unit of page count. 0 is invalid.
 
                               unpin_gen_threshold=NUM -  Number of unpin intervals a pinned page must be busy for to be aged into the older which is less frequently checked generation."),
+          Argument::value("seccomp-policy-dir", "PATH", "Path to seccomp .policy files."),
+          Argument::flag("seccomp-log-failures", "Instead of seccomp filter failures being fatal, they will be logged instead."),
+          Argument::value("serial",
+                          "type=TYPE,[hardware=HW,num=NUM,path=PATH,input=PATH,console,earlycon,stdin]",
+                          "Comma separated key=value pairs for setting up serial devices. Can be given more than once.
+
+                              Possible key values:
+
+                              type=(stdout,syslog,sink,file) - Where to route the serial device
+
+                              hardware=(serial,virtio-console) - Which type of serial hardware to emulate. Defaults to 8250 UART (serial).
+
+                              num=(1,2,3,4) - Serial Device Number. If not provided, num will default to 1.
+
+                              path=PATH - The path to the file to write to when type=file
+
+                              input=PATH - The path to the file to read from when not stdin
+
+                              console - Use this serial device as the guest console. Can only be given once. Will default to first serial port if not provided.
+
+                              earlycon - Use this serial device as the early console. Can only be given once.
+
+                              stdin - Direct standard input to this serial device. Can only be given once. Will default to first serial port if not provided.
+                              "),
+          #[cfg(feature = "gpu")]
+          Argument::flag_or_value("gpu",
+                                  "[width=INT,height=INT]",
+                                  "(EXPERIMENTAL) Comma separated key=value pairs for setting up a virtio-gpu device
+
+                              Possible key values:
+
+                              backend=(2d|virglrenderer|gfxstream) - Which backend to use for virtio-gpu (determining rendering protocol)
+
+                              context-types=LIST - The list of supported context types, separated by ':' (default: no contexts enabled)
+
+                              width=INT - The width of the virtual display connected to the virtio-gpu.
+
+                              height=INT - The height of the virtual display connected to the virtio-gpu.
+
+                              egl[=true|=false] - If the backend should use a EGL context for rendering.
+
+                              glx[=true|=false] - If the backend should use a GLX context for rendering.
+
+                              surfaceless[=true|=false] - If the backend should use a surfaceless context for rendering.
+
+                              angle[=true|=false] - If the gfxstream backend should use ANGLE (OpenGL on Vulkan) as its native OpenGL driver.
+
+                              syncfd[=true|=false] - If the gfxstream backend should support EGL_ANDROID_native_fence_sync
+
+                              vulkan[=true|=false] - If the backend should support vulkan
+
+                              cache-path=PATH - The path to the virtio-gpu device shader cache.
+
+                              cache-size=SIZE - The maximum size of the shader cache."),
+          #[cfg(feature = "gpu")]
+          Argument::flag_or_value("gpu-display",
+                                  "[width=INT,height=INT]",
+                                  "(EXPERIMENTAL) Comma separated key=value pairs for setting up a display on the virtio-gpu device
+
+                              Possible key values:
+
+                              width=INT - The width of the virtual display connected to the virtio-gpu.
+
+                              height=INT - The height of the virtual display connected to the virtio-gpu."),
+          Argument::flag("no-legacy", "Don't use legacy KBD/RTC devices emulation"),
     ]
 }
 
@@ -338,6 +439,42 @@ pub fn set_arguments(cfg: &mut Config, name: &str, value: Option<&str>) -> argum
                         })?,
                 )
         }
+        "netmask" => {
+            if cfg.netmask.is_some() {
+                return Err(argument::Error::TooManyArguments(
+                    "`netmask` already given".to_owned(),
+                ));
+            }
+            cfg.netmask =
+                Some(
+                    value
+                        .unwrap()
+                        .parse()
+                        .map_err(|_| argument::Error::InvalidValue {
+                            value: value.unwrap().to_owned(),
+                            expected: String::from("`netmask` needs to be in the form \"x.x.x.x\""),
+                        })?,
+                )
+        }
+        "mac" => {
+            if cfg.mac_address.is_some() {
+                return Err(argument::Error::TooManyArguments(
+                    "`mac` already given".to_owned(),
+                ));
+            }
+            cfg.mac_address =
+                Some(
+                    value
+                        .unwrap()
+                        .parse()
+                        .map_err(|_| argument::Error::InvalidValue {
+                            value: value.unwrap().to_owned(),
+                            expected: String::from(
+                                "`mac` needs to be in the form \"XX:XX:XX:XX:XX:XX\"",
+                            ),
+                        })?,
+                )
+        }
         "tap-name" => {
             cfg.tap_name.push(value.unwrap().to_owned());
         }
@@ -414,6 +551,39 @@ pub fn set_arguments(cfg: &mut Config, name: &str, value: Option<&str>) -> argum
         #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
         "gpu-render-server" => {
             cfg.gpu_render_server_parameters = Some(parse_gpu_render_server_options(value)?);
+        }
+        "seccomp-policy-dir" => {
+            if let Some(jail_config) = &mut cfg.jail_config {
+                // `value` is Some because we are in this match so it's safe to unwrap.
+                jail_config.seccomp_policy_dir = PathBuf::from(value.unwrap());
+            }
+        }
+        "seccomp-log-failures" => {
+            // A side-effect of this flag is to force the use of .policy files
+            // instead of .bpf files (.bpf files are expected and assumed to be
+            // compiled to fail an unpermitted action with "trap").
+            // Normally crosvm will first attempt to use a .bpf file, and if
+            // not present it will then try to use a .policy file.  It's up
+            // to the build to decide which of these files is present for
+            // crosvm to use (for CrOS the build will use .bpf files for
+            // x64 builds and .policy files for arm/arm64 builds).
+            //
+            // This flag will likely work as expected for builds that use
+            // .policy files.  For builds that only use .bpf files the initial
+            // result when using this flag is likely to be a file-not-found
+            // error (since the .policy files are not present).
+            // For .bpf builds you can either 1) manually add the .policy files,
+            // or 2) do not use this command-line parameter and instead
+            // temporarily change the build by passing "log" rather than
+            // "trap" as the "--default-action" to compile_seccomp_policy.py.
+            if let Some(jail_config) = &mut cfg.jail_config {
+                jail_config.seccomp_log_failures = true;
+            }
+        }
+        #[cfg(feature = "gpu")]
+        "gpu-display" => {
+            let gpu_parameters = cfg.gpu_parameters.get_or_insert_with(Default::default);
+            parse_gpu_display_options(value, gpu_parameters)?;
         }
         _ => unreachable!(),
     }
@@ -504,3 +674,175 @@ pub fn parse_ac97_options(
     };
     Ok(())
 }
+
+// Wait for all children to exit. Return true if they have all exited, false
+// otherwise.
+fn wait_all_children() -> bool {
+    const CHILD_WAIT_MAX_ITER: isize = 100;
+    const CHILD_WAIT_MS: u64 = 10;
+    for _ in 0..CHILD_WAIT_MAX_ITER {
+        loop {
+            match reap_child() {
+                Ok(0) => break,
+                // We expect ECHILD which indicates that there were no children left.
+                Err(e) if e.errno() == libc::ECHILD => return true,
+                Err(e) => {
+                    warn!("error while waiting for children: {}", e);
+                    return false;
+                }
+                // We reaped one child, so continue reaping.
+                _ => {}
+            }
+        }
+        // There's no timeout option for waitpid which reap_child calls internally, so our only
+        // recourse is to sleep while waiting for the children to exit.
+        sleep(Duration::from_millis(CHILD_WAIT_MS));
+    }
+
+    // If we've made it to this point, not all of the children have exited.
+    false
+}
+
+pub(crate) fn cleanup() {
+    // Reap exit status from any child device processes. At this point, all devices should have been
+    // dropped in the main process and told to shutdown. Try over a period of 100ms, since it may
+    // take some time for the processes to shut down.
+    if !wait_all_children() {
+        // We gave them a chance, and it's too late.
+        warn!("not all child processes have exited; sending SIGKILL");
+        if let Err(e) = kill_process_group() {
+            // We're now at the mercy of the OS to clean up after us.
+            warn!("unable to kill all child processes: {}", e);
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn parse_gpu_display_options(
+    s: Option<&str>,
+    gpu_params: &mut GpuParameters,
+) -> argument::Result<()> {
+    let mut display_w: Option<u32> = None;
+    let mut display_h: Option<u32> = None;
+
+    if let Some(s) = s {
+        let opts = s
+            .split(',')
+            .map(|frag| frag.split('='))
+            .map(|mut kv| (kv.next().unwrap_or(""), kv.next().unwrap_or("")));
+
+        for (k, v) in opts {
+            match k {
+                "width" => {
+                    let width = v
+                        .parse::<u32>()
+                        .map_err(|_| argument::Error::InvalidValue {
+                            value: v.to_string(),
+                            expected: String::from("gpu parameter 'width' must be a valid integer"),
+                        })?;
+                    display_w = Some(width);
+                }
+                "height" => {
+                    let height = v
+                        .parse::<u32>()
+                        .map_err(|_| argument::Error::InvalidValue {
+                            value: v.to_string(),
+                            expected: String::from(
+                                "gpu parameter 'height' must be a valid integer",
+                            ),
+                        })?;
+                    display_h = Some(height);
+                }
+                "" => {}
+                _ => {
+                    return Err(argument::Error::UnknownArgument(format!(
+                        "gpu-display parameter {}",
+                        k
+                    )));
+                }
+            }
+        }
+    }
+
+    if display_w.is_none() || display_h.is_none() {
+        return Err(argument::Error::InvalidValue {
+            value: s.unwrap_or("").to_string(),
+            expected: String::from("gpu-display must include both 'width' and 'height'"),
+        });
+    }
+
+    gpu_params.displays.push(GpuDisplayParameters {
+        width: display_w.unwrap(),
+        height: display_h.unwrap(),
+    });
+
+    Ok(())
+}
+
+//#[cfg(test)]
+//mod tests {
+//    use super::*;
+//    use crate::parse_gpu_options;
+//
+//    #[cfg(feature = "gpu")]
+//    #[test]
+//    fn parse_gpu_display_options_valid() {
+//        {
+//            let mut gpu_params: GpuParameters = Default::default();
+//            assert!(
+//                parse_gpu_display_options(Some("width=500,height=600"), &mut gpu_params).is_ok()
+//            );
+//            assert_eq!(gpu_params.displays.len(), 1);
+//            assert_eq!(gpu_params.displays[0].width, 500);
+//            assert_eq!(gpu_params.displays[0].height, 600);
+//        }
+//    }
+//
+//    #[cfg(feature = "gpu")]
+//    #[test]
+//    fn parse_gpu_display_options_invalid() {
+//        {
+//            let mut gpu_params: GpuParameters = Default::default();
+//            assert!(parse_gpu_display_options(Some("width=500"), &mut gpu_params).is_err());
+//        }
+//        {
+//            let mut gpu_params: GpuParameters = Default::default();
+//            assert!(parse_gpu_display_options(Some("height=500"), &mut gpu_params).is_err());
+//        }
+//        {
+//            let mut gpu_params: GpuParameters = Default::default();
+//            assert!(parse_gpu_display_options(Some("width"), &mut gpu_params).is_err());
+//        }
+//        {
+//            let mut gpu_params: GpuParameters = Default::default();
+//            assert!(parse_gpu_display_options(Some("blah"), &mut gpu_params).is_err());
+//        }
+//    }
+//
+//    #[cfg(feature = "gpu")]
+//    #[test]
+//    fn parse_gpu_options_and_gpu_display_options_valid() {
+//        {
+//            let mut gpu_params: GpuParameters = Default::default();
+//            assert!(parse_gpu_options(Some("2D,width=500,height=600"), &mut gpu_params).is_ok());
+//            assert!(
+//                parse_gpu_display_options(Some("width=700,height=800"), &mut gpu_params).is_ok()
+//            );
+//            assert_eq!(gpu_params.displays.len(), 2);
+//            assert_eq!(gpu_params.displays[0].width, 500);
+//            assert_eq!(gpu_params.displays[0].height, 600);
+//            assert_eq!(gpu_params.displays[1].width, 700);
+//            assert_eq!(gpu_params.displays[1].height, 800);
+//        }
+//        {
+//            let mut gpu_params: GpuParameters = Default::default();
+//            assert!(parse_gpu_options(Some("2D"), &mut gpu_params).is_ok());
+//            assert!(
+//                parse_gpu_display_options(Some("width=700,height=800"), &mut gpu_params).is_ok()
+//            );
+//            assert_eq!(gpu_params.displays.len(), 1);
+//            assert_eq!(gpu_params.displays[0].width, 700);
+//            assert_eq!(gpu_params.displays[0].height, 800);
+//        }
+//    }
+//}

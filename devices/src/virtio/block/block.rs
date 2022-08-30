@@ -148,6 +148,19 @@ pub struct DiskOption {
     pub id: Option<[u8; DISK_ID_LEN]>,
 }
 
+impl Default for DiskOption {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from(""),
+            read_only: true,
+            sparse: false,
+            o_direct: false,
+            block_size: 512,
+            id: None,
+        }
+    }
+}
+
 struct Worker {
     interrupt: Interrupt,
     queues: Vec<Queue>,
@@ -337,7 +350,7 @@ impl Worker {
                             error!("Failed to flush the disk: {}", e);
                             break 'wait;
                         }
-                        if let Err(e) = flush_timer.wait() {
+                        if let Err(e) = flush_timer.mark_waited() {
                             error!("Failed to clear flush timer: {}", e);
                             break 'wait;
                         }
