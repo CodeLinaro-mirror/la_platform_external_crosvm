@@ -50,12 +50,13 @@ rust_binary {
         "libacpi_tables",
         "libanyhow",
         "libarch",
+        "libargh",
         "libassertions",
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libbroker_ipc",
         "libcfg_if",
-        "libcrosvm",
         "libdata_model",
         "libdevices",
         "libdisk",
@@ -83,6 +84,7 @@ rust_binary {
         "libvm_memory",
     ],
     proc_macros: [
+        "libargh_helpers",
         "libenumn",
         "libremain",
     ],
@@ -141,106 +143,6 @@ rust_binary {
 }
 
 rust_test {
-    name: "crosvm_test_src_crosvm",
-    defaults: ["crosvm_defaults"],
-    // has rustc warnings
-    host_supported: true,
-    crate_name: "crosvm",
-    cargo_env_compat: true,
-    srcs: ["src/crosvm.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    features: [
-        "audio",
-        "usb",
-    ],
-    rustlibs: [
-        "libacpi_tables",
-        "libanyhow",
-        "libarch",
-        "libassertions",
-        "libaudio_streams",
-        "libbase_rust",
-        "libbit_field",
-        "libcfg_if",
-        "libdata_model",
-        "libdevices",
-        "libdisk",
-        "libhypervisor",
-        "libkernel_cmdline",
-        "libkernel_loader",
-        "liblazy_static",
-        "liblibc",
-        "liblibcras",
-        "liblog_rust",
-        "libmetrics",
-        "libminijail_rust",
-        "libnet_util",
-        "libp9",
-        "libresources",
-        "librutabaga_gfx",
-        "libserde_json",
-        "libserde_keyvalue",
-        "libsync_rust",
-        "libtempfile",
-        "libterminal_size",
-        "libthiserror",
-        "libuuid",
-        "libvhost",
-        "libvm_control",
-        "libvm_memory",
-    ],
-    proc_macros: [
-        "libenumn",
-        "libremain",
-    ],
-    arch: {
-        x86_64: {
-            rustlibs: ["libx86_64_rust"],
-        },
-        arm64: {
-            rustlibs: ["libaarch64"],
-        },
-    },
-    target: {
-        host: {
-            features: [
-                "gfxstream",
-                "gpu",
-            ],
-        },
-        android: {
-            shared_libs: [
-                "libprocessgroup",
-            ],
-        },
-        host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
-            shared_libs: [
-                "libprocessgroup",
-            ],
-        },
-    },
-    ld_flags: [
-        "-Wl,--rpath,\\$$ORIGIN",
-        "-Wl,--rpath,\\$$ORIGIN/../../lib64",
-    ],
-
-}
-
-rust_test {
     name: "crosvm_test_src_main",
     defaults: ["crosvm_defaults"],
     // has rustc warnings
@@ -262,12 +164,13 @@ rust_test {
         "libacpi_tables",
         "libanyhow",
         "libarch",
+        "libargh",
         "libassertions",
         "libaudio_streams",
         "libbase_rust",
         "libbit_field",
+        "libbroker_ipc",
         "libcfg_if",
-        "libcrosvm",
         "libdata_model",
         "libdevices",
         "libdisk",
@@ -296,100 +199,7 @@ rust_test {
         "libvm_memory",
     ],
     proc_macros: [
-        "libenumn",
-        "libremain",
-    ],
-    arch: {
-        x86_64: {
-            rustlibs: ["libx86_64_rust"],
-        },
-        arm64: {
-            rustlibs: ["libaarch64"],
-        },
-    },
-    target: {
-        host: {
-            features: [
-                "gfxstream",
-                "gpu",
-            ],
-        },
-        android: {
-            shared_libs: [
-                "libprocessgroup",
-            ],
-        },
-        host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
-            shared_libs: [
-                "libprocessgroup",
-            ],
-        },
-    },
-    ld_flags: [
-        "-Wl,--rpath,\\$$ORIGIN",
-        "-Wl,--rpath,\\$$ORIGIN/../../lib64",
-    ],
-
-}
-
-rust_library {
-    name: "libcrosvm",
-    defaults: ["crosvm_defaults"],
-    // has rustc warnings
-    host_supported: true,
-    crate_name: "crosvm",
-    cargo_env_compat: true,
-    srcs: ["src/crosvm.rs"],
-    edition: "2021",
-    features: [
-        "audio",
-        "usb",
-    ],
-    rustlibs: [
-        "libacpi_tables",
-        "libanyhow",
-        "libarch",
-        "libassertions",
-        "libaudio_streams",
-        "libbase_rust",
-        "libbit_field",
-        "libcfg_if",
-        "libdata_model",
-        "libdevices",
-        "libdisk",
-        "libhypervisor",
-        "libkernel_cmdline",
-        "libkernel_loader",
-        "liblibc",
-        "liblibcras",
-        "liblog_rust",
-        "libmetrics",
-        "libminijail_rust",
-        "libnet_util",
-        "libp9",
-        "libresources",
-        "librutabaga_gfx",
-        "libserde_json",
-        "libserde_keyvalue",
-        "libsync_rust",
-        "libtempfile",
-        "libterminal_size",
-        "libthiserror",
-        "libuuid",
-        "libvhost",
-        "libvm_control",
-        "libvm_memory",
-    ],
-    proc_macros: [
+        "libargh_helpers",
         "libenumn",
         "libremain",
     ],

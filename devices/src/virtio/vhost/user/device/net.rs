@@ -21,6 +21,8 @@ use crate::virtio;
 use crate::virtio::net::{build_config, process_ctrl, process_tx, virtio_features_to_tap_offload};
 use crate::virtio::vhost::user::device::handler::{Doorbell, VhostUserBackend};
 
+pub use sys::{start_device as run_net_device, Options};
+
 thread_local! {
     pub(crate) static NET_EXECUTOR: OnceCell<Executor> = OnceCell::new();
 }
@@ -28,7 +30,7 @@ thread_local! {
 // TODO(b/188947559): Come up with better way to include these constants. Compiler errors happen
 // if they are kept in the trait.
 const MAX_QUEUE_NUM: usize = 3; /* rx, tx, ctrl */
-const MAX_VRING_LEN: u16 = 256;
+const MAX_VRING_LEN: u16 = 1024;
 
 async fn run_tx_queue<T: TapT>(
     mut queue: virtio::Queue,
@@ -167,9 +169,4 @@ where
             handle.abort();
         }
     }
-}
-
-/// Starts a vhost-user net device.
-pub fn run_net_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
-    sys::start_device(program_name, args)
 }

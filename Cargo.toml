@@ -7,9 +7,6 @@ default-run = "crosvm"
 # b:223855233
 resolver = "1"
 
-[lib]
-path = "src/crosvm.rs"
-
 [[bin]]
 name = "crosvm"
 path = "src/main.rs"
@@ -47,8 +44,10 @@ members = [
     "aarch64",
     "acpi_tables",
     "arch",
+    "argh_helpers",
     "base",
     "bit_field",
+    "broker_ipc",
     "cros_async",
     "crosvm-fuzz",
     "crosvm_control",
@@ -65,6 +64,7 @@ members = [
     "kvm",
     "kvm_sys",
     "linux_input_sys",
+    "media/ffmpeg",
     "media/libvda",
     "net_sys",
     "net_util",
@@ -121,9 +121,11 @@ composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
 default = ["audio", "gpu", "usb"]
 default-no-sandbox = []
 direct = ["devices/direct", "arch/direct", "x86_64/direct"]
+ffmpeg = ["devices/ffmpeg"]
 gdb = ["gdbstub", "gdbstub_arch", "arch/gdb", "vm_control/gdb", "x86_64/gdb"]
 gfxstream = ["devices/gfxstream"]
 gpu = ["devices/gpu"]
+haxm = ["hypervisor/haxm"]
 libvda = ["devices/libvda"]
 linux-armhf = [
     "composite-disk",
@@ -149,10 +151,13 @@ x = ["devices/x"]
 [dependencies]
 anyhow = "1.0.32"
 arch = { path = "arch" }
+argh = "0.1"
+argh_helpers = { path = "argh_helpers" }
 assertions = { path = "common/assertions" }
 audio_streams = "*"
 base = { path = "base" }
 bit_field = { path = "bit_field" }
+broker_ipc = { path = "broker_ipc" }
 cfg-if = "1.0.0"
 crosvm_plugin = { path = "crosvm_plugin", optional = true }
 data_model = "*"

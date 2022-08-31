@@ -27,7 +27,9 @@ rust_library {
         "liblibc",
         "libnet_sys",
         "libserde",
+        "libsmallvec",
         "libthiserror",
+        "libvirtio_sys",
     ],
     proc_macros: ["libremain"],
 }
@@ -54,7 +56,9 @@ rust_test {
         "liblibc",
         "libnet_sys",
         "libserde",
+        "libsmallvec",
         "libthiserror",
+        "libvirtio_sys",
     ],
     proc_macros: ["libremain"],
 }

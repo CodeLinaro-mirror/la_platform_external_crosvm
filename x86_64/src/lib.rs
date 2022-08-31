@@ -62,8 +62,8 @@ use crate::bootparam::boot_params;
 use acpi_tables::sdt::SDT;
 use acpi_tables::{aml, aml::Aml};
 use arch::{
-    get_serial_cmdline, GetSerialCmdlineError, MsrAction, MsrConfig, MsrRWType, MsrValueFrom,
-    RunnableLinuxVm, VmComponents, VmImage,
+    get_serial_cmdline, GetSerialCmdlineError, MsrAction, MsrConfig, MsrFilter, MsrRWType,
+    MsrValueFrom, RunnableLinuxVm, VmComponents, VmImage,
 };
 use base::{warn, Event, SendTube, TubeError};
 use devices::serial_device::{SerialHardware, SerialParameters};
@@ -245,6 +245,17 @@ pub const X86_64_SCI_IRQ: u32 = 5;
 // The CMOS RTC uses IRQ 8; start allocating IRQs at 9.
 pub const X86_64_IRQ_BASE: u32 = 9;
 const ACPI_HI_RSDP_WINDOW_BASE: u64 = 0x000E_0000;
+
+#[derive(Debug, PartialEq)]
+pub enum CpuManufacturer {
+    Intel,
+    Amd,
+    Unknown,
+}
+
+pub fn get_cpu_manufacturer() -> CpuManufacturer {
+    cpuid::cpu_manufacturer()
+}
 
 // Memory layout below 4G
 struct LowMemoryLayout {
@@ -795,6 +806,7 @@ impl arch::LinuxArch for X8664arch {
 
         if has_bios {
             regs::set_reset_vector(vcpu).map_err(Error::SetupRegs)?;
+            regs::reset_msrs(vcpu).map_err(Error::SetupMsrs)?;
             return Ok(());
         }
 
@@ -1653,27 +1665,33 @@ pub enum MsrError {
 fn insert_msr(
     msr_map: &mut BTreeMap<u32, MsrConfig>,
     key: u32,
-    rw_type: MsrRWType,
-    action: MsrAction,
-    from: MsrValueFrom,
-    filter: bool,
+    msr_config: MsrConfig,
 ) -> std::result::Result<(), MsrError> {
-    if msr_map
-        .insert(
-            key,
-            MsrConfig {
-                rw_type,
-                action,
-                from,
-                filter,
-            },
-        )
-        .is_some()
-    {
+    if msr_map.insert(key, msr_config).is_some() {
         Err(MsrError::MsrDuplicate(key))
     } else {
         Ok(())
     }
+}
+
+fn insert_msrs(
+    msr_map: &mut BTreeMap<u32, MsrConfig>,
+    msrs: &[(u32, MsrRWType, MsrAction, MsrValueFrom, MsrFilter)],
+) -> std::result::Result<(), MsrError> {
+    for msr in msrs {
+        insert_msr(
+            msr_map,
+            msr.0,
+            MsrConfig {
+                rw_type: msr.1,
+                action: msr.2,
+                from: msr.3,
+                filter: msr.4,
+            },
+        )?;
+    }
+
+    Ok(())
 }
 
 pub fn set_enable_pnp_data_msr_config(
@@ -1686,60 +1704,61 @@ pub fn set_enable_pnp_data_msr_config(
             MsrRWType::ReadOnly,
             MsrAction::MsrPassthrough,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
         (
             MSR_IA32_MPERF,
             MsrRWType::ReadOnly,
             MsrAction::MsrPassthrough,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
     ];
 
     // When itmt is enabled, the following 5 MSRs are already
     // passed through or emulated, so just skip here.
     if !itmt {
-        msrs.push((
-            MSR_PLATFORM_INFO,
-            MsrRWType::ReadOnly,
-            MsrAction::MsrPassthrough,
-            MsrValueFrom::RWFromRunningCPU,
-            true,
-        ));
-        msrs.push((
-            MSR_TURBO_RATIO_LIMIT,
-            MsrRWType::ReadOnly,
-            MsrAction::MsrPassthrough,
-            MsrValueFrom::RWFromRunningCPU,
-            false,
-        ));
-        msrs.push((
-            MSR_PM_ENABLE,
-            MsrRWType::ReadOnly,
-            MsrAction::MsrPassthrough,
-            MsrValueFrom::RWFromRunningCPU,
-            false,
-        ));
-        msrs.push((
-            MSR_HWP_CAPABILITIES,
-            MsrRWType::ReadOnly,
-            MsrAction::MsrPassthrough,
-            MsrValueFrom::RWFromRunningCPU,
-            false,
-        ));
-        msrs.push((
-            MSR_HWP_REQUEST,
-            MsrRWType::ReadOnly,
-            MsrAction::MsrPassthrough,
-            MsrValueFrom::RWFromRunningCPU,
-            false,
-        ));
+        msrs.extend([
+            (
+                MSR_PLATFORM_INFO,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Override,
+            ),
+            (
+                MSR_TURBO_RATIO_LIMIT,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+            (
+                MSR_PM_ENABLE,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+            (
+                MSR_HWP_CAPABILITIES,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+            (
+                MSR_HWP_REQUEST,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+        ]);
     }
 
-    for msr in msrs {
-        insert_msr(msr_map, msr.0, msr.1, msr.2, msr.3, msr.4)?;
-    }
+    insert_msrs(msr_map, &msrs)?;
+
     Ok(())
 }
 
@@ -1769,47 +1788,45 @@ pub fn set_itmt_msr_config(
             MsrRWType::ReadOnly,
             MsrAction::MsrPassthrough,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
         (
             MSR_PM_ENABLE,
             MsrRWType::ReadWrite,
             MsrAction::MsrEmulate,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
         (
             MSR_HWP_REQUEST,
             MsrRWType::ReadWrite,
             MsrAction::MsrEmulate,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
         (
             MSR_TURBO_RATIO_LIMIT,
             MsrRWType::ReadOnly,
             MsrAction::MsrPassthrough,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
         (
             MSR_PLATFORM_INFO,
             MsrRWType::ReadOnly,
             MsrAction::MsrPassthrough,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
         (
             MSR_IA32_PERF_CTL,
             MsrRWType::ReadWrite,
             MsrAction::MsrEmulate,
             MsrValueFrom::RWFromRunningCPU,
-            false,
+            MsrFilter::Default,
         ),
     ];
-    for msr in msrs {
-        insert_msr(msr_map, msr.0, msr.1, msr.2, msr.3, msr.4)?;
-    }
+    insert_msrs(msr_map, &msrs)?;
 
     Ok(())
 }

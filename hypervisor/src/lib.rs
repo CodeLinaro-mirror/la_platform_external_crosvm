@@ -6,6 +6,10 @@
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub mod aarch64;
 pub mod caps;
+
+#[cfg(all(windows, feature = "haxm"))]
+pub mod haxm;
+#[cfg(unix)]
 pub mod kvm;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod x86_64;

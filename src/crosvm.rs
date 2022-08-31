@@ -8,7 +8,7 @@
 pub mod argument;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 pub mod gdb;
-#[path = "linux/mod.rs"]
+#[path = "crosvm/linux/mod.rs"]
 pub mod platform;
 #[cfg(feature = "plugin")]
 pub mod plugin;
@@ -20,7 +20,13 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use argh::FromArgs;
+use base::debug;
+use devices::virtio::vhost::user::device;
+
+use super::sys;
 use arch::{MsrConfig, Pstore, VcpuAffinity};
+use argh_helpers::generate_catchall_args;
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::virtio::block::block::DiskOption;
 #[cfg(feature = "audio_cras")]
@@ -47,6 +53,339 @@ use vm_control::BatteryType;
 static KVM_PATH: &str = "/dev/kvm";
 static VHOST_NET_PATH: &str = "/dev/vhost-net";
 static SECCOMP_POLICY_DIR: &str = "/usr/share/policy/crosvm";
+
+// Commandline arguments
+
+#[derive(FromArgs)]
+/// crosvm
+pub struct CrosvmCmdlineArgs {
+    #[argh(switch)]
+    /// use extended exit status
+    pub extended_status: bool,
+    #[argh(option, default = r#"String::from("info")"#)]
+    /// specify log level, eg "off", "error", "debug,disk=off", etc
+    pub log_level: String,
+    #[argh(switch)]
+    /// disable output to syslog
+    pub no_syslog: bool,
+    #[argh(subcommand)]
+    pub command: Command,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum Command {
+    Balloon(BalloonCommand),
+    BalloonStats(BalloonStatsCommand),
+    Battery(BatteryCommand),
+    #[cfg(feature = "composite-disk")]
+    CreateComposite(CreateCompositeCommand),
+    CreateQcow2(CreateQcow2Command),
+    Device(DevicesCommand),
+    Disk(DiskCommand),
+    MakeRT(MakeRTCommand),
+    Resume(ResumeCommand),
+    Run(RunCommand),
+    Stop(StopCommand),
+    Suspend(SuspendCommand),
+    Powerbtn(PowerbtnCommand),
+    Sleepbtn(SleepCommand),
+    Gpe(GpeCommand),
+    Usb(UsbCommand),
+    Version(VersionCommand),
+    Vfio(VfioCrosvmCommand),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "balloon")]
+/// Set balloon size of the crosvm instance to `SIZE` bytes
+pub struct BalloonCommand {
+    #[argh(positional, arg_name = "SIZE")]
+    /// amount of bytes
+    pub num_bytes: u64,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "balloon_stats")]
+/// Prints virtio balloon statistics for a `VM_SOCKET`
+pub struct BalloonStatsCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "battery")]
+/// Modify battery
+pub struct BatteryCommand {
+    #[argh(positional, arg_name = "BATTERY_TYPE")]
+    /// battery type
+    pub battery_type: String,
+    #[argh(positional)]
+    /// battery property
+    /// status | present | health | capacity | aconline
+    pub property: String,
+    #[argh(positional)]
+    /// battery property target
+    /// STATUS | PRESENT | HEALTH | CAPACITY | ACONLINE
+    pub target: String,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "composite-disk")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "create_composite")]
+/// Create a new composite disk image file
+pub struct CreateCompositeCommand {
+    #[argh(positional, arg_name = "PATH")]
+    /// image path
+    pub path: String,
+    #[argh(positional, arg_name = "LABEL:PARTITION")]
+    /// partitions
+    pub partitions: Vec<String>,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "create_qcow2")]
+/// Create Qcow2 image given path and size
+pub struct CreateQcow2Command {
+    #[argh(positional, arg_name = "PATH")]
+    /// path to the new qcow2 file to create
+    pub file_path: String,
+    #[argh(positional, arg_name = "SIZE")]
+    /// desired size of the image in bytes; required if not using --backing-file
+    pub size: Option<u64>,
+    #[argh(option)]
+    /// path to backing file; if specified, the image will be the same size as the backing file, and
+    /// SIZE may not be specified
+    pub backing_file: Option<String>,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum DiskSubcommand {
+    Resize(ResizeDiskSubcommand),
+}
+
+#[derive(FromArgs)]
+/// resize disk
+#[argh(subcommand, name = "resize")]
+pub struct ResizeDiskSubcommand {
+    #[argh(positional, arg_name = "DISK_INDEX")]
+    /// disk index
+    pub disk_index: usize,
+    #[argh(positional, arg_name = "NEW_SIZE")]
+    /// new disk size
+    pub disk_size: u64,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "disk")]
+/// Manage attached virtual disk devices
+pub struct DiskCommand {
+    #[argh(subcommand)]
+    pub command: DiskSubcommand,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "make_rt")]
+/// Enables real-time vcpu priority for crosvm instances started with `--delay-rt`
+pub struct MakeRTCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "resume")]
+/// Resumes the crosvm instance
+pub struct ResumeCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[generate_catchall_args]
+#[argh(subcommand, name = "run")]
+/// Start a new crosvm instance
+pub struct RunCommand {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "stop")]
+/// Stops crosvm instances via their control sockets
+pub struct StopCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "suspend")]
+/// Suspends the crosvm instance
+pub struct SuspendCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "powerbtn")]
+/// Triggers a power button event in the crosvm instance
+pub struct PowerbtnCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "sleepbtn")]
+/// Triggers a sleep button event in the crosvm instance
+pub struct SleepCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "gpe")]
+/// Injects a general-purpose event into the crosvm instance
+pub struct GpeCommand {
+    #[argh(positional)]
+    /// GPE #
+    pub gpe: u32,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "usb")]
+/// Manage attached virtual USB devices.
+pub struct UsbCommand {
+    #[argh(subcommand)]
+    pub command: UsbSubCommand,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "version")]
+/// Show package version.
+pub struct VersionCommand {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "add")]
+/// ADD
+pub struct VfioAddSubCommand {
+    #[argh(positional)]
+    /// path to host's vfio sysfs
+    pub vfio_path: PathBuf,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "remove")]
+/// REMOVE
+pub struct VfioRemoveSubCommand {
+    #[argh(positional)]
+    /// path to host's vfio sysfs
+    pub vfio_path: PathBuf,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum VfioSubCommand {
+    Add(VfioAddSubCommand),
+    Remove(VfioRemoveSubCommand),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "vfio")]
+/// add/remove host vfio pci device into guest
+pub struct VfioCrosvmCommand {
+    #[argh(subcommand)]
+    pub command: VfioSubCommand,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "device")]
+/// Start a device process
+pub struct DevicesCommand {
+    #[argh(subcommand)]
+    pub command: DevicesSubcommand,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+/// Cross-platform Devices
+pub enum CrossPlatformDevicesCommands {
+    Block(device::BlockOptions),
+    Net(device::NetOptions),
+}
+
+#[derive(argh_helpers::FlattenSubcommand)]
+pub enum DevicesSubcommand {
+    CrossPlatform(CrossPlatformDevicesCommands),
+    Sys(sys::DevicesSubcommand),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum UsbSubCommand {
+    Attach(UsbAttachCommand),
+    Detach(UsbDetachCommand),
+    List(UsbListCommand),
+}
+
+#[derive(FromArgs)]
+/// Attach usb device
+#[argh(subcommand, name = "attach")]
+pub struct UsbAttachCommand {
+    #[argh(
+        positional,
+        arg_name = "BUS_ID:ADDR:BUS_NUM:DEV_NUM",
+        from_str_fn(parse_bus_id_addr)
+    )]
+    pub addr: (u8, u8, u16, u16),
+    #[argh(positional)]
+    /// usb device path
+    pub dev_path: String,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+/// Detach usb device
+#[argh(subcommand, name = "detach")]
+pub struct UsbDetachCommand {
+    #[argh(positional, arg_name = "PORT")]
+    /// usb port
+    pub port: u8,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+/// Detach usb device
+#[argh(subcommand, name = "list")]
+pub struct UsbListCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
 
 /// Indicates the location and kind of executable kernel for a VM.
 #[derive(Debug)]
@@ -350,6 +689,22 @@ impl Default for JailConfig {
             seccomp_policy_dir: PathBuf::from(SECCOMP_POLICY_DIR),
             seccomp_log_failures: false,
         }
+    }
+}
+
+fn parse_bus_id_addr(v: &str) -> Result<(u8, u8, u16, u16), String> {
+    debug!("parse_bus_id_addr: {}", v);
+    let mut ids = v.split(':');
+    let errorre = move |item| move |e| format!("{}: {}", item, e);
+    match (ids.next(), ids.next(), ids.next(), ids.next()) {
+        (Some(bus_id), Some(addr), Some(vid), Some(pid)) => {
+            let bus_id = bus_id.parse::<u8>().map_err(errorre("bus_id"))?;
+            let addr = addr.parse::<u8>().map_err(errorre("addr"))?;
+            let vid = u16::from_str_radix(vid, 16).map_err(errorre("vid"))?;
+            let pid = u16::from_str_radix(pid, 16).map_err(errorre("pid"))?;
+            Ok((bus_id, addr, vid, pid))
+        }
+        _ => Err(String::from("BUS_ID:ADDR:BUS_NUM:DEV_NUM")),
     }
 }
 

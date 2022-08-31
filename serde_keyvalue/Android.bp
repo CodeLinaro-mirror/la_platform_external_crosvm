@@ -20,6 +20,7 @@ rust_library {
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
+        "libnum_traits",
         "libserde",
         "libthiserror",
     ],
@@ -41,6 +42,7 @@ rust_test {
     },
     edition: "2021",
     rustlibs: [
+        "libnum_traits",
         "libserde",
         "libthiserror",
     ],

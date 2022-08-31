@@ -108,6 +108,20 @@ enum KvmVfioGroupOps {
 #[repr(u32)]
 enum IommuType {
     Type1V2 = VFIO_TYPE1v2_IOMMU,
+    // ChromeOS specific vfio_iommu_type1 implementation that is optimized for
+    // small, dynamic mappings. For clients which create large, relatively
+    // static mappings, Type1V2 is still preferred.
+    //
+    // See crrev.com/c/3593528 for the implementation.
+    Type1ChromeOS = 100001,
+}
+
+// Hint as to whether IOMMU mappings will tend to be large and static or
+// small and dynamic.
+#[derive(PartialEq)]
+enum IommuMappingHint {
+    Static,
+    Dynamic,
 }
 
 /// VfioContainer contain multi VfioGroup, and delegate an IOMMU domain table
@@ -132,16 +146,7 @@ impl VfioContainer {
             .open("/dev/vfio/vfio")
             .map_err(VfioError::OpenContainer)?;
 
-        // Safe as file is vfio container descriptor and ioctl is defined by kernel.
-        let version = unsafe { ioctl(&container, VFIO_GET_API_VERSION()) };
-        if version as u8 != VFIO_API_VERSION {
-            return Err(VfioError::VfioApiVersion);
-        }
-
-        Ok(VfioContainer {
-            container,
-            groups: HashMap::new(),
-        })
+        Self::new_from_container(container)
     }
 
     // Construct a VfioContainer from an exist container file.
@@ -306,7 +311,15 @@ impl VfioContainer {
         Err(VfioError::IommuGetCapInfo)
     }
 
-    fn init_vfio_iommu(&mut self) -> Result<()> {
+    fn init_vfio_iommu(&mut self, hint: IommuMappingHint) -> Result<()> {
+        // If we expect granular, dynamic mappings (i.e. viommu/coiommu), try the
+        // ChromeOS Type1ChromeOS first, then fall back to upstream versions.
+        if hint == IommuMappingHint::Dynamic {
+            if self.set_iommu(IommuType::Type1ChromeOS) == 0 {
+                return Ok(());
+            }
+        }
+
         if !self.check_extension(IommuType::Type1V2) {
             return Err(VfioError::VfioType1V2);
         }
@@ -329,9 +342,16 @@ impl VfioContainer {
             None => {
                 let group = Arc::new(Mutex::new(VfioGroup::new(self, id)?));
                 if self.groups.is_empty() {
-                    // Before the first group is added into container, do once per
-                    // container initialization.
-                    self.init_vfio_iommu()?;
+                    // Before the first group is added into container, do once per container
+                    // initialization. Both coiommu and virtio-iommu rely on small, dynamic
+                    // mappings. However, if an iommu is not enabled, then we map the entirety
+                    // of guest memory as a small number of large, static mappings.
+                    let mapping_hint = if iommu_enabled {
+                        IommuMappingHint::Dynamic
+                    } else {
+                        IommuMappingHint::Static
+                    };
+                    self.init_vfio_iommu(mapping_hint)?;
 
                     if !iommu_enabled {
                         vm.get_memory().with_regions(
@@ -373,7 +393,7 @@ impl VfioContainer {
                 if self.groups.is_empty() {
                     // Before the first group is added into container, do once per
                     // container initialization.
-                    self.init_vfio_iommu()?;
+                    self.init_vfio_iommu(IommuMappingHint::Static)?;
                 }
 
                 self.groups.insert(id, group.clone());
@@ -407,13 +427,18 @@ impl VfioContainer {
         }
     }
 
-    pub fn into_raw_descriptor(&self) -> Result<RawDescriptor> {
+    pub fn clone_as_raw_descriptor(&self) -> Result<RawDescriptor> {
         let raw_descriptor = unsafe { libc::dup(self.container.as_raw_descriptor()) };
         if raw_descriptor < 0 {
             Err(VfioError::ContainerDupError)
         } else {
             Ok(raw_descriptor)
         }
+    }
+
+    // Gets group ids for all groups in the container.
+    pub fn group_ids(&self) -> Vec<&u32> {
+        self.groups.keys().collect()
     }
 }
 
@@ -618,6 +643,7 @@ impl VfioCommonTrait for VfioCommonSetup {
                 let group_id = VfioGroup::get_group_id(path)?;
 
                 // One VFIO container is used for all devices belong to one VFIO group
+                // NOTE: vfio_wrapper relies on each container containing exactly one group.
                 IOMMU_CONTAINERS.with(|v| {
                     if let Some(ref mut containers) = *v.borrow_mut() {
                         let container = containers

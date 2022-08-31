@@ -9,7 +9,7 @@ use std::result;
 use std::sync::Arc;
 use std::thread;
 
-use base::{error, Event, FileSync, PollToken, RawDescriptor, WaitContext};
+use base::{error, Event, EventToken, FileSync, RawDescriptor, WaitContext};
 use data_model::{DataInit, Le16, Le32};
 use hypervisor::ProtectionType;
 use remain::sorted;
@@ -101,6 +101,21 @@ pub fn handle_input<I: SignalableInterrupt>(
             return Ok(());
         }
     }
+}
+
+/// Writes the available data from the reader into the given output queue.
+///
+/// # Arguments
+///
+/// * `reader` - The Reader with the data we want to write.
+/// * `output` - The output sink we are going to write the data to.
+pub fn process_transmit_request(mut reader: Reader, output: &mut dyn io::Write) -> io::Result<()> {
+    let len = reader.available_bytes();
+    let mut data = vec![0u8; len];
+    reader.read_exact(&mut data)?;
+    output.write_all(&data)?;
+    output.flush()?;
+    Ok(())
 }
 
 /// Processes the data taken from the given transmit queue into the output sink.
@@ -208,24 +223,9 @@ pub fn spawn_input_thread(
     Some(buffer_cloned)
 }
 
-/// Writes the available data from the reader into the given output queue.
-///
-/// # Arguments
-///
-/// * `reader` - The Reader with the data we want to write.
-/// * `output` - The output sink we are going to write the data to.
-pub fn process_transmit_request(mut reader: Reader, output: &mut dyn io::Write) -> io::Result<()> {
-    let len = reader.available_bytes();
-    let mut data = vec![0u8; len];
-    reader.read_exact(&mut data)?;
-    output.write_all(&data)?;
-    output.flush()?;
-    Ok(())
-}
-
 impl Worker {
     fn run(&mut self) {
-        #[derive(PollToken)]
+        #[derive(EventToken)]
         enum Token {
             ReceiveQueueAvailable,
             TransmitQueueAvailable,

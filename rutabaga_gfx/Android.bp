@@ -25,8 +25,10 @@ rust_library {
     ],
     rustlibs: [
         "libbase_rust",
+        "libcfg_if",
         "libdata_model",
         "liblibc",
+        "libserde",
         "libsync_rust",
         "libthiserror",
     ],
@@ -72,8 +74,10 @@ rust_test {
     ],
     rustlibs: [
         "libbase_rust",
+        "libcfg_if",
         "libdata_model",
         "liblibc",
+        "libserde",
         "libsync_rust",
         "libthiserror",
     ],

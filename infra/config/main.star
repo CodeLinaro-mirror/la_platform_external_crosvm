@@ -126,10 +126,15 @@ luci.cq_group(
     ),
 )
 
-# Configure postsubmit tests running in ci pool
+# Console showing all postsubmit verify builders
 luci.console_view(
-    name = "CI Console",
+    name = "Postsubmit",
     repo = "https://chromium.googlesource.com/crosvm/crosvm",
+)
+
+# View showing all infra builders
+luci.list_view(
+    name = "Infra",
 )
 
 def verify_builder(name, dimensions, presubmit = True, postsubmit = True, **args):
@@ -162,7 +167,7 @@ def verify_builder(name, dimensions, presubmit = True, postsubmit = True, **args
             triggers = ["ci/%s" % name],
         )
         luci.console_view_entry(
-            console_view = "CI Console",
+            console_view = "Postsubmit",
             builder = "ci/%s" % name,
             category = "linux",
         )
@@ -227,11 +232,44 @@ def verify_chromeos_builder(board, **kwargs):
         **kwargs
     )
 
+def infra_builder(name, postsubmit, **args):
+    """Creates a ci job to run infra recipes that are not involved in verifying changes.
+
+    The builders are added to a separate infra dashboard.
+
+    Args:
+        name: Name of the builder
+        postsubmit: True if the builder should run after each submitted commit.
+        **args: Passed to luci.builder
+    """
+    luci.builder(
+        name = name,
+        bucket = "ci",
+        service_account = "crosvm-luci-ci-builder@crosvm-infra.iam.gserviceaccount.com",
+        dimensions = {
+            "pool": "luci.crosvm.ci",
+            "os": "Ubuntu",
+            "cpu": "x86-64",
+        },
+        **args
+    )
+    if postsubmit:
+        luci.gitiles_poller(
+            name = "main source",
+            bucket = "ci",
+            repo = "https://chromium.googlesource.com/crosvm/crosvm",
+            triggers = ["ci/%s" % name],
+        )
+    luci.list_view_entry(
+        list_view = "Infra",
+        builder = "ci/%s" % name,
+    )
+
 verify_linux_builder("x86_64")
 verify_linux_builder("aarch64")
 verify_linux_builder("armhf")
 
-verify_chromeos_builder("amd64_generic", presubmit = False)
+verify_chromeos_builder("amd64-generic", presubmit = False)
 
 verify_builder(
     name = "crosvm_health_check",
@@ -244,3 +282,19 @@ verify_builder(
     ),
 )
 
+infra_builder(
+    name = "crosvm_push_to_github",
+    executable = luci.recipe(
+        name = "push_to_github",
+    ),
+    postsubmit = True,
+)
+
+infra_builder(
+    name = "crosvm_update_chromeos_merges",
+    executable = luci.recipe(
+        name = "update_chromeos_merges",
+    ),
+    schedule = "0,30 * * * *",  # Run every 30 minutes
+    postsubmit = False,
+)

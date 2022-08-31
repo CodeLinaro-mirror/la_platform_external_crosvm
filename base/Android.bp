@@ -41,7 +41,7 @@ rust_test {
         "libuuid",
     ],
     proc_macros: [
-        "libbase_poll_token_derive",
+        "libbase_event_token_derive",
         "libremain",
     ],
     target: {
@@ -93,7 +93,7 @@ rust_library {
         "libuuid",
     ],
     proc_macros: [
-        "libbase_poll_token_derive",
+        "libbase_event_token_derive",
         "libremain",
     ],
     target: {

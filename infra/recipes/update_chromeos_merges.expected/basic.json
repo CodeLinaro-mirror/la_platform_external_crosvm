@@ -1,0 +1,36 @@
+[
+  {
+    "cmd": [
+      "vpython3",
+      "./tools/chromeos/merge_bot",
+      "--verbose",
+      "update-merges",
+      "--is-bot",
+      "origin/main"
+    ],
+    "cwd": "[CACHE]/builder/crosvm",
+    "env_prefixes": {
+      "MERGE_BOT_TEST": [
+        "1"
+      ]
+    },
+    "name": "Update Merges"
+  },
+  {
+    "cmd": [
+      "vpython3",
+      "./tools/chromeos/merge_bot",
+      "--verbose",
+      "update-dry-runs",
+      "--is-bot",
+      "origin/main"
+    ],
+    "cwd": "[CACHE]/builder/crosvm",
+    "env_prefixes": {
+      "MERGE_BOT_TEST": [
+        "1"
+      ]
+    },
+    "name": "Update Dry Runs"
+  }
+]

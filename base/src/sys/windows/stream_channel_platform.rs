@@ -382,7 +382,7 @@ impl AsRawDescriptor for &StreamChannel {
 }
 
 impl ReadNotifier for StreamChannel {
-    /// Returns a RawDescriptor that can be polled for reads using PollContext.
+    /// Returns a RawDescriptor that can be polled for reads using WaitContext.
     fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
         &self.read_notify
     }
@@ -397,16 +397,16 @@ impl CloseNotifier for StreamChannel {
 #[cfg(test)]
 mod test {
     use super::{
-        super::{EventContext, EventTrigger, PollToken},
+        super::{EventContext, EventTrigger},
         *,
     };
-    use crate::ReadNotifier;
+    use crate::{EventToken, ReadNotifier};
     use std::{
         io::{Read, Write},
         time::Duration,
     };
 
-    #[derive(PollToken, Debug, Eq, PartialEq, Copy, Clone)]
+    #[derive(EventToken, Debug, Eq, PartialEq, Copy, Clone)]
     enum Token {
         ReceivedData,
     }

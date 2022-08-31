@@ -35,11 +35,13 @@ data_model = { path = "../common/data_model" }
 dbus = { version = "0.9", optional = true }
 disk = { path = "../disk" }
 enumn = "0.1.0"
+ffmpeg = { path = "../media/ffmpeg", optional = true }
 fuse = {path = "../fuse" }
 gpu_display = { path = "../gpu_display", optional = true }
 rutabaga_gfx = { path = "../rutabaga_gfx", optional = true }
 hypervisor = { path = "../hypervisor" }
 kvm_sys = { path = "../kvm_sys" }
+lazy_static = "*"
 libc = "*"
 libcras = { path = "../libcras_stub", optional = true }
 libvda = { path = "../media/libvda", optional = true }
@@ -48,6 +50,7 @@ memoffset = { version = "0.6" }
 minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
 net_sys = { path = "../net_sys" }
 net_util = { path = "../net_util" }
+num-traits = "0.2"
 once_cell = "1.7.2"
 p9 = { path = "../common/p9" }
 power_monitor = { path = "../power_monitor" }
@@ -80,3 +83,4 @@ default-features = false
 
 [dev-dependencies]
 tempfile = "3"
+crc32fast = "1"

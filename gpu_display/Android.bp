@@ -61,11 +61,9 @@ cc_library_static {
     ],
     generated_headers: [
         "gpu_display_client_protocol_headers",
-        "wayland_extension_client_protocol_headers",
     ],
     export_generated_headers: [
         "gpu_display_client_protocol_headers",
-        "wayland_extension_client_protocol_headers",
     ],
 
     // added manually
@@ -90,14 +88,17 @@ cc_library_static {
     ],
 }
 
+// We could use the modules provided in //external/wayland-protocols, except
+//
+//  1. virtio-gpu-metadata-v1.xml is missing
+//  2. crosvm expects a different header suffix
+
 wayland_protocol_codegen {
     name: "gpu_display_protocol_sources",
     cmd: "$(location wayland_scanner) private-code < $(in) > $(out)",
     suffix: ".c",
     srcs: [
-        "protocol/aura-shell.xml",
-        "protocol/linux-dmabuf-unstable-v1.xml",
-        "protocol/viewporter.xml",
+        ":wayland_extension_protocols",
         "protocol/virtio-gpu-metadata-v1.xml",
     ],
     tools: ["wayland_scanner"],
@@ -108,9 +109,7 @@ wayland_protocol_codegen {
     cmd: "$(location wayland_scanner) client-header < $(in) > $(out)",
     suffix: ".h",
     srcs: [
-        "protocol/aura-shell.xml",
-        "protocol/linux-dmabuf-unstable-v1.xml",
-        "protocol/viewporter.xml",
+        ":wayland_extension_protocols",
         "protocol/virtio-gpu-metadata-v1.xml",
     ],
     tools: ["wayland_scanner"],
@@ -121,9 +120,7 @@ wayland_protocol_codegen {
     cmd: "$(location wayland_scanner) server-header < $(in) > $(out)",
     suffix: ".h",
     srcs: [
-        "protocol/aura-shell.xml",
-        "protocol/linux-dmabuf-unstable-v1.xml",
-        "protocol/viewporter.xml",
+        ":wayland_extension_protocols",
         "protocol/virtio-gpu-metadata-v1.xml",
     ],
     tools: ["wayland_scanner"],

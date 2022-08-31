@@ -42,13 +42,15 @@ pub use tube::{Error as TubeError, RecvTube, Result as TubeResult, SendTube, Tub
 pub use wait_context::{EventToken, EventType, TriggeredEvent, WaitContext};
 pub use write_zeroes::{PunchHole, WriteZeroesAt};
 
+// TODO(b/233233301): reorganize platform specific exports under platform
+// namespaces instead of exposing them directly in base::.
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
         pub use sys::unix;
 
         pub use unix::net;
 
-       // File related exports.
+        // File related exports.
         pub use platform::{FileFlags, get_max_open_files};
 
         // memory/mmap related exports.
@@ -63,13 +65,11 @@ cfg_if::cfg_if! {
             validate_raw_descriptor, clear_descriptor_cloexec,
         };
 
-
         // Event/signal related exports.
         pub use platform::{
             block_signal, clear_signal, get_blocked_signals, new_pipe_full,
             register_rt_signal_handler, signal, unblock_signal, Killable, SIGRTMIN,
-            WatchingEvents, EpollContext, EpollEvents, AcpiNotifyEvent, NetlinkGenericSocket,
-            SignalFd, Terminal, EventFd,
+            AcpiNotifyEvent, NetlinkGenericSocket, SignalFd, Terminal, EventFd,
         };
 
         pub use platform::{
@@ -115,10 +115,10 @@ pub use platform::{
 
 use uuid::Uuid;
 
+pub use platform::Protection;
 pub(crate) use platform::{file_punch_hole, file_write_zeroes_at};
 pub use platform::{get_cpu_affinity, set_cpu_affinity};
 pub use platform::{with_as_descriptor, with_raw_descriptor, RawDescriptor, INVALID_DESCRIPTOR};
-pub use platform::{PollToken, Protection};
 
 pub use crate::descriptor::{
     AsRawDescriptor, AsRawDescriptors, Descriptor, FromRawDescriptor, IntoRawDescriptor,
@@ -126,8 +126,9 @@ pub use crate::descriptor::{
 };
 
 pub use platform::getpid;
+pub use platform::platform_timer_resolution::enable_high_res_timers;
 pub use platform::{get_filesystem_type, open_file};
-pub use platform::{pagesize, round_up_to_page_size};
+pub use platform::{number_of_logical_cores, pagesize, round_up_to_page_size};
 pub use platform::{FileReadWriteAtVolatile, FileReadWriteVolatile, FileSetLen, FileSync};
 pub use platform::{MappedRegion, MemoryMappingArena, MmapError};
 

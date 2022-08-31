@@ -85,7 +85,7 @@ def BuildAndTest(api, board):
     )
     api.step(
         "Run unit tests",
-        [cros_sdk, "cros_run_unit_tests", "--board=%s" % board, "implicit-system"] + PACKAGE_LIST,
+        [cros_sdk, "cros_run_unit_tests", "--board=%s" % board, "--packages"] + PACKAGE_LIST,
     )
 
 
@@ -95,6 +95,7 @@ def CleanUp(api):
 
 
 def RunSteps(api, properties):
+    # Use a 'cleanup' path to ensure we are starting with a clean slate on each build.
     workspace = api.path["cleanup"].join("workspace")
     api.file.ensure_directory("Ensure workspace exists", workspace)
 
@@ -102,7 +103,7 @@ def RunSteps(api, properties):
         try:
             SetupSource(api, workspace)
             PrepareBuild(api)
-            BuildAndTest(api, properties.board or "amd64_generic")
+            BuildAndTest(api, properties.board or "amd64-generic")
         finally:
             CleanUp(api)
 

@@ -768,7 +768,9 @@ pub struct RutabagaBuilder {
 impl RutabagaBuilder {
     /// Create new a RutabagaBuilder.
     pub fn new(default_component: RutabagaComponentType, context_mask: u64) -> RutabagaBuilder {
-        let virglrenderer_flags = VirglRendererFlags::new();
+        let virglrenderer_flags = VirglRendererFlags::new()
+            .use_thread_sync(true)
+            .use_async_fence_cb(true);
         let gfxstream_flags = GfxstreamFlags::new().use_async_fence_cb(true);
 
         RutabagaBuilder {
@@ -853,6 +855,12 @@ impl RutabagaBuilder {
         self
     }
 
+    /// Use the Vulkan swapchain to draw on the host window for gfxstream.
+    pub fn set_wsi(mut self, v: Option<&RutabagaWsi>) -> RutabagaBuilder {
+        self.gfxstream_flags = self.gfxstream_flags.set_wsi(v);
+        self
+    }
+
     /// Set rutabaga channels for the RutabagaBuilder
     pub fn set_rutabaga_channels(
         mut self,
@@ -916,7 +924,6 @@ impl RutabagaBuilder {
                 .virglrenderer_flags
                 .use_virgl(capset_enabled(RUTABAGA_CAPSET_VIRGL2))
                 .use_venus(capset_enabled(RUTABAGA_CAPSET_VENUS))
-                .use_async_fence_cb(capset_enabled(RUTABAGA_CAPSET_DRM))
                 .use_drm(capset_enabled(RUTABAGA_CAPSET_DRM));
         }
 
