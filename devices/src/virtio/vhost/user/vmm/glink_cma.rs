@@ -6,7 +6,6 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 use std::u32;
-use data_model::Le64;
 
 use base::{error, Event, RawDescriptor};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
@@ -90,11 +89,7 @@ impl VirtioDevice for GlinkPassthrough {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self
-            .handler
-            .borrow_mut()
-            .read_config::<Le64>(offset, data)
-        {
+        if let Err(e) = self.handler.borrow_mut().read_config(offset, data) {
             error!("failed to read config: {}", e);
         }
     }

@@ -15,7 +15,7 @@ use vm_memory::GuestMemory;
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error};
-use crate::virtio::{Interrupt, Queue, VirtioDevice, VirtioNetConfig, TYPE_NET};
+use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_NET};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -104,11 +104,7 @@ impl VirtioDevice for Net {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self
-            .handler
-            .borrow_mut()
-            .read_config::<VirtioNetConfig>(offset, data)
-        {
+        if let Err(e) = self.handler.borrow_mut().read_config(offset, data) {
             error!("failed to read config: {}", e);
         }
     }
