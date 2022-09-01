@@ -20,7 +20,7 @@ use libc::sched_getcpu;
 
 use acpi_tables::aml::Aml;
 use acpi_tables::sdt::SDT;
-use base::{syslog, AsRawDescriptor, AsRawDescriptors, Event, Tube};
+use base::{syslog, AsRawDescriptor, AsRawDescriptors, Event, SendTube, Tube};
 use devices::virtio::VirtioDevice;
 use devices::{
     BarRange, Bus, BusDevice, BusDeviceObj, BusError, BusResumeDevice, HotPlugBus, IrqChip,
@@ -81,66 +81,70 @@ pub enum VcpuAffinity {
 
 /// Holds the pieces needed to build a VM. Passed to `build_vm` in the `LinuxArch` trait below to
 /// create a `RunnableLinuxVm`.
+#[sorted]
 pub struct VmComponents {
-    pub memory_size: u64,
-    pub swiotlb: Option<u64>,
-    pub vcpu_count: usize,
-    pub vcpu_affinity: Option<VcpuAffinity>,
-    pub cpu_clusters: Vec<Vec<usize>>,
-    pub cpu_capacity: BTreeMap<usize, u32>,
-    pub no_smt: bool,
-    pub hugepages: bool,
-    pub vm_image: VmImage,
-    pub android_fstab: Option<File>,
-    pub pstore: Option<Pstore>,
-    pub initrd_image: Option<File>,
-    pub extra_kernel_params: Vec<String>,
     pub acpi_sdts: Vec<SDT>,
-    pub rt_cpus: Vec<usize>,
+    pub android_fstab: Option<File>,
+    pub cpu_capacity: BTreeMap<usize, u32>,
+    pub cpu_clusters: Vec<Vec<usize>>,
     pub delay_rt: bool,
-    pub protected_vm: ProtectionType,
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    pub gdb: Option<(u32, Tube)>, // port and control tube.
-    pub dmi_path: Option<PathBuf>,
-    pub no_legacy: bool,
-    pub host_cpu_topology: bool,
-    pub itmt: bool,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub force_s2idle: bool,
     #[cfg(feature = "direct")]
     pub direct_gpe: Vec<u32>,
+    pub dmi_path: Option<PathBuf>,
+    pub extra_kernel_params: Vec<String>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub force_s2idle: bool,
+    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    pub gdb: Option<(u32, Tube)>, // port and control tube.
+    pub host_cpu_topology: bool,
+    pub hugepages: bool,
+    pub initrd_image: Option<File>,
+    pub itmt: bool,
+    pub memory_size: u64,
+    pub no_legacy: bool,
+    pub no_smt: bool,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub pci_low_start: Option<u64>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub pcie_ecam: Option<MemRegion>,
+    pub protected_vm: ProtectionType,
+    pub pstore: Option<Pstore>,
     /// A file to load as pVM firmware. Must be `Some` iff
     /// `protected_vm == ProtectionType::UnprotectedWithFirmware`.
     pub pvm_fw: Option<File>,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub pcie_ecam: Option<MemRegion>,
+    pub rt_cpus: Vec<usize>,
+    pub swiotlb: Option<u64>,
+    pub vcpu_affinity: Option<VcpuAffinity>,
+    pub vcpu_count: usize,
+    pub vm_image: VmImage,
 }
 
 /// Holds the elements needed to run a Linux VM. Created by `build_vm`.
+#[sorted]
 pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
-    pub vm: V,
-    pub vcpu_count: usize,
-    /// If vcpus is None, then it's the responsibility of the vcpu thread to create vcpus.
-    /// If it's Some, then `build_vm` already created the vcpus.
-    pub vcpus: Option<Vec<Vcpu>>,
-    pub vcpu_affinity: Option<VcpuAffinity>,
-    pub no_smt: bool,
-    pub irq_chip: Box<dyn IrqChipArch>,
-    pub has_bios: bool,
-    pub io_bus: Arc<Bus>,
-    pub mmio_bus: Arc<Bus>,
-    pub pid_debug_label_map: BTreeMap<u32, String>,
-    pub suspend_evt: Event,
-    pub rt_cpus: Vec<usize>,
-    pub delay_rt: bool,
     pub bat_control: Option<BatControl>,
+    pub delay_rt: bool,
     #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
     pub gdb: Option<(u32, Tube)>,
+    pub has_bios: bool,
+    pub hotplug_bus: Vec<Arc<Mutex<dyn HotPlugBus>>>,
+    pub io_bus: Arc<Bus>,
+    pub irq_chip: Box<dyn IrqChipArch>,
+    pub mmio_bus: Arc<Bus>,
+    pub no_smt: bool,
+    pub pid_debug_label_map: BTreeMap<u32, String>,
     pub pm: Option<Arc<Mutex<dyn PmResource>>>,
     /// Devices to be notified before the system resumes from the S3 suspended state.
     pub resume_notify_devices: Vec<Arc<Mutex<dyn BusResumeDevice>>>,
     pub root_config: Arc<Mutex<PciRoot>>,
-    pub hotplug_bus: Vec<Arc<Mutex<dyn HotPlugBus>>>,
+    pub rt_cpus: Vec<usize>,
+    pub suspend_evt: Event,
+    pub vcpu_affinity: Option<VcpuAffinity>,
+    pub vcpu_count: usize,
+    /// If vcpus is None, then it's the responsibility of the vcpu thread to create vcpus.
+    /// If it's Some, then `build_vm` already created the vcpus.
+    pub vcpus: Option<Vec<Vcpu>>,
+    pub vm: V,
 }
 
 /// The device and optional jail.
@@ -180,10 +184,8 @@ pub trait LinuxArch {
     /// # Arguments
     ///
     /// * `components` - Parts to use to build the VM.
-    /// * `exit_evt` - Event used by sub-devices to request that crosvm exit because guest
-    ///     wants to stop/shut down.
-    /// * `reset_evt` - Event used by sub-devices to request that crosvm exit because guest
-    ///     requested reset.
+    /// * `vm_evt_wrtube` - Tube used by sub-devices to request that crosvm exit because guest
+    ///     wants to stop/shut down or requested reset.
     /// * `system_allocator` - Allocator created by this trait's implementation of
     ///   `get_system_allocator_config`.
     /// * `serial_parameters` - Definitions for how the serial devices should be configured.
@@ -193,10 +195,10 @@ pub trait LinuxArch {
     /// * `ramoops_region` - Region allocated for ramoops.
     /// * `devices` - The devices to be built into the VM.
     /// * `irq_chip` - The IRQ chip implemention for the VM.
+    /// * `debugcon_jail` - Jail used for debugcon devices created here.
     fn build_vm<V, Vcpu>(
         components: VmComponents,
-        exit_evt: &Event,
-        reset_evt: &Event,
+        vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
@@ -206,6 +208,7 @@ pub trait LinuxArch {
         devices: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipArch,
         vcpu_ids: &mut Vec<usize>,
+        debugcon_jail: Option<Minijail>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmArch,
@@ -222,6 +225,10 @@ pub trait LinuxArch {
     /// * `vcpu_id` - The id of the given `vcpu`.
     /// * `num_cpus` - Number of virtual CPUs the guest will have.
     /// * `has_bios` - Whether the `VmImage` is a `Bios` image
+    /// * `no_smt` - Wheter diabling SMT.
+    /// * `host_cpu_topology` - whether enabling host cpu topology.
+    /// * `enable_pnp_data` - whether enabling PnP statistics data.
+    /// * `itmt` - whether enabling ITMT scheduler
     fn configure_vcpu<V: Vm>(
         vm: &V,
         hypervisor: &dyn HypervisorArch,
@@ -232,6 +239,7 @@ pub trait LinuxArch {
         has_bios: bool,
         no_smt: bool,
         host_cpu_topology: bool,
+        enable_pnp_data: bool,
         itmt: bool,
     ) -> Result<(), Self::Error>;
 
@@ -621,7 +629,18 @@ pub fn generate_pci_root(
         }
     }
 
-    for (dev_idx, (mut device, jail)) in devices.into_iter().enumerate() {
+    // To prevent issues where device's on_sandbox may spawn thread before all
+    // sandboxed devices are sandboxed we partition iterator to go over sandboxed
+    // first
+    let devices = {
+        let (sandboxed, non_sandboxed): (Vec<_>, Vec<_>) = devices
+            .into_iter()
+            .enumerate()
+            .partition(|(_, (_, jail))| jail.is_some());
+        sandboxed.into_iter().chain(non_sandboxed.into_iter())
+    };
+
+    for (dev_idx, (mut device, jail)) in devices {
         let address = device_addrs[dev_idx];
 
         let mut keep_rds = device.keep_rds();
@@ -852,10 +871,11 @@ where
 /// Read and write permissions setting
 ///
 /// Wrap read_allow and write_allow to store them in MsrHandlers level.
-#[derive(Clone, Copy, Default)]
-pub struct MsrRWType {
-    pub read_allow: bool,
-    pub write_allow: bool,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MsrRWType {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
 }
 
 /// Handler types for userspace-msr
@@ -895,32 +915,20 @@ impl MsrValueFrom {
     }
 }
 
-/// If user doesn't specific CPU0, the default source CPU is running CPU.
-impl Default for MsrValueFrom {
-    fn default() -> Self {
-        MsrValueFrom::RWFromRunningCPU
-    }
-}
-
 /// Config option for userspace-msr handing
 ///
 /// MsrConfig will be collected with its corresponding MSR's index.
 /// eg, (msr_index, msr_config)
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MsrConfig {
     /// If support RDMSR/WRMSR emulation in crosvm?
     pub rw_type: MsrRWType,
     /// Handlers should be used to handling MSR.
-    /// User must set this field.
-    pub action: Option<MsrAction>,
+    pub action: MsrAction,
     /// MSR source CPU.
     pub from: MsrValueFrom,
-}
-
-impl MsrConfig {
-    pub fn new() -> Self {
-        Default::default()
-    }
+    /// Whether to override KVM MSR emulation.
+    pub filter: bool,
 }
 
 #[sorted]
@@ -928,6 +936,4 @@ impl MsrConfig {
 pub enum MsrExitHandlerError {
     #[error("Fail to create MSR handler")]
     HandlerCreateFailed,
-    #[error("Error parameter")]
-    InvalidParam,
 }

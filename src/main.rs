@@ -18,13 +18,13 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::string::String;
-use std::thread::sleep;
-use std::time::Duration;
 
 use arch::{
-    set_default_serial_parameters, MsrAction, MsrConfig, MsrValueFrom, Pstore, VcpuAffinity,
+    set_default_serial_parameters, MsrAction, MsrConfig, MsrRWType, MsrValueFrom, Pstore,
+    VcpuAffinity,
 };
-use base::{debug, error, getpid, info, kill_process_group, pagesize, reap_child, syslog, warn};
+use base::syslog::LogConfig;
+use base::{debug, error, getpid, info, pagesize, syslog};
 use crosvm::{
     argument::{self, parse_hex_or_decimal, print_help, set_arguments, Argument},
     platform, BindMount, Config, Executable, FileBackedMappingParameters, GidMap,
@@ -70,7 +70,9 @@ use vm_control::{
     VmResponse,
 };
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use x86_64::set_itmt_msr_config;
+use x86_64::{set_enable_pnp_data_msr_config, set_itmt_msr_config};
+
+use rutabaga_gfx::calculate_context_mask;
 
 const ONE_MB: u64 = 1 << 20;
 const MB_ALIGNED: u64 = ONE_MB - 1;
@@ -83,34 +85,6 @@ static ALLOCATOR: scudo::GlobalScudoAllocator = scudo::GlobalScudoAllocator;
 
 fn executable_is_plugin(executable: &Option<Executable>) -> bool {
     matches!(executable, Some(Executable::Plugin(_)))
-}
-
-// Wait for all children to exit. Return true if they have all exited, false
-// otherwise.
-fn wait_all_children() -> bool {
-    const CHILD_WAIT_MAX_ITER: isize = 100;
-    const CHILD_WAIT_MS: u64 = 10;
-    for _ in 0..CHILD_WAIT_MAX_ITER {
-        loop {
-            match reap_child() {
-                Ok(0) => break,
-                // We expect ECHILD which indicates that there were no children left.
-                Err(e) if e.errno() == libc::ECHILD => return true,
-                Err(e) => {
-                    warn!("error while waiting for children: {}", e);
-                    return false;
-                }
-                // We reaped one child, so continue reaping.
-                _ => {}
-            }
-        }
-        // There's no timeout option for waitpid which reap_child calls internally, so our only
-        // recourse is to sleep while waiting for the children to exit.
-        sleep(Duration::from_millis(CHILD_WAIT_MS));
-    }
-
-    // If we've made it to this point, not all of the children have exited.
-    false
 }
 
 /// Parse a comma-separated list of CPU numbers and ranges and convert it to a Vec of CPU numbers.
@@ -258,10 +232,28 @@ fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argumen
                 // Preferred: Specifying --gpu,backend=<mode>
                 "backend" => match v {
                     "2d" | "2D" => {
-                        gpu_params.mode = GpuMode::Mode2D;
+                        if sys::is_gpu_backend_deprecated(v) {
+                            return Err(argument::Error::InvalidValue {
+                                value: v.to_string(),
+                                expected: String::from(
+                                    "this backend type is deprecated, please use gfxstream.",
+                                ),
+                            });
+                        } else {
+                            gpu_params.mode = GpuMode::Mode2D;
+                        }
                     }
                     "3d" | "3D" | "virglrenderer" => {
-                        gpu_params.mode = GpuMode::ModeVirglRenderer;
+                        if sys::is_gpu_backend_deprecated(v) {
+                            return Err(argument::Error::InvalidValue {
+                                value: v.to_string(),
+                                expected: String::from(
+                                    "this backend type is deprecated, please use gfxstream.",
+                                ),
+                            });
+                        } else {
+                            gpu_params.mode = GpuMode::ModeVirglRenderer;
+                        }
                     }
                     #[cfg(feature = "gfxstream")]
                     "gfxstream" => {
@@ -271,7 +263,10 @@ fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argumen
                         return Err(argument::Error::InvalidValue {
                             value: v.to_string(),
                             expected: String::from(
+                                #[cfg(feature = "gfxstream")]
                                 "gpu parameter 'backend' should be one of (2d|virglrenderer|gfxstream)",
+                                #[cfg(not(feature = "gfxstream"))]
+                                "gpu parameter 'backend' should be one of (2d|3d)",
                             ),
                         });
                     }
@@ -430,6 +425,10 @@ fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argumen
                         });
                     }
                 },
+                "context-types" => {
+                    let context_types: Vec<String> = v.split(':').map(|s| s.to_string()).collect();
+                    gpu_params.context_mask = calculate_context_mask(context_types);
+                }
                 "" => {}
                 _ => {
                     return Err(argument::Error::UnknownArgument(format!(
@@ -460,7 +459,7 @@ fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argumen
     #[cfg(feature = "gfxstream")]
     {
         if !vulkan_specified && gpu_params.mode == GpuMode::ModeGfxstream {
-            gpu_params.use_vulkan = true;
+            gpu_params.use_vulkan = sys::use_vulkan();
         }
 
         if syncfd_specified || angle_specified {
@@ -505,68 +504,6 @@ fn parse_video_options(s: Option<&str>) -> argument::Result<VideoBackendType> {
     }
 }
 
-#[cfg(feature = "gpu")]
-fn parse_gpu_display_options(
-    s: Option<&str>,
-    gpu_params: &mut GpuParameters,
-) -> argument::Result<()> {
-    let mut display_w: Option<u32> = None;
-    let mut display_h: Option<u32> = None;
-
-    if let Some(s) = s {
-        let opts = s
-            .split(',')
-            .map(|frag| frag.split('='))
-            .map(|mut kv| (kv.next().unwrap_or(""), kv.next().unwrap_or("")));
-
-        for (k, v) in opts {
-            match k {
-                "width" => {
-                    let width = v
-                        .parse::<u32>()
-                        .map_err(|_| argument::Error::InvalidValue {
-                            value: v.to_string(),
-                            expected: String::from("gpu parameter 'width' must be a valid integer"),
-                        })?;
-                    display_w = Some(width);
-                }
-                "height" => {
-                    let height = v
-                        .parse::<u32>()
-                        .map_err(|_| argument::Error::InvalidValue {
-                            value: v.to_string(),
-                            expected: String::from(
-                                "gpu parameter 'height' must be a valid integer",
-                            ),
-                        })?;
-                    display_h = Some(height);
-                }
-                "" => {}
-                _ => {
-                    return Err(argument::Error::UnknownArgument(format!(
-                        "gpu-display parameter {}",
-                        k
-                    )));
-                }
-            }
-        }
-    }
-
-    if display_w.is_none() || display_h.is_none() {
-        return Err(argument::Error::InvalidValue {
-            value: s.unwrap_or("").to_string(),
-            expected: String::from("gpu-display must include both 'width' and 'height'"),
-        });
-    }
-
-    gpu_params.displays.push(GpuDisplayParameters {
-        width: display_w.unwrap(),
-        height: display_h.unwrap(),
-    });
-
-    Ok(())
-}
-
 #[cfg(feature = "audio")]
 fn parse_ac97_options(s: &str) -> argument::Result<Ac97Parameters> {
     let mut ac97_params: Ac97Parameters = Default::default();
@@ -603,7 +540,10 @@ fn parse_ac97_options(s: &str) -> argument::Result<Ac97Parameters> {
 }
 
 fn parse_userspace_msr_options(value: &str) -> argument::Result<(u32, MsrConfig)> {
-    let mut msr_config = MsrConfig::new();
+    let mut rw_type: Option<MsrRWType> = None;
+    let mut action: Option<MsrAction> = None;
+    let mut from = MsrValueFrom::RWFromRunningCPU;
+    let mut filter: bool = false;
 
     let mut options = argument::parse_key_value_options("userspace-msr", value, ',');
     let index: u32 = options
@@ -616,42 +556,49 @@ fn parse_userspace_msr_options(value: &str) -> argument::Result<(u32, MsrConfig)
     for opt in options {
         match opt.key() {
             "type" => match opt.value()? {
-                "r" => msr_config.rw_type.read_allow = true,
-                "w" => msr_config.rw_type.write_allow = true,
-                "rw" | "wr" => {
-                    msr_config.rw_type.read_allow = true;
-                    msr_config.rw_type.write_allow = true;
-                }
+                "r" => rw_type = Some(MsrRWType::ReadOnly),
+                "w" => rw_type = Some(MsrRWType::WriteOnly),
+                "rw" | "wr" => rw_type = Some(MsrRWType::ReadWrite),
                 _ => {
                     return Err(opt.invalid_value_err(String::from("bad type")));
                 }
             },
             "action" => match opt.value()? {
-                "pass" => msr_config.action = Some(MsrAction::MsrPassthrough),
-                "emu" => msr_config.action = Some(MsrAction::MsrEmulate),
+                "pass" => action = Some(MsrAction::MsrPassthrough),
+                "emu" => action = Some(MsrAction::MsrEmulate),
                 _ => return Err(opt.invalid_value_err(String::from("bad action"))),
             },
             "from" => match opt.value()? {
-                "cpu0" => msr_config.from = MsrValueFrom::RWFromCPU0,
+                "cpu0" => from = MsrValueFrom::RWFromCPU0,
                 _ => return Err(opt.invalid_value_err(String::from("bad from"))),
             },
+            "filter" => match opt.value()? {
+                "yes" => filter = true,
+                "no" => filter = false,
+                _ => return Err(opt.invalid_value_err(String::from("bad filter"))),
+            },
+
             _ => return Err(opt.invalid_key_err()),
         }
     }
 
-    if !msr_config.rw_type.read_allow && !msr_config.rw_type.write_allow {
-        return Err(argument::Error::ExpectedArgument(String::from(
-            "userspace-msr: type is required",
-        )));
-    }
+    let rw_type = rw_type.ok_or(argument::Error::ExpectedArgument(String::from(
+        "userspace-msr: type is required",
+    )))?;
 
-    if msr_config.action.is_none() {
-        return Err(argument::Error::ExpectedArgument(String::from(
-            "userspace-msr: action is required",
-        )));
-    }
+    let action = action.ok_or(argument::Error::ExpectedArgument(String::from(
+        "userspace-msr: action is required",
+    )))?;
 
-    Ok((index, msr_config))
+    Ok((
+        index,
+        MsrConfig {
+            rw_type,
+            action,
+            from,
+            filter,
+        },
+    ))
 }
 
 fn parse_serial_options(s: &str) -> argument::Result<SerialParameters> {
@@ -1144,6 +1091,8 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
         }
         "serial" => {
             let serial_params = parse_serial_options(value.unwrap())?;
+            sys::check_serial_params(&serial_params)?;
+
             let num = serial_params.num;
             let key = (serial_params.hardware, num);
             if cfg.serial_parameters.contains_key(&key) {
@@ -1202,7 +1151,6 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
                     "`syslog-tag` already given".to_owned(),
                 ));
             }
-            syslog::set_proc_name(value.unwrap());
             cfg.syslog_tag = Some(value.unwrap().to_owned());
         }
         "root" | "rwroot" | "disk" | "rwdisk" => {
@@ -1251,10 +1199,8 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
             cfg.pmem_devices.push(DiskOption {
                 path: disk_path,
                 read_only: !name.starts_with("rw"),
-                sparse: false,
-                o_direct: false,
                 block_size: base::pagesize() as u32,
-                id: None,
+                ..Default::default()
             });
         }
         "pstore" => {
@@ -1300,43 +1246,14 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
                 },
             });
         }
-        "netmask" => {
-            if cfg.netmask.is_some() {
-                return Err(argument::Error::TooManyArguments(
-                    "`netmask` already given".to_owned(),
-                ));
-            }
-            cfg.netmask =
-                Some(
-                    value
-                        .unwrap()
-                        .parse()
-                        .map_err(|_| argument::Error::InvalidValue {
-                            value: value.unwrap().to_owned(),
-                            expected: String::from("`netmask` needs to be in the form \"x.x.x.x\""),
-                        })?,
-                )
-        }
-        "mac" => {
-            if cfg.mac_address.is_some() {
-                return Err(argument::Error::TooManyArguments(
-                    "`mac` already given".to_owned(),
-                ));
-            }
-            cfg.mac_address =
-                Some(
-                    value
-                        .unwrap()
-                        .parse()
-                        .map_err(|_| argument::Error::InvalidValue {
-                            value: value.unwrap().to_owned(),
-                            expected: String::from(
-                                "`mac` needs to be in the form \"XX:XX:XX:XX:XX:XX\"",
-                            ),
-                        })?,
-                )
-        }
         "net-vq-pairs" => {
+            // When using slirp, this option is not supported on windows.
+            if sys::net_vq_pairs_expected() {
+                return Err(argument::Error::InvalidValue {
+                    value: value.unwrap().to_owned(),
+                    expected: String::from("`net-vq-pairs` is not supported."),
+                });
+            }
             if cfg.net_vq_pairs.is_some() {
                 return Err(argument::Error::TooManyArguments(
                     "`net-vq-pairs` already given".to_owned(),
@@ -1465,34 +1382,6 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
                     })?,
             );
         }
-        "seccomp-policy-dir" => {
-            if let Some(jail_config) = &mut cfg.jail_config {
-                // `value` is Some because we are in this match so it's safe to unwrap.
-                jail_config.seccomp_policy_dir = PathBuf::from(value.unwrap());
-            }
-        }
-        "seccomp-log-failures" => {
-            // A side-effect of this flag is to force the use of .policy files
-            // instead of .bpf files (.bpf files are expected and assumed to be
-            // compiled to fail an unpermitted action with "trap").
-            // Normally crosvm will first attempt to use a .bpf file, and if
-            // not present it will then try to use a .policy file.  It's up
-            // to the build to decide which of these files is present for
-            // crosvm to use (for CrOS the build will use .bpf files for
-            // x64 builds and .policy files for arm/arm64 builds).
-            //
-            // This flag will likely work as expected for builds that use
-            // .policy files.  For builds that only use .bpf files the initial
-            // result when using this flag is likely to be a file-not-found
-            // error (since the .policy files are not present).
-            // For .bpf builds you can either 1) manually add the .policy files,
-            // or 2) do not use this command-line parameter and instead
-            // temporarily change the build by passing "log" rather than
-            // "trap" as the "--default-action" to compile_seccomp_policy.py.
-            if let Some(jail_config) = &mut cfg.jail_config {
-                jail_config.seccomp_log_failures = true;
-            }
-        }
         "plugin" => {
             if cfg.executable_path.is_some() {
                 return Err(argument::Error::TooManyArguments(format!(
@@ -1555,11 +1444,6 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
         "gpu" => {
             let gpu_parameters = cfg.gpu_parameters.get_or_insert_with(Default::default);
             parse_gpu_options(value, gpu_parameters)?;
-        }
-        #[cfg(feature = "gpu")]
-        "gpu-display" => {
-            let gpu_parameters = cfg.gpu_parameters.get_or_insert_with(Default::default);
-            parse_gpu_display_options(value, gpu_parameters)?;
         }
         "software-tpm" => {
             cfg.software_tpm = true;
@@ -1860,21 +1744,6 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
                 );
         }
         #[cfg(feature = "direct")]
-        "direct-wake-irq" => {
-            cfg.direct_wake_irq
-                .push(
-                    value
-                        .unwrap()
-                        .parse()
-                        .map_err(|_| argument::Error::InvalidValue {
-                            value: value.unwrap().to_owned(),
-                            expected: String::from(
-                                "this value for `direct-wake-irq` must be an unsigned integer",
-                            ),
-                        })?,
-                );
-        }
-        #[cfg(feature = "direct")]
         "direct-gpe" => {
             cfg.direct_gpe.push(value.unwrap().parse().map_err(|_| {
                 argument::Error::InvalidValue {
@@ -1923,7 +1792,10 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
         }
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         "host-cpu-topology" => {
-            cfg.host_cpu_topology = true;
+            cfg.host_cpu_topology = sys::use_host_cpu_topology();
+        }
+        "enable-pnp-data" => {
+            cfg.enable_pnp_data = true;
         }
         "privileged-vm" => {
             cfg.privileged_vm = true;
@@ -2151,6 +2023,28 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
 
             cfg.pcie_ecam = Some(MemRegion { base, size: len });
         }
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        "pci-start" => {
+            if cfg.pci_low_start.is_some() {
+                return Err(argument::Error::TooManyArguments(
+                    "`pci-start` already given".to_owned(),
+                ));
+            }
+
+            let value = value.unwrap();
+            let start = parse_hex_or_decimal(value).map_err(|_| argument::Error::InvalidValue {
+                value: value.to_owned(),
+                expected: String::from("pci-start parameter should be integer"),
+            })?;
+            // pci-start should be below 4G and aligned to 256MB
+            if start >= 0x1_0000_0000 || start & 0xFFF_FFFF != 0 {
+                return Err(argument::Error::InvalidValue {
+                    value: value.to_owned(),
+                    expected: String::from("pci-start should be below 4G and alignment to 256MB"),
+                });
+            }
+            cfg.pci_low_start = Some(start);
+        }
         "help" => return Err(argument::Error::PrintHelp),
         _ => sys::set_arguments(cfg, name, value)?,
     }
@@ -2220,8 +2114,7 @@ fn validate_arguments(cfg: &mut Config) -> std::result::Result<(), argument::Err
             ));
         }
 
-        // Safe because we pass a flag for this call and the host supports this system call
-        let pcpu_count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) } as usize;
+        let pcpu_count = sys::get_vcpu_count()?;
         if cfg.vcpu_count.is_some() {
             if pcpu_count != cfg.vcpu_count.unwrap() {
                 return Err(argument::Error::ExpectedArgument(format!(
@@ -2255,13 +2148,26 @@ fn validate_arguments(cfg: &mut Config) -> std::result::Result<(), argument::Err
         if !cfg.userspace_msr.is_empty() {
             for (_, msr_config) in cfg.userspace_msr.iter() {
                 if msr_config.from == MsrValueFrom::RWFromRunningCPU {
-                    return Err(argument::Error::UnknownArgument(
+                    return Err(argument::Error::ExpectedArgument(
                         "`userspace-msr` must set `cpu0` if `host-cpu-topology` is not set"
                             .to_owned(),
                     ));
                 }
             }
         }
+    }
+    if cfg.enable_pnp_data {
+        if !cfg.host_cpu_topology {
+            return Err(argument::Error::ExpectedArgument(
+                "setting `enable_pnp_data` must require `host-cpu-topology` is set previously."
+                    .to_owned(),
+            ));
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        set_enable_pnp_data_msr_config(cfg.itmt, &mut cfg.userspace_msr).map_err(|e| {
+            argument::Error::UnknownArgument(format!("MSR can't be passed through {}", e))
+        })?;
     }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     if cfg.itmt {
@@ -2302,7 +2208,7 @@ fn validate_arguments(cfg: &mut Config) -> std::result::Result<(), argument::Err
             }
         }
         set_itmt_msr_config(&mut cfg.userspace_msr).map_err(|e| {
-            argument::Error::UnknownArgument(format!("the cpu doesn't support itmt {}", e))
+            argument::Error::UnexpectedValue(format!("the cpu doesn't support itmt {}", e))
         })?;
     }
     if !cfg.balloon && cfg.balloon_control.is_some() {
@@ -2332,7 +2238,13 @@ enum CommandStatus {
     GuestPanic,
 }
 
-fn run_vm(args: std::env::Args) -> std::result::Result<CommandStatus, ()> {
+fn run_vm<F: 'static>(
+    args: std::env::Args,
+    log_config: LogConfig<F>,
+) -> std::result::Result<CommandStatus, ()>
+where
+    F: Fn(&mut syslog::fmt::Formatter, &log::Record<'_>) -> std::io::Result<()> + Sync + Send,
+{
     let mut arguments =
         vec![Argument::positional("KERNEL", "bzImage of kernel to run"),
           Argument::value("kvm-device", "PATH", "Path to the KVM device. (default /dev/kvm)"),
@@ -2388,8 +2300,6 @@ fn run_vm(args: std::env::Args) -> std::result::Result<CommandStatus, ()> {
           Argument::value("rw-pmem-device", "PATH", "Path to a writable disk image."),
           Argument::value("pmem-device", "PATH", "Path to a disk image."),
           Argument::value("pstore", "path=PATH,size=SIZE", "Path to pstore buffer backend file followed by size."),
-          Argument::value("netmask", "NETMASK", "Netmask for VM subnet."),
-          Argument::value("mac", "MAC", "MAC address for VM."),
           Argument::value("net-vq-pairs", "N", "virtio net virtual queue paris. (default: 1)"),
           #[cfg(feature = "audio")]
           Argument::value("ac97",
@@ -2412,28 +2322,6 @@ fn run_vm(args: std::env::Args) -> std::result::Result<CommandStatus, ()> {
                               server - The to the VIOS server (unix socket)."),
           #[cfg(feature = "audio")]
           Argument::value("sound", "[PATH]", "Path to the VioS server socket for setting up virtio-snd devices."),
-          Argument::value("serial",
-                          "type=TYPE,[hardware=HW,num=NUM,path=PATH,input=PATH,console,earlycon,stdin]",
-                          "Comma separated key=value pairs for setting up serial devices. Can be given more than once.
-
-                              Possible key values:
-
-                              type=(stdout,syslog,sink,file) - Where to route the serial device
-
-                              hardware=(serial,virtio-console) - Which type of serial hardware to emulate. Defaults to 8250 UART (serial).
-
-                              num=(1,2,3,4) - Serial Device Number. If not provided, num will default to 1.
-
-                              path=PATH - The path to the file to write to when type=file
-
-                              input=PATH - The path to the file to read from when not stdin
-
-                              console - Use this serial device as the guest console. Can only be given once. Will default to first serial port if not provided.
-
-                              earlycon - Use this serial device as the early console. Can only be given once.
-
-                              stdin - Direct standard input to this serial device. Can only be given once. Will default to first serial port if not provided.
-                              "),
           Argument::value("syslog-tag", "TAG", "When logging to syslog, use the provided tag."),
           Argument::value("x-display", "DISPLAY", "X11 display name to use."),
           Argument::flag("display-window-keyboard", "Capture keyboard input from the display window."),
@@ -2472,8 +2360,6 @@ There is a cost of slightly increased latency the first time the file is accesse
 
                               posix_acl=BOOL - Indicates whether the shared directory supports POSIX ACLs.  This should only be enabled when the underlying file system supports POSIX ACLs.  The default value for this option is \"true\".
 "),
-          Argument::value("seccomp-policy-dir", "PATH", "Path to seccomp .policy files."),
-          Argument::flag("seccomp-log-failures", "Instead of seccomp filter failures being fatal, they will be logged instead."),
           #[cfg(feature = "plugin")]
           Argument::value("plugin", "PATH", "Absolute path to plugin process to run under crosvm."),
           #[cfg(feature = "plugin")]
@@ -2487,44 +2373,6 @@ There is a cost of slightly increased latency the first time the file is accesse
           #[cfg(feature = "plugin")]
           Argument::value("plugin-gid-map-file", "PATH", "Path to the file listing supplemental GIDs that should be mapped in plugin jail.  Can be given more than once."),
           Argument::flag("vhost-net", "Use vhost for networking."),
-          #[cfg(feature = "gpu")]
-          Argument::flag_or_value("gpu",
-                                  "[width=INT,height=INT]",
-                                  "(EXPERIMENTAL) Comma separated key=value pairs for setting up a virtio-gpu device
-
-                              Possible key values:
-
-                              backend=(2d|virglrenderer|gfxstream) - Which backend to use for virtio-gpu (determining rendering protocol)
-
-                              width=INT - The width of the virtual display connected to the virtio-gpu.
-
-                              height=INT - The height of the virtual display connected to the virtio-gpu.
-
-                              egl[=true|=false] - If the backend should use a EGL context for rendering.
-
-                              glx[=true|=false] - If the backend should use a GLX context for rendering.
-
-                              surfaceless[=true|=false] - If the backend should use a surfaceless context for rendering.
-
-                              angle[=true|=false] - If the gfxstream backend should use ANGLE (OpenGL on Vulkan) as its native OpenGL driver.
-
-                              syncfd[=true|=false] - If the gfxstream backend should support EGL_ANDROID_native_fence_sync
-
-                              vulkan[=true|=false] - If the backend should support vulkan
-
-                              cache-path=PATH - The path to the virtio-gpu device shader cache.
-
-                              cache-size=SIZE - The maximum size of the shader cache."),
-          #[cfg(feature = "gpu")]
-          Argument::flag_or_value("gpu-display",
-                                  "[width=INT,height=INT]",
-                                  "(EXPERIMENTAL) Comma separated key=value pairs for setting up a display on the virtio-gpu device
-
-                              Possible key values:
-
-                              width=INT - The width of the virtual display connected to the virtio-gpu.
-
-                              height=INT - The height of the virtual display connected to the virtio-gpu."),
           #[cfg(feature = "tpm")]
           Argument::flag("software-tpm", "enable a software emulated trusted platform module device"),
           Argument::value("evdev", "PATH", "Path to an event device node. The device will be grabbed (unusable from the host) and made available to the guest with the same configuration it shows on the host"),
@@ -2563,6 +2411,7 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
                               Possible key values:
 
                               type=goldfish - type of battery emulation, defaults to goldfish"),
+          #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
           Argument::value("gdb", "PORT", "(EXPERIMENTAL) gdb on the given port"),
           Argument::flag("no-balloon", "Don't use virtio-balloon device in the guest"),
           #[cfg(feature = "usb")]
@@ -2595,22 +2444,23 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
 #[cfg(feature = "direct")]
           Argument::value("direct-edge-irq", "irq", "Enable interrupt passthrough"),
 #[cfg(feature = "direct")]
-          Argument::value("direct-wake-irq", "irq", "Enable wakeup interrupt for host"),
-#[cfg(feature = "direct")]
           Argument::value("direct-gpe", "gpe", "Enable GPE interrupt and register access passthrough"),
           Argument::value("dmi", "DIR", "Directory with smbios_entry_point/DMI files"),
-          Argument::flag("no-legacy", "Don't use legacy KBD/RTC devices emulation"),
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-          Argument::value("userspace-msr", "INDEX,type=TYPE,action=TYPE,[from=TYPE]",
+          Argument::value("userspace-msr", "INDEX,type=TYPE,action=ACTION,[from=FROM],[filter=FILTER]",
                               "Userspace MSR handling. Takes INDEX of the MSR and how they are handled.
 
                               type=(r|w|rw|wr) - read/write permission control.
 
                               action=(pass|emu) - if the control of msr is effective on host.
 
-                              from=(cpu0) - source of msr value. if not set, the source is running CPU."),
+                              from=(cpu0) - source of msr value. if not set, the source is running CPU.
+
+                              filter=(yes|no) - if the msr is filtered in KVM."),
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
           Argument::flag("host-cpu-topology", "Use mirror cpu topology of Host for Guest VM, also copy some cpu feature to Guest VM."),
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+          Argument::flag("enable-pnp-data", "Expose Power and Perfomance (PnP) data to guest and guest can show these PnP data."),
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
           Argument::flag("itmt", "Allow to enable ITMT scheduling feature in VM. The success of enabling depends on HWP and ACPI CPPC support on hardware."),
           Argument::flag("privileged-vm", "Grant this Guest VM certian privileges to manage Host resources, such as power management."),
@@ -2651,7 +2501,9 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
           Argument::value("pcie-root-port", "PATH[,hp_gpe=NUM]", "Path to sysfs of host pcie root port and host pcie root port hotplug gpe number"),
           Argument::value("pivot-root", "PATH", "Path to empty directory to use for sandbox pivot root."),
           #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-          Argument::flag("s2idle", "Set Low Power S0 Idle Capable Flag for guest Fixed ACPI Description Table"),
+          Argument::flag("s2idle", "Set Low Power S0 Idle Capable Flag for guest Fixed ACPI
+                         Description Table, additionally use enhanced crosvm suspend and resume
+                         routines to perform full guest suspension/resumption"),
           Argument::flag("strict-balloon", "Don't allow guest to use pages from the balloon"),
           Argument::value("mmio-address-range", "STARTADDR-ENDADDR[,STARTADDR-ENDADDR]*",
                           "Ranges (inclusive) into which to limit guest mmio addresses. Note that
@@ -2662,6 +2514,8 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
           #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
           Argument::value("pcie-ecam", "mmio_base,mmio_length",
                           "Base and length for PCIE Enhanced Configuration Access Mechanism"),
+          #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+          Argument::value("pci-start", "pci_low_mmio_start", "the pci mmio start address below 4G"),
           Argument::short_flag('h', "help", "Print help message.")];
 
     arguments.append(&mut sys::get_arguments());
@@ -2670,6 +2524,18 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
         set_argument(&mut cfg, name, value)
     })
     .and_then(|_| validate_arguments(&mut cfg));
+
+    if let Err(e) = syslog::init_with(LogConfig {
+        proc_name: if let Some(ref tag) = cfg.syslog_tag {
+            tag.clone()
+        } else {
+            String::from("crosvm")
+        },
+        ..log_config
+    }) {
+        eprintln!("failed to initialize syslog: {}", e);
+        return Err(());
+    }
 
     match match_res {
         #[cfg(feature = "plugin")]
@@ -2968,11 +2834,18 @@ fn create_composite(mut args: std::env::Args) -> std::result::Result<(), ()> {
             if let [label, path] = partition_arg.split(":").collect::<Vec<_>>()[..] {
                 let partition_file = File::open(path)
                     .map_err(|e| error!("Failed to open partition image: {}", e))?;
-                let size =
-                    create_disk_file(partition_file, disk::MAX_NESTING_DEPTH, Path::new(path))
-                        .map_err(|e| error!("Failed to create DiskFile instance: {}", e))?
-                        .get_len()
-                        .map_err(|e| error!("Failed to get length of partition image: {}", e))?;
+
+                // Sparseness for composite disks is not user provided on Linux
+                // (e.g. via an option), and it has no runtime effect.
+                let size = create_disk_file(
+                    partition_file,
+                    /* is_sparse_file= */ true,
+                    disk::MAX_NESTING_DEPTH,
+                    Path::new(path),
+                )
+                .map_err(|e| error!("Failed to create DiskFile instance: {}", e))?
+                .get_len()
+                .map_err(|e| error!("Failed to get length of partition image: {}", e))?;
                 Ok(PartitionInfo {
                     label: label.to_owned(),
                     path: Path::new(path).to_owned(),
@@ -3283,7 +3156,11 @@ fn pkg_version() -> std::result::Result<(), ()> {
 }
 
 fn print_usage() {
-    print_help("crosvm", "[--extended-status] [command]", &[]);
+    print_help(
+        "crosvm",
+        "[--extended-status] [--log-level=<level>] [--no-syslog] [command]",
+        &[],
+    );
     println!("Commands:");
     println!("    balloon - Set balloon size of the crosvm instance.");
     println!("    balloon_stats - Prints virtio balloon statistics.");
@@ -3310,11 +3187,6 @@ fn print_usage() {
 }
 
 fn crosvm_main() -> std::result::Result<CommandStatus, ()> {
-    if let Err(e) = syslog::init() {
-        println!("failed to initialize syslog: {}", e);
-        return Err(());
-    }
-
     panic_hook::set_panic_hook();
 
     let mut args = std::env::args();
@@ -3324,28 +3196,53 @@ fn crosvm_main() -> std::result::Result<CommandStatus, ()> {
     }
 
     let mut cmd_arg = args.next();
-    let extended_status = match cmd_arg.as_ref().map(|s| s.as_ref()) {
-        Some("--extended-status") => {
-            cmd_arg = args.next();
-            true
-        }
-        _ => false,
+
+    let extended_status = if let Some("--extended-status") = cmd_arg.as_deref() {
+        cmd_arg = args.next();
+        true
+    } else {
+        false
     };
 
-    let command = match cmd_arg {
-        Some(c) => c,
-        None => {
-            print_usage();
-            return Ok(CommandStatus::Success);
-        }
+    let log_level = if let Some("--log-level") = cmd_arg.as_deref() {
+        let level = args.next();
+        cmd_arg = args.next();
+        level
+    } else {
+        None
+    }
+    .unwrap_or(String::from("info"));
+
+    let syslog = if let Some("--no-syslog") = cmd_arg.as_deref() {
+        cmd_arg = args.next();
+        false
+    } else {
+        true
+    };
+
+    let log_config = LogConfig {
+        filter: &log_level,
+        syslog,
+        ..Default::default()
+    };
+
+    let command = if let Some(c) = cmd_arg {
+        c
+    } else {
+        print_usage();
+        return Ok(CommandStatus::Success);
     };
 
     // Past this point, usage of exit is in danger of leaking zombie processes.
     let ret = if command == "run" {
         // We handle run_vm separately because it does not simply signal success/error
         // but also indicates whether the guest requested reset or stop.
-        run_vm(args)
+        run_vm(args, log_config)
     } else {
+        if let Err(e) = syslog::init_with(log_config) {
+            eprintln!("failed to initialize syslog: {}", e);
+            return Err(());
+        }
         match &command[..] {
             "balloon" => balloon_vms(args),
             "balloon_stats" => balloon_stats(args),
@@ -3374,17 +3271,7 @@ fn crosvm_main() -> std::result::Result<CommandStatus, ()> {
         .map(|_| CommandStatus::Success)
     };
 
-    // Reap exit status from any child device processes. At this point, all devices should have been
-    // dropped in the main process and told to shutdown. Try over a period of 100ms, since it may
-    // take some time for the processes to shut down.
-    if !wait_all_children() {
-        // We gave them a chance, and it's too late.
-        warn!("not all child processes have exited; sending SIGKILL");
-        if let Err(e) = kill_process_group() {
-            // We're now at the mercy of the OS to clean up after us.
-            warn!("unable to kill all child processes: {}", e);
-        }
-    }
+    sys::cleanup();
 
     // WARNING: Any code added after this point is not guaranteed to run
     // since we may forcibly kill this process (and its children) above.
@@ -3969,68 +3856,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gpu")]
-    #[test]
-    fn parse_gpu_display_options_valid() {
-        {
-            let mut gpu_params: GpuParameters = Default::default();
-            assert!(
-                parse_gpu_display_options(Some("width=500,height=600"), &mut gpu_params).is_ok()
-            );
-            assert_eq!(gpu_params.displays.len(), 1);
-            assert_eq!(gpu_params.displays[0].width, 500);
-            assert_eq!(gpu_params.displays[0].height, 600);
-        }
-    }
-
-    #[cfg(feature = "gpu")]
-    #[test]
-    fn parse_gpu_display_options_invalid() {
-        {
-            let mut gpu_params: GpuParameters = Default::default();
-            assert!(parse_gpu_display_options(Some("width=500"), &mut gpu_params).is_err());
-        }
-        {
-            let mut gpu_params: GpuParameters = Default::default();
-            assert!(parse_gpu_display_options(Some("height=500"), &mut gpu_params).is_err());
-        }
-        {
-            let mut gpu_params: GpuParameters = Default::default();
-            assert!(parse_gpu_display_options(Some("width"), &mut gpu_params).is_err());
-        }
-        {
-            let mut gpu_params: GpuParameters = Default::default();
-            assert!(parse_gpu_display_options(Some("blah"), &mut gpu_params).is_err());
-        }
-    }
-
-    #[cfg(feature = "gpu")]
-    #[test]
-    fn parse_gpu_options_and_gpu_display_options_valid() {
-        {
-            let mut gpu_params: GpuParameters = Default::default();
-            assert!(parse_gpu_options(Some("2D,width=500,height=600"), &mut gpu_params).is_ok());
-            assert!(
-                parse_gpu_display_options(Some("width=700,height=800"), &mut gpu_params).is_ok()
-            );
-            assert_eq!(gpu_params.displays.len(), 2);
-            assert_eq!(gpu_params.displays[0].width, 500);
-            assert_eq!(gpu_params.displays[0].height, 600);
-            assert_eq!(gpu_params.displays[1].width, 700);
-            assert_eq!(gpu_params.displays[1].height, 800);
-        }
-        {
-            let mut gpu_params: GpuParameters = Default::default();
-            assert!(parse_gpu_options(Some("2D"), &mut gpu_params).is_ok());
-            assert!(
-                parse_gpu_display_options(Some("width=700,height=800"), &mut gpu_params).is_ok()
-            );
-            assert_eq!(gpu_params.displays.len(), 1);
-            assert_eq!(gpu_params.displays[0].width, 700);
-            assert_eq!(gpu_params.displays[0].height, 800);
-        }
-    }
-
     #[test]
     fn parse_battery_vaild() {
         parse_battery_options(Some("type=goldfish")).expect("parse should have succeded");
@@ -4170,25 +3995,24 @@ mod tests {
     #[test]
     fn parse_userspace_msr_options_test() {
         let (pass_cpu0_index, pass_cpu0_cfg) =
+            parse_userspace_msr_options("0x10,type=w,action=pass,filter=yes").unwrap();
+        assert_eq!(pass_cpu0_index, 0x10);
+        assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::WriteOnly);
+        assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
+        assert!(pass_cpu0_cfg.filter);
+
+        let (pass_cpu0_index, pass_cpu0_cfg) =
             parse_userspace_msr_options("0x10,type=r,action=pass,from=cpu0").unwrap();
         assert_eq!(pass_cpu0_index, 0x10);
-        assert!(pass_cpu0_cfg.rw_type.read_allow);
-        assert!(!pass_cpu0_cfg.rw_type.write_allow);
-        assert_eq!(
-            *pass_cpu0_cfg.action.as_ref().unwrap(),
-            MsrAction::MsrPassthrough
-        );
+        assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::ReadOnly);
+        assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
         assert_eq!(pass_cpu0_cfg.from, MsrValueFrom::RWFromCPU0);
 
         let (pass_cpus_index, pass_cpus_cfg) =
             parse_userspace_msr_options("0x10,type=rw,action=emu").unwrap();
         assert_eq!(pass_cpus_index, 0x10);
-        assert!(pass_cpus_cfg.rw_type.read_allow);
-        assert!(pass_cpus_cfg.rw_type.write_allow);
-        assert_eq!(
-            *pass_cpus_cfg.action.as_ref().unwrap(),
-            MsrAction::MsrEmulate
-        );
+        assert_eq!(pass_cpus_cfg.rw_type, MsrRWType::ReadWrite);
+        assert_eq!(pass_cpus_cfg.action, MsrAction::MsrEmulate);
         assert_eq!(pass_cpus_cfg.from, MsrValueFrom::RWFromRunningCPU);
 
         assert!(parse_userspace_msr_options("0x10,action=none").is_err());

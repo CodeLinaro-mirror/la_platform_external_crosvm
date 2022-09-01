@@ -103,10 +103,13 @@ where
     // write to 4th page
     let write_addr = GuestAddress(0x4000);
 
-    init_low_memory_layout(Some(MemRegion {
-        base: 0xC000_0000,
-        size: 0x1000_0000,
-    }));
+    init_low_memory_layout(
+        Some(MemRegion {
+            base: 0xC000_0000,
+            size: 0x1000_0000,
+        }),
+        Some(0x8000_0000),
+    );
     // guest mem is 400 pages
     let arch_mem_regions = arch_memory_regions(memory_size, None);
     let guest_mem = GuestMemory::new(&arch_mem_regions).unwrap();
@@ -121,7 +124,7 @@ where
 
     let mmio_bus = Arc::new(devices::Bus::new());
     let io_bus = Arc::new(devices::Bus::new());
-    let exit_evt = Event::new().unwrap();
+    let (exit_evt_wrtube, _) = Tube::directional_pair().unwrap();
 
     let mut control_tubes = vec![TaggedControlTube::VmIrq(irqchip_tube)];
     // Create one control socket per disk.
@@ -150,13 +153,14 @@ where
     )
     .unwrap();
     let pci = Arc::new(Mutex::new(pci));
-    let pci_bus = Arc::new(Mutex::new(PciConfigIo::new(pci, Event::new().unwrap())));
+    let (pcibus_exit_evt_wrtube, _) = Tube::directional_pair().unwrap();
+    let pci_bus = Arc::new(Mutex::new(PciConfigIo::new(pci, pcibus_exit_evt_wrtube)));
     io_bus.insert(pci_bus, 0xcf8, 0x8).unwrap();
 
     X8664arch::setup_legacy_devices(
         &io_bus,
         irq_chip.pit_uses_speaker_port(),
-        exit_evt.try_clone().unwrap(),
+        exit_evt_wrtube.try_clone().unwrap(),
         memory_size,
     )
     .unwrap();
@@ -201,7 +205,9 @@ where
         suspend_evt
             .try_clone()
             .expect("unable to clone suspend_evt"),
-        exit_evt.try_clone().expect("unable to clone exit_evt"),
+        exit_evt_wrtube
+            .try_clone()
+            .expect("unable to clone exit_evt_wrtube"),
         Default::default(),
         &mut irq_chip,
         X86_64_SCI_IRQ,
@@ -258,7 +264,7 @@ where
                 .add_vcpu(0, &vcpu)
                 .expect("failed to add vcpu to irqchip");
 
-            setup_cpuid(&hyp, &irq_chip, &vcpu, 0, 1, false, false, false).unwrap();
+            setup_cpuid(&hyp, &irq_chip, &vcpu, 0, 1, false, false, false, false).unwrap();
             setup_msrs(&vm, &vcpu, read_pci_start_before_32bit()).unwrap();
 
             setup_regs(

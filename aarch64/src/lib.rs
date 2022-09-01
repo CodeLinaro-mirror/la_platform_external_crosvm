@@ -14,7 +14,7 @@ use arch::{
     get_serial_cmdline, GetSerialCmdlineError, MsrConfig, MsrExitHandlerError, RunnableLinuxVm,
     VmComponents, VmImage,
 };
-use base::{Event, MemoryMappingBuilder};
+use base::{Event, MemoryMappingBuilder, SendTube, Tube};
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::{
     Bus, BusDeviceObj, BusError, IrqChip, IrqChipAArch64, PciAddress, PciConfigMmio, PciDevice,
@@ -232,8 +232,7 @@ impl arch::LinuxArch for AArch64 {
 
     fn build_vm<V, Vcpu>(
         mut components: VmComponents,
-        _exit_evt: &Event,
-        _reset_evt: &Event,
+        _vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
@@ -243,6 +242,7 @@ impl arch::LinuxArch for AArch64 {
         devs: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipAArch64,
         vcpu_ids: &mut Vec<usize>,
+        _debugcon_jail: Option<Minijail>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmAArch64,
@@ -523,6 +523,7 @@ impl arch::LinuxArch for AArch64 {
         _has_bios: bool,
         _no_smt: bool,
         _host_cpu_topology: bool,
+        _enable_pnp_data: bool,
         _itmt: bool,
     ) -> std::result::Result<(), Self::Error> {
         // AArch64 doesn't configure vcpus on the vcpu thread, so nothing to do here.

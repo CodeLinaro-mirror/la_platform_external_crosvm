@@ -26,10 +26,12 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libbase_rust",
+        "libcfg_if",
         "libcros_async",
         "libdata_model",
         "libfutures",
         "liblibc",
+        "libserde",
         "libtempfile",
         "libthiserror",
         "libvm_memory",
@@ -55,12 +57,14 @@ rust_library {
     rustlibs: [
         "libbase_rust",
         "libcrc32fast", // Added manually
+        "libcfg_if",
         "libcros_async",
         "libdata_model",
         "libfutures",
         "liblibc",
         "libprotobuf", // Added manually
         "libprotos", // Added manually
+        "libserde",
         "libtempfile",
         "libthiserror",
         "libuuid", // Added manually

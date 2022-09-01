@@ -21,6 +21,7 @@ use super::{
     base_features, copy_config, DeviceType, Interrupt, Queue, Reader, SignalableInterrupt,
     VirtioDevice, Writer,
 };
+use crate::serial_device::SerialInput;
 use crate::SerialDevice;
 
 pub(crate) const QUEUE_SIZE: u16 = 256;
@@ -120,25 +121,15 @@ pub fn process_transmit_queue<I: SignalableInterrupt>(
     while let Some(avail_desc) = transmit_queue.pop(mem) {
         let desc_index = avail_desc.index;
 
-        let reader = match Reader::new(mem.clone(), avail_desc) {
-            Ok(r) => r,
+        match Reader::new(mem.clone(), avail_desc) {
+            Ok(reader) => process_transmit_request(reader, output)
+                .unwrap_or_else(|e| error!("console: process_transmit_request failed: {}", e)),
             Err(e) => {
                 error!("console: failed to create reader: {}", e);
-                transmit_queue.add_used(mem, desc_index, 0);
-                needs_interrupt = true;
-                continue;
             }
         };
 
-        let len = match process_transmit_request(reader, output) {
-            Ok(written) => written,
-            Err(e) => {
-                error!("console: process_transmit_request failed: {}", e);
-                0
-            }
-        };
-
-        transmit_queue.add_used(mem, desc_index, len);
+        transmit_queue.add_used(mem, desc_index, 0);
         needs_interrupt = true;
     }
 
@@ -171,7 +162,7 @@ struct Worker {
 /// * `rx` - Data source that the reader thread will wait on to send data back to the buffer
 /// * `in_avail_evt` - Event triggered by the thread when new input is available on the buffer
 pub fn spawn_input_thread(
-    mut rx: Box<dyn io::Read + Send>,
+    mut rx: Box<dyn SerialInput>,
     in_avail_evt: &Event,
 ) -> Option<Arc<Mutex<VecDeque<u8>>>> {
     let buffer = Arc::new(Mutex::new(VecDeque::<u8>::new()));
@@ -223,13 +214,13 @@ pub fn spawn_input_thread(
 ///
 /// * `reader` - The Reader with the data we want to write.
 /// * `output` - The output sink we are going to write the data to.
-pub fn process_transmit_request(mut reader: Reader, output: &mut dyn io::Write) -> io::Result<u32> {
+pub fn process_transmit_request(mut reader: Reader, output: &mut dyn io::Write) -> io::Result<()> {
     let len = reader.available_bytes();
     let mut data = vec![0u8; len];
     reader.read_exact(&mut data)?;
     output.write_all(&data)?;
     output.flush()?;
-    Ok(0)
+    Ok(())
 }
 
 impl Worker {
@@ -339,7 +330,7 @@ impl Worker {
 }
 
 enum ConsoleInput {
-    FromRead(Box<dyn io::Read + Send>),
+    FromRead(Box<dyn SerialInput>),
     FromThread(Arc<Mutex<VecDeque<u8>>>),
 }
 
@@ -358,7 +349,7 @@ impl SerialDevice for Console {
     fn new(
         protected_vm: ProtectionType,
         _evt: Event,
-        input: Option<Box<dyn io::Read + Send>>,
+        input: Option<Box<dyn SerialInput>>,
         output: Option<Box<dyn io::Write + Send>>,
         _sync: Option<Box<dyn FileSync + Send>>,
         _out_timestamp: bool,

@@ -219,7 +219,7 @@ impl MsrHandlers {
         if let Some((rw_type, handler)) = self.handler.get(&index) {
             // It's not error. This means user does't want to handle
             // RDMSR. Just log it.
-            if !rw_type.read_allow {
+            if matches!(rw_type, MsrRWType::WriteOnly) {
                 debug!("RDMSR is not allowed for msr: {:#x}", index);
                 return None;
             }
@@ -240,7 +240,7 @@ impl MsrHandlers {
         if let Some((rw_type, handler)) = self.handler.get(&index) {
             // It's not error. This means user does't want to handle
             // WRMSR. Just log it.
-            if !rw_type.write_allow {
+            if matches!(rw_type, MsrRWType::ReadOnly) {
                 debug!("WRMSR is not allowed for msr: {:#x}", index);
                 return None;
             }
@@ -263,11 +263,7 @@ impl MsrHandlers {
         msr_config: MsrConfig,
         cpu_id: usize,
     ) -> std::result::Result<(), MsrExitHandlerError> {
-        if msr_config.action.is_none() {
-            return Err(MsrExitHandlerError::InvalidParam);
-        }
-
-        match msr_config.action.as_ref().unwrap() {
+        match msr_config.action {
             MsrAction::MsrPassthrough => {
                 let msr_handler: Rc<RefCell<Box<dyn MsrHandling>>> =
                     match MsrPassthroughHandler::new(index, &msr_config, Rc::clone(&self.msr_file))
@@ -302,4 +298,33 @@ impl MsrHandlers {
         };
         Ok(())
     }
+}
+
+/// get override msr list
+pub fn get_override_msr_list(
+    msr_list: &BTreeMap<u32, MsrConfig>,
+) -> (
+    Vec<u32>, /* read override */
+    Vec<u32>, /* write override */
+) {
+    let mut rd_msrs: Vec<u32> = Vec::new();
+    let mut wr_msrs: Vec<u32> = Vec::new();
+
+    for (index, config) in msr_list.iter() {
+        if config.filter {
+            match config.rw_type {
+                MsrRWType::ReadOnly => {
+                    rd_msrs.push(*index);
+                }
+                MsrRWType::WriteOnly => {
+                    wr_msrs.push(*index);
+                }
+                MsrRWType::ReadWrite => {
+                    rd_msrs.push(*index);
+                    wr_msrs.push(*index);
+                }
+            }
+        }
+    }
+    (rd_msrs, wr_msrs)
 }

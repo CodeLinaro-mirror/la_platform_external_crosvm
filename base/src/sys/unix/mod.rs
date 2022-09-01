@@ -48,10 +48,7 @@ pub use crate::descriptor_reflection::{
     deserialize_with_descriptors, with_as_descriptor, with_raw_descriptor, FileSerdeWrapper,
     SerializeDescriptors,
 };
-pub use crate::{
-    errno::{Error, Result, *},
-    generate_scoped_event,
-};
+pub use crate::errno::{Error, Result, *};
 pub use acpi_event::*;
 pub use base_poll_token_derive::*;
 pub use capabilities::drop_capabilities;
@@ -563,14 +560,12 @@ pub fn clear_fd_flags(fd: RawFd, clear_flags: c_int) -> Result<()> {
 
 /// Return a timespec filed with the specified Duration `duration`.
 pub fn duration_to_timespec(duration: Duration) -> libc::timespec {
-    // Safe because we are zero-initializing a struct with only primitive member fields.
-    let mut ts: libc::timespec = unsafe { mem::zeroed() };
-
-    ts.tv_sec = duration.as_secs() as libc::time_t;
     // nsec always fits in i32 because subsec_nanos is defined to be less than one billion.
     let nsec = duration.subsec_nanos() as i32;
-    ts.tv_nsec = libc::c_long::from(nsec);
-    ts
+    libc::timespec {
+        tv_sec: duration.as_secs() as libc::time_t,
+        tv_nsec: nsec.into(),
+    }
 }
 
 /// Return the maximum Duration that can be used with libc::timespec.

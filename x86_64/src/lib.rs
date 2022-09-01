@@ -52,7 +52,6 @@ mod smbios;
 use once_cell::sync::OnceCell;
 use std::arch::x86_64::__cpuid;
 use std::collections::BTreeMap;
-use std::convert::TryFrom;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Seek};
@@ -66,13 +65,13 @@ use arch::{
     get_serial_cmdline, GetSerialCmdlineError, MsrAction, MsrConfig, MsrRWType, MsrValueFrom,
     RunnableLinuxVm, VmComponents, VmImage,
 };
-use base::{warn, Event};
+use base::{warn, Event, SendTube, TubeError};
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::{
-    BusDeviceObj, BusResumeDevice, IrqChip, IrqChipX86_64, PciAddress, PciConfigIo, PciConfigMmio,
-    PciDevice, PciVirtualConfigMmio,
+    BusDevice, BusDeviceObj, BusResumeDevice, Debugcon, IrqChip, IrqChipX86_64, PciAddress,
+    PciConfigIo, PciConfigMmio, PciDevice, PciVirtualConfigMmio, ProxyDevice,
 };
-use hypervisor::{HypervisorX86_64, ProtectionType, VcpuX86_64, Vm, VmX86_64};
+use hypervisor::{HypervisorX86_64, ProtectionType, VcpuX86_64, Vm, VmCap, VmX86_64};
 use minijail::Minijail;
 use remain::sorted;
 use resources::{MemRegion, SystemAllocator, SystemAllocatorConfig};
@@ -82,7 +81,7 @@ use vm_control::{BatControl, BatteryType};
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use {
-    gdbstub_arch::x86::reg::{X86SegmentRegs, X86_64CoreRegs},
+    gdbstub_arch::x86::reg::{X86SegmentRegs, X86_64CoreRegs, X87FpuInternalRegs},
     hypervisor::x86_64::{Regs, Sregs},
 };
 
@@ -99,6 +98,10 @@ pub enum Error {
     CloneEvent(base::Error),
     #[error("failed to clone IRQ chip: {0}")]
     CloneIrqChip(base::Error),
+    #[error("failed to clone jail: {0}")]
+    CloneJail(minijail::Error),
+    #[error("unable to clone a Tube: {0}")]
+    CloneTube(TubeError),
     #[error("the given kernel command line was invalid: {0}")]
     Cmdline(kernel_cmdline::Error),
     #[error("failed to configure hotplugged pci device: {0}")]
@@ -109,6 +112,8 @@ pub enum Error {
     CreateAcpi,
     #[error("unable to create battery devices: {0}")]
     CreateBatDevices(arch::DeviceRegistrationError),
+    #[error("could not create debugcon device: {0}")]
+    CreateDebugconDevice(devices::SerialError),
     #[error("unable to make an Event: {0}")]
     CreateEvent(base::Error),
     #[error("failed to create fdt: {0}")]
@@ -124,6 +129,8 @@ pub enum Error {
     CreatePit(base::Error),
     #[error("unable to make PIT device: {0}")]
     CreatePitDevice(devices::PitError),
+    #[error("unable to create proxy device: {0}")]
+    CreateProxyDevice(devices::ProxyError),
     #[error("unable to create serial devices: {0}")]
     CreateSerialDevices(arch::DeviceRegistrationError),
     #[error("failed to create socket: {0}")]
@@ -138,6 +145,8 @@ pub enum Error {
     EnableSplitIrqchip(base::Error),
     #[error("failed to get serial cmdline: {0}")]
     GetSerialCmdline(GetSerialCmdlineError),
+    #[error("failed to insert device onto bus: {0}")]
+    InsertBus(devices::BusError),
     #[error("the kernel extends past the end of RAM")]
     KernelOffsetPastEnd,
     #[error("error loading bios: {0}")]
@@ -251,7 +260,7 @@ struct LowMemoryLayout {
 
 static LOW_MEMORY_LAYOUT: OnceCell<LowMemoryLayout> = OnceCell::new();
 
-fn init_low_memory_layout(pcie_ecam: Option<MemRegion>) {
+fn init_low_memory_layout(pcie_ecam: Option<MemRegion>, pci_low_start: Option<u64>) {
     LOW_MEMORY_LAYOUT.get_or_init(|| {
         // Make sure it align to 256MB for MTRR convenient
         const MEM_32BIT_GAP_SIZE: u64 = if cfg!(feature = "direct") {
@@ -279,7 +288,12 @@ fn init_low_memory_layout(pcie_ecam: Option<MemRegion>) {
             )
         };
 
-        let pci_start = pcie_cfg_mmio_start.min(FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE);
+        let pci_start = if let Some(pci_low) = pci_low_start {
+            pcie_cfg_mmio_start.min(pci_low)
+        } else {
+            pcie_cfg_mmio_start.min(FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE)
+        };
+
         let pci_size = FIRST_ADDR_PAST_32BITS - pci_start - RESERVED_MEM_SIZE;
 
         LowMemoryLayout {
@@ -459,7 +473,7 @@ impl arch::LinuxArch for X8664arch {
     fn guest_memory_layout(
         components: &VmComponents,
     ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error> {
-        init_low_memory_layout(components.pcie_ecam);
+        init_low_memory_layout(components.pcie_ecam, components.pci_low_start);
 
         let bios_size = match &components.vm_image {
             VmImage::Bios(bios_file) => Some(bios_file.metadata().map_err(Error::LoadBios)?.len()),
@@ -493,8 +507,7 @@ impl arch::LinuxArch for X8664arch {
 
     fn build_vm<V, Vcpu>(
         mut components: VmComponents,
-        exit_evt: &Event,
-        reset_evt: &Event,
+        vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
@@ -504,6 +517,7 @@ impl arch::LinuxArch for X8664arch {
         devs: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipX86_64,
         vcpu_ids: &mut Vec<usize>,
+        debugcon_jail: Option<Minijail>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -571,7 +585,7 @@ impl arch::LinuxArch for X8664arch {
         pci.lock().enable_pcie_cfg_mmio(read_pcie_cfg_mmio_start());
         let pci_cfg = PciConfigIo::new(
             pci.clone(),
-            reset_evt.try_clone().map_err(Error::CloneEvent)?,
+            vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
         );
         let pci_bus = Arc::new(Mutex::new(pci_cfg));
         io_bus.insert(pci_bus, 0xcf8, 0x8).unwrap();
@@ -601,7 +615,7 @@ impl arch::LinuxArch for X8664arch {
             Self::setup_legacy_devices(
                 &io_bus,
                 irq_chip.pit_uses_speaker_port(),
-                reset_evt.try_clone().map_err(Error::CloneEvent)?,
+                vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
                 components.memory_size,
             )?;
         }
@@ -611,6 +625,12 @@ impl arch::LinuxArch for X8664arch {
             &io_bus,
             serial_parameters,
             serial_jail,
+        )?;
+        Self::setup_debugcon_devices(
+            components.protected_vm,
+            &io_bus,
+            serial_parameters,
+            debugcon_jail,
         )?;
 
         let mut resume_notify_devices = Vec::new();
@@ -622,7 +642,7 @@ impl arch::LinuxArch for X8664arch {
             &io_bus,
             system_allocator,
             suspend_evt.try_clone().map_err(Error::CloneEvent)?,
-            exit_evt.try_clone().map_err(Error::CloneEvent)?,
+            vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
             components.acpi_sdts,
             #[cfg(feature = "direct")]
             &components.direct_gpe,
@@ -755,21 +775,26 @@ impl arch::LinuxArch for X8664arch {
         has_bios: bool,
         no_smt: bool,
         host_cpu_topology: bool,
+        enable_pnp_data: bool,
         itmt: bool,
     ) -> Result<()> {
-        cpuid::setup_cpuid(
-            hypervisor,
-            irq_chip,
-            vcpu,
-            vcpu_id,
-            num_cpus,
-            no_smt,
-            host_cpu_topology,
-            itmt,
-        )
-        .map_err(Error::SetupCpuid)?;
+        if !vm.check_capability(VmCap::EarlyInitCpuid) {
+            cpuid::setup_cpuid(
+                hypervisor,
+                irq_chip,
+                vcpu,
+                vcpu_id,
+                num_cpus,
+                no_smt,
+                host_cpu_topology,
+                enable_pnp_data,
+                itmt,
+            )
+            .map_err(Error::SetupCpuid)?;
+        }
 
         if has_bios {
+            regs::set_reset_vector(vcpu).map_err(Error::SetupRegs)?;
             return Ok(());
         }
 
@@ -830,15 +855,41 @@ impl arch::LinuxArch for X8664arch {
             gs: sregs.gs.selector as u32,
         };
 
-        // TODO(keiichiw): Other registers such as FPU, xmm and mxcsr.
+        // x87 FPU internal state
+        // TODO(dverkamp): floating point tag word, instruction pointer, and data pointer
+        let fpu = vcpu.get_fpu().map_err(Error::ReadRegs)?;
+        let fpu_internal = X87FpuInternalRegs {
+            fctrl: u32::from(fpu.fcw),
+            fstat: u32::from(fpu.fsw),
+            fop: u32::from(fpu.last_opcode),
+            ..Default::default()
+        };
 
-        Ok(X86_64CoreRegs {
+        let mut regs = X86_64CoreRegs {
             regs,
             eflags,
             rip,
             segments,
-            ..Default::default()
-        })
+            st: Default::default(),
+            fpu: fpu_internal,
+            xmm: Default::default(),
+            mxcsr: fpu.mxcsr,
+        };
+
+        // x87 FPU registers: ST0-ST7
+        for (dst, src) in regs.st.iter_mut().zip(fpu.fpr.iter()) {
+            // `fpr` contains the x87 floating point registers in FXSAVE format.
+            // Each element contains an 80-bit floating point value in the low 10 bytes.
+            // The upper 6 bytes are reserved and can be ignored.
+            dst.copy_from_slice(&src[0..10])
+        }
+
+        // SSE registers: XMM0-XMM15
+        for (dst, src) in regs.xmm.iter_mut().zip(fpu.xmm.iter()) {
+            *dst = u128::from_le_bytes(*src);
+        }
+
+        Ok(regs)
     }
 
     #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
@@ -880,7 +931,24 @@ impl arch::LinuxArch for X8664arch {
 
         vcpu.set_sregs(&sregs).map_err(Error::WriteRegs)?;
 
-        // TODO(keiichiw): Other registers such as FPU, xmm and mxcsr.
+        // FPU and SSE registers
+        let mut fpu = vcpu.get_fpu().map_err(Error::ReadRegs)?;
+        fpu.fcw = regs.fpu.fctrl as u16;
+        fpu.fsw = regs.fpu.fstat as u16;
+        fpu.last_opcode = regs.fpu.fop as u16;
+        // TODO(dverkamp): floating point tag word, instruction pointer, and data pointer
+
+        // x87 FPU registers: ST0-ST7
+        for (dst, src) in fpu.fpr.iter_mut().zip(regs.st.iter()) {
+            dst[0..10].copy_from_slice(src);
+        }
+
+        // SSE registers: XMM0-XMM15
+        for (dst, src) in fpu.xmm.iter_mut().zip(regs.xmm.iter()) {
+            dst.copy_from_slice(&src.to_le_bytes());
+        }
+
+        vcpu.set_fpu(&fpu).map_err(Error::WriteRegs)?;
 
         Ok(())
     }
@@ -1286,12 +1354,12 @@ impl X8664arch {
     ///
     /// * - `io_bus` - the IO bus object
     /// * - `pit_uses_speaker_port` - does the PIT use port 0x61 for the PC speaker
-    /// * - `reset_evt` - the event object which should receive exit events
+    /// * - `vm_evt_wrtube` - Tube for sending exit events
     /// * - `mem_size` - the size in bytes of physical ram for the guest
     fn setup_legacy_devices(
         io_bus: &devices::Bus,
         pit_uses_speaker_port: bool,
-        reset_evt: Event,
+        vm_evt_wrtube: SendTube,
         mem_size: u64,
     ) -> Result<()> {
         let mem_regions = arch_memory_regions(mem_size, None);
@@ -1317,7 +1385,7 @@ impl X8664arch {
             .unwrap();
 
         let i8042 = Arc::new(Mutex::new(devices::I8042Device::new(
-            reset_evt.try_clone().map_err(Error::CloneEvent)?,
+            vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
         )));
 
         if pit_uses_speaker_port {
@@ -1347,7 +1415,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         resources: &mut SystemAllocator,
         suspend_evt: Event,
-        exit_evt: Event,
+        vm_evt_wrtube: SendTube,
         sdts: Vec<SDT>,
         #[cfg(feature = "direct")] direct_gpe: &[u32],
         irq_chip: &mut dyn IrqChip,
@@ -1422,7 +1490,7 @@ impl X8664arch {
             #[cfg(feature = "direct")]
             direct_gpe_info,
             suspend_evt,
-            exit_evt,
+            vm_evt_wrtube,
         );
         pmresource.to_aml_bytes(&mut amls);
         pmresource.start();
@@ -1531,137 +1599,216 @@ impl X8664arch {
 
         Ok(())
     }
+
+    fn setup_debugcon_devices(
+        protected_vm: ProtectionType,
+        io_bus: &devices::Bus,
+        serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
+        debugcon_jail: Option<Minijail>,
+    ) -> Result<()> {
+        for param in serial_parameters.values() {
+            if param.hardware != SerialHardware::Debugcon {
+                continue;
+            }
+
+            let mut preserved_fds = Vec::new();
+            let con = param
+                .create_serial_device::<Debugcon>(
+                    protected_vm,
+                    // Debugcon doesn't use the interrupt event
+                    &Event::new().map_err(Error::CreateEvent)?,
+                    &mut preserved_fds,
+                )
+                .map_err(Error::CreateDebugconDevice)?;
+
+            let con: Arc<Mutex<dyn BusDevice>> = match debugcon_jail.as_ref() {
+                Some(jail) => Arc::new(Mutex::new(
+                    ProxyDevice::new(
+                        con,
+                        &jail.try_clone().map_err(Error::CloneJail)?,
+                        preserved_fds,
+                    )
+                    .map_err(Error::CreateProxyDevice)?,
+                )),
+                None => Arc::new(Mutex::new(con)),
+            };
+            io_bus
+                .insert(con.clone(), param.debugcon_port.into(), 1)
+                .map_err(Error::InsertBus)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[sorted]
 #[derive(Error, Debug)]
-pub enum ItmtError {
+pub enum MsrError {
     #[error("CPU not support. Only intel CPUs support ITMT.")]
     CpuUnSupport,
     #[error("msr must be unique: {0}")]
     MsrDuplicate(u32),
 }
 
+fn insert_msr(
+    msr_map: &mut BTreeMap<u32, MsrConfig>,
+    key: u32,
+    rw_type: MsrRWType,
+    action: MsrAction,
+    from: MsrValueFrom,
+    filter: bool,
+) -> std::result::Result<(), MsrError> {
+    if msr_map
+        .insert(
+            key,
+            MsrConfig {
+                rw_type,
+                action,
+                from,
+                filter,
+            },
+        )
+        .is_some()
+    {
+        Err(MsrError::MsrDuplicate(key))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn set_enable_pnp_data_msr_config(
+    itmt: bool,
+    msr_map: &mut BTreeMap<u32, MsrConfig>,
+) -> std::result::Result<(), MsrError> {
+    let mut msrs = vec![
+        (
+            MSR_IA32_APERF,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+        (
+            MSR_IA32_MPERF,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+    ];
+
+    // When itmt is enabled, the following 5 MSRs are already
+    // passed through or emulated, so just skip here.
+    if !itmt {
+        msrs.push((
+            MSR_PLATFORM_INFO,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            true,
+        ));
+        msrs.push((
+            MSR_TURBO_RATIO_LIMIT,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ));
+        msrs.push((
+            MSR_PM_ENABLE,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ));
+        msrs.push((
+            MSR_HWP_CAPABILITIES,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ));
+        msrs.push((
+            MSR_HWP_REQUEST,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ));
+    }
+
+    for msr in msrs {
+        insert_msr(msr_map, msr.0, msr.1, msr.2, msr.3, msr.4)?;
+    }
+    Ok(())
+}
+
 const EBX_INTEL_GENU: u32 = 0x756e6547; // "Genu"
 const ECX_INTEL_NTEL: u32 = 0x6c65746e; // "ntel"
 const EDX_INTEL_INEI: u32 = 0x49656e69; // "ineI"
 
-fn check_itmt_cpu_support() -> std::result::Result<(), ItmtError> {
+fn check_itmt_cpu_support() -> std::result::Result<(), MsrError> {
     // Safe because we pass 0 for this call and the host supports the
     // `cpuid` instruction
     let entry = unsafe { __cpuid(0) };
     if entry.ebx == EBX_INTEL_GENU && entry.ecx == ECX_INTEL_NTEL && entry.edx == EDX_INTEL_INEI {
         Ok(())
     } else {
-        Err(ItmtError::CpuUnSupport)
+        Err(MsrError::CpuUnSupport)
     }
 }
 
 pub fn set_itmt_msr_config(
     msr_map: &mut BTreeMap<u32, MsrConfig>,
-) -> std::result::Result<(), ItmtError> {
+) -> std::result::Result<(), MsrError> {
     check_itmt_cpu_support()?;
 
-    if msr_map
-        .insert(
+    let msrs = vec![
+        (
             MSR_HWP_CAPABILITIES,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: false,
-                },
-                action: Some(MsrAction::MsrPassthrough),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_HWP_CAPABILITIES));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+        (
             MSR_PM_ENABLE,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: true,
-                },
-                action: Some(MsrAction::MsrEmulate),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_PM_ENABLE));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadWrite,
+            MsrAction::MsrEmulate,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+        (
             MSR_HWP_REQUEST,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: true,
-                },
-                action: Some(MsrAction::MsrEmulate),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_HWP_REQUEST));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadWrite,
+            MsrAction::MsrEmulate,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+        (
             MSR_TURBO_RATIO_LIMIT,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: false,
-                },
-                action: Some(MsrAction::MsrPassthrough),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_TURBO_RATIO_LIMIT));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+        (
             MSR_PLATFORM_INFO,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: false,
-                },
-                action: Some(MsrAction::MsrPassthrough),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_PLATFORM_INFO));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+        (
             MSR_IA32_PERF_CTL,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: true,
-                },
-                action: Some(MsrAction::MsrEmulate),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_IA32_PERF_CTL));
+            MsrRWType::ReadWrite,
+            MsrAction::MsrEmulate,
+            MsrValueFrom::RWFromRunningCPU,
+            false,
+        ),
+    ];
+    for msr in msrs {
+        insert_msr(msr_map, msr.0, msr.1, msr.2, msr.3, msr.4)?;
     }
 
     Ok(())
@@ -1681,7 +1828,8 @@ mod tests {
             base: 3 * GB,
             size: 256 * MB,
         });
-        init_low_memory_layout(pcie_ecam);
+        let pci_start = Some(2 * GB);
+        init_low_memory_layout(pcie_ecam, pci_start);
     }
 
     #[test]
@@ -1768,7 +1916,7 @@ mod tests {
     fn check_pci_mmio_layout() {
         setup();
 
-        assert_eq!(read_pci_start_before_32bit(), 3 * GB);
+        assert_eq!(read_pci_start_before_32bit(), 2 * GB);
         assert_eq!(read_pcie_cfg_mmio_start(), 3 * GB);
         assert_eq!(read_pcie_cfg_mmio_size(), 256 * MB);
     }

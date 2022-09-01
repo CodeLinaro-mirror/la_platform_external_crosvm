@@ -17,7 +17,6 @@ use std::os::unix::prelude::OpenOptionsExt;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{mpsc, Arc, Barrier};
-use std::time::Duration;
 
 use std::process;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
@@ -50,7 +49,7 @@ use hypervisor::{HypervisorCap, ProtectionType, Vm, VmCap};
 use minijail::{self, Minijail};
 use resources::{Alloc, SystemAllocator};
 use rutabaga_gfx::RutabagaGralloc;
-use sync::Mutex;
+use sync::{Condvar, Mutex};
 use vm_control::*;
 use vm_memory::{GuestAddress, GuestMemory, MemoryPolicy};
 
@@ -68,6 +67,7 @@ use {
         IrqChipX86_64 as IrqChipArch, KvmSplitIrqChip, PciBridge, PcieHostRootPort, PcieRootPort,
     },
     hypervisor::{VcpuX86_64 as VcpuArch, VmX86_64 as VmArch},
+    x86_64::msr::get_override_msr_list,
     x86_64::X8664arch as Arch,
 };
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -99,7 +99,7 @@ fn create_virtio_devices(
     cfg: &Config,
     vm: &mut impl Vm,
     resources: &mut SystemAllocator,
-    _exit_evt: &Event,
+    vm_evt_wrtube: &SendTube,
     wayland_device_tube: Tube,
     gpu_device_tube: Tube,
     vhost_user_gpu_tubes: Vec<(Tube, Tube, Tube)>,
@@ -234,7 +234,7 @@ fn create_virtio_devices(
 
             devs.push(create_gpu_device(
                 cfg,
-                _exit_evt,
+                vm_evt_wrtube,
                 gpu_device_tube,
                 resource_bridges,
                 // Use the unnamed socket for GPU display screens.
@@ -462,8 +462,7 @@ fn create_devices(
     cfg: &Config,
     vm: &mut impl Vm,
     resources: &mut SystemAllocator,
-    exit_evt: &Event,
-    panic_wrtube: Tube,
+    vm_evt_wrtube: &SendTube,
     iommu_attached_endpoints: &mut BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>>,
     control_tubes: &mut Vec<TaggedControlTube>,
     wayland_device_tube: Tube,
@@ -586,7 +585,7 @@ fn create_devices(
         cfg,
         vm,
         resources,
-        exit_evt,
+        vm_evt_wrtube,
         wayland_device_tube,
         gpu_device_tube,
         vhost_user_gpu_tubes,
@@ -632,7 +631,11 @@ fn create_devices(
         devices.push((Box::new(StubPciDevice::new(params)), None));
     }
 
-    devices.push((Box::new(PvPanicPciDevice::new(panic_wrtube)), None));
+    devices.push((
+        Box::new(PvPanicPciDevice::new(vm_evt_wrtube.try_clone()?)),
+        None,
+    ));
+
     Ok(devices)
 }
 
@@ -912,6 +915,8 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         pvm_fw: pvm_fw_image,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         pcie_ecam: cfg.pcie_ecam,
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        pci_low_start: cfg.pci_low_start,
     })
 }
 
@@ -978,6 +983,12 @@ fn run_kvm(cfg: Config, components: VmComponents, guest_mem: GuestMemory) -> Res
     if !cfg.userspace_msr.is_empty() {
         vm.enable_userspace_msr()
             .context("failed to enable userspace MSR handling, do you have kernel 5.10 or later")?;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            let msr_list = get_override_msr_list(&cfg.userspace_msr);
+            vm.set_msr_filter(msr_list)
+                .context("failed to set msr filter")?;
+        }
     }
 
     // Check that the VM was actually created in protected mode as expected.
@@ -1133,10 +1144,6 @@ where
             // Balloon gets a special socket so balloon requests can be forwarded
             // from the main process.
             let (host, device) = Tube::pair().context("failed to create tube")?;
-            // Set recv timeout to avoid deadlock on sending BalloonControlCommand
-            // before the guest is ready.
-            host.set_recv_timeout(Some(Duration::from_millis(100)))
-                .context("failed to set timeout")?;
             (Some(host), Some(device))
         }
     } else {
@@ -1221,10 +1228,8 @@ where
         vvu_proxy_device_tubes.push(vvu_proxy_device_tube);
     }
 
-    let exit_evt = Event::new().context("failed to create event")?;
-    let reset_evt = Event::new().context("failed to create event")?;
-    let crash_evt = Event::new().context("failed to create event")?;
-    let (panic_rdtube, panic_wrtube) = Tube::pair().context("failed to create tube")?;
+    let (vm_evt_wrtube, vm_evt_rdtube) =
+        Tube::directional_pair().context("failed to create vm event tube")?;
 
     let pstore_size = components.pstore.as_ref().map(|pstore| pstore.size as u64);
     let mut sys_allocator = SystemAllocator::new(
@@ -1280,13 +1285,6 @@ where
         direct_irq
             .irq_enable(*irq)
             .context("failed to enable interrupt forwarding")?;
-
-        if cfg.direct_wake_irq.contains(&irq) {
-            direct_irq
-                .irq_wake_enable(*irq)
-                .context("failed to enable interrupt wake")?;
-        }
-
         irqs.push(direct_irq);
     }
 
@@ -1302,13 +1300,6 @@ where
         direct_irq
             .irq_enable(*irq)
             .context("failed to enable interrupt forwarding")?;
-
-        if cfg.direct_wake_irq.contains(&irq) {
-            direct_irq
-                .irq_wake_enable(*irq)
-                .context("failed to enable interrupt wake")?;
-        }
-
         irqs.push(direct_irq);
     }
 
@@ -1335,8 +1326,7 @@ where
         &cfg,
         &mut vm,
         &mut sys_allocator,
-        &exit_evt,
-        panic_wrtube,
+        &vm_evt_wrtube,
         &mut iommu_attached_endpoints,
         &mut control_tubes,
         wayland_device_tube,
@@ -1434,8 +1424,7 @@ where
     #[cfg_attr(not(feature = "direct"), allow(unused_mut))]
     let mut linux = Arch::build_vm::<V, Vcpu>(
         components,
-        &exit_evt,
-        &reset_evt,
+        &vm_evt_wrtube,
         &mut sys_allocator,
         &cfg.serial_parameters,
         simple_jail(&cfg.jail_config, "serial")?,
@@ -1445,6 +1434,7 @@ where
         devices,
         irq_chip,
         &mut vcpu_ids,
+        simple_jail(&cfg.jail_config, "serial")?,
     )
     .context("the architecture failed to build the vm")?;
 
@@ -1500,10 +1490,8 @@ where
         &disk_host_tubes,
         #[cfg(feature = "usb")]
         usb_control_tube,
-        exit_evt,
-        reset_evt,
-        crash_evt,
-        panic_rdtube,
+        vm_evt_rdtube,
+        vm_evt_wrtube,
         sigchld_fd,
         Arc::clone(&map_request),
         gralloc,
@@ -1685,10 +1673,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     balloon_host_tube: Option<Tube>,
     disk_host_tubes: &[Tube],
     #[cfg(feature = "usb")] usb_control_tube: Tube,
-    exit_evt: Event,
-    reset_evt: Event,
-    crash_evt: Event,
-    panic_rdtube: Tube,
+    vm_evt_rdtube: RecvTube,
+    vm_evt_wrtube: SendTube,
     sigchld_fd: SignalFd,
     map_request: Arc<Mutex<Option<ExternalMapping>>>,
     mut gralloc: RutabagaGralloc,
@@ -1697,10 +1683,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 ) -> Result<ExitState> {
     #[derive(PollToken)]
     enum Token {
-        Exit,
-        Reset,
-        Crash,
-        Panic,
+        VmEvent,
         Suspend,
         ChildSignal,
         IrqFd { index: IrqEventIndex },
@@ -1714,12 +1697,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         .expect("failed to set terminal raw mode");
 
     let wait_ctx = WaitContext::build_with(&[
-        (&exit_evt, Token::Exit),
-        (&reset_evt, Token::Reset),
-        (&crash_evt, Token::Crash),
-        (&panic_rdtube, Token::Panic),
         (&linux.suspend_evt, Token::Suspend),
         (&sigchld_fd, Token::ChildSignal),
+        (&vm_evt_rdtube, Token::VmEvent),
     ])
     .context("failed to add descriptor to wait context")?;
 
@@ -1799,6 +1779,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(target_os = "android")]
     android::set_process_profiles(&cfg.task_profiles)?;
 
+    let guest_suspended_cvar = Arc::new((Mutex::new(false), Condvar::new()));
+
     for (cpu_id, vcpu) in vcpus.into_iter().enumerate() {
         let (to_vcpu_channel, from_main_channel) = mpsc::channel();
         let vcpu_affinity = match linux.vcpu_affinity.clone() {
@@ -1824,9 +1806,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             linux.has_bios,
             (*linux.io_bus).clone(),
             (*linux.mmio_bus).clone(),
-            exit_evt.try_clone().context("failed to clone event")?,
-            reset_evt.try_clone().context("failed to clone event")?,
-            crash_evt.try_clone().context("failed to clone event")?,
+            vm_evt_wrtube
+                .try_clone()
+                .context("failed to clone vm event tube")?,
             linux.vm.check_capability(VmCap::PvClockSuspend),
             from_main_channel,
             use_hypervisor_signals,
@@ -1834,6 +1816,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             to_gdb_channel.clone(),
             cfg.per_vm_core_scheduling,
             cfg.host_cpu_topology,
+            cfg.enable_pnp_data,
             cfg.itmt,
             cfg.privileged_vm,
             match vcpu_cgroup_tasks_file {
@@ -1844,6 +1827,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 ),
             },
             cfg.userspace_msr.clone(),
+            guest_suspended_cvar.clone(),
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }
@@ -1869,6 +1853,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     vcpu_thread_barrier.wait();
 
     let mut exit_state = ExitState::Stop;
+    let mut pvpanic_code = PvPanicCode::Unknown;
     let mut balloon_stats_id: u64 = 0;
 
     'wait: loop {
@@ -1885,37 +1870,36 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         let mut vm_control_indices_to_remove = Vec::new();
         for event in events.iter().filter(|e| e.is_readable) {
             match event.token {
-                Token::Exit => {
-                    info!("vcpu requested shutdown");
-                    break 'wait;
-                }
-                Token::Reset => {
-                    info!("vcpu requested reset");
-                    exit_state = ExitState::Reset;
-                    break 'wait;
-                }
-                Token::Crash => {
-                    info!("vcpu crashed");
-                    exit_state = ExitState::Crash;
-                    break 'wait;
-                }
-                Token::Panic => {
+                Token::VmEvent => {
                     let mut break_to_wait: bool = true;
-                    match panic_rdtube.recv::<u8>() {
-                        Ok(panic_code) => {
-                            let panic_code = PvPanicCode::from_u8(panic_code);
-                            info!("Guest reported panic [Code: {}]", panic_code);
-                            if panic_code == PvPanicCode::CrashLoaded {
-                                // VM is booting to crash kernel.
+                    match vm_evt_rdtube.recv::<VmEventType>() {
+                        Ok(vm_event) => match vm_event {
+                            VmEventType::Exit => {
+                                info!("vcpu requested shutdown");
+                                exit_state = ExitState::Stop;
+                            }
+                            VmEventType::Reset => {
+                                info!("vcpu requested reset");
+                                exit_state = ExitState::Reset;
+                            }
+                            VmEventType::Crash => {
+                                info!("vcpu crashed");
+                                exit_state = ExitState::Crash;
+                            }
+                            VmEventType::Panic(panic_code) => {
+                                pvpanic_code = PvPanicCode::from_u8(panic_code);
+                                info!("Guest reported panic [Code: {}]", pvpanic_code);
                                 break_to_wait = false;
                             }
-                        }
+                        },
                         Err(e) => {
-                            warn!("failed to recv panic event: {} ", e);
+                            warn!("failed to recv VmEvent: {}", e);
                         }
                     }
                     if break_to_wait {
-                        exit_state = ExitState::GuestPanic;
+                        if pvpanic_code == PvPanicCode::Panicked {
+                            exit_state = ExitState::GuestPanic;
+                        }
                         break 'wait;
                     }
                 }
@@ -2007,6 +1991,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                             None,
                                             &mut linux.bat_control,
                                             &vcpu_handles,
+                                            cfg.force_s2idle,
+                                            guest_suspended_cvar.clone(),
                                         ),
                                     };
 

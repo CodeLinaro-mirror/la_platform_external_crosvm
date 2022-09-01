@@ -381,12 +381,11 @@ pub struct Config {
     pub direct_mmio: Option<DirectIoOption>,
     #[cfg(feature = "direct")]
     pub direct_pmio: Option<DirectIoOption>,
-    #[cfg(feature = "direct")]
-    pub direct_wake_irq: Vec<u32>,
     pub disks: Vec<DiskOption>,
     pub display_window_keyboard: bool,
     pub display_window_mouse: bool,
     pub dmi_path: Option<PathBuf>,
+    pub enable_pnp_data: bool,
     pub executable_path: Option<Executable>,
     pub file_backed_mappings: Vec<FileBackedMappingParameters>,
     pub force_s2idle: bool,
@@ -414,6 +413,8 @@ pub struct Config {
     pub no_legacy: bool,
     pub no_smt: bool,
     pub params: Vec<String>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub pci_low_start: Option<u64>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub pcie_ecam: Option<MemRegion>,
     #[cfg(feature = "direct")]
@@ -509,12 +510,11 @@ impl Default for Config {
             direct_mmio: None,
             #[cfg(feature = "direct")]
             direct_pmio: None,
-            #[cfg(feature = "direct")]
-            direct_wake_irq: Vec::new(),
             disks: Vec::new(),
             display_window_keyboard: false,
             display_window_mouse: false,
             dmi_path: None,
+            enable_pnp_data: false,
             executable_path: None,
             file_backed_mappings: Vec::new(),
             force_s2idle: false,
@@ -546,6 +546,8 @@ impl Default for Config {
             no_legacy: false,
             no_smt: false,
             params: Vec::new(),
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            pci_low_start: None,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             pcie_ecam: None,
             #[cfg(feature = "direct")]

@@ -15,12 +15,12 @@
 use std::fmt;
 
 use base::RawDescriptor;
-use base::{self, error, Tube};
+use base::{self, error, SendTube, VmEventType};
 use resources::{Alloc, MmioType, SystemAllocator};
 
 use crate::pci::pci_configuration::{
-    PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciClassCode, PciConfiguration,
-    PciHeaderType, PciOtherSubclass,
+    PciBarConfiguration, PciBarIndex, PciBarPrefetchable, PciBarRegionType, PciClassCode,
+    PciConfiguration, PciHeaderType, PciOtherSubclass,
 };
 use crate::pci::pci_device::{self, BarRange, PciDevice, Result};
 use crate::pci::{PciAddress, PciDeviceError, PCI_VENDOR_ID_REDHAT};
@@ -28,7 +28,7 @@ use crate::pci::{PciAddress, PciDeviceError, PCI_VENDOR_ID_REDHAT};
 const PCI_DEVICE_ID_REDHAT_PVPANIC: u16 = 0x0011;
 const PCI_PVPANIC_REVISION_ID: u8 = 1;
 
-const PVPANIC_REG_NUM: u8 = 0;
+const PVPANIC_BAR_NUM: PciBarIndex = PciBarIndex::Bar0;
 const PVPANIC_REG_SIZE: u64 = 0x10;
 
 // Guest panicked
@@ -69,11 +69,11 @@ impl fmt::Display for PvPanicCode {
 pub struct PvPanicPciDevice {
     pci_address: Option<PciAddress>,
     config_regs: PciConfiguration,
-    evt_tube: Tube,
+    evt_wrtube: SendTube,
 }
 
 impl PvPanicPciDevice {
-    pub fn new(evt_tube: Tube) -> PvPanicPciDevice {
+    pub fn new(evt_wrtube: SendTube) -> PvPanicPciDevice {
         let config_regs = PciConfiguration::new(
             PCI_VENDOR_ID_REDHAT,
             PCI_DEVICE_ID_REDHAT_PVPANIC,
@@ -89,7 +89,7 @@ impl PvPanicPciDevice {
         Self {
             pci_address: None,
             config_regs,
-            evt_tube,
+            evt_wrtube,
         }
     }
 }
@@ -127,14 +127,14 @@ impl PciDevice for PvPanicPciDevice {
                     bus: address.bus,
                     dev: address.dev,
                     func: address.func,
-                    bar: PVPANIC_REG_NUM,
+                    bar: PVPANIC_BAR_NUM.into(),
                 },
                 "pvpanic_reg".to_string(),
                 PVPANIC_REG_SIZE,
             )
             .map_err(|e| pci_device::Error::IoAllocationFailed(PVPANIC_REG_SIZE, e))?;
         let pvpanic_config = PciBarConfiguration::new(
-            PVPANIC_REG_NUM.into(),
+            PVPANIC_BAR_NUM,
             PVPANIC_REG_SIZE,
             PciBarRegionType::Memory32BitRegion,
             PciBarPrefetchable::NotPrefetchable,
@@ -156,7 +156,7 @@ impl PciDevice for PvPanicPciDevice {
         Vec::new()
     }
 
-    fn get_bar_configuration(&self, bar_num: usize) -> Option<PciBarConfiguration> {
+    fn get_bar_configuration(&self, bar_num: PciBarIndex) -> Option<PciBarConfiguration> {
         self.config_regs.get_bar_configuration(bar_num)
     }
 
@@ -169,7 +169,7 @@ impl PciDevice for PvPanicPciDevice {
     }
 
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
-        let mmio_addr = self.config_regs.get_bar_addr(PVPANIC_REG_NUM as usize);
+        let mmio_addr = self.config_regs.get_bar_addr(PVPANIC_BAR_NUM);
         data[0] = if addr == mmio_addr && data.len() == 1 {
             PVPANIC_CAPABILITIES
         } else {
@@ -178,12 +178,16 @@ impl PciDevice for PvPanicPciDevice {
     }
 
     fn write_bar(&mut self, addr: u64, data: &[u8]) {
-        let mmio_addr = self.config_regs.get_bar_addr(PVPANIC_REG_NUM as usize);
+        let mmio_addr = self.config_regs.get_bar_addr(PVPANIC_BAR_NUM);
         if addr != mmio_addr || data.len() != 1 {
             return;
         }
-        if let Err(e) = self.evt_tube.send::<u8>(&data[0]) {
-            error!("Failed to send to the panic event: {}", e);
+
+        if let Err(e) = self
+            .evt_wrtube
+            .send::<VmEventType>(&VmEventType::Panic(data[0]))
+        {
+            error!("Failed to write to the event tube: {}", e);
         }
     }
 }
@@ -191,6 +195,7 @@ impl PciDevice for PvPanicPciDevice {
 #[cfg(test)]
 mod test {
     use super::*;
+    use base::Tube;
     use resources::{MemRegion, SystemAllocator, SystemAllocatorConfig};
 
     #[test]
@@ -217,7 +222,7 @@ mod test {
         )
         .unwrap();
 
-        let (evt_rdtube, evt_wrtube) = Tube::pair().unwrap();
+        let (evt_wrtube, evt_rdtube) = Tube::directional_pair().unwrap();
         let mut device = PvPanicPciDevice::new(evt_wrtube);
 
         assert!(device.allocate_address(&mut allocator).is_ok());
@@ -230,7 +235,7 @@ mod test {
         assert_eq!(data[0], 0);
 
         // Read from the valid addr
-        let mmio_addr = device.config_regs.get_bar_addr(PVPANIC_REG_NUM as usize);
+        let mmio_addr = device.config_regs.get_bar_addr(PVPANIC_BAR_NUM);
         device.read_bar(mmio_addr, &mut data);
         assert_eq!(data[0], PVPANIC_CAPABILITIES);
 
@@ -239,7 +244,7 @@ mod test {
         device.write_bar(mmio_addr, &data);
 
         // Verify the event
-        let val = evt_rdtube.recv::<u8>().unwrap();
-        assert_eq!(val, PVPANIC_CRASH_LOADED);
+        let val = evt_rdtube.recv::<VmEventType>().unwrap();
+        assert_eq!(val, VmEventType::Panic(PVPANIC_CRASH_LOADED));
     }
 }

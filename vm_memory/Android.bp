@@ -22,6 +22,7 @@ rust_library {
     rustlibs: [
         "libbase_rust",
         "libbitflags",
+        "libcfg_if",
         "libcros_async",
         "libdata_model",
         "liblibc",
@@ -48,6 +49,7 @@ rust_test {
     rustlibs: [
         "libbase_rust",
         "libbitflags",
+        "libcfg_if",
         "libcros_async",
         "libdata_model",
         "liblibc",
