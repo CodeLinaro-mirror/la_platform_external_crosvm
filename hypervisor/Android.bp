@@ -27,8 +27,10 @@ rust_test {
     rustlibs: [
         "libbase_rust",
         "libbit_field",
+        "libbitflags",
         "libdata_model",
         "libdowncast_rs",
+        "libfnv",
         "libkvm",
         "libkvm_sys",
         "liblibc",
@@ -52,8 +54,10 @@ rust_library {
     rustlibs: [
         "libbase_rust",
         "libbit_field",
+        "libbitflags",
         "libdata_model",
         "libdowncast_rs",
+        "libfnv",
         "libkvm",
         "libkvm_sys",
         "liblibc",

@@ -10,21 +10,24 @@
 //! implementation (referred to as `device backend` in this module) in the
 //! device VM.
 
+use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::net::UnixListener;
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{anyhow, bail, Context};
 use base::{
-    error, info, AsRawDescriptor, Event, EventType, FromRawDescriptor, IntoRawDescriptor,
-    PollToken, RawDescriptor, SafeDescriptor, Tube, WaitContext,
+    error, info, AsRawDescriptor, Event, EventToken, EventType, FromRawDescriptor,
+    IntoRawDescriptor, RawDescriptor, SafeDescriptor, Tube, WaitContext,
 };
 use data_model::{DataInit, Le32};
 use libc::{recv, MSG_DONTWAIT, MSG_PEEK};
 use resources::Alloc;
+use sync::Mutex;
 use uuid::Uuid;
-use vm_control::{VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
+use vm_control::{MemSlot, VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
 use vm_memory::GuestMemory;
 use vmm_vhost::{
     connection::socket::Endpoint as SocketEndpoint,
@@ -66,7 +69,7 @@ const CONFIG_UUID_SIZE: usize = 16;
 // https://stefanha.github.io/virtio/vhost-user-slave.html#x1-2870004.
 const VIRTIO_VHOST_USER_STATUS_SLAVE_UP: u8 = 0;
 
-const BAR_INDEX: PciBarIndex = PciBarIndex::Bar2;
+const BAR_INDEX: u8 = 2;
 
 // Bar configuration.
 // All offsets are from the starting of bar `BAR_INDEX`.
@@ -226,9 +229,12 @@ struct Worker {
 
     // Helps with communication and parsing messages from the sibling.
     slave_req_helper: SlaveReqHelper<SocketEndpoint<MasterReq>>,
+
+    // Stores memory regions that the worker has asked the main thread to register.
+    registered_memory: Vec<MemSlot>,
 }
 
-#[derive(PollToken, Debug, Clone)]
+#[derive(EventToken, Debug, Clone)]
 enum Token {
     // Data is available on the Vhost-user sibling socket.
     SiblingSocket,
@@ -649,27 +655,34 @@ impl Worker {
         }
 
         for (region, file) in contexts.iter().zip(files.into_iter()) {
-            let request = VmMemoryRequest::RegisterMemory {
-                source: VmMemorySource::Descriptor {
-                    descriptor: SafeDescriptor::from(file),
-                    offset: region.mmap_offset,
-                    size: region.memory_size,
-                },
-                dest: VmMemoryDestination::ExistingAllocation {
-                    allocation: self.pci_bar,
-                    offset: self.mem_offset as u64,
-                },
-                read_only: false,
+            let source = VmMemorySource::Descriptor {
+                descriptor: SafeDescriptor::from(file),
+                offset: region.mmap_offset,
+                size: region.memory_size,
             };
-            self.process_memory_mapping_request(&request)?;
+            let dest = VmMemoryDestination::ExistingAllocation {
+                allocation: self.pci_bar,
+                offset: self.mem_offset as u64,
+            };
+            self.register_memory(source, dest)?;
             self.mem_offset += region.memory_size as usize;
         }
         Ok(())
     }
 
+    fn register_memory(&mut self, source: VmMemorySource, dest: VmMemoryDestination) -> Result<()> {
+        let request = VmMemoryRequest::RegisterMemory {
+            source,
+            dest,
+            read_only: false,
+        };
+        self.send_memory_request(&request)?;
+        Ok(())
+    }
+
     // Sends memory mapping request to the main process. If successful adds the
-    // mmaped info into |sibling_mem|, else returns error.
-    fn process_memory_mapping_request(&mut self, request: &VmMemoryRequest) -> Result<()> {
+    // mmaped info into `registered_memory`, else returns error.
+    fn send_memory_request(&mut self, request: &VmMemoryRequest) -> Result<()> {
         self.main_process_tube
             .send(request)
             .context("sending mapping request to tube failed")?;
@@ -680,7 +693,12 @@ impl Worker {
             .context("receiving mapping request from tube failed")?;
 
         match response {
-            VmMemoryResponse::RegisterMemory { .. } => Ok(()),
+            VmMemoryResponse::Ok => Ok(()),
+            VmMemoryResponse::RegisterMemory { slot, .. } => {
+                // Store the registered memory slot so we can unregister it when the thread ends.
+                self.registered_memory.push(slot);
+                Ok(())
+            }
             VmMemoryResponse::Err(e) => {
                 bail!("memory mapping failed: {}", e);
             }
@@ -837,6 +855,17 @@ impl Worker {
             .with_context(|| format!("failed to write call event for {}-th ring", index))?;
         Ok(())
     }
+
+    // Clean up memory regions that the worker registered so that the device can start another
+    // worker later.
+    fn cleanup_registered_memory(&mut self) {
+        while let Some(slot) = self.registered_memory.pop() {
+            let req = VmMemoryRequest::UnregisterMemory(slot);
+            if let Err(e) = self.send_memory_request(&req) {
+                error!("failed to unregister memory slot: {}", e);
+            }
+        }
+    }
 }
 
 // Doorbell capability of the proxy device.
@@ -875,12 +904,59 @@ impl VirtioPciDoorbellCap {
     }
 }
 
-// Used to store parameters passed in the |activate| function.
-struct ActivateParams {
-    mem: GuestMemory,
-    interrupt: Interrupt,
-    queues: Vec<Queue>,
-    queue_evts: Vec<Event>,
+/// Represents the `VirtioVhostUser` device's state.
+enum State {
+    /// The device is initialized but not activated.
+    Initialized {
+        // Bound socket waiting to accept a socket connection from the Vhost-user
+        // sibling.
+        listener: UnixListener,
+
+        // The tube communicate with the main process from a worker.
+        // This will be passed on to a worker thread when it's spawned.
+        main_process_tube: Tube,
+    },
+    /// The VVU-proxy PCI device is activated but its worker thread hasn't started.
+    Activated {
+        listener: UnixListener,
+        main_process_tube: Tube,
+
+        mem: GuestMemory,
+        interrupt: Interrupt,
+        rx_queue: Queue,
+        tx_queue: Queue,
+        rx_queue_evt: Event,
+        tx_queue_evt: Event,
+    },
+    /// The worker thread is running.
+    Running {
+        // To communicate with the worker thread.
+        worker_thread_tube: Tube,
+
+        kill_evt: Event,
+        worker_thread: thread::JoinHandle<Result<()>>,
+    },
+    /// Something wrong happened and the device is unusable.
+    Invalid,
+}
+
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            State::Initialized { .. } => {
+                write!(f, "Initialized")
+            }
+            State::Activated { .. } => {
+                write!(f, "Activated")
+            }
+            State::Running { .. } => {
+                write!(f, "Running")
+            }
+            State::Invalid { .. } => {
+                write!(f, "Invalid")
+            }
+        }
+    }
 }
 
 pub struct VirtioVhostUser {
@@ -894,15 +970,8 @@ pub struct VirtioVhostUser {
     // size differ in the QEMU implementation.
     device_bar_size: u64,
 
-    // Bound socket waiting to accept a socket connection from the Vhost-user
-    // sibling.
-    listener: Option<UnixListener>,
-
     // Device configuration.
     config: VirtioVhostUserConfig,
-
-    kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<Result<Worker>>>,
 
     // The bar representing the doorbell, notification and shared memory regions.
     pci_bar: Option<Alloc>,
@@ -913,20 +982,13 @@ pub struct VirtioVhostUser {
     // Stores msix vectors corresponding to each device backend queue.
     notification_msix_vectors: [Option<u16>; MAX_VHOST_DEVICE_QUEUES],
 
-    // Cache for params stored in |activate|.
-    activate_params: Option<ActivateParams>,
-
-    // Is Vhost-user sibling connected.
-    sibling_connected: bool,
-
-    // To communicate with the main process.
-    main_process_tube: Option<Tube>,
-
-    // To communicate with the worker thread.
-    worker_thread_tube: Option<Tube>,
-
     // PCI address that this device needs to be allocated if specified.
     pci_address: Option<PciAddress>,
+
+    // The device's state.
+    // The value is wrapped with `Arc<Mutex<_>>` because it can be modified from the worker thread
+    // as well as the main device thread.
+    state: Arc<Mutex<State>>,
 }
 
 impl VirtioVhostUser {
@@ -945,27 +1007,24 @@ impl VirtioVhostUser {
         Ok(VirtioVhostUser {
             base_features: base_features | 1 << VIRTIO_F_ACCESS_PLATFORM,
             device_bar_size,
-            listener: Some(listener),
             config: VirtioVhostUserConfig {
                 status: Le32::from(0),
                 max_vhost_queues: Le32::from(MAX_VHOST_DEVICE_QUEUES as u32),
                 uuid: *uuid.unwrap_or_default().as_bytes(),
             },
-            kill_evt: None,
-            worker_thread: None,
             pci_bar: None,
             notification_select: None,
             notification_msix_vectors: [None; MAX_VHOST_DEVICE_QUEUES],
-            activate_params: None,
-            sibling_connected: false,
-            main_process_tube: Some(main_process_tube),
-            worker_thread_tube: None,
+            state: Arc::new(Mutex::new(State::Initialized {
+                main_process_tube,
+                listener,
+            })),
             pci_address,
         })
     }
 
     fn check_bar_metadata(&self, bar_index: PciBarIndex) -> Result<()> {
-        if bar_index != BAR_INDEX {
+        if bar_index != BAR_INDEX as usize {
             bail!("invalid bar index: {}", bar_index);
         }
 
@@ -978,17 +1037,23 @@ impl VirtioVhostUser {
 
     // Handles writes to the DOORBELL region of the BAR as per the VVU spec.
     fn write_bar_doorbell(&mut self, offset: u64) {
-        // The |offset| represents the Vring number who call event needs to be
-        // written to.
-        let vring = (offset / DOORBELL_OFFSET_MULTIPLIER as u64) as usize;
-        match &self.worker_thread_tube {
-            Some(worker_thread_tube) => {
+        match &*self.state.lock() {
+            State::Running {
+                worker_thread_tube, ..
+            } => {
+                // The |offset| represents the Vring number who call event needs to be
+                // written to.
+                let vring = (offset / DOORBELL_OFFSET_MULTIPLIER as u64) as usize;
+
                 if let Err(e) = worker_thread_tube.send(&vring) {
                     error!("failed to send doorbell write request: {}", e);
                 }
             }
-            None => {
-                error!("worker thread tube not allocated");
+            s => {
+                error!(
+                    "write_bar_doorbell is called in an invalid state {} with offset={}",
+                    s, offset,
+                );
             }
         }
     }
@@ -1061,14 +1126,70 @@ impl VirtioVhostUser {
         data[..2].copy_from_slice(&d);
     }
 
-    // Initializes state and starts the worker thread which will process all messages to this device
-    // and send out messages in response.
-    fn start_worker(&mut self) {
-        // This function should never be called if this device hasn't been
-        // activated.
-        if self.activate_params.is_none() {
-            panic!("device not activated");
-        }
+    // Checks the device's state and starts a worker thread if it's ready.
+    // The thread will process all messages to this device and send out messages in response.
+    fn try_starting_worker(&mut self) {
+        let mut state = self.state.lock();
+
+        // Check the device state to decide whether start a new worker thread.
+        // Note that this check cannot be done by the caller of this function because `self.state`
+        // can be modified by another thread technically.
+        match *state {
+            State::Activated { .. } => (),
+            _ => {
+                // If the device is not ready or a thread is already running, do nothing here.
+                return;
+            }
+        };
+
+        // We'll prepare values that will be used in a new thread below.
+
+        // Clone to pass it into a worker thread.
+        let state_cloned = Arc::clone(&self.state);
+
+        // Create tube to communicate with the worker thread and update the state.
+        let (worker_thread_tube, main_thread_tube) =
+            Tube::pair().expect("failed to create tube pair");
+
+        // Use `State::Invalid` as the intermediate state while preparing the proper next state.
+        // Once a worker thread is successfully started, `self.state` will be updated to `Running`.
+        let old_state: State = std::mem::replace(&mut *state, State::Invalid);
+
+        // Retrieve values stored in the state value.
+        let (
+            main_process_tube,
+            listener,
+            mem,
+            interrupt,
+            rx_queue,
+            tx_queue,
+            rx_queue_evt,
+            tx_queue_evt,
+        ) = match old_state {
+            State::Activated {
+                main_process_tube,
+                listener,
+                mem,
+                interrupt,
+                rx_queue,
+                tx_queue,
+                rx_queue_evt,
+                tx_queue_evt,
+            } => (
+                main_process_tube,
+                listener,
+                mem,
+                interrupt,
+                rx_queue,
+                tx_queue,
+                rx_queue_evt,
+                tx_queue_evt,
+            ),
+            s => {
+                // Unreachable because we've checked the state at the beginning of this function.
+                unreachable!("invalid state: {}", s)
+            }
+        };
 
         let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
@@ -1077,11 +1198,6 @@ impl VirtioVhostUser {
                 return;
             }
         };
-        self.kill_evt = Some(self_kill_evt);
-
-        let listener = self.listener.take().expect("listener should be set");
-
-        let main_process_tube = self.main_process_tube.take().expect("tube missing");
 
         // Safe because a PCI bar is guaranteed to be allocated at this point.
         let pci_bar = self.pci_bar.expect("PCI bar unallocated");
@@ -1096,22 +1212,11 @@ impl VirtioVhostUser {
             };
         }
 
-        // Create tube to communicate with the worker thread.
-        let (worker_thread_tube, main_thread_tube) =
-            Tube::pair().expect("failed to create tube pair");
-        self.worker_thread_tube = Some(worker_thread_tube);
-
-        // TODO(abhishekbh): Should interrupt.signal_config_changed be called ?
-        self.sibling_connected = true;
-        let mut activate_params = self.activate_params.take().unwrap();
         // This thread will wait for the sibling to connect and the continuously parse messages from
         // the sibling as well as the device (over Virtio).
         let worker_result = thread::Builder::new()
             .name("virtio_vhost_user".to_string())
             .spawn(move || {
-                let rx_queue = activate_params.queues.remove(0);
-                let tx_queue = activate_params.queues.remove(0);
-
                 // Block until the connection with the sibling is established. We do this in a
                 // thread to avoid blocking the main thread.
                 let (socket, _) = listener
@@ -1126,8 +1231,8 @@ impl VirtioVhostUser {
                     SlaveReqHelper::new(SocketEndpoint::from(socket), Protocol::Regular);
 
                 let mut worker = Worker {
-                    mem: activate_params.mem,
-                    interrupt: activate_params.interrupt,
+                    mem,
+                    interrupt,
                     rx_queue,
                     tx_queue,
                     main_process_tube,
@@ -1135,23 +1240,49 @@ impl VirtioVhostUser {
                     mem_offset: SHARED_MEMORY_OFFSET as usize,
                     vrings,
                     slave_req_helper,
+                    registered_memory: Vec::new(),
                 };
-                let rx_queue_evt = activate_params.queue_evts.remove(0);
-                let tx_queue_evt = activate_params.queue_evts.remove(0);
-
-                match worker.run(rx_queue_evt, tx_queue_evt, main_thread_tube, kill_evt) {
+                match worker.run(
+                    rx_queue_evt.try_clone().unwrap(),
+                    tx_queue_evt.try_clone().unwrap(),
+                    main_thread_tube,
+                    kill_evt,
+                ) {
                     Ok(ExitReason::Killed) => {
                         info!("worker thread exited successfully");
-                        Ok(worker)
+                        Ok(())
                     }
                     Ok(ExitReason::Disconnected) => {
-                        // TODO(b/216407443): Handle sibling reconnect events.
                         info!("worker thread exited: sibling disconnected");
-                        Ok(worker)
+
+                        worker.cleanup_registered_memory();
+
+                        let mut state = state_cloned.lock();
+                        let Worker {
+                            mem,
+                            interrupt,
+                            rx_queue,
+                            tx_queue,
+                            main_process_tube,
+                            ..
+                        } = worker;
+
+                        *state = State::Activated {
+                            main_process_tube,
+                            listener,
+                            mem,
+                            interrupt,
+                            rx_queue,
+                            tx_queue,
+                            rx_queue_evt,
+                            tx_queue_evt,
+                        };
+
+                        Ok(())
                     }
                     Err(e) => {
-                        error!("worker thread exited with an error: {:#}", e);
-                        Ok(worker)
+                        error!("worker thread exited with an error: {:?}", e);
+                        Ok(())
                     }
                 }
             });
@@ -1159,9 +1290,14 @@ impl VirtioVhostUser {
         match worker_result {
             Err(e) => {
                 error!("failed to spawn virtio_vhost_user worker: {}", e);
+                return;
             }
-            Ok(join_handle) => {
-                self.worker_thread = Some(join_handle);
+            Ok(worker_thread) => {
+                *state = State::Running {
+                    worker_thread_tube,
+                    kill_evt: self_kill_evt,
+                    worker_thread,
+                };
             }
         }
     }
@@ -1169,13 +1305,17 @@ impl VirtioVhostUser {
 
 impl Drop for VirtioVhostUser {
     fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
+        let mut state = self.state.lock();
+        if let State::Running {
+            kill_evt,
+            worker_thread,
+            ..
+        } = std::mem::replace(&mut *state, State::Invalid)
+        {
             match kill_evt.write(1) {
                 Ok(()) => {
-                    if let Some(worker_thread) = self.worker_thread.take() {
-                        // Ignore the result because there is nothing we can do about it.
-                        let _ = worker_thread.join();
-                    }
+                    // Ignore the result because there is nothing we can do about it.
+                    let _ = worker_thread.join();
                 }
                 Err(e) => error!("failed to write kill event: {}", e),
             }
@@ -1195,17 +1335,18 @@ impl VirtioDevice for VirtioVhostUser {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
         let mut rds = Vec::new();
 
-        if let Some(rd) = &self.listener {
-            rds.push(rd.as_raw_descriptor());
-        }
-
-        if let Some(rd) = &self.kill_evt {
-            rds.push(rd.as_raw_descriptor());
-        }
-
-        if let Some(rd) = &self.main_process_tube {
-            rds.push(rd.as_raw_descriptor());
-        }
+        match &*self.state.lock() {
+            State::Initialized {
+                main_process_tube,
+                listener,
+            } => {
+                rds.push(main_process_tube.as_raw_descriptor());
+                rds.push(listener.as_raw_descriptor());
+            }
+            State::Activated { .. } | State::Running { .. } | State::Invalid => {
+                error!("keep_rds is called in an unexpected state");
+            }
+        };
 
         // `self.worker_thread_tube` is set after a fork / keep_rds is called in multiprocess mode.
         // Hence, it's not required to be processed in this function.
@@ -1245,8 +1386,8 @@ impl VirtioDevice for VirtioVhostUser {
 
         // The driver has indicated that it's safe for the Vhost-user sibling to
         // initiate a connection and send data over.
-        if self.config.is_slave_up() && !self.sibling_connected {
-            self.start_worker();
+        if self.config.is_slave_up() {
+            self.try_starting_worker();
         }
     }
 
@@ -1291,11 +1432,11 @@ impl VirtioDevice for VirtioVhostUser {
             bus: address.bus,
             dev: address.dev,
             func: address.func,
-            bar: BAR_INDEX as u8,
+            bar: BAR_INDEX,
         });
 
         vec![PciBarConfiguration::new(
-            BAR_INDEX,
+            BAR_INDEX as usize,
             self.device_bar_size,
             PciBarRegionType::Memory64BitRegion,
             // NotPrefetchable so as to exit on every read / write event in the
@@ -1308,21 +1449,39 @@ impl VirtioDevice for VirtioVhostUser {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<Queue>,
-        queue_evts: Vec<Event>,
+        mut queues: Vec<Queue>,
+        mut queue_evts: Vec<Event>,
     ) {
         if queues.len() != NUM_PROXY_DEVICE_QUEUES || queue_evts.len() != NUM_PROXY_DEVICE_QUEUES {
             error!("bad queue length: {} {}", queues.len(), queue_evts.len());
             return;
         }
 
-        // Cache these to be used later in the `start_worker` function.
-        self.activate_params = Some(ActivateParams {
-            mem,
-            interrupt,
-            queues,
-            queue_evts,
-        });
+        let mut state = self.state.lock();
+        // Use `State::Invalid` as the intermediate state here.
+        let old_state: State = std::mem::replace(&mut *state, State::Invalid);
+
+        match old_state {
+            State::Initialized {
+                listener,
+                main_process_tube,
+            } => {
+                *state = State::Activated {
+                    listener,
+                    main_process_tube,
+                    mem,
+                    interrupt,
+                    rx_queue: queues.remove(0),
+                    tx_queue: queues.remove(0),
+                    rx_queue_evt: queue_evts.remove(0),
+                    tx_queue_evt: queue_evts.remove(0),
+                };
+            }
+            s => {
+                // If the old state is not `Initialized`, it becomes `Invalid`.
+                error!("activate() is called in an unexpected state: {}", s);
+            }
+        };
     }
 
     fn read_bar(&mut self, bar_index: PciBarIndex, offset: u64, data: &mut [u8]) {
@@ -1354,23 +1513,58 @@ impl VirtioDevice for VirtioVhostUser {
     }
 
     fn reset(&mut self) -> bool {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            if let Err(e) = kill_evt.write(1) {
-                error!("failed to notify the kill event: {}", e);
-                return false;
-            }
-        }
+        info!("resetting vvu-proxy device");
 
-        if let Some(worker_thread) = self.worker_thread.take() {
-            if let Err(e) = worker_thread.join() {
-                error!("failed to get back resources: {:?}", e);
-                return false;
+        let mut state = self.state.lock();
+        match std::mem::replace(&mut *state, State::Invalid) {
+            old_state @ State::Initialized { .. } => {
+                *state = old_state;
             }
-        }
+            State::Activated {
+                listener,
+                main_process_tube,
+                ref mut rx_queue,
+                ref mut tx_queue,
+                ..
+            } => {
+                rx_queue.reset_counters();
+                tx_queue.reset_counters();
+                *state = State::Initialized {
+                    listener,
+                    main_process_tube,
+                };
+            }
+            State::Running {
+                kill_evt,
+                worker_thread,
+                ..
+            } => {
+                // TODO(b/216407443): The current implementation doesn't support the case where
+                // vvu-proxy is reset while running.
+                // So, the state is changed to `Invalid` in this case below.
+                // We should support this case eventually.
+                // e.g. The VVU device backend in the guest is killed unexpectedly.
+                // To support this case, we might need to reset iommu's state as well.
 
-        // TODO(abhishekbh): Disconnect from sibling and reset
-        // `sibling_connected`.
-        false
+                if let Err(e) = kill_evt.write(1) {
+                    error!("failed to notify the kill event: {}", e);
+                }
+
+                // Drop the lock, as the worker thread might change the state.
+                drop(state);
+                if let Err(e) = worker_thread.join() {
+                    error!("failed to get back resources: {:?}", e);
+                }
+
+                let mut state = self.state.lock();
+                *state = State::Invalid;
+            }
+            State::Invalid => {
+                // TODO(b/216407443): Support this case.
+            }
+        };
+
+        true
     }
 
     fn pci_address(&self) -> Option<PciAddress> {

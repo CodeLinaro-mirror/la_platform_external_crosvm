@@ -34,7 +34,6 @@ use backend::*;
 
 #[derive(Debug)]
 struct QueuedInputResourceParams {
-    encoder_id: InputBufferId,
     timestamp: u64,
     in_queue: bool,
 }
@@ -46,8 +45,6 @@ struct InputResource {
 
 #[derive(Debug)]
 struct QueuedOutputResourceParams {
-    encoder_id: OutputBufferId,
-    timestamp: u64,
     in_queue: bool,
 }
 
@@ -104,7 +101,7 @@ impl<T: EncoderSession> Stream<T> {
         const DEFAULT_HEIGHT: u32 = 480;
         const DEFAULT_BITRATE_TARGET: u32 = 6000;
         const DEFAULT_BITRATE_PEAK: u32 = DEFAULT_BITRATE_TARGET * 2;
-        const DEFAULT_BITRATE: Bitrate = Bitrate::VBR {
+        const DEFAULT_BITRATE: Bitrate = Bitrate::Vbr {
             target: DEFAULT_BITRATE_TARGET,
             peak: DEFAULT_BITRATE_PEAK,
         };
@@ -799,7 +796,6 @@ impl<T: Encoder> EncoderDevice<T> {
                             return Err(VideoError::InvalidOperation);
                         }
                         let queue_params = QueuedInputResourceParams {
-                            encoder_id: input_buffer_id,
                             timestamp,
                             in_queue: true,
                         };
@@ -883,11 +879,7 @@ impl<T: Encoder> EncoderDevice<T> {
                                 output_buffer_id, last_resource_id
                             );
                         }
-                        let queue_params = QueuedOutputResourceParams {
-                            encoder_id: output_buffer_id,
-                            timestamp,
-                            in_queue: true,
-                        };
+                        let queue_params = QueuedOutputResourceParams { in_queue: true };
                         if let Some(last_queue_params) =
                             dst_resource.queue_params.replace(queue_params)
                         {
@@ -1214,9 +1206,9 @@ impl<T: Encoder> EncoderDevice<T> {
             CtrlType::BitrateMode => CtrlVal::BitrateMode(stream.dst_bitrate.mode()),
             CtrlType::Bitrate => CtrlVal::Bitrate(stream.dst_bitrate.target()),
             CtrlType::BitratePeak => CtrlVal::BitratePeak(match stream.dst_bitrate {
-                Bitrate::VBR { peak, .. } => peak,
+                Bitrate::Vbr { peak, .. } => peak,
                 // For CBR there is no peak, so return the target (which is technically correct).
-                Bitrate::CBR { target } => target,
+                Bitrate::Cbr { target } => target,
             }),
             CtrlType::Profile => CtrlVal::Profile(stream.dst_profile),
             CtrlType::Level => {
@@ -1266,10 +1258,10 @@ impl<T: Encoder> EncoderDevice<T> {
                         return Err(VideoError::InvalidOperation);
                     }
                     stream.dst_bitrate = match bitrate_mode {
-                        BitrateMode::CBR => Bitrate::CBR {
+                        BitrateMode::Cbr => Bitrate::Cbr {
                             target: stream.dst_bitrate.target(),
                         },
-                        BitrateMode::VBR => Bitrate::VBR {
+                        BitrateMode::Vbr => Bitrate::Vbr {
                             target: stream.dst_bitrate.target(),
                             peak: stream.dst_bitrate.target(),
                         },
@@ -1281,7 +1273,7 @@ impl<T: Encoder> EncoderDevice<T> {
                 if stream.dst_bitrate.target() != bitrate {
                     let mut new_bitrate = stream.dst_bitrate;
                     match &mut new_bitrate {
-                        Bitrate::CBR { target } | Bitrate::VBR { target, .. } => *target = bitrate,
+                        Bitrate::Cbr { target } | Bitrate::Vbr { target, .. } => *target = bitrate,
                     }
                     if let Some(ref mut encoder_session) = stream.encoder_session {
                         if let Err(e) = encoder_session.request_encoding_params_change(
@@ -1297,9 +1289,9 @@ impl<T: Encoder> EncoderDevice<T> {
             }
             CtrlVal::BitratePeak(bitrate) => {
                 match stream.dst_bitrate {
-                    Bitrate::VBR { peak, .. } => {
+                    Bitrate::Vbr { peak, .. } => {
                         if peak != bitrate {
-                            let new_bitrate = Bitrate::VBR {
+                            let new_bitrate = Bitrate::Vbr {
                                 target: stream.dst_bitrate.target(),
                                 peak: bitrate,
                             };
@@ -1320,7 +1312,7 @@ impl<T: Encoder> EncoderDevice<T> {
                     }
                     // Trying to set the peak bitrate while in constant mode. This is not
                     // an error, just ignored.
-                    Bitrate::CBR { .. } => {}
+                    Bitrate::Cbr { .. } => {}
                 }
             }
             CtrlVal::Profile(profile) => {

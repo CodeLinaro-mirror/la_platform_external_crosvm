@@ -7,11 +7,10 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context};
-use argh::FromArgs;
 use base::{get_max_open_files, AsRawDescriptor, RawDescriptor};
 use cros_async::Executor;
 use minijail::{self, Minijail};
-use vmm_vhost::connection::socket::Listener as SocketListener;
+use vmm_vhost::connection::socket::{Endpoint as SocketEndpoint, Listener as SocketListener};
 
 use crate::virtio::vhost::user::device::fs::{FsBackend, Options};
 use crate::virtio::vhost::user::device::handler::{DeviceRequestHandler, VhostUserBackend};
@@ -79,19 +78,7 @@ fn jail_and_fork(
 
 /// Starts a vhost-user fs device.
 /// Returns an error if the given `args` is invalid or the device fails to run.
-pub fn start_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
-    let opts = match Options::from_args(&[program_name], args) {
-        Ok(opts) => opts,
-        Err(e) => {
-            if e.status.is_err() {
-                bail!(e.output);
-            } else {
-                println!("{}", e.output);
-            }
-            return Ok(());
-        }
-    };
-
+pub fn start_device(opts: Options) -> anyhow::Result<()> {
     base::syslog::init().context("Failed to initialize syslog")?;
 
     let ex = Executor::new().context("Failed to create executor")?;
@@ -151,7 +138,7 @@ pub fn start_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
     }
 
     let res = match (listener, device) {
-        (Some(l), None) => ex.run_until(handler.run_with_listener(l, &ex))?,
+        (Some(l), None) => ex.run_until(handler.run_with_listener::<SocketEndpoint<_>>(l, &ex))?,
         (None, Some(d)) => ex.run_until(handler.run_vvu(d, &ex))?,
         _ => Err(anyhow!("exactly one of `--socket` or `--vfio` is required")),
     };

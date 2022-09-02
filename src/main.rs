@@ -7,12 +7,13 @@
 pub mod panic_hook;
 pub mod sys;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use std::default::Default;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader};
-use std::ops::Deref;
 #[cfg(feature = "direct")]
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -20,13 +21,16 @@ use std::str::FromStr;
 use std::string::String;
 
 use arch::{
-    set_default_serial_parameters, MsrAction, MsrConfig, MsrRWType, MsrValueFrom, Pstore,
-    VcpuAffinity,
+    set_default_serial_parameters, MsrAction, MsrConfig, MsrFilter, MsrRWType, MsrValueFrom,
+    Pstore, VcpuAffinity,
 };
 use base::syslog::LogConfig;
-use base::{debug, error, getpid, info, pagesize, syslog};
+use base::{error, getpid, info, pagesize, syslog};
+mod crosvm;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", feature = "direct"))]
+use crosvm::argument::parse_hex_or_decimal;
 use crosvm::{
-    argument::{self, parse_hex_or_decimal, print_help, set_arguments, Argument},
+    argument::{self, print_help, set_arguments, Argument},
     platform, BindMount, Config, Executable, FileBackedMappingParameters, GidMap,
     TouchDeviceOption, VfioCommand, VhostUserFsOption, VhostUserOption, VhostUserWlOption,
     VvuOption,
@@ -39,10 +43,6 @@ use devices::virtio::block::block::DiskOption;
 use devices::virtio::gpu::{
     GpuDisplayParameters, GpuMode, GpuParameters, DEFAULT_DISPLAY_HEIGHT, DEFAULT_DISPLAY_WIDTH,
 };
-#[cfg(feature = "audio_cras")]
-use devices::virtio::snd::cras_backend::Error as CrasSndError;
-#[cfg(feature = "audio_cras")]
-use devices::virtio::vhost::user::device::run_cras_snd_device;
 use devices::virtio::vhost::user::device::{run_block_device, run_net_device};
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 use devices::virtio::VideoBackendType;
@@ -64,7 +64,7 @@ use uuid::Uuid;
 use vm_control::{
     client::{
         do_modify_battery, do_usb_attach, do_usb_detach, do_usb_list, handle_request, vms_request,
-        ModifyUsbError, ModifyUsbResult,
+        ModifyUsbResult,
     },
     BalloonControlCommand, BatteryType, DiskControlCommand, UsbControlResult, VmRequest,
     VmResponse,
@@ -72,11 +72,15 @@ use vm_control::{
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use x86_64::{set_enable_pnp_data_msr_config, set_itmt_msr_config};
 
-use rutabaga_gfx::calculate_context_mask;
+#[cfg(feature = "gpu")]
+use rutabaga_gfx::{calculate_context_mask, RutabagaWsi};
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const ONE_MB: u64 = 1 << 20;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const MB_ALIGNED: u64 = ONE_MB - 1;
 // the max bus number is 256 and each bus occupy 1MB, so the max pcie cfg mmio size = 256M
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const MAX_PCIE_ECAM_SIZE: u64 = ONE_MB * 256;
 
 #[cfg(feature = "scudo")]
@@ -198,6 +202,72 @@ fn parse_cpu_capacity(s: &str, cpu_capacity: &mut BTreeMap<usize, u32>) -> argum
 }
 
 #[cfg(feature = "gpu")]
+#[derive(Default)]
+struct GpuDisplayParametersBuilder {
+    width: Option<u32>,
+    height: Option<u32>,
+    args: Vec<String>,
+}
+
+#[cfg(feature = "gpu")]
+impl GpuDisplayParametersBuilder {
+    fn parse(&mut self, arg: &str) -> argument::Result<()> {
+        let mut kv = arg.split('=');
+        let k = kv.next().unwrap_or("");
+        let v = kv.next().unwrap_or("");
+        match k {
+            "width" => {
+                let width = v
+                    .parse::<u32>()
+                    .map_err(|_| argument::Error::InvalidValue {
+                        value: v.to_string(),
+                        expected: String::from("gpu parameter 'width' must be a valid integer"),
+                    })?;
+                self.width = Some(width);
+            }
+            "height" => {
+                let height = v
+                    .parse::<u32>()
+                    .map_err(|_| argument::Error::InvalidValue {
+                        value: v.to_string(),
+                        expected: String::from("gpu parameter 'height' must be a valid integer"),
+                    })?;
+                self.height = Some(height);
+            }
+            _ => {
+                return Err(argument::Error::UnknownArgument(format!(
+                    "gpu-display parameter {}",
+                    k
+                )))
+            }
+        }
+        self.args.push(arg.to_string());
+        Ok(())
+    }
+
+    fn build(&self) -> argument::Result<Option<GpuDisplayParameters>> {
+        match (self.width, self.height) {
+            (None, None) => Ok(None),
+            (None, Some(_)) | (Some(_), None) => {
+                let mut value = self
+                    .args
+                    .clone()
+                    .into_iter()
+                    .fold(String::new(), |args_so_far, arg| args_so_far + &arg + ",");
+                value.pop();
+                return Err(argument::Error::InvalidValue {
+                    value,
+                    expected: String::from(
+                        "gpu must include both 'width' and 'height' if either is supplied",
+                    ),
+                });
+            }
+            (Some(width), Some(height)) => Ok(Some(GpuDisplayParameters { width, height })),
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
 fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argument::Result<()> {
     #[cfg(feature = "gfxstream")]
     let mut vulkan_specified = false;
@@ -206,16 +276,14 @@ fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argumen
     #[cfg(feature = "gfxstream")]
     let mut angle_specified = false;
 
-    let mut display_w: Option<u32> = None;
-    let mut display_h: Option<u32> = None;
+    let mut display_param_builder: GpuDisplayParametersBuilder = Default::default();
 
     if let Some(s) = s {
-        let opts = s
-            .split(',')
-            .map(|frag| frag.split('='))
-            .map(|mut kv| (kv.next().unwrap_or(""), kv.next().unwrap_or("")));
-
-        for (k, v) in opts {
+        for frag in s.split(',') {
+            let mut rest: Option<&str> = None;
+            let mut kv = frag.split('=');
+            let k = kv.next().unwrap_or("");
+            let v = kv.next().unwrap_or("");
             match k {
                 // Deprecated: Specifying --gpu=<mode> Not great as the mode can be set multiple
                 // times if the user specifies several modes (--gpu=2d,virglrenderer,gfxstream)
@@ -389,26 +457,17 @@ fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argumen
                         }
                     }
                 }
-                "width" => {
-                    let width = v
-                        .parse::<u32>()
-                        .map_err(|_| argument::Error::InvalidValue {
+                "wsi" => match v {
+                    "vk" => {
+                        gpu_params.wsi = Some(RutabagaWsi::Vulkan);
+                    }
+                    _ => {
+                        return Err(argument::Error::InvalidValue {
                             value: v.to_string(),
-                            expected: String::from("gpu parameter 'width' must be a valid integer"),
-                        })?;
-                    display_w = Some(width);
-                }
-                "height" => {
-                    let height = v
-                        .parse::<u32>()
-                        .map_err(|_| argument::Error::InvalidValue {
-                            value: v.to_string(),
-                            expected: String::from(
-                                "gpu parameter 'height' must be a valid integer",
-                            ),
-                        })?;
-                    display_h = Some(height);
-                }
+                            expected: String::from("gpu parameter 'wsi' should be vk"),
+                        });
+                    }
+                },
                 "cache-path" => gpu_params.cache_path = Some(v.to_string()),
                 "cache-size" => gpu_params.cache_size = Some(v.to_string()),
                 "udmabuf" => match v {
@@ -431,29 +490,29 @@ fn parse_gpu_options(s: Option<&str>, gpu_params: &mut GpuParameters) -> argumen
                 }
                 "" => {}
                 _ => {
-                    return Err(argument::Error::UnknownArgument(format!(
-                        "gpu parameter {}",
-                        k
-                    )));
+                    rest = Some(frag);
                 }
+            }
+            if let Some(arg) = rest.take() {
+                match display_param_builder.parse(arg) {
+                    Ok(()) => {}
+                    Err(argument::Error::UnknownArgument(_)) => {
+                        rest = Some(arg);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            if let Some(arg) = rest.take() {
+                return Err(argument::Error::UnknownArgument(format!(
+                    "gpu parameter {}",
+                    arg
+                )));
             }
         }
     }
 
-    if display_w.is_some() || display_h.is_some() {
-        if display_w.is_none() || display_h.is_none() {
-            return Err(argument::Error::InvalidValue {
-                value: s.unwrap_or("").to_string(),
-                expected: String::from(
-                    "gpu must include both 'width' and 'height' if either is supplied",
-                ),
-            });
-        }
-
-        gpu_params.displays.push(GpuDisplayParameters {
-            width: display_w.unwrap(),
-            height: display_h.unwrap(),
-        });
+    if let Some(display_param) = display_param_builder.build()?.take() {
+        gpu_params.displays.push(display_param);
     }
 
     #[cfg(feature = "gfxstream")]
@@ -483,6 +542,8 @@ fn parse_video_options(s: Option<&str>) -> argument::Result<VideoBackendType> {
     const VALID_VIDEO_BACKENDS: &[&str] = &[
         #[cfg(feature = "libvda")]
         "libvda",
+        #[cfg(feature = "ffmpeg")]
+        "ffmpeg",
     ];
 
     match s {
@@ -490,6 +551,8 @@ fn parse_video_options(s: Option<&str>) -> argument::Result<VideoBackendType> {
             cfg_if::cfg_if! {
                 if #[cfg(feature = "libvda")] {
                     Ok(VideoBackendType::Libvda)
+                } else if #[cfg(feature = "ffmpeg")] {
+                    Ok(VideoBackendType::Ffmpeg)
                 }
             }
         }
@@ -497,11 +560,37 @@ fn parse_video_options(s: Option<&str>) -> argument::Result<VideoBackendType> {
         Some("libvda") => Ok(VideoBackendType::Libvda),
         #[cfg(feature = "libvda")]
         Some("libvda-vd") => Ok(VideoBackendType::LibvdaVd),
+        #[cfg(feature = "ffmpeg")]
+        Some("ffmpeg") => Ok(VideoBackendType::Ffmpeg),
         Some(s) => Err(argument::Error::InvalidValue {
             value: s.to_owned(),
             expected: format!("should be one of ({})", VALID_VIDEO_BACKENDS.join("|")),
         }),
     }
+}
+
+#[cfg(feature = "gpu")]
+fn parse_gpu_display_options(
+    s: Option<&str>,
+    gpu_params: &mut GpuParameters,
+) -> argument::Result<()> {
+    let mut display_param_builder: GpuDisplayParametersBuilder = Default::default();
+
+    if let Some(s) = s {
+        for arg in s.split(',') {
+            display_param_builder.parse(arg)?;
+        }
+    }
+
+    let display_param = display_param_builder.build()?;
+    let display_param = display_param.ok_or_else(|| argument::Error::InvalidValue {
+        value: s.unwrap_or("").to_string(),
+        expected: String::from("gpu-display must include both 'width' and 'height'"),
+    })?;
+
+    gpu_params.displays.push(display_param);
+
+    Ok(())
 }
 
 #[cfg(feature = "audio")]
@@ -543,7 +632,7 @@ fn parse_userspace_msr_options(value: &str) -> argument::Result<(u32, MsrConfig)
     let mut rw_type: Option<MsrRWType> = None;
     let mut action: Option<MsrAction> = None;
     let mut from = MsrValueFrom::RWFromRunningCPU;
-    let mut filter: bool = false;
+    let mut filter = MsrFilter::Default;
 
     let mut options = argument::parse_key_value_options("userspace-msr", value, ',');
     let index: u32 = options
@@ -573,8 +662,8 @@ fn parse_userspace_msr_options(value: &str) -> argument::Result<(u32, MsrConfig)
                 _ => return Err(opt.invalid_value_err(String::from("bad from"))),
             },
             "filter" => match opt.value()? {
-                "yes" => filter = true,
-                "no" => filter = false,
+                "yes" | "override" => filter = MsrFilter::Override,
+                "no" | "default" => filter = MsrFilter::Default,
                 _ => return Err(opt.invalid_value_err(String::from("bad filter"))),
             },
 
@@ -1445,6 +1534,11 @@ fn set_argument(cfg: &mut Config, name: &str, value: Option<&str>) -> argument::
             let gpu_parameters = cfg.gpu_parameters.get_or_insert_with(Default::default);
             parse_gpu_options(value, gpu_parameters)?;
         }
+        #[cfg(feature = "gpu")]
+        "gpu-display" => {
+            let gpu_parameters = cfg.gpu_parameters.get_or_insert_with(Default::default);
+            parse_gpu_display_options(value, gpu_parameters)?;
+        }
         "software-tpm" => {
             cfg.software_tpm = true;
         }
@@ -2114,14 +2208,14 @@ fn validate_arguments(cfg: &mut Config) -> std::result::Result<(), argument::Err
             ));
         }
 
-        let pcpu_count = sys::get_vcpu_count()?;
-        if cfg.vcpu_count.is_some() {
-            if pcpu_count != cfg.vcpu_count.unwrap() {
+        let pcpu_count =
+            base::number_of_logical_cores().expect("Could not read number of logical cores");
+        if let Some(vcpu_count) = cfg.vcpu_count {
+            if pcpu_count != vcpu_count {
                 return Err(argument::Error::ExpectedArgument(format!(
                     "`host-cpu-topology` requires the count of vCPUs({}) to equal the \
                             count of CPUs({}) on host.",
-                    cfg.vcpu_count.unwrap(),
-                    pcpu_count
+                    vcpu_count, pcpu_count
                 )));
             }
         } else {
@@ -2239,7 +2333,7 @@ enum CommandStatus {
 }
 
 fn run_vm<F: 'static>(
-    args: std::env::Args,
+    args: Vec<String>,
     log_config: LogConfig<F>,
 ) -> std::result::Result<CommandStatus, ()>
 where
@@ -2373,6 +2467,48 @@ There is a cost of slightly increased latency the first time the file is accesse
           #[cfg(feature = "plugin")]
           Argument::value("plugin-gid-map-file", "PATH", "Path to the file listing supplemental GIDs that should be mapped in plugin jail.  Can be given more than once."),
           Argument::flag("vhost-net", "Use vhost for networking."),
+          #[cfg(feature = "gpu")]
+          Argument::flag_or_value("gpu",
+                                  "[width=INT,height=INT]",
+                                  "(EXPERIMENTAL) Comma separated key=value pairs for setting up a virtio-gpu device
+
+                              Possible key values:
+
+                              backend=(2d|virglrenderer|gfxstream) - Which backend to use for virtio-gpu (determining rendering protocol)
+
+                              context-types=LIST - The list of supported context types, separated by ':' (default: no contexts enabled)
+
+                              width=INT - The width of the virtual display connected to the virtio-gpu.
+
+                              height=INT - The height of the virtual display connected to the virtio-gpu.
+
+                              egl[=true|=false] - If the backend should use a EGL context for rendering.
+
+                              glx[=true|=false] - If the backend should use a GLX context for rendering.
+
+                              surfaceless[=true|=false] - If the backend should use a surfaceless context for rendering.
+
+                              angle[=true|=false] - If the gfxstream backend should use ANGLE (OpenGL on Vulkan) as its native OpenGL driver.
+
+                              syncfd[=true|=false] - If the gfxstream backend should support EGL_ANDROID_native_fence_sync
+
+                              vulkan[=true|=false] - If the backend should support vulkan
+
+                              wsi=vk - If the gfxstream backend should use the Vulkan swapchain to draw on a window
+
+                              cache-path=PATH - The path to the virtio-gpu device shader cache.
+
+                              cache-size=SIZE - The maximum size of the shader cache."),
+          #[cfg(feature = "gpu")]
+          Argument::flag_or_value("gpu-display",
+                                  "[width=INT,height=INT]",
+                                  "(EXPERIMENTAL) Comma separated key=value pairs for setting up a display on the virtio-gpu device
+
+                              Possible key values:
+
+                              width=INT - The width of the virtual display connected to the virtio-gpu.
+
+                              height=INT - The height of the virtual display connected to the virtio-gpu."),
           #[cfg(feature = "tpm")]
           Argument::flag("software-tpm", "enable a software emulated trusted platform module device"),
           Argument::value("evdev", "PATH", "Path to an event device node. The device will be grabbed (unusable from the host) and made available to the guest with the same configuration it shows on the host"),
@@ -2394,7 +2530,7 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
           Argument::flag("virtio-iommu", "Add a virtio-iommu device"),
           #[cfg(feature = "video-decoder")]
           Argument::flag_or_value("video-decoder", "[backend]", "(EXPERIMENTAL) enable virtio-video decoder device
-                              Possible backend values: libvda"),
+                              Possible backend values: libvda|ffmpeg"),
           #[cfg(feature = "video-encoder")]
           Argument::flag_or_value("video-encoder", "[backend]", "(EXPERIMENTAL) enable virtio-video encoder device
                               Possible backend values: libvda"),
@@ -2448,15 +2584,15 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
           Argument::value("dmi", "DIR", "Directory with smbios_entry_point/DMI files"),
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
           Argument::value("userspace-msr", "INDEX,type=TYPE,action=ACTION,[from=FROM],[filter=FILTER]",
-                              "Userspace MSR handling. Takes INDEX of the MSR and how they are handled.
+                          "Userspace MSR handling. Takes INDEX of the MSR and how they are handled.
 
-                              type=(r|w|rw|wr) - read/write permission control.
+type=(r|w|rw|wr) - read/write permission control.
 
-                              action=(pass|emu) - if the control of msr is effective on host.
+action=(pass|emu) - if the control of msr is effective on host.
 
-                              from=(cpu0) - source of msr value. if not set, the source is running CPU.
+from=(cpu0) - source of msr value. if not set, the source is running CPU.
 
-                              filter=(yes|no) - if the msr is filtered in KVM."),
+filter=(default|override) - if the msr is filtered in KVM, whether to override or not."),
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
           Argument::flag("host-cpu-topology", "Use mirror cpu topology of Host for Guest VM, also copy some cpu feature to Guest VM."),
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -2520,7 +2656,7 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
 
     arguments.append(&mut sys::get_arguments());
     let mut cfg = Config::default();
-    let match_res = set_arguments(args, &arguments[..], |name, value| {
+    let match_res = set_arguments(args.into_iter(), &arguments[..], |name, value| {
         set_argument(&mut cfg, name, value)
     })
     .and_then(|_| validate_arguments(&mut cfg));
@@ -2584,114 +2720,41 @@ iommu=on|off - indicates whether to enable virtio IOMMU for this device"),
     }
 }
 
-fn stop_vms(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() == 0 {
-        print_help("crosvm stop", "VM_SOCKET...", &[]);
-        println!("Stops the crosvm instance listening on each `VM_SOCKET` given.");
-        return Err(());
-    }
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::Exit, socket_path)
+fn stop_vms(cmd: crosvm::StopCommand) -> std::result::Result<(), ()> {
+    vms_request(&VmRequest::Exit, cmd.socket_path)
 }
 
-fn suspend_vms(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() == 0 {
-        print_help("crosvm suspend", "VM_SOCKET...", &[]);
-        println!("Suspends the crosvm instance listening on each `VM_SOCKET` given.");
-        return Err(());
-    }
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::Suspend, socket_path)
+fn suspend_vms(cmd: crosvm::SuspendCommand) -> std::result::Result<(), ()> {
+    vms_request(&VmRequest::Suspend, cmd.socket_path)
 }
 
-fn resume_vms(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() == 0 {
-        print_help("crosvm resume", "VM_SOCKET...", &[]);
-        println!("Resumes the crosvm instance listening on each `VM_SOCKET` given.");
-        return Err(());
-    }
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::Resume, socket_path)
+fn resume_vms(cmd: crosvm::ResumeCommand) -> std::result::Result<(), ()> {
+    vms_request(&VmRequest::Resume, cmd.socket_path)
 }
 
-fn powerbtn_vms(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() == 0 {
-        print_help("crosvm powerbtn", "VM_SOCKET...", &[]);
-        println!("Triggers a power button event in the crosvm instance listening on each `VM_SOCKET` given.");
-        return Err(());
-    }
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::Powerbtn, socket_path)
+fn powerbtn_vms(cmd: crosvm::PowerbtnCommand) -> std::result::Result<(), ()> {
+    vms_request(&VmRequest::Powerbtn, cmd.socket_path)
 }
 
-fn sleepbtn_vms(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() == 0 {
-        print_help("crosvm sleepbtn", "VM_SOCKET...", &[]);
-        println!(
-            "Triggers a sleep button event in the crosvm instance listening on each `VM_SOCKET`
-            given."
-        );
-        return Err(());
-    }
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::Sleepbtn, socket_path)
+fn sleepbtn_vms(cmd: crosvm::SleepCommand) -> std::result::Result<(), ()> {
+    vms_request(&VmRequest::Sleepbtn, cmd.socket_path)
 }
 
-fn inject_gpe(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() < 2 {
-        print_help("crosvm gpe", "GPE# VM_SOCKET...", &[]);
-        println!("Injects a general-purpose event (GPE#) into the crosvm instance listening on each `VM_SOCKET` given.");
-        return Err(());
-    }
-    let gpe = match args.next().unwrap().parse::<u32>() {
-        Ok(n) => n,
-        Err(_) => {
-            error!("Failed to parse GPE#");
-            return Err(());
-        }
+fn inject_gpe(cmd: crosvm::GpeCommand) -> std::result::Result<(), ()> {
+    vms_request(&VmRequest::Gpe(cmd.gpe), cmd.socket_path)
+}
+
+fn balloon_vms(cmd: crosvm::BalloonCommand) -> std::result::Result<(), ()> {
+    let command = BalloonControlCommand::Adjust {
+        num_bytes: cmd.num_bytes,
     };
-
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::Gpe(gpe), socket_path)
+    vms_request(&VmRequest::BalloonCommand(command), cmd.socket_path)
 }
 
-fn balloon_vms(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() < 2 {
-        print_help("crosvm balloon", "SIZE VM_SOCKET...", &[]);
-        println!("Set the ballon size of the crosvm instance to `SIZE` bytes.");
-        return Err(());
-    }
-    let num_bytes = match args.next().unwrap().parse::<u64>() {
-        Ok(n) => n,
-        Err(_) => {
-            error!("Failed to parse number of bytes");
-            return Err(());
-        }
-    };
-
-    let command = BalloonControlCommand::Adjust { num_bytes };
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::BalloonCommand(command), socket_path)
-}
-
-fn balloon_stats(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() != 1 {
-        print_help("crosvm balloon_stats", "VM_SOCKET", &[]);
-        println!("Prints virtio balloon statistics for a `VM_SOCKET`.");
-        return Err(());
-    }
+fn balloon_stats(cmd: crosvm::BalloonStatsCommand) -> std::result::Result<(), ()> {
     let command = BalloonControlCommand::Stats {};
     let request = &VmRequest::BalloonCommand(command);
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    let response = handle_request(request, socket_path)?;
+    let response = handle_request(request, cmd.socket_path)?;
     match serde_json::to_string_pretty(&response) {
         Ok(response_json) => println!("{}", response_json),
         Err(e) => {
@@ -2705,82 +2768,45 @@ fn balloon_stats(mut args: std::env::Args) -> std::result::Result<(), ()> {
     }
 }
 
-fn modify_battery(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() < 4 {
-        print_help(
-            "crosvm battery BATTERY_TYPE ",
-            "[status STATUS | \
-             present PRESENT | \
-             health HEALTH | \
-             capacity CAPACITY | \
-             aconline ACONLINE ] \
-             VM_SOCKET...",
-            &[],
-        );
-        return Err(());
-    }
-
-    // This unwrap will not panic because of the above length check.
-    let battery_type = args.next().unwrap();
-    let property = args.next().unwrap();
-    let target = args.next().unwrap();
-
-    let socket_path = args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-
-    do_modify_battery(socket_path, &*battery_type, &*property, &*target)
+fn modify_battery(cmd: crosvm::BatteryCommand) -> std::result::Result<(), ()> {
+    do_modify_battery(
+        cmd.socket_path,
+        &cmd.battery_type,
+        &cmd.property,
+        &cmd.target,
+    )
 }
 
-fn modify_vfio(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() < 3 {
-        print_help(
-            "crosvm vfio",
-            "[add | remove host_vfio_sysfs] VM_SOCKET...",
-            &[],
-        );
-        return Err(());
-    }
-
-    // This unwrap will not panic because of the above length check.
-    let command = args.next().unwrap();
-    let path_str = args.next().unwrap();
-    let vfio_path = PathBuf::from(&path_str);
-    if !vfio_path.exists() || !vfio_path.is_dir() {
-        error!("Invalid host sysfs path: {}", path_str);
-        return Err(());
-    }
-
-    let socket_path = args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-
-    let add = match command.as_ref() {
-        "add" => true,
-        "remove" => false,
-        other => {
-            error!("Invalid vfio command {}", other);
-            return Err(());
+fn modify_vfio(cmd: crosvm::VfioCrosvmCommand) -> std::result::Result<(), ()> {
+    let (request, socket_path, vfio_path) = match cmd.command {
+        crosvm::VfioSubCommand::Add(c) => {
+            let request = VmRequest::VfioCommand {
+                vfio_path: c.vfio_path.clone(),
+                add: true,
+                hp_interrupt: true,
+            };
+            (request, c.socket_path, c.vfio_path)
+        }
+        crosvm::VfioSubCommand::Remove(c) => {
+            let request = VmRequest::VfioCommand {
+                vfio_path: c.vfio_path.clone(),
+                add: true,
+                hp_interrupt: true,
+            };
+            (request, c.socket_path, c.vfio_path)
         }
     };
-
-    let hp_interrupt = true;
-    let request = VmRequest::VfioCommand {
-        vfio_path,
-        add,
-        hp_interrupt,
-    };
+    if !vfio_path.exists() || !vfio_path.is_dir() {
+        error!("Invalid host sysfs path: {:?}", vfio_path);
+        return Err(());
+    }
     handle_request(&request, socket_path)?;
     Ok(())
 }
 
 #[cfg(feature = "composite-disk")]
-fn create_composite(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() < 1 {
-        print_help("crosvm create_composite", "PATH [LABEL:PARTITION]..", &[]);
-        println!("Creates a new composite disk image containing the given partition images");
-        return Err(());
-    }
-
-    let composite_image_path = args.next().unwrap();
+fn create_composite(cmd: crosvm::CreateCompositeCommand) -> std::result::Result<(), ()> {
+    let composite_image_path = &cmd.path;
     let zero_filler_path = format!("{}.filler", composite_image_path);
     let header_path = format!("{}.header", composite_image_path);
     let footer_path = format!("{}.footer", composite_image_path);
@@ -2828,7 +2854,8 @@ fn create_composite(mut args: std::env::Args) -> std::result::Result<(), ()> {
             );
         })?;
 
-    let partitions = args
+    let partitions = cmd
+        .partitions
         .into_iter()
         .map(|partition_arg| {
             if let [label, path] = partition_arg.split(":").collect::<Vec<_>>()[..] {
@@ -2882,57 +2909,11 @@ fn create_composite(mut args: std::env::Args) -> std::result::Result<(), ()> {
     Ok(())
 }
 
-fn create_qcow2(args: std::env::Args) -> std::result::Result<(), ()> {
-    let arguments = [
-        Argument::positional("PATH", "where to create the qcow2 image"),
-        Argument::positional("[SIZE]", "the expanded size of the image"),
-        Argument::value(
-            "backing_file",
-            "path/to/file",
-            " the file to back the image",
-        ),
-    ];
-    let mut positional_index = 0;
-    let mut file_path = String::from("");
-    let mut size: Option<u64> = None;
-    let mut backing_file: Option<String> = None;
-    set_arguments(args, &arguments[..], |name, value| {
-        match (name, positional_index) {
-            ("", 0) => {
-                // NAME
-                positional_index += 1;
-                file_path = value.unwrap().to_owned();
-            }
-            ("", 1) => {
-                // [SIZE]
-                positional_index += 1;
-                size = Some(value.unwrap().parse::<u64>().map_err(|_| {
-                    argument::Error::InvalidValue {
-                        value: value.unwrap().to_owned(),
-                        expected: String::from("SIZE should be a nonnegative integer"),
-                    }
-                })?);
-            }
-            ("", _) => {
-                return Err(argument::Error::TooManyArguments(
-                    "Expected at most 2 positional arguments".to_owned(),
-                ));
-            }
-            ("backing_file", _) => {
-                backing_file = value.map(|x| x.to_owned());
-            }
-            _ => unreachable!(),
-        };
-        Ok(())
-    })
-    .map_err(|e| {
-        error!("Unable to parse command line arguments: {}", e);
-    })?;
-    if file_path.is_empty() || !(size.is_some() ^ backing_file.is_some()) {
-        print_help("crosvm create_qcow2", "PATH [SIZE]", &arguments);
+fn create_qcow2(cmd: crosvm::CreateQcow2Command) -> std::result::Result<(), ()> {
+    if !(cmd.size.is_some() ^ cmd.backing_file.is_some()) {
         println!(
             "Create a new QCOW2 image at `PATH` of either the specified `SIZE` in bytes or
-with a '--backing_file'."
+    with a '--backing_file'."
         );
         return Err(());
     }
@@ -2942,19 +2923,19 @@ with a '--backing_file'."
         .read(true)
         .write(true)
         .truncate(true)
-        .open(&file_path)
+        .open(&cmd.file_path)
         .map_err(|e| {
-            error!("Failed opening qcow file at '{}': {}", file_path, e);
+            error!("Failed opening qcow file at '{}': {}", cmd.file_path, e);
         })?;
 
-    match (size, backing_file) {
+    match (cmd.size, cmd.backing_file) {
         (Some(size), None) => QcowFile::new(file, size).map_err(|e| {
-            error!("Failed to create qcow file at '{}': {}", file_path, e);
+            error!("Failed to create qcow file at '{}': {}", cmd.file_path, e);
         })?,
         (None, Some(backing_file)) => {
             QcowFile::new_from_backing(file, &backing_file, disk::MAX_NESTING_DEPTH).map_err(
                 |e| {
-                    error!("Failed to create qcow file at '{}': {}", file_path, e);
+                    error!("Failed to create qcow file at '{}': {}", cmd.file_path, e);
                 },
             )?
         }
@@ -2963,172 +2944,58 @@ with a '--backing_file'."
     Ok(())
 }
 
-fn start_device(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    let print_usage = || {
-        print_help(
-            "crosvm device",
-            " (block|console|cras-snd|fs|gpu|net|wl) <device-specific arguments>",
-            &[],
-        );
-    };
-
-    if args.len() == 0 {
-        print_usage();
-        return Err(());
-    }
-
-    let device = args.next().unwrap();
-
-    let program_name = format!("crosvm device {}", device);
-
-    let args = args.collect::<Vec<_>>();
-    let args = args.iter().map(Deref::deref).collect::<Vec<_>>();
-    let args = args.as_slice();
-
-    let result = match device.as_str() {
-        "block" => run_block_device(&program_name, args),
-        "net" => run_net_device(&program_name, args),
-        _ => sys::start_device(&program_name, device.as_str(), args),
+fn start_device(opts: crosvm::DevicesCommand) -> std::result::Result<(), ()> {
+    let result = match opts.command {
+        crosvm::DevicesSubcommand::CrossPlatform(command) => match command {
+            crosvm::CrossPlatformDevicesCommands::Block(cfg) => run_block_device(cfg),
+            crosvm::CrossPlatformDevicesCommands::Net(cfg) => run_net_device(cfg),
+        },
+        crosvm::DevicesSubcommand::Sys(command) => sys::start_device(command),
     };
 
     result.map_err(|e| {
-        error!("Failed to run {} device: {:#}", device, e);
+        error!("Failed to run device: {:#}", e);
     })
 }
 
-fn disk_cmd(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() < 2 {
-        print_help("crosvm disk", "SUBCOMMAND VM_SOCKET...", &[]);
-        println!("Manage attached virtual disk devices.");
-        println!("Subcommands:");
-        println!("  resize DISK_INDEX NEW_SIZE VM_SOCKET");
-        return Err(());
-    }
-    let subcommand: &str = &args.next().unwrap();
-
-    let request = match subcommand {
-        "resize" => {
-            let disk_index = match args.next().unwrap().parse::<usize>() {
-                Ok(n) => n,
-                Err(_) => {
-                    error!("Failed to parse disk index");
-                    return Err(());
-                }
+fn disk_cmd(cmd: crosvm::DiskCommand) -> std::result::Result<(), ()> {
+    match cmd.command {
+        crosvm::DiskSubcommand::Resize(cmd) => {
+            let request = VmRequest::DiskCommand {
+                disk_index: cmd.disk_index,
+                command: DiskControlCommand::Resize {
+                    new_size: cmd.disk_size,
+                },
             };
-
-            let new_size = match args.next().unwrap().parse::<u64>() {
-                Ok(n) => n,
-                Err(_) => {
-                    error!("Failed to parse disk size");
-                    return Err(());
-                }
-            };
-
-            VmRequest::DiskCommand {
-                disk_index,
-                command: DiskControlCommand::Resize { new_size },
-            }
+            vms_request(&request, cmd.socket_path)
         }
-        _ => {
-            error!("Unknown disk subcommand '{}'", subcommand);
-            return Err(());
-        }
-    };
-
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&request, socket_path)
-}
-
-fn make_rt(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() == 0 {
-        print_help("crosvm make_rt", "VM_SOCKET...", &[]);
-        println!("Makes the crosvm instance listening on each `VM_SOCKET` given RT.");
-        return Err(());
-    }
-    let socket_path = &args.next().unwrap();
-    let socket_path = Path::new(&socket_path);
-    vms_request(&VmRequest::MakeRT, socket_path)
-}
-
-fn parse_bus_id_addr(v: &str) -> ModifyUsbResult<(u8, u8, u16, u16)> {
-    debug!("parse_bus_id_addr: {}", v);
-    let mut ids = v.split(':');
-    match (ids.next(), ids.next(), ids.next(), ids.next()) {
-        (Some(bus_id), Some(addr), Some(vid), Some(pid)) => {
-            let bus_id = bus_id
-                .parse::<u8>()
-                .map_err(|e| ModifyUsbError::ArgParseInt("bus_id", bus_id.to_owned(), e))?;
-            let addr = addr
-                .parse::<u8>()
-                .map_err(|e| ModifyUsbError::ArgParseInt("addr", addr.to_owned(), e))?;
-            let vid = u16::from_str_radix(vid, 16)
-                .map_err(|e| ModifyUsbError::ArgParseInt("vid", vid.to_owned(), e))?;
-            let pid = u16::from_str_radix(pid, 16)
-                .map_err(|e| ModifyUsbError::ArgParseInt("pid", pid.to_owned(), e))?;
-            Ok((bus_id, addr, vid, pid))
-        }
-        _ => Err(ModifyUsbError::ArgParse(
-            "BUS_ID_ADDR_BUS_NUM_DEV_NUM",
-            v.to_owned(),
-        )),
     }
 }
 
-fn usb_attach(mut args: std::env::Args) -> ModifyUsbResult<UsbControlResult> {
-    let val = args
-        .next()
-        .ok_or(ModifyUsbError::ArgMissing("BUS_ID_ADDR_BUS_NUM_DEV_NUM"))?;
-    let (bus, addr, vid, pid) = parse_bus_id_addr(&val)?;
-    let dev_path = PathBuf::from(
-        args.next()
-            .ok_or(ModifyUsbError::ArgMissing("usb device path"))?,
-    );
-
-    let socket_path = args
-        .next()
-        .ok_or(ModifyUsbError::ArgMissing("control socket path"))?;
-    let socket_path = Path::new(&socket_path);
-
-    do_usb_attach(socket_path, bus, addr, vid, pid, &dev_path)
+fn make_rt(cmd: crosvm::MakeRTCommand) -> std::result::Result<(), ()> {
+    vms_request(&VmRequest::MakeRT, cmd.socket_path)
 }
 
-fn usb_detach(mut args: std::env::Args) -> ModifyUsbResult<UsbControlResult> {
-    let port: u8 = args
-        .next()
-        .map_or(Err(ModifyUsbError::ArgMissing("PORT")), |p| {
-            p.parse::<u8>()
-                .map_err(|e| ModifyUsbError::ArgParseInt("PORT", p.to_owned(), e))
-        })?;
-    let socket_path = args
-        .next()
-        .ok_or(ModifyUsbError::ArgMissing("control socket path"))?;
-    let socket_path = Path::new(&socket_path);
-    do_usb_detach(socket_path, port)
+fn usb_attach(cmd: crosvm::UsbAttachCommand) -> ModifyUsbResult<UsbControlResult> {
+    let (bus, addr, vid, pid) = cmd.addr;
+    let dev_path = Path::new(&cmd.dev_path);
+
+    do_usb_attach(cmd.socket_path, bus, addr, vid, pid, dev_path)
 }
 
-fn usb_list(mut args: std::env::Args) -> ModifyUsbResult<UsbControlResult> {
-    let socket_path = args
-        .next()
-        .ok_or(ModifyUsbError::ArgMissing("control socket path"))?;
-    let socket_path = Path::new(&socket_path);
-    do_usb_list(socket_path)
+fn usb_detach(cmd: crosvm::UsbDetachCommand) -> ModifyUsbResult<UsbControlResult> {
+    do_usb_detach(cmd.socket_path, cmd.port)
 }
 
-fn modify_usb(mut args: std::env::Args) -> std::result::Result<(), ()> {
-    if args.len() < 2 {
-        print_help("crosvm usb",
-                   "[attach BUS_ID:ADDR:VENDOR_ID:PRODUCT_ID [USB_DEVICE_PATH|-] | detach PORT | list] VM_SOCKET...", &[]);
-        return Err(());
-    }
+fn usb_list(cmd: crosvm::UsbListCommand) -> ModifyUsbResult<UsbControlResult> {
+    do_usb_list(cmd.socket_path)
+}
 
-    // This unwrap will not panic because of the above length check.
-    let command = &args.next().unwrap();
-    let result = match command.as_ref() {
-        "attach" => usb_attach(args),
-        "detach" => usb_detach(args),
-        "list" => usb_list(args),
-        other => Err(ModifyUsbError::UnknownCommand(other.to_owned())),
+fn modify_usb(cmd: crosvm::UsbCommand) -> std::result::Result<(), ()> {
+    let result = match cmd.command {
+        crosvm::UsbSubCommand::Attach(cmd) => usb_attach(cmd),
+        crosvm::UsbSubCommand::Detach(cmd) => usb_detach(cmd),
+        crosvm::UsbSubCommand::List(cmd) => usb_list(cmd),
     };
     match result {
         Ok(response) => {
@@ -3155,118 +3022,49 @@ fn pkg_version() -> std::result::Result<(), ()> {
     Ok(())
 }
 
-fn print_usage() {
-    print_help(
-        "crosvm",
-        "[--extended-status] [--log-level=<level>] [--no-syslog] [command]",
-        &[],
-    );
-    println!("Commands:");
-    println!("    balloon - Set balloon size of the crosvm instance.");
-    println!("    balloon_stats - Prints virtio balloon statistics.");
-    println!("    battery - Modify battery.");
-    #[cfg(feature = "composite-disk")]
-    println!("    create_composite  - Create a new composite disk image file.");
-    println!("    create_qcow2  - Create a new qcow2 disk image file.");
-    println!("    device - Start a device process.");
-    println!("    disk - Manage attached virtual disk devices.");
-    println!(
-        "    make_rt - Enables real-time vcpu priority for crosvm instances started with \
-         `--delay-rt`."
-    );
-    println!("    resume - Resumes the crosvm instance.");
-    println!("    run - Start a new crosvm instance.");
-    println!("    stop - Stops crosvm instances via their control sockets.");
-    println!("    suspend - Suspends the crosvm instance.");
-    println!("    powerbtn - Triggers a power button event in the crosvm instance.");
-    println!("    sleepbtn - Triggers a sleep button event in the crosvm instance.");
-    println!("    gpe - Injects a general-purpose event into the crosvm instance.");
-    println!("    usb - Manage attached virtual USB devices.");
-    println!("    version - Show package version.");
-    println!("    vfio - add/remove host vfio pci device into guest.");
-}
-
 fn crosvm_main() -> std::result::Result<CommandStatus, ()> {
     panic_hook::set_panic_hook();
 
-    let mut args = std::env::args();
-    if args.next().is_none() {
-        error!("expected executable name");
-        return Err(());
-    }
+    let args: crosvm::CrosvmCmdlineArgs = argh::from_env();
 
-    let mut cmd_arg = args.next();
-
-    let extended_status = if let Some("--extended-status") = cmd_arg.as_deref() {
-        cmd_arg = args.next();
-        true
-    } else {
-        false
-    };
-
-    let log_level = if let Some("--log-level") = cmd_arg.as_deref() {
-        let level = args.next();
-        cmd_arg = args.next();
-        level
-    } else {
-        None
-    }
-    .unwrap_or(String::from("info"));
-
-    let syslog = if let Some("--no-syslog") = cmd_arg.as_deref() {
-        cmd_arg = args.next();
-        false
-    } else {
-        true
-    };
+    let extended_status = args.extended_status;
 
     let log_config = LogConfig {
-        filter: &log_level,
-        syslog,
+        filter: &args.log_level,
+        syslog: !args.no_syslog,
         ..Default::default()
     };
 
-    let command = if let Some(c) = cmd_arg {
-        c
-    } else {
-        print_usage();
-        return Ok(CommandStatus::Success);
-    };
-
     // Past this point, usage of exit is in danger of leaking zombie processes.
-    let ret = if command == "run" {
+    let ret = if let crosvm::Command::Run(cmd) = args.command {
         // We handle run_vm separately because it does not simply signal success/error
         // but also indicates whether the guest requested reset or stop.
-        run_vm(args, log_config)
+        run_vm(cmd.args, log_config)
     } else {
         if let Err(e) = syslog::init_with(log_config) {
             eprintln!("failed to initialize syslog: {}", e);
             return Err(());
         }
-        match &command[..] {
-            "balloon" => balloon_vms(args),
-            "balloon_stats" => balloon_stats(args),
-            "battery" => modify_battery(args),
+        match args.command {
+            crosvm::Command::Balloon(cmd) => balloon_vms(cmd),
+            crosvm::Command::BalloonStats(cmd) => balloon_stats(cmd),
+            crosvm::Command::Battery(cmd) => modify_battery(cmd),
             #[cfg(feature = "composite-disk")]
-            "create_composite" => create_composite(args),
-            "create_qcow2" => create_qcow2(args),
-            "device" => start_device(args),
-            "disk" => disk_cmd(args),
-            "make_rt" => make_rt(args),
-            "resume" => resume_vms(args),
-            "stop" => stop_vms(args),
-            "suspend" => suspend_vms(args),
-            "powerbtn" => powerbtn_vms(args),
-            "sleepbtn" => sleepbtn_vms(args),
-            "gpe" => inject_gpe(args),
-            "usb" => modify_usb(args),
-            "version" => pkg_version(),
-            "vfio" => modify_vfio(args),
-            c => {
-                println!("invalid subcommand: {:?}", c);
-                print_usage();
-                Err(())
-            }
+            crosvm::Command::CreateComposite(cmd) => create_composite(cmd),
+            crosvm::Command::CreateQcow2(cmd) => create_qcow2(cmd),
+            crosvm::Command::Device(cmd) => start_device(cmd),
+            crosvm::Command::Disk(cmd) => disk_cmd(cmd),
+            crosvm::Command::MakeRT(cmd) => make_rt(cmd),
+            crosvm::Command::Resume(cmd) => resume_vms(cmd),
+            crosvm::Command::Run(_) => unreachable!(),
+            crosvm::Command::Stop(cmd) => stop_vms(cmd),
+            crosvm::Command::Suspend(cmd) => suspend_vms(cmd),
+            crosvm::Command::Powerbtn(cmd) => powerbtn_vms(cmd),
+            crosvm::Command::Sleepbtn(cmd) => sleepbtn_vms(cmd),
+            crosvm::Command::Gpe(cmd) => inject_gpe(cmd),
+            crosvm::Command::Usb(cmd) => modify_usb(cmd),
+            crosvm::Command::Version(_) => pkg_version(),
+            crosvm::Command::Vfio(cmd) => modify_vfio(cmd),
         }
         .map(|_| CommandStatus::Success)
     };
@@ -3856,6 +3654,94 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn parse_gpu_options_gfxstream_with_wsi_specified() {
+        let mut gpu_params: GpuParameters = Default::default();
+        assert!(parse_gpu_options(Some("backend=virglrenderer,wsi=vk"), &mut gpu_params).is_ok());
+        assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
+
+        let mut gpu_params: GpuParameters = Default::default();
+        assert!(parse_gpu_options(Some("wsi=vk,backend=virglrenderer"), &mut gpu_params).is_ok());
+        assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
+
+        let mut gpu_params: GpuParameters = Default::default();
+        assert!(parse_gpu_options(
+            Some("backend=virglrenderer,wsi=invalid_value"),
+            &mut gpu_params
+        )
+        .is_err());
+
+        let mut gpu_params: GpuParameters = Default::default();
+        assert!(parse_gpu_options(
+            Some("wsi=invalid_value,backend=virglrenderer"),
+            &mut gpu_params
+        )
+        .is_err());
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn parse_gpu_display_options_valid() {
+        {
+            let mut gpu_params: GpuParameters = Default::default();
+            assert!(
+                parse_gpu_display_options(Some("width=500,height=600"), &mut gpu_params).is_ok()
+            );
+            assert_eq!(gpu_params.displays.len(), 1);
+            assert_eq!(gpu_params.displays[0].width, 500);
+            assert_eq!(gpu_params.displays[0].height, 600);
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn parse_gpu_display_options_invalid() {
+        {
+            let mut gpu_params: GpuParameters = Default::default();
+            assert!(parse_gpu_display_options(Some("width=500"), &mut gpu_params).is_err());
+        }
+        {
+            let mut gpu_params: GpuParameters = Default::default();
+            assert!(parse_gpu_display_options(Some("height=500"), &mut gpu_params).is_err());
+        }
+        {
+            let mut gpu_params: GpuParameters = Default::default();
+            assert!(parse_gpu_display_options(Some("width"), &mut gpu_params).is_err());
+        }
+        {
+            let mut gpu_params: GpuParameters = Default::default();
+            assert!(parse_gpu_display_options(Some("blah"), &mut gpu_params).is_err());
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn parse_gpu_options_and_gpu_display_options_valid() {
+        {
+            let mut gpu_params: GpuParameters = Default::default();
+            assert!(parse_gpu_options(Some("2D,width=500,height=600"), &mut gpu_params).is_ok());
+            assert!(
+                parse_gpu_display_options(Some("width=700,height=800"), &mut gpu_params).is_ok()
+            );
+            assert_eq!(gpu_params.displays.len(), 2);
+            assert_eq!(gpu_params.displays[0].width, 500);
+            assert_eq!(gpu_params.displays[0].height, 600);
+            assert_eq!(gpu_params.displays[1].width, 700);
+            assert_eq!(gpu_params.displays[1].height, 800);
+        }
+        {
+            let mut gpu_params: GpuParameters = Default::default();
+            assert!(parse_gpu_options(Some("2D"), &mut gpu_params).is_ok());
+            assert!(
+                parse_gpu_display_options(Some("width=700,height=800"), &mut gpu_params).is_ok()
+            );
+            assert_eq!(gpu_params.displays.len(), 1);
+            assert_eq!(gpu_params.displays[0].width, 700);
+            assert_eq!(gpu_params.displays[0].height, 800);
+        }
+    }
+
     #[test]
     fn parse_battery_vaild() {
         parse_battery_options(Some("type=goldfish")).expect("parse should have succeded");
@@ -3999,7 +3885,15 @@ mod tests {
         assert_eq!(pass_cpu0_index, 0x10);
         assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::WriteOnly);
         assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
-        assert!(pass_cpu0_cfg.filter);
+        assert_eq!(pass_cpu0_cfg.filter, MsrFilter::Override);
+
+        let (_, pass_cpu0_cfg) =
+            parse_userspace_msr_options("0x10,type=w,action=pass,filter=default").unwrap();
+        assert_eq!(pass_cpu0_cfg.filter, MsrFilter::Default);
+
+        let (_, pass_cpu0_cfg) =
+            parse_userspace_msr_options("0x10,type=w,action=pass,filter=override").unwrap();
+        assert_eq!(pass_cpu0_cfg.filter, MsrFilter::Override);
 
         let (pass_cpu0_index, pass_cpu0_cfg) =
             parse_userspace_msr_options("0x10,type=r,action=pass,from=cpu0").unwrap();
@@ -4007,6 +3901,7 @@ mod tests {
         assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::ReadOnly);
         assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
         assert_eq!(pass_cpu0_cfg.from, MsrValueFrom::RWFromCPU0);
+        assert_eq!(pass_cpu0_cfg.filter, MsrFilter::Default);
 
         let (pass_cpus_index, pass_cpus_cfg) =
             parse_userspace_msr_options("0x10,type=rw,action=emu").unwrap();

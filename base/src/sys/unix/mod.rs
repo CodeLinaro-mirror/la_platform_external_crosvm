@@ -30,6 +30,7 @@ mod mmap;
 pub mod net;
 mod netlink;
 mod notifiers;
+pub mod platform_timer_resolution;
 mod poll;
 mod priority;
 pub mod rand;
@@ -50,7 +51,6 @@ pub use crate::descriptor_reflection::{
 };
 pub use crate::errno::{Error, Result, *};
 pub use acpi_event::*;
-pub use base_poll_token_derive::*;
 pub use capabilities::drop_capabilities;
 pub use descriptor::*;
 // EventFd is deprecated. Use Event instead. EventFd will be removed as soon as rest of the current
@@ -62,7 +62,7 @@ pub use get_filesystem_type::*;
 pub use ioctl::*;
 pub use mmap::*;
 pub use netlink::*;
-pub use poll::{EpollContext, EpollEvents, PollContext as EventContext, PollToken, WatchingEvents};
+pub use poll::EventContext;
 pub use priority::*;
 pub use sched::*;
 pub use scoped_signal_handler::*;
@@ -622,6 +622,12 @@ pub fn get_max_open_files() -> Result<u64> {
     } else {
         errno_result()
     }
+}
+
+/// Returns the number of online logical cores on the system.
+pub fn number_of_logical_cores() -> Result<usize> {
+    // Safe because we pass a flag for this call and the host supports this system call
+    Ok(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize)
 }
 
 #[cfg(test)]
