@@ -220,9 +220,9 @@ impl ProviderInner {
                 if let Some(device_ctx) = self.devices.lock().remove(&port) {
                     let _ = device_ctx.event_handler.on_event();
                     let device = device_ctx.device.lock();
-                    let fd = device.fd();
+                    let descriptor = device.fd();
 
-                    if let Err(e) = self.event_loop.remove_event_for_fd(&*fd) {
+                    if let Err(e) = self.event_loop.remove_event_for_descriptor(&*descriptor) {
                         error!(
                             "failed to remove poll change handler from event loop: {}",
                             e
@@ -263,7 +263,7 @@ impl ProviderInner {
         let tube = self.control_tube.lock();
         let cmd = tube.recv().map_err(Error::ReadControlTube)?;
         let result = match cmd {
-            UsbControlCommand::AttachDevice { file, .. } => self.handle_attach_device(file),
+            UsbControlCommand::AttachDevice { file } => self.handle_attach_device(file),
             UsbControlCommand::DetachDevice { port } => self.handle_detach_device(port),
             UsbControlCommand::ListDevice { ports } => self.handle_list_devices(ports),
         };

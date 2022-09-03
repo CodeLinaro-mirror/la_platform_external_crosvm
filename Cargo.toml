@@ -76,6 +76,7 @@ members = [
     "serde_keyvalue",
     "tpm2",
     "tpm2-sys",
+    "tracing",
     "usb_sys",
     "usb_util",
     "vfio_sys",
@@ -107,8 +108,10 @@ all-linux = [
     # TODO(b/203105868): Enable remaining features on linux builds.
     "composite-disk",
     "default",
+    "ffmpeg",
     "gdb",
     "tpm",
+    "video-decoder",
     "virgl_renderer_next",
     "virgl_renderer",
     "x",
@@ -126,6 +129,7 @@ gdb = ["gdbstub", "gdbstub_arch", "arch/gdb", "vm_control/gdb", "x86_64/gdb"]
 gfxstream = ["devices/gfxstream"]
 gpu = ["devices/gpu"]
 haxm = ["hypervisor/haxm"]
+whpx = ["devices/whpx", "hypervisor/whpx"]
 libvda = ["devices/libvda"]
 linux-armhf = [
     "composite-disk",
@@ -177,16 +181,17 @@ libcras = "*"
 # Compile out trace statements in release builds
 log = { version = "0", features = ["release_max_level_debug"]}
 metrics = { path = "metrics" }
-minijail = "*" # provided by ebuild
+minijail = { path = "../minijail/rust/minijail" } # ignored by ebuild
 net_util = { path = "net_util" }
-p9 = "*"
+p9 = { path = "common/p9" }
 protobuf = { version = "2.3", optional = true }
 protos = { path = "protos", optional = true }
 remain = "*"
 resources = { path = "resources" }
 scudo = { version = "0.1", optional = true }
+serde = "*"
 serde_json = "*"
-serde_keyvalue = { path = "serde_keyvalue" }
+serde_keyvalue = { path = "serde_keyvalue", features = ["argh_derive"] }
 sync = { path = "common/sync" }
 tempfile = "3"
 terminal_size = "0.1.17"
@@ -208,7 +213,7 @@ tube_transporter = { path = "tube_transporter" }
 
 [dev-dependencies]
 base = { path = "base" }
-lazy_static = "*"
+once_cell = "1.7"
 
 [patch.crates-io]
 assertions = { path = "common/assertions" }

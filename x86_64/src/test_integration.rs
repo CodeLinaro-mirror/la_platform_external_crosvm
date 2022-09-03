@@ -2,23 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+// These tests are only implemented for kvm & gvm. Other hypervisors may be added in the future.
+#![cfg(all(
+    any(feature = "gvm", unix),
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+
+mod sys;
 
 use arch::LinuxArch;
 use devices::IrqChipX86_64;
 use hypervisor::{
-    HypervisorX86_64, IoOperation, IoParams, ProtectionType, VcpuExit, VcpuX86_64, VmX86_64,
+    HypervisorX86_64, IoOperation, IoParams, ProtectionType, Regs, VcpuExit, VcpuX86_64, VmCap,
+    VmX86_64,
 };
-use resources::{MemRegion, SystemAllocator};
+use resources::{AddressRange, SystemAllocator};
 use vm_memory::{GuestAddress, GuestMemory};
 
 use super::cpuid::setup_cpuid;
 use super::interrupts::set_lint;
-use super::regs::{setup_fpu, setup_msrs, setup_regs, setup_sregs};
+use super::regs::{setup_fpu, setup_msrs, setup_sregs};
 use super::X8664arch;
 use super::{
     acpi, arch_memory_regions, bootparam, init_low_memory_layout, mptable,
-    read_pci_start_before_32bit, read_pcie_cfg_mmio_size, read_pcie_cfg_mmio_start, smbios,
+    read_pci_mmio_before_32bit, read_pcie_cfg_mmio, smbios,
 };
 use super::{
     BOOT_STACK_POINTER, KERNEL_64BIT_ENTRY_OFFSET, KERNEL_START_OFFSET, X86_64_SCI_IRQ,
@@ -38,41 +45,6 @@ use devices::PciConfigIo;
 enum TaggedControlTube {
     VmMemory(Tube),
     VmIrq(Tube),
-}
-
-#[test]
-fn simple_kvm_kernel_irqchip_test() {
-    use devices::KvmKernelIrqChip;
-    use hypervisor::kvm::*;
-    simple_vm_test::<_, _, KvmVcpu, _, _, _>(
-        |guest_mem| {
-            let kvm = Kvm::new().expect("failed to create kvm");
-            let vm = KvmVm::new(&kvm, guest_mem, ProtectionType::Unprotected)
-                .expect("failed to create kvm vm");
-            (kvm, vm)
-        },
-        |vm, vcpu_count, _| {
-            KvmKernelIrqChip::new(vm, vcpu_count).expect("failed to create KvmKernelIrqChip")
-        },
-    );
-}
-
-#[test]
-fn simple_kvm_split_irqchip_test() {
-    use devices::KvmSplitIrqChip;
-    use hypervisor::kvm::*;
-    simple_vm_test::<_, _, KvmVcpu, _, _, _>(
-        |guest_mem| {
-            let kvm = Kvm::new().expect("failed to create kvm");
-            let vm = KvmVm::new(&kvm, guest_mem, ProtectionType::Unprotected)
-                .expect("failed to create kvm vm");
-            (kvm, vm)
-        },
-        |vm, vcpu_count, device_tube| {
-            KvmSplitIrqChip::new(vm, vcpu_count, device_tube, None)
-                .expect("failed to create KvmSplitIrqChip")
-        },
-    );
 }
 
 /// Tests the integration of x86_64 with some hypervisor and devices setup. This test can help
@@ -104,9 +76,9 @@ where
     let write_addr = GuestAddress(0x4000);
 
     init_low_memory_layout(
-        Some(MemRegion {
-            base: 0xC000_0000,
-            size: 0x1000_0000,
+        Some(AddressRange {
+            start: 0xC000_0000,
+            end: 0xCFFF_FFFF,
         }),
         Some(0x8000_0000),
     );
@@ -157,13 +129,14 @@ where
     let pci_bus = Arc::new(Mutex::new(PciConfigIo::new(pci, pcibus_exit_evt_wrtube)));
     io_bus.insert(pci_bus, 0xcf8, 0x8).unwrap();
 
-    X8664arch::setup_legacy_devices(
+    X8664arch::setup_legacy_i8042_device(
         &io_bus,
         irq_chip.pit_uses_speaker_port(),
         exit_evt_wrtube.try_clone().unwrap(),
-        memory_size,
     )
     .unwrap();
+
+    X8664arch::setup_legacy_cmos_device(&io_bus, memory_size).unwrap();
 
     let mut serial_params = BTreeMap::new();
 
@@ -195,7 +168,7 @@ where
     // let mut kernel_image = File::open("/mnt/host/source/src/avd/vmlinux.uncompressed").expect("failed to open kernel");
     // let (params, kernel_end) = X8664arch::load_kernel(&guest_mem, &mut kernel_image).expect("failed to load kernel");
 
-    let max_bus = (read_pcie_cfg_mmio_size() / 0x100000 - 1) as u8;
+    let max_bus = (read_pcie_cfg_mmio().len().unwrap() / 0x100000 - 1) as u8;
     let suspend_evt = Event::new().unwrap();
     let mut resume_notify_devices = Vec::new();
     let acpi_dev_resource = X8664arch::setup_acpi_devices(
@@ -209,6 +182,8 @@ where
             .try_clone()
             .expect("unable to clone exit_evt_wrtube"),
         Default::default(),
+        #[cfg(feature = "direct")]
+        &[], // direct_gpe
         &mut irq_chip,
         X86_64_SCI_IRQ,
         (&None, None),
@@ -243,7 +218,7 @@ where
         None,
         &mut apic_ids,
         &pci_irqs,
-        read_pcie_cfg_mmio_start(),
+        read_pcie_cfg_mmio().start,
         max_bus,
         false,
     );
@@ -264,18 +239,21 @@ where
                 .add_vcpu(0, &vcpu)
                 .expect("failed to add vcpu to irqchip");
 
-            setup_cpuid(&hyp, &irq_chip, &vcpu, 0, 1, false, false, false, false).unwrap();
-            setup_msrs(&vm, &vcpu, read_pci_start_before_32bit()).unwrap();
+            if !vm.check_capability(VmCap::EarlyInitCpuid) {
+                setup_cpuid(
+                    &hyp, &irq_chip, &vcpu, 0, 1, false, false, false, false, false,
+                )
+                .unwrap();
+            }
+            setup_msrs(&vm, &vcpu, read_pci_mmio_before_32bit().start).unwrap();
 
-            setup_regs(
-                &vcpu,
-                start_addr.offset() as u64,
-                BOOT_STACK_POINTER as u64,
-                ZERO_PAGE_OFFSET as u64,
-            )
-            .unwrap();
+            let mut vcpu_regs = Regs {
+                rip: start_addr.offset(),
+                rsp: BOOT_STACK_POINTER,
+                rsi: ZERO_PAGE_OFFSET,
+                ..Default::default()
+            };
 
-            let mut vcpu_regs = vcpu.get_regs().unwrap();
             // instruction is
             // mov [eax],ebx
             // so we're writing 0x12 (the contents of ebx) to the address

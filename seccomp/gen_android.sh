@@ -55,8 +55,11 @@ function scan_policy_name() {
     # pushd but no output to stdout/stderr
     # the output is taken and used by the caller
     pushd $seccomp_dir > /dev/null 2>&1
-    ls --hide=common_device.policy --hide=common_device.frequency \
-       --hide=gpu_common.policy -1
+    ls --hide=common_device.policy \
+       --hide=common_device.frequency \
+       --hide=gpu_common.policy \
+       --hide=serial.policy \
+       -1
     popd > /dev/null 2>&1
   )
 }
@@ -98,21 +101,23 @@ package {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "\$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) < \$(in) > \$(out)",
+    cmd: "\$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) \$(location x86_64/serial.policy) < \$(in) > \$(out)",
     tool_files: [
         "policy-inliner.sh",
         "x86_64/common_device.policy",
         "x86_64/gpu_common.policy",
+        "x86_64/serial.policy",
     ],
 }
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_aarch64",
-    cmd: "\$(location policy-inliner.sh) \$(location aarch64/common_device.policy) \$(location aarch64/gpu_common.policy) < \$(in) > \$(out)",
+    cmd: "\$(location policy-inliner.sh) \$(location aarch64/common_device.policy) \$(location aarch64/gpu_common.policy) \$(location aarch64/serial.policy) < \$(in) > \$(out)",
     tool_files: [
         "policy-inliner.sh",
         "aarch64/common_device.policy",
         "aarch64/gpu_common.policy",
+        "aarch64/serial.policy",
     ],
 }
 

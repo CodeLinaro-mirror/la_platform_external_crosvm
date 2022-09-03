@@ -17,18 +17,19 @@ use arch::{
 use base::{Event, MemoryMappingBuilder, SendTube};
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::{
-    Bus, BusDeviceObj, BusError, IrqChip, IrqChipAArch64, PciAddress, PciConfigMmio, PciDevice,
+    Bus, BusDeviceObj, BusError, IrqChip, IrqChipAArch64, IrqEventSource, PciAddress,
+    PciConfigMmio, PciDevice, Serial,
 };
 use hypervisor::{
     DeviceKind, Hypervisor, HypervisorCap, ProtectionType, VcpuAArch64, VcpuFeature,
-    VcpuRegAArch64, Vm, VmAArch64,
+    VcpuInitAArch64, VcpuRegAArch64, Vm, VmAArch64,
 };
 use minijail::Minijail;
 use remain::sorted;
-use resources::{range_inclusive_len, MemRegion, SystemAllocator, SystemAllocatorConfig};
+use resources::{AddressRange, SystemAllocator, SystemAllocatorConfig};
 use sync::Mutex;
 use thiserror::Error;
-use vm_control::BatteryType;
+use vm_control::{BatControl, BatteryType};
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 
 mod fdt;
@@ -115,6 +116,8 @@ const AARCH64_PMU_IRQ: u32 = 7;
 #[sorted]
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("failed to allocate IRQ number")]
+    AllocateIrq,
     #[error("bios could not be loaded: {0}")]
     BiosLoadFailure(arch::LoadImageError),
     #[error("failed to build arm pvtime memory: {0}")]
@@ -125,6 +128,8 @@ pub enum Error {
     CloneIrqChip(base::Error),
     #[error("the given kernel command line was invalid: {0}")]
     Cmdline(kernel_cmdline::Error),
+    #[error("unable to create battery devices: {0}")]
+    CreateBatDevices(arch::DeviceRegistrationError),
     #[error("unable to make an Event: {0}")]
     CreateEvent(base::Error),
     #[error("FDT could not be created: {0}")]
@@ -236,7 +241,7 @@ impl arch::LinuxArch for AArch64 {
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
-        _battery: (&Option<BatteryType>, Option<Minijail>),
+        (bat_type, bat_jail): (&Option<BatteryType>, Option<Minijail>),
         mut vm: V,
         ramoops_region: Option<arch::pstore::RamoopsRegion>,
         devs: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
@@ -269,8 +274,9 @@ impl arch::LinuxArch for AArch64 {
                             .map_err(Error::KernelLoadFailure)?;
                     kernel_end = get_kernel_addr().offset() + kernel_size as u64;
                 } else {
-                    kernel_end = elf_result.map_err(Error::LoadElfKernel)?;
-                    kernel_size = kernel_end as usize - get_kernel_addr().offset() as usize;
+                    let loaded_kernel = elf_result.map_err(Error::LoadElfKernel)?;
+                    kernel_size = loaded_kernel.size as usize;
+                    kernel_end = loaded_kernel.address_range.end;
                 }
                 initrd = match components.initrd_image {
                     Some(initrd_file) => {
@@ -425,11 +431,16 @@ impl arch::LinuxArch for AArch64 {
         )
         .map_err(Error::CreateSerialDevices)?;
 
+        let source = IrqEventSource {
+            device_id: Serial::device_id(),
+            queue_id: 0,
+            device_name: Serial::debug_label(),
+        };
         irq_chip
-            .register_edge_irq_event(AARCH64_SERIAL_1_3_IRQ, &com_evt_1_3)
+            .register_edge_irq_event(AARCH64_SERIAL_1_3_IRQ, &com_evt_1_3, source.clone())
             .map_err(Error::RegisterIrqfd)?;
         irq_chip
-            .register_edge_irq_event(AARCH64_SERIAL_2_4_IRQ, &com_evt_2_4)
+            .register_edge_irq_event(AARCH64_SERIAL_2_4_IRQ, &com_evt_2_4, source)
             .map_err(Error::RegisterIrqfd)?;
 
         mmio_bus
@@ -460,12 +471,37 @@ impl arch::LinuxArch for AArch64 {
             .iter()
             .map(|range| fdt::PciRange {
                 space: fdt::PciAddressSpace::Memory64,
-                bus_address: *range.start(),
-                cpu_physical_address: *range.start(),
-                size: range_inclusive_len(range).unwrap(),
+                bus_address: range.start,
+                cpu_physical_address: range.start,
+                size: range.len().unwrap(),
                 prefetchable: false,
             })
             .collect();
+
+        let bat_irq = system_allocator.allocate_irq().ok_or(Error::AllocateIrq)?;
+        let (bat_control, bat_mmio_base) = match bat_type {
+            Some(BatteryType::Goldfish) => {
+                // a dummy AML buffer. Aarch64 crosvm doesn't use ACPI.
+                let mut amls = Vec::new();
+                let (control_tube, mmio_base) = arch::add_goldfish_battery(
+                    &mut amls,
+                    bat_jail,
+                    &mmio_bus,
+                    irq_chip.as_irq_chip_mut(),
+                    bat_irq,
+                    system_allocator,
+                )
+                .map_err(Error::CreateBatDevices)?;
+                (
+                    Some(BatControl {
+                        type_: BatteryType::Goldfish,
+                        control_tube,
+                    }),
+                    mmio_base,
+                )
+            }
+            None => (None, 0),
+        };
 
         fdt::create_fdt(
             AARCH64_FDT_MAX_SIZE as usize,
@@ -484,6 +520,8 @@ impl arch::LinuxArch for AArch64 {
             use_pmu,
             psci_version,
             components.swiotlb,
+            bat_mmio_base,
+            bat_irq,
         )
         .map_err(Error::CreateFdt)?;
 
@@ -491,6 +529,7 @@ impl arch::LinuxArch for AArch64 {
             vm,
             vcpu_count,
             vcpus: Some(vcpus),
+            vcpu_init: VcpuInitAArch64 {},
             vcpu_affinity: components.vcpu_affinity,
             no_smt: components.no_smt,
             irq_chip: irq_chip.try_box_clone().map_err(Error::CloneIrqChip)?,
@@ -501,7 +540,7 @@ impl arch::LinuxArch for AArch64 {
             suspend_evt,
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
-            bat_control: None,
+            bat_control,
             pm: None,
             resume_notify_devices: Vec::new(),
             root_config: pci_root,
@@ -514,6 +553,7 @@ impl arch::LinuxArch for AArch64 {
         _hypervisor: &dyn Hypervisor,
         _irq_chip: &mut dyn IrqChipAArch64,
         _vcpu: &mut dyn VcpuAArch64,
+        _vcpu_init: &VcpuInitAArch64,
         _vcpu_id: usize,
         _num_cpus: usize,
         _has_bios: bool,
@@ -521,6 +561,7 @@ impl arch::LinuxArch for AArch64 {
         _host_cpu_topology: bool,
         _enable_pnp_data: bool,
         _itmt: bool,
+        _force_calibrated_tsc_leaf: bool,
     ) -> std::result::Result<(), Self::Error> {
         // AArch64 doesn't configure vcpus on the vcpu thread, so nothing to do here.
         Ok(())
@@ -571,18 +612,14 @@ impl AArch64 {
             });
         SystemAllocatorConfig {
             io: None,
-            low_mmio: MemRegion {
-                base: AARCH64_MMIO_BASE,
-                size: AARCH64_MMIO_SIZE,
-            },
-            high_mmio: MemRegion {
-                base: high_mmio_base,
-                size: high_mmio_size,
-            },
-            platform_mmio: Some(MemRegion {
-                base: plat_mmio_base,
-                size: plat_mmio_size,
-            }),
+            low_mmio: AddressRange::from_start_and_size(AARCH64_MMIO_BASE, AARCH64_MMIO_SIZE)
+                .expect("invalid mmio region"),
+            high_mmio: AddressRange::from_start_and_size(high_mmio_base, high_mmio_size)
+                .expect("invalid high mmio region"),
+            platform_mmio: Some(
+                AddressRange::from_start_and_size(plat_mmio_base, plat_mmio_size)
+                    .expect("invalid platform mmio region"),
+            ),
             first_irq: AARCH64_IRQ_BASE,
         }
     }
@@ -595,13 +632,17 @@ impl AArch64 {
     /// * `bus` - The bus to add devices to.
     fn add_arch_devs(irq_chip: &mut dyn IrqChip, bus: &Bus) -> Result<()> {
         let rtc_evt = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
+        let rtc = devices::pl030::Pl030::new(rtc_evt.try_clone().map_err(Error::CloneEvent)?);
         irq_chip
-            .register_edge_irq_event(AARCH64_RTC_IRQ, &rtc_evt)
+            .register_edge_irq_event(AARCH64_RTC_IRQ, &rtc_evt, IrqEventSource::from_device(&rtc))
             .map_err(Error::RegisterIrqfd)?;
 
-        let rtc = Arc::new(Mutex::new(devices::pl030::Pl030::new(rtc_evt)));
-        bus.insert(rtc, AARCH64_RTC_ADDR, AARCH64_RTC_SIZE)
-            .expect("failed to add rtc device");
+        bus.insert(
+            Arc::new(Mutex::new(rtc)),
+            AARCH64_RTC_ADDR,
+            AARCH64_RTC_SIZE,
+        )
+        .expect("failed to add rtc device");
 
         Ok(())
     }

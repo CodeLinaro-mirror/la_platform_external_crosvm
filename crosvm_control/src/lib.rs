@@ -174,10 +174,10 @@ pub extern "C" fn crosvm_client_usb_list(
 /// # Arguments
 ///
 /// * `socket_path` - Path to the crosvm control socket
-/// * `bus` - USB device bus ID
-/// * `addr` - USB device address
-/// * `vid` - USB device vendor ID
-/// * `pid` - USB device product ID
+/// * `bus` - USB device bus ID (unused)
+/// * `addr` - USB device address (unused)
+/// * `vid` - USB device vendor ID (unused)
+/// * `pid` - USB device product ID (unused)
 /// * `dev_path` - Path to the USB device (Most likely `/dev/bus/usb/<bus>/<addr>`).
 /// * `out_port` - (optional) internal port will be written here if provided.
 ///
@@ -185,10 +185,10 @@ pub extern "C" fn crosvm_client_usb_list(
 #[no_mangle]
 pub extern "C" fn crosvm_client_usb_attach(
     socket_path: *const c_char,
-    bus: u8,
-    addr: u8,
-    vid: u16,
-    pid: u16,
+    _bus: u8,
+    _addr: u8,
+    _vid: u16,
+    _pid: u16,
     dev_path: *const c_char,
     out_port: *mut u8,
 ) -> bool {
@@ -199,9 +199,7 @@ pub extern "C" fn crosvm_client_usb_attach(
             }
             let dev_path = Path::new(unsafe { CStr::from_ptr(dev_path) }.to_str().unwrap_or(""));
 
-            if let Ok(UsbControlResult::Ok { port }) =
-                do_usb_attach(&socket_path, bus, addr, vid, pid, dev_path)
-            {
+            if let Ok(UsbControlResult::Ok { port }) = do_usb_attach(&socket_path, dev_path) {
                 if !out_port.is_null() {
                     unsafe { *out_port = port };
                 }
@@ -307,6 +305,8 @@ pub struct BalloonStatsFfi {
     disk_caches: i64,
     hugetlb_allocations: i64,
     hugetlb_failures: i64,
+    shared_memory: i64,
+    unevictable_memory: i64,
 }
 
 impl From<&BalloonStats> for BalloonStatsFfi {
@@ -323,6 +323,8 @@ impl From<&BalloonStats> for BalloonStatsFfi {
             disk_caches: convert(other.disk_caches),
             hugetlb_allocations: convert(other.hugetlb_allocations),
             hugetlb_failures: convert(other.hugetlb_failures),
+            shared_memory: convert(other.shared_memory),
+            unevictable_memory: convert(other.unevictable_memory),
         }
     }
 }

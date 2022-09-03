@@ -15,8 +15,9 @@
 
 common_device="$1"
 gpu_common="$2"
-if ! [[ -f $common_device ]] || ! [[ -f $gpu_common ]]; then
-  echo "usage: $0 /path/to/common_device.policy /path/to/gpu_common.policy <input.policy >output.policy"
+serial="$3"
+if ! [[ -f $common_device ]] || ! [[ -f $gpu_common ]] || ! [[ -f $serial ]]; then
+  echo "usage: $0 /path/to/common_device.policy /path/to/gpu_common.policy /path/to/serial.policy <input.policy >output.policy"
   exit 1
 fi
 
@@ -28,6 +29,12 @@ do
   elif echo "$line" | egrep "@include[[:space:]]+/usr/share/policy/crosvm/gpu_common.policy" > /dev/null; then
     cat $gpu_common
     continue
+  elif echo "$line" | egrep "@include[[:space:]]+/usr/share/policy/crosvm/serial.policy" > /dev/null; then
+    cat $serial
+    continue
+  elif echo "$line" | egrep "@include" > /dev/null; then
+    echo "ERROR: Unsupported include statement $line" >&2
+    exit 1
   fi
   echo $line
 done

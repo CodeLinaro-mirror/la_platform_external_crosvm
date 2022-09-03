@@ -13,11 +13,6 @@
 //   * cluster-mode logical addressing
 //   * external interrupts -- these are handled by querying `Pic` separately in
 //     `UserspaceIrqChip::inject_interrupts`
-//
-
-// TODO(b/213149158): this code will be used once the rest of the module
-// upstreaming is done.
-#![allow(dead_code)]
 
 use std::convert::{TryFrom, TryInto};
 use std::time::{Duration, Instant};
@@ -137,7 +132,7 @@ impl Apic {
     pub fn frequency() -> u32 {
         // Our Apic implementation will try to use the host's bus frequency if it
         // can be determined from cpuid, otherwise it uses 100MHz (cycle length of 10 nanos)
-        match crate::tsc::bus_freq_hz() {
+        match crate::tsc::bus_freq_hz(std::arch::x86_64::__cpuid_count) {
             Some(hz) => hz,
             None => (1_000_000_000u128 / CYCLE_LENGTH_FALLBACK.as_nanos()) as u32,
         }

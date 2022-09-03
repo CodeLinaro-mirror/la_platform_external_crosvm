@@ -2,11 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(any(unix, feature = "haxm"))]
-use std::arch::x86_64::_rdtsc;
-
-#[cfg(any(feature = "haxm"))]
-use std::arch::x86_64::__cpuid;
+use std::arch::x86_64::CpuidResult;
+#[cfg(any(unix, feature = "haxm", feature = "whpx"))]
+use std::arch::x86_64::{__cpuid, _rdtsc};
 
 use serde::{Deserialize, Serialize};
 
@@ -123,7 +121,7 @@ impl_downcast!(VcpuX86_64);
 pub const MSR_IA32_TSC: u32 = 0x00000010;
 
 /// Implementation of get_tsc_offset that uses VcpuX86_64::get_msrs.
-#[cfg(any(unix, feature = "haxm"))]
+#[cfg(any(unix, feature = "haxm", feature = "whpx"))]
 pub(crate) fn get_tsc_offset_from_msr(vcpu: &impl VcpuX86_64) -> Result<u64> {
     let mut regs = vec![Register {
         id: crate::MSR_IA32_TSC,
@@ -146,7 +144,7 @@ pub(crate) fn get_tsc_offset_from_msr(vcpu: &impl VcpuX86_64) -> Result<u64> {
 }
 
 /// Implementation of get_tsc_offset that uses VcpuX86_64::get_msrs.
-#[cfg(any(unix, feature = "haxm"))]
+#[cfg(any(unix, feature = "haxm", feature = "whpx"))]
 pub(crate) fn set_tsc_offset_via_msr(vcpu: &impl VcpuX86_64, offset: u64) -> Result<()> {
     // Safe because _rdtsc takes no arguments
     let host_tsc = unsafe { _rdtsc() };
@@ -161,7 +159,7 @@ pub(crate) fn set_tsc_offset_via_msr(vcpu: &impl VcpuX86_64, offset: u64) -> Res
 }
 
 /// Gets host cpu max physical address bits.
-#[cfg(feature = "haxm")]
+#[cfg(any(unix, feature = "haxm", feature = "whpx"))]
 pub(crate) fn host_phys_addr_bits() -> u8 {
     let highest_ext_function = unsafe { __cpuid(0x80000000) };
     if highest_ext_function.eax >= 0x80000008 {
@@ -173,23 +171,27 @@ pub(crate) fn host_phys_addr_bits() -> u8 {
     }
 }
 
+/// Initial state for x86_64 VCPUs.
+#[derive(Copy, Clone, Default)]
+pub struct VcpuInitX86_64 {
+    /// General-purpose registers.
+    pub regs: Regs,
+}
+
 /// A CpuId Entry contains supported feature information for the given processor.
 /// This can be modified by the hypervisor to pass additional information to the guest kernel
 /// about the hypervisor or vm. Information is returned in the eax, ebx, ecx and edx registers
 /// by the cpu for a given function and index/subfunction (passed into the cpu via the eax and ecx
 /// register respectively).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuIdEntry {
     pub function: u32,
     pub index: u32,
     // flags is needed for KVM.  We store it on CpuIdEntry to preserve the flags across
     // get_supported_cpuids() -> kvm_cpuid2 -> CpuId -> kvm_cpuid2 -> set_cpuid().
     pub flags: u32,
-    pub eax: u32,
-    pub ebx: u32,
-    pub ecx: u32,
-    pub edx: u32,
+    pub cpuid: CpuidResult,
 }
 
 /// A container for the list of cpu id entries for the hypervisor and underlying cpu.
@@ -548,7 +550,7 @@ impl IrqRoute {
 
 /// State of a VCPU's general purpose registers.
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct Regs {
     pub rax: u64,
     pub rbx: u64,
@@ -568,6 +570,31 @@ pub struct Regs {
     pub r15: u64,
     pub rip: u64,
     pub rflags: u64,
+}
+
+impl Default for Regs {
+    fn default() -> Self {
+        Regs {
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rsp: 0,
+            rbp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0,
+            rflags: 0x2, // Bit 1 (0x2) is always 1.
+        }
+    }
 }
 
 /// State of a memory segment.

@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import enum
+from typing import List, Dict
 
 
 class TestOption(enum.Enum):
@@ -44,11 +45,9 @@ WIN64_DISABLED_CRATES = [
     "arch",
     "cros_asyncv2",
     "cros-fuzz",
-    "crosvm_control",
     "crosvm_plugin",
     "crosvm-fuzz",
     "crosvm",
-    "devices",
     "ffi",
     "ffmpeg",
     "fuse",
@@ -56,30 +55,22 @@ WIN64_DISABLED_CRATES = [
     "gpu_display",
     "integration_tests",
     "io_uring",
-    "kernel_cmdline",
-    "kernel_loader",
     "kvm",
     "libcras_stub",
     "libvda",
     "minijail-sys",
     "minijail",
     "p9",
-    "power_monitor",
-    "protos",
     "qcow_utils",
     "rutabaga_gralloc",
     "system_api_stub",
     "tpm2-sys",
     "tpm2",
-    "usb_sys",
     "usb_util",
-    "vfio_sys",
-    "virtio_sys",
-    "wire_format_derive",
     "x86_64",
 ]
 
-CRATE_OPTIONS: dict[str, list[TestOption]] = {
+CRATE_OPTIONS: Dict[str, List[TestOption]] = {
     "base": [TestOption.SINGLE_THREADED, TestOption.LARGE],
     "cros_async": [TestOption.LARGE],
     "crosvm": [TestOption.SINGLE_THREADED],
@@ -126,7 +117,7 @@ CRATE_OPTIONS: dict[str, list[TestOption]] = {
 for name in WIN64_DISABLED_CRATES:
     CRATE_OPTIONS[name] = CRATE_OPTIONS.get(name, []) + [TestOption.DO_NOT_BUILD_WIN64]
 
-BUILD_FEATURES: dict[str, str] = {
+BUILD_FEATURES: Dict[str, str] = {
     "x86_64": "linux-x86_64",
     "aarch64": "linux-aarch64",
     "armhf": "linux-armhf",

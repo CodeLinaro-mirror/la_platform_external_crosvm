@@ -12,6 +12,8 @@ use std::{
     ptr::{copy_nonoverlapping, null_mut, read_unaligned, write_unaligned},
 };
 
+use log::warn;
+
 use crate::{
     external_mapping::ExternalMapping, AsRawDescriptor, Descriptor,
     MemoryMapping as CrateMemoryMapping, MemoryMappingBuilder, RawDescriptor, SafeDescriptor,
@@ -20,6 +22,7 @@ use libc::{self, c_int, c_void, read, write};
 use remain::sorted;
 
 use data_model::{volatile_memory::*, DataInit};
+use serde::{Deserialize, Serialize};
 
 use super::{pagesize, Error as ErrnoError};
 
@@ -50,7 +53,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Memory access type for anonymous shared memory mapping.
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
 pub struct Protection(c_int);
 impl Protection {
     /// Returns Protection allowing no access.
@@ -702,6 +705,34 @@ impl MemoryMapping {
         }
     }
 
+    /// Disable host swap for this mapping.
+    pub fn lock_all(&self) -> Result<()> {
+        let ret = unsafe {
+            // Safe because MLOCK_ONFAULT only affects the swap behavior of the kernel, so it
+            // has no impact on rust semantics.
+            // TODO(raging): use the explicit declaration of mlock2, which was being merged
+            // as of when the call below was being worked on.
+            libc::syscall(
+                libc::SYS_mlock2,
+                (self.addr as usize) as *const libc::c_void,
+                self.size(),
+                libc::MLOCK_ONFAULT,
+            )
+        };
+        if ret < 0 {
+            let errno = super::Error::last();
+            warn!(
+                "failed to mlock at {:#x} with length {}: {}",
+                (self.addr as usize) as u64,
+                self.size(),
+                errno,
+            );
+            Err(Error::SystemCallFailed(errno))
+        } else {
+            Ok(())
+        }
+    }
+
     // Check that offset+count is valid and return the sum.
     fn range_end(&self, offset: usize, count: usize) -> Result<usize> {
         let mem_end = offset.checked_add(count).ok_or(Error::InvalidAddress)?;
@@ -989,12 +1020,18 @@ impl CrateMemoryMapping {
 }
 
 pub trait Unix {
+    /// Remove the specified range from the mapping.
     fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()>;
+    /// Disable host swap for this mapping.
+    fn lock_all(&self) -> Result<()>;
 }
 
 impl Unix for CrateMemoryMapping {
     fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()> {
         self.mapping.remove_range(mem_offset, count)
+    }
+    fn lock_all(&self) -> Result<()> {
+        self.mapping.lock_all()
     }
 }
 

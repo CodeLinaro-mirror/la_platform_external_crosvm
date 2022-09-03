@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod sys;
+
 use std::borrow::Cow;
 use std::cmp;
 use std::convert::TryInto;
@@ -308,7 +310,7 @@ impl Reader {
         read
     }
 
-    /// Reads data from the descriptor chain buffer into a file descriptor.
+    /// Reads data from the descriptor chain buffer into a writable object.
     /// Returns the number of bytes read from the descriptor chain buffer.
     /// The number of bytes read can be less than `count` if there isn't
     /// enough data in the descriptor chain buffer.
@@ -564,7 +566,7 @@ impl Writer {
         written
     }
 
-    /// Writes data to the descriptor chain buffer from a file descriptor.
+    /// Writes data to the descriptor chain buffer from a readable object.
     /// Returns the number of bytes written to the descriptor chain buffer.
     /// The number of bytes written can be less than `count` if
     /// there isn't enough data in the descriptor chain buffer.
@@ -964,7 +966,8 @@ mod tests {
         let mut reader = Reader::new(memory, chain).expect("failed to create Reader");
 
         // Open a file in read-only mode so writes to it to trigger an I/O error.
-        let mut ro_file = File::open("/dev/zero").expect("failed to open /dev/zero");
+        let device_file = if cfg!(windows) { "NUL" } else { "/dev/zero" };
+        let mut ro_file = File::open(device_file).expect("failed to open device file");
 
         reader
             .read_exact_to(&mut ro_file, 512)

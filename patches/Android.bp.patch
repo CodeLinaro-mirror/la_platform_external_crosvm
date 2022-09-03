@@ -20,7 +20,7 @@ index d3d46248..bc1191a5 100644
          host_linux: {
              features: [
                  "gdb",
-@@ -107,6 +108,15 @@ rust_binary {
+@@ -107,6 +108,18 @@ rust_binary {
                  "libthiserror",
              ],
          },
@@ -33,6 +33,19 @@ index d3d46248..bc1191a5 100644
 +        linux_musl_x86_64: {
 +            relative_install_path: "x86_64-linux-musl",
 +        },
++        linux_musl_arm64: {
++            relative_install_path: "aarch64-linux-musl",
++        },
      },
      ld_flags: [
          "-Wl,--rpath,\\$$ORIGIN",
+@@ -263,6 +266,9 @@ rust_defaults {
+         linux_bionic_arm64: {
+             enabled: true,
+         },
++        linux_musl_arm64: {
++            enabled: true,
++        },
+         darwin: {
+             enabled: false,
+         },

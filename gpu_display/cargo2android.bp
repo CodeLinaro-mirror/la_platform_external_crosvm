@@ -26,10 +26,6 @@ cc_library_static {
                 "libffi",
             ],
         },
-        linux_glibc_x86: {
-            // libffi broken on x86, see b/162610242
-            enabled: false,
-        },
     },
     apex_available: [
         "//apex_available:platform",

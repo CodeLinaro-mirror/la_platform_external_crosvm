@@ -33,13 +33,13 @@ mod notifiers;
 pub mod platform_timer_resolution;
 mod poll;
 mod priority;
-pub mod rand;
 mod sched;
 pub mod scoped_signal_handler;
 mod shm;
 pub mod signal;
 mod signalfd;
 mod sock_ctrl_msg;
+mod stream_channel;
 mod terminal;
 mod timer;
 pub mod vsock;
@@ -70,6 +70,7 @@ pub use shm::{kernel_has_memfd, MemfdSeals, SharedMemory, Unix as SharedMemoryUn
 pub use signal::*;
 pub use signalfd::*;
 pub use sock_ctrl_msg::*;
+pub use stream_channel::*;
 pub use terminal::*;
 pub use timer::*;
 
