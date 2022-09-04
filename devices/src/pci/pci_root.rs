@@ -14,9 +14,9 @@ use crate::pci::pci_configuration::{
     PciBarConfiguration, PciBridgeSubclass, PciClassCode, PciConfiguration, PciHeaderType,
     HEADER_TYPE_MULTIFUNCTION_MASK, HEADER_TYPE_REG,
 };
-use crate::pci::pci_device::{Error, PciDevice};
+use crate::pci::pci_device::{Error, PciBus, PciDevice};
 use crate::pci::{PciAddress, PciId, PCI_VENDOR_ID_INTEL};
-use crate::{Bus, BusAccessInfo, BusDevice, BusType};
+use crate::{Bus, BusAccessInfo, BusDevice, BusType, DeviceId};
 use resources::SystemAllocator;
 
 // A PciDevice that holds the root hub's configuration.
@@ -63,6 +63,8 @@ pub struct PciRoot {
     mmio_bus: Weak<Bus>,
     /// IO bus (x86 only - for non-x86 platforms, this is just an empty Bus).
     io_bus: Weak<Bus>,
+    /// Root pci bus (bus 0)
+    root_bus: Arc<Mutex<PciBus>>,
     /// Bus configuration for the root device.
     root_configuration: PciRootConfiguration,
     /// Devices attached to this bridge.
@@ -76,10 +78,11 @@ const PCIE_XBAR_BASE_ADDR: usize = 24;
 
 impl PciRoot {
     /// Create an empty PCI root bus.
-    pub fn new(mmio_bus: Weak<Bus>, io_bus: Weak<Bus>) -> Self {
+    pub fn new(mmio_bus: Weak<Bus>, io_bus: Weak<Bus>, root_bus: Arc<Mutex<PciBus>>) -> Self {
         PciRoot {
             mmio_bus,
             io_bus,
+            root_bus,
             root_configuration: PciRootConfiguration {
                 config: PciConfiguration::new(
                     PCI_VENDOR_ID_INTEL,
@@ -108,6 +111,16 @@ impl PciRoot {
         // Ignore attempt to replace PCI Root host bridge.
         if !address.is_root() {
             self.devices.insert(address, device);
+        }
+
+        if let Err(e) = self.root_bus.lock().add_child_device(address) {
+            error!("add device error: {}", e);
+        }
+    }
+
+    pub fn add_bridge(&mut self, bridge_bus: Arc<Mutex<PciBus>>) {
+        if let Err(e) = self.root_bus.lock().add_child_bus(bridge_bus) {
+            error!("add bridge error: {}", e);
         }
     }
 
@@ -314,7 +327,7 @@ impl BusDevice for PciConfigIo {
         format!("pci config io-port 0x{:03x}", self.config_address)
     }
 
-    fn device_id(&self) -> u32 {
+    fn device_id(&self) -> DeviceId {
         PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
     }
 
@@ -394,7 +407,7 @@ impl BusDevice for PciConfigMmio {
         "pci config mmio".to_owned()
     }
 
-    fn device_id(&self) -> u32 {
+    fn device_id(&self) -> DeviceId {
         PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
     }
 
@@ -451,7 +464,7 @@ impl BusDevice for PciVirtualConfigMmio {
         "pci virtual config mmio".to_owned()
     }
 
-    fn device_id(&self) -> u32 {
+    fn device_id(&self) -> DeviceId {
         PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
     }
 

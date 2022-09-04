@@ -1007,6 +1007,8 @@ impl RutabagaBuilder {
 
             let cross_domain = CrossDomain::init(self.channels)?;
             rutabaga_components.insert(RutabagaComponentType::CrossDomain, cross_domain);
+            push_capset(RUTABAGA_CAPSET_CROSS_DOMAIN);
+            push_capset(30);
         }
 
         Ok(Rutabaga {

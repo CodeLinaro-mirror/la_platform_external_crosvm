@@ -24,7 +24,10 @@ use crate::irqchip::{
     Ioapic, IrqEvent, IrqEventIndex, Pic, VcpuRunState, IOAPIC_BASE_ADDRESS,
     IOAPIC_MEM_LENGTH_BYTES,
 };
-use crate::{Bus, IrqChip, IrqChipCap, IrqChipX86_64, IrqEdgeEvent, IrqLevelEvent, Pit, PitError};
+use crate::{
+    Bus, IrqChip, IrqChipCap, IrqChipX86_64, IrqEdgeEvent, IrqEventSource, IrqLevelEvent, Pit,
+    PitError,
+};
 
 /// PIT tube 0 timer is connected to IRQ 0
 const PIT_CHANNEL0_IRQ: u32 = 0;
@@ -204,26 +207,24 @@ impl KvmSplitIrqChip {
         let ioapic_pins = ioapic_pins.unwrap_or(vm.get_ioapic_num_pins()?);
         vm.enable_split_irqchip(ioapic_pins)?;
         let pit_evt = IrqEdgeEvent::new()?;
-        let pit = Arc::new(Mutex::new(
-            Pit::new(
-                pit_evt.get_trigger().try_clone()?,
-                Arc::new(Mutex::new(Clock::new())),
-            )
-            .map_err(|e| match e {
+        let pit = Pit::new(pit_evt.try_clone()?, Arc::new(Mutex::new(Clock::new()))).map_err(
+            |e| match e {
                 PitError::CloneEvent(err) => err,
                 PitError::CreateEvent(err) => err,
                 PitError::CreateWaitContext(err) => err,
                 PitError::WaitError(err) => err,
                 PitError::TimerCreateError(err) => err,
                 PitError::SpawnThread(_) => Error::new(libc::EIO),
-            })?,
-        ));
+            },
+        )?;
+
+        let pit_event_source = IrqEventSource::from_device(&pit);
 
         let mut chip = KvmSplitIrqChip {
             vm,
             vcpus: Arc::new(Mutex::new((0..num_vcpus).map(|_| None).collect())),
             routes: Arc::new(Mutex::new(Vec::new())),
-            pit,
+            pit: Arc::new(Mutex::new(pit)),
             pic: Arc::new(Mutex::new(Pic::new())),
             ioapic: Arc::new(Mutex::new(Ioapic::new(irq_tube, ioapic_pins)?)),
             ioapic_pins,
@@ -249,7 +250,7 @@ impl KvmSplitIrqChip {
         // Set the routes so they get sent to KVM
         chip.set_irq_routes(&routes)?;
 
-        chip.register_edge_irq_event(PIT_CHANNEL0_IRQ, &pit_evt)?;
+        chip.register_edge_irq_event(PIT_CHANNEL0_IRQ, &pit_evt, pit_event_source)?;
         Ok(chip)
     }
 }
@@ -308,12 +309,14 @@ impl KvmSplitIrqChip {
         irq: u32,
         irq_event: &Event,
         resample_event: Option<&Event>,
+        source: IrqEventSource,
     ) -> Result<Option<IrqEventIndex>> {
         if irq < self.ioapic_pins as u32 {
             let mut evt = IrqEvent {
                 gsi: irq,
                 event: irq_event.try_clone()?,
                 resample_event: None,
+                source,
             };
 
             if let Some(resample_event) = resample_event {
@@ -395,8 +398,9 @@ impl IrqChip for KvmSplitIrqChip {
         &mut self,
         irq: u32,
         irq_event: &IrqEdgeEvent,
+        source: IrqEventSource,
     ) -> Result<Option<IrqEventIndex>> {
-        self.register_irq_event(irq, irq_event.get_trigger(), None)
+        self.register_irq_event(irq, irq_event.get_trigger(), None, source)
     }
 
     fn unregister_edge_irq_event(&mut self, irq: u32, irq_event: &IrqEdgeEvent) -> Result<()> {
@@ -407,8 +411,14 @@ impl IrqChip for KvmSplitIrqChip {
         &mut self,
         irq: u32,
         irq_event: &IrqLevelEvent,
+        source: IrqEventSource,
     ) -> Result<Option<IrqEventIndex>> {
-        self.register_irq_event(irq, irq_event.get_trigger(), Some(irq_event.get_resample()))
+        self.register_irq_event(
+            irq,
+            irq_event.get_trigger(),
+            Some(irq_event.get_resample()),
+            source,
+        )
     }
 
     fn unregister_level_irq_event(&mut self, irq: u32, irq_event: &IrqLevelEvent) -> Result<()> {
@@ -443,11 +453,11 @@ impl IrqChip for KvmSplitIrqChip {
 
     /// Return a vector of all registered irq numbers and their associated events and event
     /// indices. These should be used by the main thread to wait for irq events.
-    fn irq_event_tokens(&self) -> Result<Vec<(IrqEventIndex, u32, Event)>> {
-        let mut tokens: Vec<(IrqEventIndex, u32, Event)> = Vec::new();
+    fn irq_event_tokens(&self) -> Result<Vec<(IrqEventIndex, IrqEventSource, Event)>> {
+        let mut tokens = vec![];
         for (index, evt) in self.irq_events.lock().iter().enumerate() {
             if let Some(evt) = evt {
-                tokens.push((index, evt.gsi, evt.event.try_clone()?));
+                tokens.push((index, evt.source.clone(), evt.event.try_clone()?));
             }
         }
         Ok(tokens)
@@ -784,11 +794,12 @@ mod tests {
     use hypervisor::{
         kvm::Kvm, IoapicRedirectionTableEntry, PitRWMode, ProtectionType, TriggerMode, Vm, VmX86_64,
     };
-    use resources::{MemRegion, SystemAllocator, SystemAllocatorConfig};
+    use resources::{AddressRange, SystemAllocator, SystemAllocatorConfig};
     use vm_memory::GuestMemory;
 
     use crate::irqchip::tests::*;
-    use crate::IrqChip;
+    use crate::pci::CrosvmDeviceId;
+    use crate::{DeviceId, IrqChip};
 
     /// Helper function for setting up a KvmKernelIrqChip
     fn get_kernel_chip() -> KvmKernelIrqChip {
@@ -828,6 +839,12 @@ mod tests {
         chip.add_vcpu(0, vcpu.as_vcpu())
             .expect("failed to add vcpu");
         chip
+    }
+
+    #[test]
+    fn kernel_irqchip_pit_uses_speaker_port() {
+        let chip = get_kernel_chip();
+        assert!(!chip.pit_uses_speaker_port());
     }
 
     #[test]
@@ -911,6 +928,12 @@ mod tests {
     }
 
     #[test]
+    fn split_irqchip_pit_uses_speaker_port() {
+        let chip = get_split_chip();
+        assert!(chip.pit_uses_speaker_port());
+    }
+
+    #[test]
     fn split_irqchip_routes_conflict() {
         let mut chip = get_split_chip();
         chip.route_irq(IrqRoute {
@@ -941,11 +964,16 @@ mod tests {
 
         // there should be one token on a fresh split irqchip, for the pit
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].1, 0);
+        assert_eq!(tokens[0].1.device_name, "userspace PIT");
 
         // register another irq event
         let evt = IrqEdgeEvent::new().expect("failed to create event");
-        chip.register_edge_irq_event(6, &evt)
+        let source = IrqEventSource {
+            device_id: CrosvmDeviceId::Cmos.into(),
+            queue_id: 0,
+            device_name: "test".into(),
+        };
+        chip.register_edge_irq_event(6, &evt, source)
             .expect("failed to register irq event");
 
         let tokens = chip
@@ -954,8 +982,11 @@ mod tests {
 
         // now there should be two tokens
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].1, 0);
-        assert_eq!(tokens[1].1, 6);
+        assert_eq!(tokens[0].1.device_name, "userspace PIT");
+        assert_eq!(
+            tokens[1].1.device_id,
+            DeviceId::PlatformDeviceId(CrosvmDeviceId::Cmos)
+        );
         assert_eq!(tokens[1].2, *evt.get_trigger());
     }
 
@@ -967,17 +998,17 @@ mod tests {
         let io_bus = Bus::new();
         let mut resources = SystemAllocator::new(
             SystemAllocatorConfig {
-                io: Some(MemRegion {
-                    base: 0xc000,
-                    size: 0x4000,
+                io: Some(AddressRange {
+                    start: 0xc000,
+                    end: 0xffff,
                 }),
-                low_mmio: MemRegion {
-                    base: 0,
-                    size: 2048,
+                low_mmio: AddressRange {
+                    start: 0,
+                    end: 2047,
                 },
-                high_mmio: MemRegion {
-                    base: 0x1_0000_0000,
-                    size: 0x2_0000_0000,
+                high_mmio: AddressRange {
+                    start: 0x1_0000_0000,
+                    end: 0x2_ffff_ffff,
                 },
                 platform_mmio: None,
                 first_irq: 5,
@@ -989,8 +1020,14 @@ mod tests {
 
         // Set up a level-triggered interrupt line 1
         let evt = IrqLevelEvent::new().expect("failed to create event");
+
+        let source = IrqEventSource {
+            device_id: CrosvmDeviceId::Cmos.into(),
+            device_name: "test".into(),
+            queue_id: 0,
+        };
         let evt_index = chip
-            .register_level_irq_event(1, &evt)
+            .register_level_irq_event(1, &evt, source)
             .expect("failed to register irq event")
             .expect("register_irq_event should not return None");
 
@@ -1100,17 +1137,17 @@ mod tests {
         let io_bus = Bus::new();
         let mut resources = SystemAllocator::new(
             SystemAllocatorConfig {
-                io: Some(MemRegion {
-                    base: 0xc000,
-                    size: 0x4000,
+                io: Some(AddressRange {
+                    start: 0xc000,
+                    end: 0xffff,
                 }),
-                low_mmio: MemRegion {
-                    base: 0,
-                    size: 2048,
+                low_mmio: AddressRange {
+                    start: 0,
+                    end: 2047,
                 },
-                high_mmio: MemRegion {
-                    base: 0x1_0000_0000,
-                    size: 0x2_0000_0000,
+                high_mmio: AddressRange {
+                    start: 0x1_0000_0000,
+                    end: 0x2_ffff_ffff,
                 },
                 platform_mmio: None,
                 first_irq: 5,
@@ -1120,12 +1157,16 @@ mod tests {
         )
         .expect("failed to create SystemAllocator");
 
+        let source = IrqEventSource {
+            device_id: CrosvmDeviceId::Cmos.into(),
+            device_name: "test".into(),
+            queue_id: 0,
+        };
         // setup an event and a resample event for irq line 1
-        let evt = Event::new().expect("failed to create event");
-        let resample_evt = Event::new().expect("failed to create event");
+        let evt = IrqLevelEvent::new().expect("failed to create event");
 
-        chip.register_irq_event(1, &evt, Some(&resample_evt))
-            .expect("failed to register_irq_event");
+        chip.register_level_irq_event(1, &evt, source)
+            .expect("failed to register_level_irq_event");
 
         // Once we finalize devices, the pic/pit/ioapic should be attached to io and mmio busses
         chip.finalize_devices(&mut resources, &io_bus, &mmio_bus)
@@ -1153,7 +1194,7 @@ mod tests {
 
         // resample event should not be written to
         assert_eq!(
-            resample_evt
+            evt.get_resample()
                 .read_timeout(std::time::Duration::from_millis(10))
                 .expect("failed to read_timeout"),
             EventReadResult::Timeout
@@ -1172,7 +1213,7 @@ mod tests {
 
         // resample event should be written to by ioapic
         assert_eq!(
-            resample_evt
+            evt.get_resample()
                 .read_timeout(std::time::Duration::from_millis(10))
                 .expect("failed to read_timeout"),
             EventReadResult::Count(1)

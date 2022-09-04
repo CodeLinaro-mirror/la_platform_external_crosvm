@@ -19,6 +19,7 @@ PRODUCT_PACKAGES += \
     balloon_device.policy \
     battery.policy \
     block_device.policy \
+    coiommu_device.policy \
     cras_audio_device.policy \
     cras_snd_device.policy \
     fs_device.policy \
@@ -30,15 +31,17 @@ PRODUCT_PACKAGES += \
     null_audio_device.policy \
     pmem_device.policy \
     rng_device.policy \
-    serial.policy \
+    serial_device.policy \
     tpm_device.policy \
     vfio_device.policy \
     vhost_net_device.policy \
     vhost_vsock_device.policy \
     video_device.policy \
     vios_audio_device.policy \
+    vtpm_proxy_device.policy \
+    vvu_proxy_device.policy \
     wl_device.policy \
-    xhci.policy \
+    xhci_device.policy \
 
 # TODO: Remove this when crosvm is added to generic system image
 PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
@@ -46,6 +49,7 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/etc/seccomp_policy/crosvm/balloon_device.policy \
     system/etc/seccomp_policy/crosvm/battery.policy \
     system/etc/seccomp_policy/crosvm/block_device.policy \
+    system/etc/seccomp_policy/crosvm/coiommu_device.policy \
     system/etc/seccomp_policy/crosvm/cras_audio_device.policy \
     system/etc/seccomp_policy/crosvm/cras_snd_device.policy \
     system/etc/seccomp_policy/crosvm/fs_device.policy \
@@ -57,12 +61,14 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/etc/seccomp_policy/crosvm/null_audio_device.policy \
     system/etc/seccomp_policy/crosvm/pmem_device.policy \
     system/etc/seccomp_policy/crosvm/rng_device.policy \
-    system/etc/seccomp_policy/crosvm/serial.policy \
+    system/etc/seccomp_policy/crosvm/serial_device.policy \
     system/etc/seccomp_policy/crosvm/tpm_device.policy \
     system/etc/seccomp_policy/crosvm/vfio_device.policy \
     system/etc/seccomp_policy/crosvm/vhost_net_device.policy \
     system/etc/seccomp_policy/crosvm/vhost_vsock_device.policy \
     system/etc/seccomp_policy/crosvm/video_device.policy \
     system/etc/seccomp_policy/crosvm/vios_audio_device.policy \
+    system/etc/seccomp_policy/crosvm/vtpm_proxy_device.policy \
+    system/etc/seccomp_policy/crosvm/vvu_proxy_device.policy \
     system/etc/seccomp_policy/crosvm/wl_device.policy \
-    system/etc/seccomp_policy/crosvm/xhci.policy \
+    system/etc/seccomp_policy/crosvm/xhci_device.policy \

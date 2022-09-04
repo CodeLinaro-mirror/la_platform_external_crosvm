@@ -1,7 +1,7 @@
-diff --git b/gpu_display/Android.bp a/gpu_display/Android.bp
-index 989d1acd..cd5038f4 100644
---- b/gpu_display/Android.bp
-+++ a/gpu_display/Android.bp
+diff --git a/gpu_display/Android.bp b/gpu_display/Android.bp
+index 3ce915ad..9d5ce4aa 100644
+--- a/gpu_display/Android.bp
++++ b/gpu_display/Android.bp
 @@ -34,7 +34,19 @@ rust_library {
      ],
      proc_macros: ["libremain"],
@@ -20,6 +20,6 @@ index 989d1acd..cd5038f4 100644
 +            ],
 +        },
 +    },
- }
- 
- cc_library_static {
+     apex_available: [
+         "//apex_available:platform",
+         "//apex_available:anyapex",

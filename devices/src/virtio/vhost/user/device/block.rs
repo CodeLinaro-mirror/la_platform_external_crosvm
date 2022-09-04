@@ -19,7 +19,7 @@ use vm_memory::GuestMemory;
 use vmm_vhost::message::*;
 
 use crate::virtio::block::asynchronous::{flush_disk, handle_queue};
-use crate::virtio::block::*;
+use crate::virtio::block::{build_avail_features, build_config_space, DiskState, SECTOR_SIZE};
 use crate::virtio::vhost::user::device::handler::{Doorbell, VhostUserBackend};
 use crate::virtio::{self, block::sys::*, copy_config};
 
@@ -39,7 +39,7 @@ pub(crate) struct BlockBackend {
     acked_protocol_features: VhostUserProtocolFeatures,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
-    workers: [Option<AbortHandle>; Self::MAX_QUEUE_NUM],
+    workers: [Option<AbortHandle>; NUM_QUEUES as usize],
 }
 
 impl BlockBackend {
@@ -98,10 +98,7 @@ impl BlockBackend {
         let flush_timer_read = timer
             .try_clone()
             .context("Failed to clone flush_timer")
-            .and_then(|t| {
-                // TODO(b/228645507): Update code below to match B* once B* Timer is upstreamed.
-                TimerAsync::new(t, ex).context("Failed to create an async timer")
-            })?;
+            .and_then(|t| TimerAsync::new(t, ex).context("Failed to create an async timer"))?;
         let flush_timer_armed = Rc::new(RefCell::new(false));
         ex.spawn_local(flush_disk(
             Rc::clone(&disk_state),
@@ -127,10 +124,13 @@ impl BlockBackend {
 }
 
 impl VhostUserBackend for BlockBackend {
-    const MAX_QUEUE_NUM: usize = NUM_QUEUES as usize;
-    const MAX_VRING_LEN: u16 = QUEUE_SIZE;
+    fn max_queue_num(&self) -> usize {
+        return NUM_QUEUES as usize;
+    }
 
-    type Error = anyhow::Error;
+    fn max_vring_len(&self) -> u16 {
+        return QUEUE_SIZE;
+    }
 
     fn features(&self) -> u64 {
         self.avail_features

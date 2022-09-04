@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use sync::Mutex;
 use thiserror::Error;
 
-use crate::{PciAddress, PciDevice, VfioPlatformDevice};
+#[cfg(unix)]
+use crate::VfioPlatformDevice;
+use crate::{DeviceId, PciAddress, PciDevice};
 
 /// Information about how a device was accessed.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
@@ -70,12 +72,8 @@ pub enum BusType {
 pub trait BusDevice: Send {
     /// Returns a label suitable for debug output.
     fn debug_label(&self) -> String;
-
     /// Returns a unique id per device type suitable for metrics gathering.
-    // TODO(225991065): Remove this default implementation when all of the crate is upstreamed.
-    fn device_id(&self) -> u32 {
-        0
-    }
+    fn device_id(&self) -> DeviceId;
     /// Reads at `offset` from this device
     fn read(&mut self, offset: BusAccessInfo, data: &mut [u8]) {}
     /// Writes at `offset` into this device
@@ -172,13 +170,15 @@ pub trait BusDeviceObj {
     fn into_pci_device(self: Box<Self>) -> Option<Box<dyn PciDevice>> {
         None
     }
-
+    #[cfg(unix)]
     fn as_platform_device(&self) -> Option<&VfioPlatformDevice> {
         None
     }
+    #[cfg(unix)]
     fn as_platform_device_mut(&mut self) -> Option<&mut VfioPlatformDevice> {
         None
     }
+    #[cfg(unix)]
     fn into_platform_device(self: Box<Self>) -> Option<Box<VfioPlatformDevice>> {
         None
     }
@@ -190,8 +190,13 @@ pub enum Error {
     #[error("Bus Range not found")]
     Empty,
     /// The insertion failed because the new device overlapped with an old device.
-    #[error("new device overlaps with an old device")]
-    Overlap,
+    #[error("new device {base},{len} overlaps with an old device {other_base},{other_len}")]
+    Overlap {
+        base: u64,
+        len: u64,
+        other_base: u64,
+        other_len: u64,
+    },
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -290,23 +295,39 @@ impl Bus {
     /// Puts the given device at the given address space.
     pub fn insert(&self, device: Arc<Mutex<dyn BusDevice>>, base: u64, len: u64) -> Result<()> {
         if len == 0 {
-            return Err(Error::Overlap);
+            return Err(Error::Overlap {
+                base,
+                len,
+                other_base: 0,
+                other_len: 0,
+            });
         }
 
         // Reject all cases where the new device's range overlaps with an existing device.
         let mut devices = self.devices.lock();
-        if devices
-            .iter()
-            .any(|(range, _dev)| range.overlaps(base, len))
-        {
-            return Err(Error::Overlap);
-        }
+        devices.iter().try_for_each(|(range, _dev)| {
+            if range.overlaps(base, len) {
+                Err(Error::Overlap {
+                    base,
+                    len,
+                    other_base: range.base,
+                    other_len: range.len,
+                })
+            } else {
+                Ok(())
+            }
+        })?;
 
         if devices
             .insert(BusRange { base, len }, BusDeviceEntry::OuterSync(device))
             .is_some()
         {
-            return Err(Error::Overlap);
+            return Err(Error::Overlap {
+                base,
+                len,
+                other_base: base,
+                other_len: len,
+            });
         }
 
         Ok(())
@@ -317,23 +338,39 @@ impl Bus {
     /// by multiple threads simultaneously.
     pub fn insert_sync(&self, device: Arc<dyn BusDeviceSync>, base: u64, len: u64) -> Result<()> {
         if len == 0 {
-            return Err(Error::Overlap);
+            return Err(Error::Overlap {
+                base,
+                len,
+                other_base: 0,
+                other_len: 0,
+            });
         }
 
         // Reject all cases where the new device's range overlaps with an existing device.
         let mut devices = self.devices.lock();
-        if devices
-            .iter()
-            .any(|(range, _dev)| range.overlaps(base, len))
-        {
-            return Err(Error::Overlap);
-        }
+        devices.iter().try_for_each(|(range, _dev)| {
+            if range.overlaps(base, len) {
+                Err(Error::Overlap {
+                    base,
+                    len,
+                    other_base: range.base,
+                    other_len: range.len,
+                })
+            } else {
+                Ok(())
+            }
+        })?;
 
         if devices
             .insert(BusRange { base, len }, BusDeviceEntry::InnerSync(device))
             .is_some()
         {
-            return Err(Error::Overlap);
+            return Err(Error::Overlap {
+                base,
+                len,
+                other_base: base,
+                other_len: len,
+            });
         }
 
         Ok(())
@@ -342,7 +379,12 @@ impl Bus {
     /// Remove the given device at the given address space.
     pub fn remove(&self, base: u64, len: u64) -> Result<()> {
         if len == 0 {
-            return Err(Error::Overlap);
+            return Err(Error::Overlap {
+                base,
+                len,
+                other_base: 0,
+                other_len: 0,
+            });
         }
 
         let mut devices = self.devices.lock();
@@ -404,10 +446,15 @@ impl Bus {
 
 #[cfg(test)]
 mod tests {
+    use crate::pci::CrosvmDeviceId;
+
     use super::*;
 
     struct DummyDevice;
     impl BusDevice for DummyDevice {
+        fn device_id(&self) -> DeviceId {
+            CrosvmDeviceId::Cmos.into()
+        }
         fn debug_label(&self) -> String {
             "dummy device".to_owned()
         }
@@ -418,6 +465,10 @@ mod tests {
     }
 
     impl BusDevice for ConstantDevice {
+        fn device_id(&self) -> DeviceId {
+            CrosvmDeviceId::Cmos.into()
+        }
+
         fn debug_label(&self) -> String {
             "constant device".to_owned()
         }

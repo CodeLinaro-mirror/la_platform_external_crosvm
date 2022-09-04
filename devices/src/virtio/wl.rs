@@ -54,8 +54,8 @@ use data_model::*;
 use base::ioctl_iow_nr;
 use base::{
     error, ioctl_iowr_nr, ioctl_with_ref, pipe, round_up_to_page_size, warn, AsRawDescriptor,
-    Error, Event, EventToken, EventType, FileFlags, FromRawDescriptor, RawDescriptor, Result,
-    ScmSocket, SharedMemory, SharedMemoryUnix, Tube, TubeError, WaitContext,
+    Error, Event, EventToken, EventType, FileFlags, FromRawDescriptor, Protection, RawDescriptor,
+    Result, ScmSocket, SharedMemory, SharedMemoryUnix, Tube, TubeError, WaitContext,
 };
 #[cfg(feature = "gpu")]
 use base::{IntoRawDescriptor, SafeDescriptor};
@@ -348,7 +348,7 @@ impl VmRequester {
         let request = VmMemoryRequest::RegisterMemory {
             source: VmMemorySource::SharedMemory(shm),
             dest: VmMemoryDestination::NewAllocation,
-            read_only: false,
+            prot: Protection::read_write(),
         };
         let response = self.request(&request)?;
         match request {
@@ -761,7 +761,7 @@ impl WlVfd {
         self.guest_shared_memory.as_ref().map(|shm| shm.size())
     }
 
-    // The FD that gets sent if this VFD is sent over a socket.
+    // The descriptor that gets sent if this VFD is sent over a socket.
     fn send_descriptor(&self) -> Option<RawDescriptor> {
         self.guest_shared_memory
             .as_ref()
@@ -1072,7 +1072,7 @@ impl WlState {
         let events = match self.wait_ctx.wait_timeout(Duration::from_secs(0)) {
             Ok(v) => v,
             Err(e) => {
-                error!("failed polling for vfd evens: {}", e);
+                error!("failed waiting for vfd evens: {}", e);
                 return;
             }
         };
@@ -1684,7 +1684,7 @@ impl Worker {
             let events = match wait_ctx.wait() {
                 Ok(v) => v,
                 Err(e) => {
-                    error!("failed polling for events: {}", e);
+                    error!("failed waiting for events: {}", e);
                     break;
                 }
             };

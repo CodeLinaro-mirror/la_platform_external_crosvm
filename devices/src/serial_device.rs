@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 #[cfg(windows)]
 use base::platform::Console as WinConsole;
-use base::{error, open_file, syslog, AsRawDescriptor, Event, FileSync, RawDescriptor};
+use base::{
+    error, open_file, syslog, AsRawDescriptor, Event, FileSync, RawDescriptor, ReadNotifier,
+};
 use hypervisor::ProtectionType;
 use remain::sorted;
 use serde::{Deserialize, Serialize};
@@ -42,7 +44,7 @@ pub enum Error {
 }
 
 /// Trait for types that can be used as input for a serial device.
-pub trait SerialInput: io::Read + AsRawDescriptor + Send {}
+pub trait SerialInput: io::Read + ReadNotifier + Send {}
 impl SerialInput for File {}
 #[cfg(windows)]
 impl SerialInput for WinConsole {}
@@ -116,7 +118,7 @@ fn serial_parameters_default_debugcon_port() -> u16 {
     0xe9
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SerialParameters {
     #[serde(rename = "type")]
@@ -159,7 +161,7 @@ impl SerialParameters {
             Some(Box::new(input_file))
         } else if self.stdin {
             keep_rds.push(stdin().as_raw_descriptor());
-            Some(Box::new(ConsoleInput))
+            Some(Box::new(ConsoleInput::new()))
         } else {
             None
         };
@@ -248,7 +250,7 @@ mod tests {
         assert_eq!(params.type_, SerialType::Syslog);
         #[cfg(unix)]
         let opt = "type=unix";
-        #[cfg(window)]
+        #[cfg(windows)]
         let opt = "type=namedpipe";
         let params = from_serial_arg(opt).unwrap();
         assert_eq!(params.type_, SerialType::SystemSerialType);
@@ -305,6 +307,16 @@ mod tests {
         let params = from_serial_arg("stdin=false").unwrap();
         assert!(!params.stdin);
         let params = from_serial_arg("stdin=foobar");
+        assert!(params.is_err());
+
+        // out_timestamp parameter
+        let params = from_serial_arg("out_timestamp").unwrap();
+        assert!(params.out_timestamp);
+        let params = from_serial_arg("out_timestamp=true").unwrap();
+        assert!(params.out_timestamp);
+        let params = from_serial_arg("out_timestamp=false").unwrap();
+        assert!(!params.out_timestamp);
+        let params = from_serial_arg("out_timestamp=foobar");
         assert!(params.is_err());
 
         // debugcon port parameter
