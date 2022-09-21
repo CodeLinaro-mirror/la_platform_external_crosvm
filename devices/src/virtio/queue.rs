@@ -3,25 +3,37 @@
 // found in the LICENSE file.
 
 use std::cmp::min;
-use std::convert::TryInto;
 use std::num::Wrapping;
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::fence;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use sync::Mutex;
 
-use anyhow::{bail, Context};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use base::error;
-use cros_async::{AsyncError, EventAsync};
-use data_model::{DataInit, Le16, Le32, Le64};
+use base::warn;
+use base::Protection;
+use cros_async::AsyncError;
+use cros_async::EventAsync;
+use data_model::DataInit;
+use data_model::Le16;
+use data_model::Le32;
+use data_model::Le64;
+use smallvec::smallvec;
+use smallvec::SmallVec;
+use sync::Mutex;
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
-use vm_memory::{GuestAddress, GuestMemory};
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
 
-use super::{SignalableInterrupt, VIRTIO_MSI_NO_VECTOR};
+use super::SignalableInterrupt;
+use super::VIRTIO_MSI_NO_VECTOR;
+use crate::virtio::ipc_memory_mapper::ExportedRegion;
 use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
-use crate::virtio::memory_mapper::{MemRegion, Permission, Translate};
-use crate::virtio::memory_util::{
-    is_valid_wrapper, read_obj_from_addr_wrapper, write_obj_at_addr_wrapper,
-};
+use crate::virtio::memory_mapper::MemRegion;
+use crate::virtio::memory_util::read_obj_from_addr_wrapper;
+use crate::virtio::memory_util::write_obj_at_addr_wrapper;
 
 const VIRTQ_DESC_F_NEXT: u16 = 0x1;
 const VIRTQ_DESC_F_WRITE: u16 = 0x2;
@@ -88,8 +100,19 @@ pub struct DescriptorChain {
     /// the next bit set
     pub next: u16,
 
+    /// The memory regions associated with the current descriptor.
+    regions: SmallVec<[MemRegion; 1]>,
+
     /// Translates `addr` to guest physical address
     iommu: Option<Arc<Mutex<IpcMemoryMapper>>>,
+
+    /// The exported descriptor table of this chain's queue. Present
+    /// iff iommu is present.
+    exported_desc_table: Option<ExportedRegion>,
+
+    /// The exported iommu region of the current descriptor. Present iff
+    /// iommu is present.
+    exported_region: Option<ExportedRegion>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -111,7 +134,8 @@ impl DescriptorChain {
         index: u16,
         required_flags: u16,
         iommu: Option<Arc<Mutex<IpcMemoryMapper>>>,
-    ) -> anyhow::Result<DescriptorChain> {
+        exported_desc_table: Option<ExportedRegion>,
+    ) -> Result<DescriptorChain> {
         if index >= queue_size {
             bail!("index ({}) >= queue_size ({})", index, queue_size);
         }
@@ -119,19 +143,58 @@ impl DescriptorChain {
         let desc_head = desc_table
             .checked_add((index as u64) * 16)
             .context("integer overflow")?;
-        let desc: Desc = read_obj_from_addr_wrapper::<Desc>(mem, &iommu, desc_head)
-            .context("failed to read desc")?;
+        let desc: Desc = read_obj_from_addr_wrapper(mem, &exported_desc_table, desc_head)
+            .with_context(|| format!("failed to read desc {:x}", desc_head.offset()))?;
+
+        let addr = GuestAddress(desc.addr.into());
+        let len = desc.len.to_native();
+        let (regions, exported_region) = if let Some(iommu) = &iommu {
+            if exported_desc_table.is_none() {
+                bail!("missing exported descriptor table");
+            }
+
+            let exported_region =
+                ExportedRegion::new(mem, iommu.clone(), addr.offset(), len.into())
+                    .context("failed to get mem regions")?;
+
+            let regions = exported_region.get_mem_regions();
+            let required_prot = if required_flags & VIRTQ_DESC_F_WRITE == 0 {
+                Protection::read()
+            } else {
+                Protection::write()
+            };
+            for r in &regions {
+                if !r.prot.allows(&required_prot) {
+                    bail!("missing RW permissions for descriptor");
+                }
+            }
+
+            (regions, Some(exported_region))
+        } else {
+            (
+                smallvec![MemRegion {
+                    gpa: addr,
+                    len: len.into(),
+                    prot: Protection::read_write(),
+                }],
+                None,
+            )
+        };
+
         let chain = DescriptorChain {
             mem: mem.clone(),
             desc_table,
             queue_size,
             ttl: queue_size,
             index,
-            addr: GuestAddress(desc.addr.into()),
-            len: desc.len.into(),
+            addr,
+            len,
             flags: desc.flags.into(),
             next: desc.next.into(),
             iommu,
+            regions,
+            exported_region,
+            exported_desc_table,
         };
 
         if chain.is_valid() && chain.flags & required_flags == required_flags {
@@ -141,39 +204,18 @@ impl DescriptorChain {
         }
     }
 
-    /// Get the mem region(s), regardless if the `DescriptorChain`s contain gpa (guest physical
-    /// address), or iova (io virtual address) and iommu.
-    pub fn get_mem_regions(&self) -> anyhow::Result<Vec<MemRegion>> {
-        if let Some(iommu) = &self.iommu {
-            iommu
-                .lock()
-                .translate(self.addr.offset(), self.len as u64)
-                .context("failed to get mem regions")
-        } else {
-            Ok(vec![MemRegion {
-                gpa: self.addr,
-                len: self.len.try_into().expect("u32 doesn't fit in usize"),
-                perm: Permission::RW,
-            }])
-        }
+    pub fn into_mem_regions(self) -> (SmallVec<[MemRegion; 1]>, Option<ExportedRegion>) {
+        (self.regions, self.exported_region)
     }
 
     fn is_valid(&self) -> bool {
         if self.len > 0 {
-            match self.get_mem_regions() {
-                Ok(regions) => {
-                    if regions.iter().any(|r| {
-                        self.mem
-                            .checked_offset(r.gpa, r.len as u64 - 1u64)
-                            .is_none()
-                    }) {
-                        return false;
-                    }
-                }
-                Err(e) => {
-                    error!("{:#}", e);
-                    return false;
-                }
+            if self.regions.iter().any(|r| {
+                self.mem
+                    .checked_offset(r.gpa, r.len as u64 - 1u64)
+                    .is_none()
+            }) {
+                return false;
             }
         }
 
@@ -217,6 +259,7 @@ impl DescriptorChain {
                 self.next,
                 required_flags,
                 iommu,
+                self.exported_desc_table.clone(),
             ) {
                 Ok(mut c) => {
                     c.ttl = self.ttl - 1;
@@ -254,27 +297,35 @@ impl<'a, 'b> Iterator for AvailIter<'a, 'b> {
 
 #[derive(Clone)]
 /// A virtio queue's parameters.
+///
+/// WARNING: it is NOT safe to clone and then use n>1 Queue(s) to interact with the same virtqueue.
+/// That will prevent descriptor index tracking from being accurate, which can cause incorrect
+/// interrupt masking.
+/// TODO(b/201119859) drop Clone from this struct.
 pub struct Queue {
     /// The maximal size in elements offered by the device
     pub max_size: u16,
 
     /// The queue size in elements the driver selected
-    pub size: u16,
+    size: u16,
 
     /// Inidcates if the queue is finished with configuration
-    pub ready: bool,
+    ready: bool,
+
+    /// Indicates that a ready queue's configuration has been validated successfully.
+    validated: bool,
 
     /// MSI-X vector for the queue. Don't care for INTx
-    pub vector: u16,
+    vector: u16,
 
     /// Guest physical address of the descriptor table
-    pub desc_table: GuestAddress,
+    desc_table: GuestAddress,
 
     /// Guest physical address of the available ring
-    pub avail_ring: GuestAddress,
+    avail_ring: GuestAddress,
 
     /// Guest physical address of the used ring
-    pub used_ring: GuestAddress,
+    used_ring: GuestAddress,
 
     pub next_avail: Wrapping<u16>,
     pub next_used: Wrapping<u16>,
@@ -289,6 +340,29 @@ pub struct Queue {
     notification_disable_count: usize,
 
     iommu: Option<Arc<Mutex<IpcMemoryMapper>>>,
+
+    // When |iommu| is present, |desc_table| and the rings are IOVAs rather than real
+    // GPAs. These are the exported regions used to access the underlying GPAs. They
+    // are initialized by |export_memory| and released by |release_exported_memory|.
+    exported_desc_table: Option<ExportedRegion>,
+    exported_avail_ring: Option<ExportedRegion>,
+    exported_used_ring: Option<ExportedRegion>,
+}
+
+macro_rules! accessors {
+    ($var:ident, $t:ty, $setter:ident) => {
+        pub fn $var(&self) -> $t {
+            self.$var
+        }
+
+        pub fn $setter(&mut self, val: $t) {
+            if self.ready {
+                warn!("ignoring write to {} on ready queue", stringify!($var));
+                return;
+            }
+            self.$var = val;
+        }
+    };
 }
 
 impl Queue {
@@ -298,6 +372,7 @@ impl Queue {
             max_size,
             size: max_size,
             ready: false,
+            validated: false,
             vector: VIRTIO_MSI_NO_VECTOR,
             desc_table: GuestAddress(0),
             avail_ring: GuestAddress(0),
@@ -308,8 +383,18 @@ impl Queue {
             last_used: Wrapping(0),
             notification_disable_count: 0,
             iommu: None,
+            exported_desc_table: None,
+            exported_avail_ring: None,
+            exported_used_ring: None,
         }
     }
+
+    accessors!(vector, u16, set_vector);
+    accessors!(size, u16, set_size);
+    accessors!(ready, bool, set_ready);
+    accessors!(desc_table, GuestAddress, set_desc_table);
+    accessors!(avail_ring, GuestAddress, set_avail_ring);
+    accessors!(used_ring, GuestAddress, set_used_ring);
 
     /// Return the actual size of the queue, as the driver may not set up a
     /// queue as big as the device allows.
@@ -320,6 +405,7 @@ impl Queue {
     /// Reset queue to a clean state
     pub fn reset(&mut self) {
         self.ready = false;
+        self.validated = false;
         self.size = self.max_size;
         self.vector = VIRTIO_MSI_NO_VECTOR;
         self.desc_table = GuestAddress(0);
@@ -329,6 +415,9 @@ impl Queue {
         self.next_used = Wrapping(0);
         self.features = 0;
         self.last_used = Wrapping(0);
+        self.exported_desc_table = None;
+        self.exported_avail_ring = None;
+        self.exported_used_ring = None;
     }
 
     /// Reset queue's counters.
@@ -340,48 +429,91 @@ impl Queue {
         self.last_used = Wrapping(0);
     }
 
-    pub fn is_valid(&self, mem: &GuestMemory) -> bool {
-        let queue_size = self.actual_size() as usize;
-        let desc_table = self.desc_table;
-        let desc_table_size = 16 * queue_size;
-        let avail_ring = self.avail_ring;
-        let avail_ring_size = 6 + 2 * queue_size;
-        let used_ring = self.used_ring;
-        let used_ring_size = 6 + 8 * queue_size;
+    pub fn is_valid(&mut self, mem: &GuestMemory) -> bool {
         if !self.ready {
             error!("attempt to use virtio queue that is not marked ready");
             return false;
-        } else if self.size > self.max_size || self.size == 0 || (self.size & (self.size - 1)) != 0
-        {
-            error!("virtio queue with invalid size: {}", self.size);
-            return false;
         }
 
-        let iommu = self.iommu.as_ref().map(|i| i.lock());
-        for (addr, size, name) in [
-            (desc_table, desc_table_size, "descriptor table"),
-            (avail_ring, avail_ring_size, "available ring"),
-            (used_ring, used_ring_size, "used ring"),
-        ] {
-            match is_valid_wrapper(mem, &iommu, addr, size as u64) {
-                Ok(valid) => {
-                    if !valid {
-                        error!(
-                            "virtio queue {} goes out of bounds: start:0x{:08x} size:0x{:08x}",
-                            name,
-                            addr.offset(),
-                            size,
-                        );
-                        return false;
-                    }
-                }
-                Err(e) => {
-                    error!("is_valid failed: {:#}", e);
-                    return false;
+        if !self.validated {
+            self.validate(mem);
+        }
+        self.validated
+    }
+
+    fn ring_sizes(&self) -> Vec<(GuestAddress, usize)> {
+        let queue_size = self.actual_size() as usize;
+        vec![
+            (self.desc_table, 16 * queue_size),
+            (self.avail_ring, 6 + 2 * queue_size),
+            (self.used_ring, 6 + 8 * queue_size),
+        ]
+    }
+
+    /// If this queue is for a device that sits behind a virtio-iommu device, exports
+    /// this queue's memory. After the queue becomes ready, this must be called before
+    /// using the queue, to convert the IOVA-based configuration to GuestAddresses.
+    pub fn export_memory(&mut self, mem: &GuestMemory) -> Result<()> {
+        if !self.ready {
+            bail!("not ready");
+        }
+        if self.exported_desc_table.is_some() {
+            bail!("already exported");
+        }
+
+        let iommu = self.iommu.as_ref().context("no iommu to export with")?;
+
+        let ring_sizes = self.ring_sizes();
+        let rings = ring_sizes.iter().zip(vec![
+            &mut self.exported_desc_table,
+            &mut self.exported_avail_ring,
+            &mut self.exported_used_ring,
+        ]);
+
+        for ((addr, size), region) in rings {
+            *region = Some(
+                ExportedRegion::new(mem, iommu.clone(), addr.offset(), *size as u64)
+                    .context("failed to export region")?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Releases memory exported by a previous call to [export_memory].
+    pub fn release_exported_memory(&mut self) {
+        self.exported_desc_table = None;
+        self.exported_avail_ring = None;
+        self.exported_used_ring = None;
+    }
+
+    fn validate(&mut self, mem: &GuestMemory) {
+        if self.size > self.max_size || self.size == 0 || (self.size & (self.size - 1)) != 0 {
+            error!("virtio queue with invalid size: {}", self.size);
+            return;
+        }
+
+        if self.iommu.is_none() {
+            let ring_sizes = self.ring_sizes();
+            let rings =
+                ring_sizes
+                    .iter()
+                    .zip(vec!["descriptor table", "available ring", "used ring"]);
+            for ((addr, size), name) in rings {
+                if !addr
+                    .checked_add(*size as u64)
+                    .map_or(false, |v| mem.address_in_range(v))
+                {
+                    error!(
+                        "virtio queue {} goes out of bounds: start:0x{:08x} size:0x{:08x}",
+                        name,
+                        addr.offset(),
+                        size,
+                    );
+                    return;
                 }
             }
         }
-        true
+        self.validated = true;
     }
 
     // Get the index of the first available descriptor chain in the available ring
@@ -394,7 +526,7 @@ impl Queue {
 
         let avail_index_addr = self.avail_ring.unchecked_add(2);
         let avail_index: u16 =
-            read_obj_from_addr_wrapper(mem, &self.iommu, avail_index_addr).unwrap();
+            read_obj_from_addr_wrapper(mem, &self.exported_avail_ring, avail_index_addr).unwrap();
 
         Wrapping(avail_index)
     }
@@ -411,7 +543,13 @@ impl Queue {
         let avail_event_addr = self
             .used_ring
             .unchecked_add(4 + 8 * u64::from(self.actual_size()));
-        write_obj_at_addr_wrapper(mem, &self.iommu, avail_index.0, avail_event_addr).unwrap();
+        write_obj_at_addr_wrapper(
+            mem,
+            &self.exported_used_ring,
+            avail_index.0,
+            avail_event_addr,
+        )
+        .unwrap();
     }
 
     // Query the value of a single-bit flag in the available ring.
@@ -421,7 +559,7 @@ impl Queue {
         fence(Ordering::SeqCst);
 
         let avail_flags: u16 =
-            read_obj_from_addr_wrapper(mem, &self.iommu, self.avail_ring).unwrap();
+            read_obj_from_addr_wrapper(mem, &self.exported_avail_ring, self.avail_ring).unwrap();
 
         avail_flags & flag == flag
     }
@@ -440,7 +578,7 @@ impl Queue {
             .avail_ring
             .unchecked_add(4 + 2 * u64::from(self.actual_size()));
         let used_event: u16 =
-            read_obj_from_addr_wrapper(mem, &self.iommu, used_event_addr).unwrap();
+            read_obj_from_addr_wrapper(mem, &self.exported_avail_ring, used_event_addr).unwrap();
 
         Wrapping(used_event)
     }
@@ -453,7 +591,8 @@ impl Queue {
         fence(Ordering::SeqCst);
 
         let used_index_addr = self.used_ring.unchecked_add(2);
-        write_obj_at_addr_wrapper(mem, &self.iommu, used_index.0, used_index_addr).unwrap();
+        write_obj_at_addr_wrapper(mem, &self.exported_used_ring, used_index.0, used_index_addr)
+            .unwrap();
     }
 
     // Set a single-bit flag in the used ring.
@@ -463,13 +602,14 @@ impl Queue {
         fence(Ordering::SeqCst);
 
         let mut used_flags: u16 =
-            read_obj_from_addr_wrapper(mem, &self.iommu, self.used_ring).unwrap();
+            read_obj_from_addr_wrapper(mem, &self.exported_used_ring, self.used_ring).unwrap();
         if value {
             used_flags |= flag;
         } else {
             used_flags &= !flag;
         }
-        write_obj_at_addr_wrapper(mem, &self.iommu, used_flags, self.used_ring).unwrap();
+        write_obj_at_addr_wrapper(mem, &self.exported_used_ring, used_flags, self.used_ring)
+            .unwrap();
     }
 
     /// Get the first available descriptor chain without removing it from the queue.
@@ -492,15 +632,23 @@ impl Queue {
 
         // This index is checked below in checked_new.
         let descriptor_index: u16 =
-            read_obj_from_addr_wrapper(mem, &self.iommu, desc_idx_addr).unwrap();
+            read_obj_from_addr_wrapper(mem, &self.exported_avail_ring, desc_idx_addr).unwrap();
 
         let iommu = self.iommu.as_ref().map(Arc::clone);
-        DescriptorChain::checked_new(mem, self.desc_table, queue_size, descriptor_index, 0, iommu)
-            .map_err(|e| {
-                error!("{:#}", e);
-                e
-            })
-            .ok()
+        DescriptorChain::checked_new(
+            mem,
+            self.desc_table,
+            queue_size,
+            descriptor_index,
+            0,
+            iommu,
+            self.exported_desc_table.clone(),
+        )
+        .map_err(|e| {
+            error!("{:#}", e);
+            e
+        })
+        .ok()
     }
 
     /// Remove the first available descriptor chain from the queue.
@@ -557,9 +705,15 @@ impl Queue {
         let used_elem = used_ring.unchecked_add((4 + next_used * 8) as u64);
 
         // These writes can't fail as we are guaranteed to be within the descriptor ring.
-        write_obj_at_addr_wrapper(mem, &self.iommu, desc_index as u32, used_elem).unwrap();
-        write_obj_at_addr_wrapper(mem, &self.iommu, len as u32, used_elem.unchecked_add(4))
+        write_obj_at_addr_wrapper(mem, &self.exported_used_ring, desc_index as u32, used_elem)
             .unwrap();
+        write_obj_at_addr_wrapper(
+            mem,
+            &self.exported_used_ring,
+            len as u32,
+            used_elem.unchecked_add(4),
+        )
+        .unwrap();
 
         self.next_used += Wrapping(1);
         self.set_used_index(mem, self.next_used);
@@ -585,119 +739,128 @@ impl Queue {
         }
     }
 
-    // Check whether guest enable interrupt injection or not.
-    //
-    // This function implements VIRTIO_RING_F_EVENT_IDX, otherwise known as
-    // interrupt suppression. The virtio spec provides the driver with a field,
-    // used_event, which says that once we write that descriptor (or several
-    // in the case of a flurry of add_used calls), we should send a
-    // notification. Because the values involved wrap around u16::MAX, and to
-    // avoid checking the condition on every add_used call, the math is a little
-    // complicated.
-    //
-    // The critical inequality is:
-    //      (next_used - 1) - used_event < next_used - last_used
-    //
-    // For illustration purposes, we label it as A < B, where
-    // A = (next_used -1) - used_event, and B = next_used - last_used.
-    //
-    // A and B represent two distances, measured in a wrapping ring of size
-    // u16::MAX. In the "send intr" case, the inequality is true. In the
-    // "don't send intr" case, the inequality is false. We must be very careful
-    // in assigning a direction to the ring, so that when we
-    // graph the subtraction operations, we are measuring the right distance
-    // (similar to how DC circuits are analyzed).
-    //
-    // The two distances are as follows:
-    //  * A is the distance between the driver's requested notification point,
-    //    and the current position in the ring.
-    //
-    //  * B is the distance between the last time we notified the guest,
-    //    and the current position in the ring.
-    //
-    // If we graph these distances for the situation where we want to notify
-    // the guest, and when we don't want to notify the guest, we see that
-    // A < B becomes true the moment next_used - 1 passes used_event. See the
-    // graphs at the bottom of this comment block for a more visual explanation.
-    //
-    // Once an interrupt is sent, we have a final useful property: last_used
-    // moves up next_used, which causes the inequality to be false. Thus, we
-    // won't send notifications again until used_event is moved forward by the
-    // driver.
-    //
-    // Finally, let's talk about a couple of ways to write this inequality
-    // that don't work, and critically, explain *why*.
-    //
-    // First, a naive reading of the virtio spec might lead us to ask: why not
-    // just use the following inequality:
-    //
-    //      next_used - 1 >= used_event
-    //
-    // because that's much simpler, right? The trouble is that the ring wraps,
-    // so it could be that a smaller index is actually ahead of a larger one.
-    // That's why we have to use distances in the ring instead.
-    //
-    // Second, one might look at the correct inequality:
-    //      (next_used - 1) - used_event < next_used - last_used
-    //
-    // And try to simplify it to:
-    //      last_used - 1 < used_event
-    //
-    // Functionally, this won't work because next_used isn't present at all
-    // anymore. (Notifications will never be sent.) But why is that? The algebra
-    // here *appears* to work out, but all semantic meaning is lost. There are
-    // two explanations for why this happens:
-    // * The intuitive one: the terms in the inequality are not actually
-    //   separable; in other words, (next_used - last_used) is an inseparable
-    //   term, so subtracting next_used from both sides of the original
-    //   inequality and zeroing them out is semantically invalid. But why aren't
-    //   they separable? See below.
-    // * The theoretical one: canceling like terms relies a vector space law:
-    //   a + x = b + x => a = b (cancellation law). For congruences / equality
-    //   under modulo, this law is satisfied, but for inequalities under mod, it
-    //   is not; therefore, we cannot cancel like terms.
-    //
-    // ┌──────────────────────────────────┐
-    // │                                  │
-    // │                                  │
-    // │                                  │
-    // │           ┌────────────  next_used - 1
-    // │           │A                   x
-    // │           │       ┌────────────x────────────┐
-    // │           │       │            x            │
-    // │           │       │                         │
-    // │           │       │               │         │
-    // │           │       │               │         │
-    // │     used_event  xxxx        + ◄───┘       xxxxx last_used
-    // │                   │                         │      │
-    // │                   │        Send intr        │      │
-    // │                   │                         │      │
-    // │                   └─────────────────────────┘      │
-    // │                                                    │
-    // │ B                                                  │
-    // └────────────────────────────────────────────────────┘
-    //
-    //             ┌───────────────────────────────────────────────────┐
-    //             │                                                 A │
-    //             │       ┌────────────────────────┐                  │
-    //             │       │                        │                  │
-    //             │       │                        │                  │
-    //             │       │              │         │                  │
-    //             │       │              │         │                  │
-    //       used_event  xxxx             │       xxxxx last_used      │
-    //                     │        + ◄───┘         │       │          │
-    //                     │                        │       │          │
-    //                     │     Don't send intr    │       │          │
-    //                     │                        │       │          │
-    //                     └───────────x────────────┘       │          │
-    //                                 x                    │          │
-    //                              next_used - 1           │          │
-    //                              │  │                  B │          │
-    //                              │  └────────────────────┘          │
-    //                              │                                  │
-    //                              └──────────────────────────────────┘
-    //
-    fn available_interrupt_enabled(&self, mem: &GuestMemory) -> bool {
+    /// Returns if the queue should have an interrupt sent based on its state.
+    ///
+    /// This function implements `VIRTIO_RING_F_EVENT_IDX`, otherwise known as
+    /// interrupt suppression. The virtio spec provides the driver with a field,
+    /// `used_event`, which says that once we write that descriptor (or several
+    /// in the case of a flurry of `add_used` calls), we should send a
+    /// notification. Because the values involved wrap around `u16::MAX`, and to
+    /// avoid checking the condition on every `add_used` call, the math is a
+    /// little complicated.
+    ///
+    /// The critical inequality is:
+    /// ```text
+    ///      (next_used - 1) - used_event < next_used - last_used
+    /// ```
+    ///
+    /// For illustration purposes, we label it as `A < B`, where
+    /// `A = (next_used -1) - used_event`, and `B = next_used - last_used`.
+    ///
+    /// `A` and `B` represent two distances, measured in a wrapping ring of size
+    /// `u16::MAX`. In the "send intr" case, the inequality is true. In the
+    /// "don't send intr" case, the inequality is false. We must be very careful
+    /// in assigning a direction to the ring, so that when we
+    /// graph the subtraction operations, we are measuring the right distance
+    /// (similar to how DC circuits are analyzed).
+    ///
+    /// The two distances are as follows:
+    ///  * `A` is the distance between the driver's requested notification
+    ///    point, and the current position in the ring.
+    ///
+    ///  * `B` is the distance between the last time we notified the guest,
+    ///    and the current position in the ring.
+    ///
+    /// If we graph these distances for the situation where we want to notify
+    /// the guest, and when we don't want to notify the guest, we see that
+    /// `A < B` becomes true the moment `next_used - 1` passes `used_event`. See
+    /// the graphs at the bottom of this comment block for a more visual
+    /// explanation.
+    ///
+    /// Once an interrupt is sent, we have a final useful property: last_used
+    /// moves up next_used, which causes the inequality to be false. Thus, we
+    /// won't send notifications again until `used_event` is moved forward by
+    /// the driver.
+    ///
+    /// Finally, let's talk about a couple of ways to write this inequality
+    /// that don't work, and critically, explain *why*.
+    ///
+    /// First, a naive reading of the virtio spec might lead us to ask: why not
+    /// just use the following inequality:
+    /// ```text
+    ///      next_used - 1 >= used_event
+    /// ```
+    ///
+    /// because that's much simpler, right? The trouble is that the ring wraps,
+    /// so it could be that a smaller index is actually ahead of a larger one.
+    /// That's why we have to use distances in the ring instead.
+    ///
+    /// Second, one might look at the correct inequality:
+    /// ```text
+    ///      (next_used - 1) - used_event < next_used - last_used
+    /// ```
+    ///
+    /// And try to simplify it to:
+    /// ```text
+    ///      last_used - 1 < used_event
+    /// ```
+    ///
+    /// Functionally, this won't work because next_used isn't present at all
+    /// anymore. (Notifications will never be sent.) But why is that? The algebra
+    /// here *appears* to work out, but all semantic meaning is lost. There are
+    /// two explanations for why this happens:
+    /// * The intuitive one: the terms in the inequality are not actually
+    ///   separable; in other words, (next_used - last_used) is an inseparable
+    ///   term, so subtracting next_used from both sides of the original
+    ///   inequality and zeroing them out is semantically invalid. But why aren't
+    ///   they separable? See below.
+    /// * The theoretical one: canceling like terms relies a vector space law:
+    ///   a + x = b + x => a = b (cancellation law). For congruences / equality
+    ///   under modulo, this law is satisfied, but for inequalities under mod, it
+    ///   is not; therefore, we cannot cancel like terms.
+    ///
+    /// ```text
+    /// ┌──────────────────────────────────┐
+    /// │                                  │
+    /// │                                  │
+    /// │                                  │
+    /// │           ┌────────────  next_used - 1
+    /// │           │A                   x
+    /// │           │       ┌────────────x────────────┐
+    /// │           │       │            x            │
+    /// │           │       │                         │
+    /// │           │       │               │         │
+    /// │           │       │               │         │
+    /// │     used_event  xxxx        + ◄───┘       xxxxx last_used
+    /// │                   │                         │      │
+    /// │                   │        Send intr        │      │
+    /// │                   │                         │      │
+    /// │                   └─────────────────────────┘      │
+    /// │                                                    │
+    /// │ B                                                  │
+    /// └────────────────────────────────────────────────────┘
+    ///
+    ///             ┌───────────────────────────────────────────────────┐
+    ///             │                                                 A │
+    ///             │       ┌────────────────────────┐                  │
+    ///             │       │                        │                  │
+    ///             │       │                        │                  │
+    ///             │       │              │         │                  │
+    ///             │       │              │         │                  │
+    ///       used_event  xxxx             │       xxxxx last_used      │
+    ///                     │        + ◄───┘         │       │          │
+    ///                     │                        │       │          │
+    ///                     │     Don't send intr    │       │          │
+    ///                     │                        │       │          │
+    ///                     └───────────x────────────┘       │          │
+    ///                                 x                    │          │
+    ///                              next_used - 1           │          │
+    ///                              │  │                  B │          │
+    ///                              │  └────────────────────┘          │
+    ///                              │                                  │
+    ///                              └──────────────────────────────────┘
+    /// ```
+    fn queue_wants_interrupt(&self, mem: &GuestMemory) -> bool {
         if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) != 0 {
             let used_event = self.get_used_event(mem);
             self.next_used - used_event - Wrapping(1) < self.next_used - self.last_used
@@ -714,7 +877,7 @@ impl Queue {
         mem: &GuestMemory,
         interrupt: &dyn SignalableInterrupt,
     ) -> bool {
-        if self.available_interrupt_enabled(mem) {
+        if self.queue_wants_interrupt(mem) {
             self.last_used = self.next_used;
             interrupt.signal_used_queue(self.vector);
             true
@@ -735,12 +898,15 @@ impl Queue {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Interrupt;
-    use super::*;
-    use crate::IrqLevelEvent;
     use std::convert::TryInto;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+
+    use memoffset::offset_of;
+
+    use super::super::Interrupt;
+    use super::*;
+    use crate::IrqLevelEvent;
 
     const GUEST_MEMORY_SIZE: u64 = 0x10000;
     const DESC_OFFSET: u64 = 0;
@@ -844,10 +1010,8 @@ mod tests {
             10,
         );
 
-        // Calculating the offset of used_event within Avail structure
-        #[allow(deref_nullptr)]
-        let used_event_offset: u64 =
-            unsafe { &(*(::std::ptr::null::<Avail>())).used_event as *const _ as u64 };
+        // Offset of used_event within Avail structure
+        let used_event_offset = offset_of!(Avail, used_event) as u64;
         let used_event_address = GuestAddress(AVAIL_OFFSET + used_event_offset);
 
         // Assume driver submit 0x100 req to device,
@@ -920,10 +1084,8 @@ mod tests {
             10,
         );
 
-        // Calculating the offset of used_event within Avail structure
-        #[allow(deref_nullptr)]
-        let used_event_offset: u64 =
-            unsafe { &(*(::std::ptr::null::<Avail>())).used_event as *const _ as u64 };
+        // Offset of used_event within Avail structure
+        let used_event_offset = offset_of!(Avail, used_event) as u64;
         let used_event_address = GuestAddress(AVAIL_OFFSET + used_event_offset);
 
         // Assume driver submit 0x100 req to device,

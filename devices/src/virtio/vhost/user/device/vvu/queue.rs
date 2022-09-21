@@ -7,12 +7,21 @@
 
 use std::mem;
 use std::num::Wrapping;
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::fence;
+use std::sync::atomic::Ordering;
 
-use anyhow::{anyhow, bail, Context, Result};
-use data_model::{DataInit, Le16, Le32, Le64, VolatileSlice};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
+use data_model::DataInit;
+use data_model::Le16;
+use data_model::Le32;
+use data_model::Le64;
+use data_model::VolatileSlice;
 use virtio_sys::virtio_ring::VRING_DESC_F_WRITE;
-use vm_memory::{GuestAddress as IOVA, GuestMemory as QueueMemory};
+use vm_memory::GuestAddress as IOVA;
+use vm_memory::GuestMemory as QueueMemory;
 
 use crate::virtio::Desc;
 
@@ -423,13 +432,14 @@ impl UserQueue {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-
     use std::cell::RefCell;
     use std::io::Read;
     use std::io::Write;
 
-    use crate::virtio::{Queue as DeviceQueue, Reader, Writer};
+    use super::*;
+    use crate::virtio::Queue as DeviceQueue;
+    use crate::virtio::Reader;
+    use crate::virtio::Writer;
 
     // An allocator that just allocates 0 as an IOVA.
     struct SimpleIovaAllocator(RefCell<bool>);
@@ -452,10 +462,10 @@ mod test {
     }
 
     fn setup_vq(queue: &mut DeviceQueue, addrs: DescTableAddrs) {
-        queue.desc_table = IOVA(addrs.desc);
-        queue.avail_ring = IOVA(addrs.avail);
-        queue.used_ring = IOVA(addrs.used);
-        queue.ready = true;
+        queue.set_desc_table(IOVA(addrs.desc));
+        queue.set_avail_ring(IOVA(addrs.avail));
+        queue.set_used_ring(IOVA(addrs.used));
+        queue.set_ready(true);
     }
 
     fn device_write(mem: &QueueMemory, q: &mut DeviceQueue, data: &[u8]) -> usize {

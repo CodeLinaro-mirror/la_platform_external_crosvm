@@ -7,10 +7,11 @@ use std::convert::TryInto;
 
 use base::warn;
 use remain::sorted;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
 
-use crate::pci::{PciAddress, PciInterruptPin};
+use crate::pci::PciInterruptPin;
 
 // The number of 32bit registers in the config space, 256 bytes.
 const NUM_CONFIGURATION_REGISTERS: usize = 64;
@@ -664,15 +665,6 @@ impl PciConfiguration {
     fn next_dword(offset: usize, len: usize) -> usize {
         let next = offset + len;
         (next + 3) & !3
-    }
-
-    pub fn suggested_interrupt_pin(pci_address: PciAddress) -> PciInterruptPin {
-        match pci_address.func % 4 {
-            0 => PciInterruptPin::IntA,
-            1 => PciInterruptPin::IntB,
-            2 => PciInterruptPin::IntC,
-            _ => PciInterruptPin::IntD,
-        }
     }
 }
 

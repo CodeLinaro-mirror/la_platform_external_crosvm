@@ -35,6 +35,7 @@ license {
 rust_binary {
     name: "crosvm",
     defaults: ["crosvm_defaults"],
+    // has rustc warnings
     host_supported: true,
     prefer_rlib: true,
     crate_name: "crosvm",
@@ -43,6 +44,7 @@ rust_binary {
     edition: "2021",
     features: [
         "audio",
+        "balloon",
         "usb",
     ],
     rustlibs: [
@@ -68,6 +70,7 @@ rust_binary {
         "libmetrics",
         "libminijail_rust",
         "libnet_util",
+        "libonce_cell",
         "libp9",
         "libresources",
         "librutabaga_gfx",
@@ -148,6 +151,7 @@ rust_binary {
 rust_test {
     name: "crosvm_test_src_main",
     defaults: ["crosvm_defaults"],
+    // has rustc warnings
     host_supported: true,
     crate_name: "crosvm",
     cargo_env_compat: true,
@@ -160,6 +164,7 @@ rust_test {
     edition: "2021",
     features: [
         "audio",
+        "balloon",
         "usb",
     ],
     rustlibs: [

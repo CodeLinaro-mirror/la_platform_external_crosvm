@@ -4,10 +4,14 @@
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
-        mod unix;
+        pub(crate) mod unix;
+        use unix as platform;
         pub(crate) use unix::*;
     } else if #[cfg(windows)] {
         mod windows;
+        use windows as platform;
         pub(crate) use windows::*;
     }
 }
+
+pub(crate) use platform::get_acpi_event_sock;

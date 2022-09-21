@@ -43,6 +43,7 @@ rust_library {
         },
         android: {
             shared_libs: [
+                "libcutils",
                 "libdrm",
             ],
             static_libs: [
@@ -95,6 +96,7 @@ rust_test {
         },
         android: {
             shared_libs: [
+                "libcutils",
                 "libdrm",
             ],
             static_libs: [

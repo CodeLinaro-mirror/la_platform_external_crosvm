@@ -2,19 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::anyhow;
-use base::{error, warn, AsRawDescriptor, IntoRawDescriptor};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
+use anyhow::anyhow;
+use base::error;
+use base::warn;
+use base::AsRawDescriptor;
+use base::IntoRawDescriptor;
 use libvda::decode::Event as LibvdaEvent;
 
-use crate::virtio::video::{
-    decoder::{backend::*, Capability},
-    error::{VideoError, VideoResult},
-    format::*,
-};
+use crate::virtio::video::decoder::backend::*;
+use crate::virtio::video::decoder::Capability;
+use crate::virtio::video::error::VideoError;
+use crate::virtio::video::error::VideoResult;
+use crate::virtio::video::format::*;
 
 impl TryFrom<Format> for libvda::Profile {
     type Error = VideoError;
@@ -142,6 +145,7 @@ fn from_pixel_format(
         mask,
         format,
         frame_formats,
+        plane_align: 1,
     }
 }
 
@@ -290,6 +294,7 @@ impl DecoderBackend for LibvdaDecoder {
                             },
                             bitrates: Vec::new(),
                         }],
+                        plane_align: 1,
                     });
                     match profiles.entry(format) {
                         Entry::Occupied(mut e) => e.get_mut().push(profile),

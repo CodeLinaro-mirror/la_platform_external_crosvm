@@ -4,8 +4,11 @@
 
 //! Data structures that represent video format information in virtio video devices.
 
-use std::convert::{From, Into, TryFrom};
-use std::fmt::{self, Display};
+use std::convert::From;
+use std::convert::Into;
+use std::convert::TryFrom;
+use std::fmt;
+use std::fmt::Display;
 use std::io;
 
 use base::error;
@@ -46,7 +49,7 @@ pub enum Profile {
 impl_try_from_le32_for_enumn!(Profile, "profile");
 
 impl Profile {
-    #[cfg(any(feature = "video-encoder", feature = "libvda"))]
+    #[cfg(any(feature = "video-encoder", feature = "libvda", feature = "vaapi"))]
     pub fn to_format(self) -> Format {
         use Profile::*;
         match self {
@@ -226,6 +229,7 @@ pub struct FormatDesc {
     pub mask: u64,
     pub format: Format,
     pub frame_formats: Vec<FrameFormat>,
+    pub plane_align: u32,
 }
 
 impl Response for FormatDesc {
@@ -236,7 +240,7 @@ impl Response for FormatDesc {
             // ChromeOS only supports single-buffer mode.
             planes_layout: Le32::from(VIRTIO_VIDEO_PLANES_LAYOUT_SINGLE_BUFFER),
             // No alignment is required on boards that we currently support.
-            plane_align: Le32::from(0),
+            plane_align: Le32::from(self.plane_align),
             num_frames: Le32::from(self.frame_formats.len() as u32),
         })?;
         self.frame_formats.iter().try_for_each(|ff| ff.write(w))

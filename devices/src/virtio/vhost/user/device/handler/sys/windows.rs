@@ -2,32 +2,34 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-pub(crate) use base::SharedMemoryWindows as SharedMemorySys;
-
-use std::fs::File;
 use std::mem::ManuallyDrop;
-use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use base::named_pipes::{BlockingMode, FramingMode, PipeConnection};
-use base::{info, CloseNotifier, Event, FromRawDescriptor, RawDescriptor, ReadNotifier, Tube};
-use cros_async::{EventAsync, Executor};
+use anyhow::Context;
+use anyhow::Result;
+use base::info;
+use base::named_pipes::BlockingMode;
+use base::named_pipes::FramingMode;
+use base::named_pipes::PipeConnection;
+use base::CloseNotifier;
+use base::Event;
+use base::FromRawDescriptor;
+use base::RawDescriptor;
+use base::ReadNotifier;
+use base::Tube;
+use cros_async::EventAsync;
+use cros_async::Executor;
+use futures::pin_mut;
+use futures::select;
 use futures::FutureExt;
-use futures::{pin_mut, select};
-use tube_transporter::{TubeTransferDataList, TubeTransporterReader};
-use vm_memory::GuestMemory;
-use vmm_vhost::{Protocol, SlaveReqHandler};
+use tube_transporter::TubeTransferDataList;
+use tube_transporter::TubeTransporterReader;
+use vmm_vhost::SlaveReqHandler;
 
-use crate::virtio::vhost::user::device::handler::{
-    DeviceRequestHandler, Doorbell, MappingInfo, VhostUserBackend,
-};
-use crate::virtio::vhost::user::device::handler::{VhostResult, VhostUserMemoryRegion};
+use crate::virtio::vhost::user::device::handler::CallEvent;
+use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
+use crate::virtio::vhost::user::device::handler::VhostUserRegularOps;
 
-#[allow(dead_code)]
-pub(crate) enum HandlerTypeSys {}
-
-#[allow(dead_code)]
-pub enum DoorbellSys {}
+pub type Doorbell = CallEvent;
 
 pub fn read_from_tube_transporter(
     raw_transport_tube: RawDescriptor,
@@ -45,69 +47,7 @@ pub fn read_from_tube_transporter(
     tube_transporter.read_tubes().map_err(anyhow::Error::msg)
 }
 
-pub(in crate::virtio::vhost::user::device::handler) fn system_protocol(
-    _handler_type: &HandlerTypeSys,
-) -> Protocol {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-pub(in crate::virtio::vhost::user::device::handler) fn system_set_mem_table(
-    _handler_type_sys: &HandlerTypeSys,
-    _files: Vec<File>,
-    _contexts: &[VhostUserMemoryRegion],
-) -> VhostResult<(GuestMemory, Vec<MappingInfo>)> {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-pub(in crate::virtio::vhost::user::device::handler) fn system_get_kick_evt(
-    _handler_type_sys: &HandlerTypeSys,
-    _index: u8,
-    _file: Option<File>,
-) -> VhostResult<Event> {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-pub(in crate::virtio::vhost::user::device::handler) fn system_create_doorbell(
-    _handler_type_sys: &HandlerTypeSys,
-    _index: u8,
-) -> VhostResult<Doorbell> {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-pub(in crate::virtio::vhost::user::device::handler) fn system_signal(
-    _doorbell_sys: &DoorbellSys,
-    _vector: u16,
-    _interrupt_status_mask: u32,
-) {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-pub(in crate::virtio::vhost::user::device::handler) fn system_signal_config_changed(
-    _doorbell_sys: &DoorbellSys,
-) {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-pub(in crate::virtio::vhost::user::device::handler) fn system_get_resample_evt(
-    _doorbell_sys: &DoorbellSys,
-) -> Option<&Event> {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-pub(in crate::virtio::vhost::user::device::handler) fn system_do_interrupt_resample(
-    _doorbell_sys: &DoorbellSys,
-) {
-    unimplemented!("This method shouldn't be called on Windows");
-}
-
-/// Window's doesn't require clearing rd flags, so this is a no-op.
-pub(in crate::virtio::vhost::user::device::handler) fn system_clear_rd_flags(
-    _file: &File,
-) -> VhostResult<()> {
-    Ok(())
-}
-
-impl DeviceRequestHandler {
+impl DeviceRequestHandler<VhostUserRegularOps> {
     pub async fn run(self, vhost_user_tube: Tube, exit_event: Event, ex: &Executor) -> Result<()> {
         let read_notifier = vhost_user_tube.get_read_notifier();
         let close_notifier = vhost_user_tube.get_close_notifier();
@@ -180,13 +120,12 @@ impl DeviceRequestHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Barrier;
 
+    use super::*;
     use crate::virtio::vhost::user::device::handler::tests::*;
     use crate::virtio::vhost::user::device::handler::*;
     use crate::virtio::vhost::user::vmm::VhostUserHandler;
-
-    use std::sync::Barrier;
     #[test]
     fn test_vhost_user_activate() {
         const QUEUES_NUM: usize = 2;

@@ -9,40 +9,67 @@ pub mod protocol;
 pub(crate) mod sys;
 
 use std::cell::RefCell;
-use std::collections::{btree_map::Entry, BTreeMap};
-use std::io::{self, Write};
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
+use std::io;
+use std::io::Write;
 use std::mem::size_of;
 use std::ops::RangeInclusive;
 use std::rc::Rc;
+use std::result;
 use std::sync::Arc;
-use std::{result, thread};
+use std::thread;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
 use anyhow::Context;
+use base::debug;
+use base::error;
+use base::pagesize;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use base::warn;
-use base::{
-    error, pagesize, AsRawDescriptor, Error as SysError, Event, RawDescriptor, Result as SysResult,
-    Tube, TubeError,
-};
-use cros_async::{AsyncError, AsyncTube, EventAsync, Executor};
-use data_model::{DataInit, Le64};
-use futures::{select, FutureExt};
+use base::AsRawDescriptor;
+use base::Error as SysError;
+use base::Event;
+use base::MappedRegion;
+use base::MemoryMapping;
+use base::Protection;
+use base::RawDescriptor;
+use base::Result as SysResult;
+use base::Tube;
+use base::TubeError;
+use cros_async::AsyncError;
+use cros_async::AsyncTube;
+use cros_async::EventAsync;
+use cros_async::Executor;
+use data_model::DataInit;
+use data_model::Le64;
+use futures::select;
+use futures::FutureExt;
+use hypervisor::MemSlot;
 use remain::sorted;
 use sync::Mutex;
 use thiserror::Error;
-use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
+use vm_memory::GuestMemoryError;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::pci::PciAddress;
+use crate::virtio::async_utils;
+use crate::virtio::copy_config;
 use crate::virtio::iommu::ipc_memory_mapper::*;
-use crate::virtio::iommu::memory_mapper::{Error as MemoryMapperError, *};
+use crate::virtio::iommu::memory_mapper::*;
 use crate::virtio::iommu::protocol::*;
-use crate::virtio::{
-    async_utils, copy_config, DescriptorChain, DescriptorError, DeviceType, Interrupt, Queue,
-    Reader, SignalableInterrupt, VirtioDevice, Writer,
-};
+use crate::virtio::DescriptorChain;
+use crate::virtio::DescriptorError;
+use crate::virtio::DeviceType;
+use crate::virtio::Interrupt;
+use crate::virtio::Queue;
+use crate::virtio::Reader;
+use crate::virtio::SignalableInterrupt;
+use crate::virtio::VirtioDevice;
+use crate::virtio::Writer;
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 2;
@@ -121,7 +148,7 @@ pub enum IommuError {
     #[error("failed to write to guest address: {0}")]
     GuestMemoryWrite(io::Error),
     #[error("memory mapper failed: {0}")]
-    MemoryMapper(MemoryMapperError),
+    MemoryMapper(anyhow::Error),
     #[error("Failed to read descriptor asynchronously: {0}")]
     ReadAsyncDesc(AsyncError),
     #[error("failed to read from virtio queue Event: {0}")]
@@ -140,61 +167,84 @@ pub enum IommuError {
     WriteBufferTooSmall,
 }
 
+// key: domain ID
+// value: reference counter and MemoryMapperTrait
+type DomainMap = BTreeMap<u32, (u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>)>;
+
+struct DmabufRegionEntry {
+    mmap: MemoryMapping,
+    mem_slot: MemSlot,
+    len: u64,
+}
+
 // Shared state for the virtio-iommu device.
 struct State {
     mem: GuestMemory,
     page_mask: u64,
     // Hot-pluggable PCI endpoints ranges
     // RangeInclusive: (start endpoint PCI address .. =end endpoint PCI address)
+    #[cfg_attr(windows, allow(dead_code))]
     hp_endpoints_ranges: Vec<RangeInclusive<u32>>,
     // All PCI endpoints that attach to certain IOMMU domain
     // key: endpoint PCI address
     // value: attached domain ID
     endpoint_map: BTreeMap<u32, u32>,
     // All attached domains
-    // key: domain ID
-    // value: reference counter and MemoryMapperTrait
-    domain_map: BTreeMap<u32, (u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>)>,
+    domain_map: DomainMap,
     // Contains all pass-through endpoints that attach to this IOMMU device
     // key: endpoint PCI address
     // value: reference counter and MemoryMapperTrait
     endpoints: BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>>,
+    // Contains dmabuf regions
+    // key: guest physical address
+    dmabuf_mem: BTreeMap<u64, DmabufRegionEntry>,
 }
 
 impl State {
     // Detach the given endpoint if possible, and return whether or not the endpoint
-    // was actually detached.
+    // was actually detached. If a successfully detached endpoint has exported
+    // memory, returns an event that will be signaled once all exported memory is released.
     //
     // The device MUST ensure that after being detached from a domain, the endpoint
     // cannot access any mapping from that domain.
     //
     // Currently, we only support detaching an endpoint if it is the only endpoint attached
     // to its domain.
-    fn detach_endpoint(&mut self, endpoint: u32) -> bool {
+    fn detach_endpoint(
+        endpoint_map: &mut BTreeMap<u32, u32>,
+        domain_map: &mut DomainMap,
+        endpoint: u32,
+    ) -> (bool, Option<EventAsync>) {
+        let mut evt = None;
         // The endpoint has attached to an IOMMU domain
-        if let Some(attached_domain) = self.endpoint_map.get(&endpoint) {
+        if let Some(attached_domain) = endpoint_map.get(&endpoint) {
             // Remove the entry or update the domain reference count
-            if let Entry::Occupied(o) = self.domain_map.entry(*attached_domain) {
+            if let Entry::Occupied(o) = domain_map.entry(*attached_domain) {
                 let (refs, mapper) = o.get();
                 if !mapper.lock().supports_detach() {
-                    return false;
+                    return (false, None);
                 }
 
                 match refs {
                     0 => unreachable!(),
                     1 => {
-                        mapper.lock().reset_domain();
+                        evt = mapper.lock().reset_domain();
                         o.remove();
                     }
-                    _ => return false,
+                    _ => return (false, None),
                 }
             }
         }
 
-        self.endpoint_map.remove(&endpoint);
-        true
+        endpoint_map.remove(&endpoint);
+        (true, evt)
     }
 
+    // Processes an attach request. This may require detaching the endpoint from
+    // its current endpoint before attaching it to a new endpoint. If that happens
+    // while the endpoint has exported memory, this function returns an event that
+    // will be signaled once all exported memory is released.
+    //
     // Notes: if a VFIO group contains multiple devices, it could violate the follow
     // requirement from the virtio IOMMU spec: If the VIRTIO_IOMMU_F_BYPASS feature
     // is negotiated, all accesses from unattached endpoints are allowed and translated
@@ -212,41 +262,21 @@ impl State {
         &mut self,
         reader: &mut Reader,
         tail: &mut virtio_iommu_req_tail,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Option<EventAsync>)> {
         let req: virtio_iommu_req_attach =
             reader.read_obj().map_err(IommuError::GuestMemoryRead)?;
+        let mut fault_resolved_event = None;
 
         // If the reserved field of an ATTACH request is not zero,
         // the device MUST reject the request and set status to
         // VIRTIO_IOMMU_S_INVAL.
         if req.reserved.iter().any(|&x| x != 0) {
             tail.status = VIRTIO_IOMMU_S_INVAL;
-            return Ok(0);
+            return Ok((0, None));
         }
 
-        // If the endpoint identified by endpoint doesn’t exist,
-        // the device MUST reject the request and set status to
-        // VIRTIO_IOMMU_S_NOENT.
         let domain: u32 = req.domain.into();
         let endpoint: u32 = req.endpoint.into();
-        if !self.endpoints.contains_key(&endpoint) {
-            tail.status = VIRTIO_IOMMU_S_NOENT;
-            return Ok(0);
-        }
-
-        // If the endpoint identified by endpoint is already attached
-        // to another domain, then the device SHOULD first detach it
-        // from that domain and attach it to the one identified by domain.
-        if self.endpoint_map.contains_key(&endpoint) {
-            // In that case the device SHOULD behave as if the driver issued
-            // a DETACH request with this endpoint, followed by the ATTACH
-            // request. If the device cannot do so, it MUST reject the request
-            // and set status to VIRTIO_IOMMU_S_UNSUPP.
-            if !self.detach_endpoint(endpoint) {
-                tail.status = VIRTIO_IOMMU_S_UNSUPP;
-                return Ok(0);
-            }
-        }
 
         if let Some(mapper) = self.endpoints.get(&endpoint) {
             // The same mapper can't be used for two domains at the same time,
@@ -257,6 +287,9 @@ impl State {
                 ((**m).type_id(), m.id())
             };
             for (other_endpoint, other_mapper) in self.endpoints.iter() {
+                if *other_endpoint == endpoint {
+                    continue;
+                }
                 let other_id = {
                     let m = other_mapper.lock();
                     ((**m).type_id(), m.id())
@@ -268,9 +301,26 @@ impl State {
                         .map_or(true, |d| d == &domain)
                     {
                         tail.status = VIRTIO_IOMMU_S_UNSUPP;
-                        return Ok(0);
+                        return Ok((0, None));
                     }
                 }
+            }
+
+            // If the endpoint identified by `endpoint` is already attached
+            // to another domain, then the device SHOULD first detach it
+            // from that domain and attach it to the one identified by domain.
+            if self.endpoint_map.contains_key(&endpoint) {
+                // In that case the device SHOULD behave as if the driver issued
+                // a DETACH request with this endpoint, followed by the ATTACH
+                // request. If the device cannot do so, it MUST reject the request
+                // and set status to VIRTIO_IOMMU_S_UNSUPP.
+                let (detached, evt) =
+                    Self::detach_endpoint(&mut self.endpoint_map, &mut self.domain_map, endpoint);
+                if !detached {
+                    tail.status = VIRTIO_IOMMU_S_UNSUPP;
+                    return Ok((0, None));
+                }
+                fault_resolved_event = evt;
             }
 
             let new_ref = match self.domain_map.get(&domain) {
@@ -280,16 +330,21 @@ impl State {
 
             self.endpoint_map.insert(endpoint, domain);
             self.domain_map.insert(domain, (new_ref, mapper.clone()));
+        } else {
+            // If the endpoint identified by endpoint doesn’t exist,
+            // the device MUST reject the request and set status to
+            // VIRTIO_IOMMU_S_NOENT.
+            tail.status = VIRTIO_IOMMU_S_NOENT;
         }
 
-        Ok(0)
+        Ok((0, fault_resolved_event))
     }
 
     fn process_detach_request(
         &mut self,
         reader: &mut Reader,
         tail: &mut virtio_iommu_req_tail,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Option<EventAsync>)> {
         let req: virtio_iommu_req_detach =
             reader.read_obj().map_err(IommuError::GuestMemoryRead)?;
 
@@ -299,14 +354,15 @@ impl State {
         let endpoint: u32 = req.endpoint.into();
         if !self.endpoints.contains_key(&endpoint) {
             tail.status = VIRTIO_IOMMU_S_NOENT;
-            return Ok(0);
+            return Ok((0, None));
         }
 
-        if !self.detach_endpoint(endpoint) {
+        let (detached, evt) =
+            Self::detach_endpoint(&mut self.endpoint_map, &mut self.domain_map, endpoint);
+        if !detached {
             tail.status = VIRTIO_IOMMU_S_UNSUPP;
         }
-
-        Ok(0)
+        Ok((0, evt))
     }
 
     fn process_dma_map_request(
@@ -349,28 +405,50 @@ impl State {
         if let Some(mapper) = self.domain_map.get(&domain) {
             let size = u64::from(req.virt_end) - u64::from(req.virt_start) + 1u64;
 
-            let vfio_map_result = mapper.1.lock().add_map(MappingInfo {
-                iova: req.virt_start.into(),
-                gpa: GuestAddress(req.phys_start.into()),
-                size,
-                perm: match write_en {
-                    true => Permission::RW,
-                    false => Permission::Read,
+            let dmabuf_map = self
+                .dmabuf_mem
+                .range(..=u64::from(req.phys_start))
+                .next_back()
+                .and_then(|(addr, region)| {
+                    if u64::from(req.phys_start) + size <= addr + region.len {
+                        Some(region.mmap.as_ptr() as u64 + (u64::from(req.phys_start) - addr))
+                    } else {
+                        None
+                    }
+                });
+
+            let prot = match write_en {
+                true => Protection::read_write(),
+                false => Protection::read(),
+            };
+
+            let vfio_map_result = match dmabuf_map {
+                // Safe because [dmabuf_map, dmabuf_map + size) refers to an external mmap'ed region.
+                Some(dmabuf_map) => unsafe {
+                    mapper.1.lock().vfio_dma_map(
+                        req.virt_start.into(),
+                        dmabuf_map as u64,
+                        size,
+                        prot,
+                    )
                 },
-            });
+                None => mapper.1.lock().add_map(MappingInfo {
+                    iova: req.virt_start.into(),
+                    gpa: GuestAddress(req.phys_start.into()),
+                    size,
+                    prot,
+                }),
+            };
 
             match vfio_map_result {
-                Ok(()) => (),
-                Err(e) => match e {
-                    MemoryMapperError::IovaRegionOverlap => {
-                        // If a mapping already exists in the requested range,
-                        // the device SHOULD reject the request and set status
-                        // to VIRTIO_IOMMU_S_INVAL.
-                        tail.status = VIRTIO_IOMMU_S_INVAL;
-                        return Ok(0);
-                    }
-                    _ => return Err(IommuError::MemoryMapper(e)),
-                },
+                Ok(AddMapResult::Ok) => (),
+                Ok(AddMapResult::OverlapFailure) => {
+                    // If a mapping already exists in the requested range,
+                    // the device SHOULD reject the request and set status
+                    // to VIRTIO_IOMMU_S_INVAL.
+                    tail.status = VIRTIO_IOMMU_S_INVAL;
+                }
+                Err(e) => return Err(IommuError::MemoryMapper(e)),
             }
         }
 
@@ -381,24 +459,36 @@ impl State {
         &mut self,
         reader: &mut Reader,
         tail: &mut virtio_iommu_req_tail,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Option<EventAsync>)> {
         let req: virtio_iommu_req_unmap = reader.read_obj().map_err(IommuError::GuestMemoryRead)?;
 
         let domain: u32 = req.domain.into();
-        if let Some(mapper) = self.domain_map.get(&domain) {
+        let fault_resolved_event = if let Some(mapper) = self.domain_map.get(&domain) {
             let size = u64::from(req.virt_end) - u64::from(req.virt_start) + 1;
-            mapper
+            let res = mapper
                 .1
                 .lock()
                 .remove_map(u64::from(req.virt_start), size)
                 .map_err(IommuError::MemoryMapper)?;
+            match res {
+                RemoveMapResult::Success(evt) => evt,
+                RemoveMapResult::OverlapFailure => {
+                    // If a mapping affected by the range is not covered in its entirety by the
+                    // range (the UNMAP request would split the mapping), then the device SHOULD
+                    // set the request `status` to VIRTIO_IOMMU_S_RANGE, and SHOULD NOT remove
+                    // any mapping.
+                    tail.status = VIRTIO_IOMMU_S_RANGE;
+                    None
+                }
+            }
         } else {
             // If domain does not exist, the device SHOULD set the
             // request status to VIRTIO_IOMMU_S_NOENT
             tail.status = VIRTIO_IOMMU_S_NOENT;
-        }
+            None
+        };
 
-        Ok(0)
+        Ok((0, fault_resolved_event))
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -463,7 +553,10 @@ impl State {
         Ok(properties_size)
     }
 
-    fn execute_request(&mut self, avail_desc: &DescriptorChain) -> Result<usize> {
+    fn execute_request(
+        &mut self,
+        avail_desc: &DescriptorChain,
+    ) -> Result<(usize, Option<EventAsync>)> {
         let mut reader =
             Reader::new(self.mem.clone(), avail_desc.clone()).map_err(IommuError::CreateReader)?;
         let mut writer =
@@ -482,22 +575,26 @@ impl State {
             ..Default::default()
         };
 
-        let reply_len = match req_head.type_ {
+        let (reply_len, fault_resolved_event) = match req_head.type_ {
             VIRTIO_IOMMU_T_ATTACH => self.process_attach_request(&mut reader, &mut tail)?,
             VIRTIO_IOMMU_T_DETACH => self.process_detach_request(&mut reader, &mut tail)?,
-            VIRTIO_IOMMU_T_MAP => self.process_dma_map_request(&mut reader, &mut tail)?,
+            VIRTIO_IOMMU_T_MAP => (self.process_dma_map_request(&mut reader, &mut tail)?, None),
             VIRTIO_IOMMU_T_UNMAP => self.process_dma_unmap_request(&mut reader, &mut tail)?,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            VIRTIO_IOMMU_T_PROBE => {
-                self.process_probe_request(&mut reader, &mut writer, &mut tail)?
-            }
+            VIRTIO_IOMMU_T_PROBE => (
+                self.process_probe_request(&mut reader, &mut writer, &mut tail)?,
+                None,
+            ),
             _ => return Err(IommuError::UnexpectedDescriptor),
         };
 
         writer
             .write_all(tail.as_slice())
             .map_err(IommuError::GuestMemoryWrite)?;
-        Ok((reply_len as usize) + size_of::<virtio_iommu_req_tail>())
+        Ok((
+            (reply_len as usize) + size_of::<virtio_iommu_req_tail>(),
+            fault_resolved_event,
+        ))
     }
 }
 
@@ -515,16 +612,25 @@ async fn request_queue<I: SignalableInterrupt>(
             .map_err(IommuError::ReadAsyncDesc)?;
         let desc_index = avail_desc.index;
 
-        let len = match state.borrow_mut().execute_request(&avail_desc) {
-            Ok(len) => len as u32,
+        let (len, fault_resolved_event) = match state.borrow_mut().execute_request(&avail_desc) {
+            Ok(res) => res,
             Err(e) => {
                 error!("execute_request failed: {}", e);
 
                 // If a request type is not recognized, the device SHOULD NOT write
                 // the buffer and SHOULD set the used length to zero
-                0
+                (0, None)
             }
         };
+
+        if let Some(fault_resolved_event) = fault_resolved_event {
+            debug!("waiting for iommu fault resolution");
+            fault_resolved_event
+                .next_val()
+                .await
+                .expect("failed waiting for fault");
+            debug!("iommu fault resolved");
+        }
 
         queue.add_used(&mem, desc_index, len as u32);
         queue.trigger_interrupt(&mem, interrupt);
@@ -570,7 +676,7 @@ fn run(
     });
 
     let f_handle_translate_request =
-        sys::handle_translate_request(&state, request_tube, response_tubes);
+        sys::handle_translate_request(&ex, &state, request_tube, response_tubes);
     let f_request = request_queue(&state, req_queue, req_evt, interrupt_ref);
 
     let command_tube = AsyncTube::new(&ex, iommu_device_tube).unwrap();
@@ -652,7 +758,9 @@ impl Iommu {
         };
 
         let mut avail_features: u64 = base_features;
-        avail_features |= 1 << VIRTIO_IOMMU_F_MAP_UNMAP | 1 << VIRTIO_IOMMU_F_INPUT_RANGE;
+        avail_features |= 1 << VIRTIO_IOMMU_F_MAP_UNMAP
+            | 1 << VIRTIO_IOMMU_F_INPUT_RANGE
+            | 1 << VIRTIO_IOMMU_F_MMIO;
 
         if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
             avail_features |= 1 << VIRTIO_IOMMU_F_PROBE;
@@ -766,6 +874,7 @@ impl VirtioDevice for Iommu {
                             endpoint_map: BTreeMap::new(),
                             domain_map: BTreeMap::new(),
                             endpoints: eps,
+                            dmabuf_mem: BTreeMap::new(),
                         };
                         let result = run(
                             state,

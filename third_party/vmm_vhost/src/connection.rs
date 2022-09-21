@@ -11,7 +11,7 @@ cfg_if::cfg_if! {
         mod unix;
     } else if #[cfg(windows)] {
         mod tube;
-        pub use tube::{TubeEndpoint, TubeListener};
+        pub use tube::TubeEndpoint;
         mod windows;
     }
 }
@@ -32,24 +32,22 @@ use crate::connection::Req;
 pub trait Listener: Sized {
     /// Type of an object created when a connection is accepted.
     type Connection;
+    /// Type of endpoint created when a connection is accepted.
+    type Endpoint;
 
     /// Accept an incoming connection.
-    fn accept(&mut self) -> Result<Option<Self::Connection>>;
+    fn accept(&mut self) -> Result<Option<Self::Endpoint>>;
 
     /// Change blocking status on the listener.
     fn set_nonblocking(&self, block: bool) -> Result<()>;
 }
 
 /// Abstracts a vhost-user connection and related operations.
-pub trait Endpoint<R: Req>: Sized {
-    /// Type of an object that Endpoint is created from.
-    type Listener: Listener;
-
-    /// Create an endpoint from a stream object.
-    fn from_connection(sock: <Self::Listener as Listener>::Connection) -> Self;
-
+pub trait Endpoint<R: Req>: Send {
     /// Create a new stream by connecting to server at `str`.
-    fn connect<P: AsRef<Path>>(path: P) -> Result<Self>;
+    fn connect<P: AsRef<Path>>(path: P) -> Result<Self>
+    where
+        Self: Sized;
 
     /// Sends bytes from scatter-gather vectors with optional attached file descriptors.
     ///
@@ -71,6 +69,15 @@ pub trait Endpoint<R: Req>: Sized {
         bufs: &mut [IoSliceMut],
         allow_fd: bool,
     ) -> Result<(usize, Option<Vec<File>>)>;
+
+    /// Constructs the slave request endpoint for self.
+    ///
+    /// # Arguments
+    /// * `files` - Files from which to create the endpoint
+    fn create_slave_request_endpoint(
+        &mut self,
+        files: Option<Vec<File>>,
+    ) -> Result<Box<dyn Endpoint<SlaveReq>>>;
 }
 
 // Advance the internal cursor of the slices.
@@ -409,32 +416,40 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     /// accepted and all other file descriptor will be discard silently.
     ///
     /// # Return:
-    /// * - (message header, message body, size of payload, [received files]) on success.
+    /// * - (message header, message body, payload, [received files]) on success.
     /// * - PartialMessage: received a partial message.
     /// * - InvalidMessage: received a invalid message.
     /// * - backend specific errors
     #[cfg_attr(feature = "cargo-clippy", allow(clippy::type_complexity))]
     fn recv_payload_into_buf<T: Sized + DataInit + Default + VhostUserMsgValidator>(
         &mut self,
-        buf: &mut [u8],
-    ) -> Result<(VhostUserMsgHeader<R>, T, usize, Option<Vec<File>>)> {
+    ) -> Result<(VhostUserMsgHeader<R>, T, Vec<u8>, Option<Vec<File>>)> {
         let mut hdr = VhostUserMsgHeader::default();
         let mut body: T = Default::default();
-        let mut slices = [hdr.as_mut_slice(), body.as_mut_slice(), buf];
+        let mut slices = [hdr.as_mut_slice()];
         let (bytes, files) = self.recv_into_bufs_all(&mut slices)?;
 
-        let total = mem::size_of::<VhostUserMsgHeader<R>>() + mem::size_of::<T>();
-        if bytes < total {
+        if bytes < mem::size_of::<VhostUserMsgHeader<R>>() {
             return Err(Error::PartialMessage);
-        } else if !hdr.is_valid() || !body.is_valid() {
+        } else if !hdr.is_valid() {
             return Err(Error::InvalidMessage);
         }
 
-        Ok((hdr, body, bytes - total, files))
+        let payload_size = hdr.get_size() as usize - mem::size_of::<T>();
+        let mut buf: Vec<u8> = vec![0; payload_size];
+        let mut slices = [body.as_mut_slice(), buf.as_mut_slice()];
+        let (bytes, more_files) = self.recv_into_bufs_all(&mut slices)?;
+        if bytes < hdr.get_size() as usize {
+            return Err(Error::PartialMessage);
+        } else if !body.is_valid() || more_files.is_some() {
+            return Err(Error::InvalidMessage);
+        }
+
+        Ok((hdr, body, buf, files))
     }
 }
 
-impl<R: Req, E: Endpoint<R>> EndpointExt<R> for E {}
+impl<R: Req, E: Endpoint<R> + ?Sized> EndpointExt<R> for E {}
 
 #[cfg(test)]
 pub(crate) mod tests {

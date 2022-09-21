@@ -10,22 +10,32 @@
 
 use std::ffi::CStr;
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::os::raw::c_char;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use base::{AsRawDescriptor, Error as BaseError, FromRawDescriptor};
+use base::AsRawDescriptor;
+use base::Error as BaseError;
+use base::FromRawDescriptor;
+use base::RawDescriptor;
 
 use crate::rutabaga_gralloc::formats::DrmFormat;
-use crate::rutabaga_gralloc::gralloc::{Gralloc, ImageAllocationInfo, ImageMemoryRequirements};
+use crate::rutabaga_gralloc::gralloc::Gralloc;
+use crate::rutabaga_gralloc::gralloc::ImageAllocationInfo;
+use crate::rutabaga_gralloc::gralloc::ImageMemoryRequirements;
 use crate::rutabaga_gralloc::minigbm_bindings::*;
 use crate::rutabaga_gralloc::rendernode;
 use crate::rutabaga_utils::*;
 
 struct MinigbmDeviceInner {
-    _fd: File,
+    fd: File,
     gbm: *mut gbm_device,
 }
+
+// Safe because minigbm handles synchronization internally.
+unsafe impl Send for MinigbmDeviceInner {}
+unsafe impl Sync for MinigbmDeviceInner {}
 
 impl Drop for MinigbmDeviceInner {
     fn drop(&mut self) {
@@ -39,8 +49,8 @@ impl Drop for MinigbmDeviceInner {
 /// A device capable of allocating `MinigbmBuffer`.
 #[derive(Clone)]
 pub struct MinigbmDevice {
-    minigbm_device: Rc<MinigbmDeviceInner>,
-    last_buffer: Option<Rc<MinigbmBuffer>>,
+    minigbm_device: Arc<MinigbmDeviceInner>,
+    last_buffer: Option<Arc<MinigbmBuffer>>,
     device_name: &'static str,
 }
 
@@ -65,7 +75,7 @@ impl MinigbmDevice {
         let device_name: &str = c_str.to_str()?;
 
         Ok(Box::new(MinigbmDevice {
-            minigbm_device: Rc::new(MinigbmDeviceInner { _fd: fd, gbm }),
+            minigbm_device: Arc::new(MinigbmDeviceInner { fd, gbm }),
             last_buffer: None,
             device_name,
         }))
@@ -105,7 +115,13 @@ impl Gralloc for MinigbmDevice {
         // perhaps minigbm will be deprecated by then.  Other display drivers (rockchip, mediatek,
         // amdgpu) typically use write combine memory.  We can also consider use flags too if this
         // heuristic proves insufficient.
-        if self.device_name == "i915" {
+        //
+        // Existing qcom devices use a mix of cached and WC buffers.  We don't *yet* have a good
+        // way to differentiate, but https://patchwork.freedesktop.org/series/106847/ is a proposal
+        // to fix that.  But existing devices without the FWB feature, the resulting mapping attrs
+        // are the more restrictive of the combination for S1 and S2 mappings.  So if we map as
+        // cached in S2 pgtables, but S1 has WC, then the result will be WC.
+        if self.device_name == "i915" || self.device_name == "msm" {
             reqs.map_info = RUTABAGA_MAP_CACHE_CACHED;
         } else {
             reqs.map_info = RUTABAGA_MAP_CACHE_WC;
@@ -127,7 +143,7 @@ impl Gralloc for MinigbmDevice {
             return Err(RutabagaError::AlreadyInUse);
         }
 
-        self.last_buffer = Some(Rc::new(gbm_buffer));
+        self.last_buffer = Some(Arc::new(gbm_buffer));
         reqs.info = info;
         reqs.size = size;
         Ok(reqs)
@@ -175,6 +191,10 @@ impl Gralloc for MinigbmDevice {
 
 /// An allocation from a `MinigbmDevice`.
 pub struct MinigbmBuffer(*mut gbm_bo, MinigbmDevice);
+
+// Safe because minigbm handles synchronization internally.
+unsafe impl Send for MinigbmBuffer {}
+unsafe impl Sync for MinigbmBuffer {}
 
 impl MinigbmBuffer {
     /// Width in pixels.

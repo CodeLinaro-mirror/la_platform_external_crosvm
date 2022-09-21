@@ -2,19 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::fmt::{self, Display};
-use std::fs::{File, OpenOptions};
-use std::io::{self, stdin, stdout};
+use std::fmt;
+use std::fmt::Display;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io;
+use std::io::stdin;
+use std::io::stdout;
 use std::path::PathBuf;
 
+use base::error;
+use base::open_file;
 #[cfg(windows)]
 use base::platform::Console as WinConsole;
-use base::{
-    error, open_file, syslog, AsRawDescriptor, Event, FileSync, RawDescriptor, ReadNotifier,
-};
+use base::syslog;
+use base::AsRawDescriptor;
+use base::Event;
+use base::FileSync;
+use base::RawDescriptor;
+use base::ReadNotifier;
 use hypervisor::ProtectionType;
 use remain::sorted;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_keyvalue::FromKeyValues;
 use thiserror::Error as ThisError;
 
 pub use crate::sys::serial_device::SerialDevice;
@@ -114,11 +125,11 @@ fn serial_parameters_default_num() -> u8 {
 }
 
 fn serial_parameters_default_debugcon_port() -> u16 {
-    // Default to the port bochs uses.
-    0xe9
+    // Default to the port OVMF expects.
+    0x402
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, FromKeyValues)]
 #[serde(deny_unknown_fields, default)]
 pub struct SerialParameters {
     #[serde(rename = "type")]
@@ -212,8 +223,9 @@ impl SerialParameters {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_keyvalue::*;
+
+    use super::*;
 
     fn from_serial_arg(options: &str) -> Result<SerialParameters, ParseError> {
         from_key_values(options)
@@ -235,7 +247,7 @@ mod tests {
                 earlycon: false,
                 stdin: false,
                 out_timestamp: false,
-                debugcon_port: 0xe9,
+                debugcon_port: 0x402,
             }
         );
 

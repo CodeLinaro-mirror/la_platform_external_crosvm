@@ -29,6 +29,7 @@ pub struct RecordDetails {
     // message fields
     pub emulator_child_process_exit_details: ::protobuf::SingularPtrField<EmulatorChildProcessExitDetails>,
     pub wave_format_details: ::protobuf::SingularPtrField<WaveFormatDetails>,
+    pub emulator_dll_details: ::protobuf::SingularPtrField<EmulatorDllDetails>,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -112,6 +113,39 @@ impl RecordDetails {
     pub fn take_wave_format_details(&mut self) -> WaveFormatDetails {
         self.wave_format_details.take().unwrap_or_else(|| WaveFormatDetails::new())
     }
+
+    // optional .EmulatorDllDetails emulator_dll_details = 19;
+
+
+    pub fn get_emulator_dll_details(&self) -> &EmulatorDllDetails {
+        self.emulator_dll_details.as_ref().unwrap_or_else(|| <EmulatorDllDetails as ::protobuf::Message>::default_instance())
+    }
+    pub fn clear_emulator_dll_details(&mut self) {
+        self.emulator_dll_details.clear();
+    }
+
+    pub fn has_emulator_dll_details(&self) -> bool {
+        self.emulator_dll_details.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_emulator_dll_details(&mut self, v: EmulatorDllDetails) {
+        self.emulator_dll_details = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_emulator_dll_details(&mut self) -> &mut EmulatorDllDetails {
+        if self.emulator_dll_details.is_none() {
+            self.emulator_dll_details.set_default();
+        }
+        self.emulator_dll_details.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_emulator_dll_details(&mut self) -> EmulatorDllDetails {
+        self.emulator_dll_details.take().unwrap_or_else(|| EmulatorDllDetails::new())
+    }
 }
 
 impl ::protobuf::Message for RecordDetails {
@@ -122,6 +156,11 @@ impl ::protobuf::Message for RecordDetails {
             }
         };
         for v in &self.wave_format_details {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.emulator_dll_details {
             if !v.is_initialized() {
                 return false;
             }
@@ -138,6 +177,9 @@ impl ::protobuf::Message for RecordDetails {
                 },
                 13 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.wave_format_details)?;
+                },
+                19 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.emulator_dll_details)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -159,6 +201,10 @@ impl ::protobuf::Message for RecordDetails {
             let len = v.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
+        if let Some(ref v) = self.emulator_dll_details.as_ref() {
+            let len = v.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -172,6 +218,11 @@ impl ::protobuf::Message for RecordDetails {
         }
         if let Some(ref v) = self.wave_format_details.as_ref() {
             os.write_tag(13, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.emulator_dll_details.as_ref() {
+            os.write_tag(19, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
@@ -223,6 +274,11 @@ impl ::protobuf::Message for RecordDetails {
                 |m: &RecordDetails| { &m.wave_format_details },
                 |m: &mut RecordDetails| { &mut m.wave_format_details },
             ));
+            fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<EmulatorDllDetails>>(
+                "emulator_dll_details",
+                |m: &RecordDetails| { &m.emulator_dll_details },
+                |m: &mut RecordDetails| { &mut m.emulator_dll_details },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<RecordDetails>(
                 "RecordDetails",
                 fields,
@@ -241,6 +297,7 @@ impl ::protobuf::Clear for RecordDetails {
     fn clear(&mut self) {
         self.emulator_child_process_exit_details.clear();
         self.wave_format_details.clear();
+        self.emulator_dll_details.clear();
         self.unknown_fields.clear();
     }
 }
@@ -1320,6 +1377,178 @@ impl ::protobuf::reflect::ProtobufValue for EmulatorChildProcessExitDetails {
     }
 }
 
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+pub struct EmulatorDllDetails {
+    // message fields
+    dll_base_name: ::protobuf::SingularField<::std::string::String>,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a EmulatorDllDetails {
+    fn default() -> &'a EmulatorDllDetails {
+        <EmulatorDllDetails as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl EmulatorDllDetails {
+    pub fn new() -> EmulatorDllDetails {
+        ::std::default::Default::default()
+    }
+
+    // optional string dll_base_name = 1;
+
+
+    pub fn get_dll_base_name(&self) -> &str {
+        match self.dll_base_name.as_ref() {
+            Some(v) => &v,
+            None => "",
+        }
+    }
+    pub fn clear_dll_base_name(&mut self) {
+        self.dll_base_name.clear();
+    }
+
+    pub fn has_dll_base_name(&self) -> bool {
+        self.dll_base_name.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_dll_base_name(&mut self, v: ::std::string::String) {
+        self.dll_base_name = ::protobuf::SingularField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_dll_base_name(&mut self) -> &mut ::std::string::String {
+        if self.dll_base_name.is_none() {
+            self.dll_base_name.set_default();
+        }
+        self.dll_base_name.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_dll_base_name(&mut self) -> ::std::string::String {
+        self.dll_base_name.take().unwrap_or_else(|| ::std::string::String::new())
+    }
+}
+
+impl ::protobuf::Message for EmulatorDllDetails {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_string_into(wire_type, is, &mut self.dll_base_name)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if let Some(ref v) = self.dll_base_name.as_ref() {
+            my_size += ::protobuf::rt::string_size(1, &v);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if let Some(ref v) = self.dll_base_name.as_ref() {
+            os.write_string(1, &v)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> EmulatorDllDetails {
+        EmulatorDllDetails::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_singular_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                "dll_base_name",
+                |m: &EmulatorDllDetails| { &m.dll_base_name },
+                |m: &mut EmulatorDllDetails| { &mut m.dll_base_name },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<EmulatorDllDetails>(
+                "EmulatorDllDetails",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static EmulatorDllDetails {
+        static instance: ::protobuf::rt::LazyV2<EmulatorDllDetails> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(EmulatorDllDetails::new)
+    }
+}
+
+impl ::protobuf::Clear for EmulatorDllDetails {
+    fn clear(&mut self) {
+        self.dll_base_name.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for EmulatorDllDetails {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for EmulatorDllDetails {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
 #[derive(Clone,PartialEq,Eq,Debug,Hash)]
 #[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum EmulatorProcessType {
@@ -1390,37 +1619,40 @@ impl ::protobuf::reflect::ProtobufValue for EmulatorProcessType {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x1aprotos/event_details.proto\"\xcf\x01\n\rRecordDetails\x12n\n#emula\
+    \n\x1aprotos/event_details.proto\"\x96\x02\n\rRecordDetails\x12n\n#emula\
     tor_child_process_exit_details\x18\x0c\x20\x01(\x0b2\x20.EmulatorChildPr\
     ocessExitDetailsR\x1femulatorChildProcessExitDetails\x12B\n\x13wave_form\
     at_details\x18\r\x20\x01(\x0b2\x12.WaveFormatDetailsR\x11waveFormatDetai\
-    lsJ\x04\x08\x01\x10\x0cJ\x04\x08\x0e\x10\x11\"\x9d\x01\n\x11WaveFormatDe\
-    tails\x12)\n\trequested\x18\x01\x20\x01(\x0b2\x0b.WaveFormatR\trequested\
-    \x12'\n\x08modified\x18\x02\x20\x01(\x0b2\x0b.WaveFormatR\x08modified\
-    \x124\n\x0fclosest_matched\x18\x03\x20\x01(\x0b2\x0b.WaveFormatR\x0eclos\
-    estMatched\"\xb9\x05\n\nWaveFormat\x12\x1d\n\nformat_tag\x18\x01\x20\x01\
-    (\x05R\tformatTag\x12\x1a\n\x08channels\x18\x02\x20\x01(\x05R\x08channel\
-    s\x12&\n\x0fsamples_per_sec\x18\x03\x20\x01(\x05R\rsamplesPerSec\x12)\n\
-    \x11avg_bytes_per_sec\x18\x04\x20\x01(\x05R\x0eavgBytesPerSec\x12\x1f\n\
-    \x0bblock_align\x18\x05\x20\x01(\x05R\nblockAlign\x12&\n\x0fbits_per_sam\
-    ple\x18\x06\x20\x01(\x05R\rbitsPerSample\x12\x1d\n\nsize_bytes\x18\x07\
-    \x20\x01(\x05R\tsizeBytes\x12\x18\n\x07samples\x18\x08\x20\x01(\x05R\x07\
-    samples\x12!\n\x0cchannel_mask\x18\t\x20\x01(\x03R\x0bchannelMask\x12>\n\
-    \nsub_format\x18\n\x20\x01(\x0e2\x1f.WaveFormat.WaveFormatSubFormatR\tsu\
-    bFormat\"\xb7\x02\n\x13WaveFormatSubFormat\x12\x20\n\x1cKSDATAFORMAT_SUB\
-    TYPE_INVALID\x10\0\x12\x1f\n\x1bKSDATAFORMAT_SUBTYPE_ANALOG\x10\x01\x12\
-    \x1c\n\x18KSDATAFORMAT_SUBTYPE_PCM\x10\x02\x12#\n\x1fKSDATAFORMAT_SUBTYP\
-    E_IEEE_FLOAT\x10\x03\x12\x1c\n\x18KSDATAFORMAT_SUBTYPE_DRM\x10\x04\x12\
-    \x1d\n\x19KSDATAFORMAT_SUBTYPE_ALAW\x10\x05\x12\x1e\n\x1aKSDATAFORMAT_SU\
-    BTYPE_MULAW\x10\x06\x12\x1e\n\x1aKSDATAFORMAT_SUBTYPE_ADPCM\x10\x07\x12\
-    \x1d\n\x19KSDATAFORMAT_SUBTYPE_MPEG\x10\x08\"w\n\x1fEmulatorChildProcess\
-    ExitDetails\x12\x1b\n\texit_code\x18\x01\x20\x01(\rR\x08exitCode\x127\n\
-    \x0cprocess_type\x18\x02\x20\x01(\x0e2\x14.EmulatorProcessTypeR\x0bproce\
-    ssType*\xd4\x01\n\x13EmulatorProcessType\x12\x18\n\x14PROCESS_TYPE_UNKNO\
-    WN\x10\0\x12\x15\n\x11PROCESS_TYPE_MAIN\x10\x01\x12\x16\n\x12PROCESS_TYP\
-    E_BLOCK\x10\x02\x12\x18\n\x14PROCESS_TYPE_METRICS\x10\x03\x12\x14\n\x10P\
-    ROCESS_TYPE_NET\x10\x04\x12\x16\n\x12PROCESS_TYPE_SLIRP\x10\x05\x12\x14\
-    \n\x10PROCESS_TYPE_GPU\x10\x06\x12\x16\n\x12PROCESS_TYPE_SOUND\x10\x07\
+    ls\x12E\n\x14emulator_dll_details\x18\x13\x20\x01(\x0b2\x13.EmulatorDllD\
+    etailsR\x12emulatorDllDetailsJ\x04\x08\x01\x10\x0cJ\x04\x08\x0e\x10\x13\
+    \"\x9d\x01\n\x11WaveFormatDetails\x12)\n\trequested\x18\x01\x20\x01(\x0b\
+    2\x0b.WaveFormatR\trequested\x12'\n\x08modified\x18\x02\x20\x01(\x0b2\
+    \x0b.WaveFormatR\x08modified\x124\n\x0fclosest_matched\x18\x03\x20\x01(\
+    \x0b2\x0b.WaveFormatR\x0eclosestMatched\"\xb9\x05\n\nWaveFormat\x12\x1d\
+    \n\nformat_tag\x18\x01\x20\x01(\x05R\tformatTag\x12\x1a\n\x08channels\
+    \x18\x02\x20\x01(\x05R\x08channels\x12&\n\x0fsamples_per_sec\x18\x03\x20\
+    \x01(\x05R\rsamplesPerSec\x12)\n\x11avg_bytes_per_sec\x18\x04\x20\x01(\
+    \x05R\x0eavgBytesPerSec\x12\x1f\n\x0bblock_align\x18\x05\x20\x01(\x05R\n\
+    blockAlign\x12&\n\x0fbits_per_sample\x18\x06\x20\x01(\x05R\rbitsPerSampl\
+    e\x12\x1d\n\nsize_bytes\x18\x07\x20\x01(\x05R\tsizeBytes\x12\x18\n\x07sa\
+    mples\x18\x08\x20\x01(\x05R\x07samples\x12!\n\x0cchannel_mask\x18\t\x20\
+    \x01(\x03R\x0bchannelMask\x12>\n\nsub_format\x18\n\x20\x01(\x0e2\x1f.Wav\
+    eFormat.WaveFormatSubFormatR\tsubFormat\"\xb7\x02\n\x13WaveFormatSubForm\
+    at\x12\x20\n\x1cKSDATAFORMAT_SUBTYPE_INVALID\x10\0\x12\x1f\n\x1bKSDATAFO\
+    RMAT_SUBTYPE_ANALOG\x10\x01\x12\x1c\n\x18KSDATAFORMAT_SUBTYPE_PCM\x10\
+    \x02\x12#\n\x1fKSDATAFORMAT_SUBTYPE_IEEE_FLOAT\x10\x03\x12\x1c\n\x18KSDA\
+    TAFORMAT_SUBTYPE_DRM\x10\x04\x12\x1d\n\x19KSDATAFORMAT_SUBTYPE_ALAW\x10\
+    \x05\x12\x1e\n\x1aKSDATAFORMAT_SUBTYPE_MULAW\x10\x06\x12\x1e\n\x1aKSDATA\
+    FORMAT_SUBTYPE_ADPCM\x10\x07\x12\x1d\n\x19KSDATAFORMAT_SUBTYPE_MPEG\x10\
+    \x08\"w\n\x1fEmulatorChildProcessExitDetails\x12\x1b\n\texit_code\x18\
+    \x01\x20\x01(\rR\x08exitCode\x127\n\x0cprocess_type\x18\x02\x20\x01(\x0e\
+    2\x14.EmulatorProcessTypeR\x0bprocessType\"8\n\x12EmulatorDllDetails\x12\
+    \"\n\rdll_base_name\x18\x01\x20\x01(\tR\x0bdllBaseName*\xd4\x01\n\x13Emu\
+    latorProcessType\x12\x18\n\x14PROCESS_TYPE_UNKNOWN\x10\0\x12\x15\n\x11PR\
+    OCESS_TYPE_MAIN\x10\x01\x12\x16\n\x12PROCESS_TYPE_BLOCK\x10\x02\x12\x18\
+    \n\x14PROCESS_TYPE_METRICS\x10\x03\x12\x14\n\x10PROCESS_TYPE_NET\x10\x04\
+    \x12\x16\n\x12PROCESS_TYPE_SLIRP\x10\x05\x12\x14\n\x10PROCESS_TYPE_GPU\
+    \x10\x06\x12\x16\n\x12PROCESS_TYPE_SOUND\x10\x07\
 ";
 
 static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;

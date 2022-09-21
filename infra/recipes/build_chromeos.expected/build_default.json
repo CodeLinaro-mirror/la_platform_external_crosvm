@@ -1,7 +1,7 @@
 [
   {
     "cmd": [
-      "vpython",
+      "vpython3",
       "-u",
       "RECIPE_MODULE[recipe_engine::file]/resources/fileutil.py",
       "--json-output",
@@ -13,91 +13,6 @@
     ],
     "infra_step": true,
     "name": "Ensure workspace exists"
-  },
-  {
-    "cmd": [],
-    "name": "Prepare git"
-  },
-  {
-    "cmd": [
-      "git",
-      "config",
-      "--get",
-      "user.name"
-    ],
-    "env": {
-      "DEPOT_TOOLS_UPDATE": "0"
-    },
-    "infra_step": true,
-    "name": "Prepare git.git config user.name",
-    "~followup_annotations": [
-      "@@@STEP_NEST_LEVEL@1@@@"
-    ]
-  },
-  {
-    "cmd": [
-      "git",
-      "config",
-      "--get",
-      "user.email"
-    ],
-    "env": {
-      "DEPOT_TOOLS_UPDATE": "0"
-    },
-    "infra_step": true,
-    "name": "Prepare git.git config user.email",
-    "~followup_annotations": [
-      "@@@STEP_NEST_LEVEL@1@@@"
-    ]
-  },
-  {
-    "cmd": [
-      "git",
-      "config",
-      "--global",
-      "user.name",
-      "Crosvm Bot"
-    ],
-    "env": {
-      "DEPOT_TOOLS_UPDATE": "0"
-    },
-    "name": "Prepare git.Set git config: user.name",
-    "~followup_annotations": [
-      "@@@STEP_NEST_LEVEL@1@@@"
-    ]
-  },
-  {
-    "cmd": [
-      "git",
-      "config",
-      "--global",
-      "user.email",
-      "crosvm-bot@crosvm-infra.iam.gserviceaccount.com"
-    ],
-    "env": {
-      "DEPOT_TOOLS_UPDATE": "0"
-    },
-    "name": "Prepare git.Set git config: user.email",
-    "~followup_annotations": [
-      "@@@STEP_NEST_LEVEL@1@@@"
-    ]
-  },
-  {
-    "cmd": [
-      "git",
-      "config",
-      "--global",
-      "credential.helper",
-      "gcloud.sh"
-    ],
-    "cwd": "[CLEANUP]/workspace",
-    "env": {
-      "DEPOT_TOOLS_UPDATE": "0"
-    },
-    "name": "Prepare git.Set git config: credential.helper",
-    "~followup_annotations": [
-      "@@@STEP_NEST_LEVEL@1@@@"
-    ]
   },
   {
     "cmd": [
@@ -201,6 +116,34 @@
       "DEPOT_TOOLS_UPDATE": "0"
     },
     "name": "Run unit tests"
+  },
+  {
+    "cmd": [
+      "RECIPE_REPO[depot_tools]/cros_sdk",
+      "cros_workon",
+      "--board=amd64-generic",
+      "start",
+      "crosvm"
+    ],
+    "cwd": "[CLEANUP]/workspace",
+    "env": {
+      "DEPOT_TOOLS_UPDATE": "0"
+    },
+    "name": "cros_workon crosvm"
+  },
+  {
+    "cmd": [
+      "RECIPE_REPO[depot_tools]/cros_sdk",
+      "cros_workon_make",
+      "--board=amd64-generic",
+      "--test",
+      "crosvm"
+    ],
+    "cwd": "[CLEANUP]/workspace",
+    "env": {
+      "DEPOT_TOOLS_UPDATE": "0"
+    },
+    "name": "cros_workon_make crosvm"
   },
   {
     "cmd": [

@@ -43,6 +43,7 @@ lto = true
 members = [
     "aarch64",
     "acpi_tables",
+    "anti_tamper",
     "arch",
     "argh_helpers",
     "base",
@@ -65,7 +66,9 @@ members = [
     "kvm_sys",
     "linux_input_sys",
     "media/ffmpeg",
+    "media/libva",
     "media/libvda",
+    "media/vp8",
     "net_sys",
     "net_util",
     "power_monitor",
@@ -100,7 +103,8 @@ exclude = [
     "common/sync",
     "tube_transporter",
     "win_util",
-    "tools/examples/baremetal"
+    "tools/examples/baremetal",
+    "tools/audio_streams_conformance_test",
 ]
 
 [features]
@@ -116,20 +120,23 @@ all-linux = [
     "virgl_renderer",
     "x",
     ]
-win64 = []
+win64 = ["devices/stats", "balloon", "haxm"]
 audio = ["devices/audio"]
 audio_cras = ["devices/audio_cras"]
+balloon = ["devices/balloon", "vm_control/balloon"]
 chromeos = ["base/chromeos", "audio_cras", "devices/chromeos"]
 composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
-default = ["audio", "gpu", "usb"]
+crash-report = []
+default = ["audio", "balloon", "gpu", "usb"]
 default-no-sandbox = []
-direct = ["devices/direct", "arch/direct", "x86_64/direct"]
+direct = ["balloon", "devices/direct", "arch/direct", "x86_64/direct"]
 ffmpeg = ["devices/ffmpeg"]
 gdb = ["gdbstub", "gdbstub_arch", "arch/gdb", "vm_control/gdb", "x86_64/gdb"]
 gfxstream = ["devices/gfxstream"]
 gpu = ["devices/gpu"]
 haxm = ["hypervisor/haxm"]
 whpx = ["devices/whpx", "hypervisor/whpx"]
+vaapi = ["devices/vaapi"]
 libvda = ["devices/libvda"]
 linux-armhf = [
     "composite-disk",
@@ -159,7 +166,7 @@ argh = "0.1"
 argh_helpers = { path = "argh_helpers" }
 assertions = { path = "common/assertions" }
 audio_streams = "*"
-base = { path = "base" }
+base = "*"
 bit_field = { path = "bit_field" }
 broker_ipc = { path = "broker_ipc" }
 cfg-if = "1.0.0"
@@ -181,9 +188,8 @@ libcras = "*"
 # Compile out trace statements in release builds
 log = { version = "0", features = ["release_max_level_debug"]}
 metrics = { path = "metrics" }
-minijail = { path = "../minijail/rust/minijail" } # ignored by ebuild
 net_util = { path = "net_util" }
-p9 = { path = "common/p9" }
+once_cell = "1.7"
 protobuf = { version = "2.3", optional = true }
 protos = { path = "protos", optional = true }
 remain = "*"
@@ -196,7 +202,7 @@ sync = { path = "common/sync" }
 tempfile = "3"
 terminal_size = "0.1.17"
 thiserror = { version = "1.0.20" }
-uuid = { version = "0.8.2" }
+uuid = { version = "0.8.2", features = [ "serde" ] }
 vhost = { path = "vhost" }
 vm_control = { path = "vm_control" }
 acpi_tables = { path = "acpi_tables" }
@@ -208,12 +214,24 @@ x86_64 = { path = "x86_64" }
 [target.'cfg(any(target_arch = "aarch64", target_arch = "arm"))'.dependencies]
 aarch64 = { path = "aarch64" }
 
+[target.'cfg(unix)'.dependencies]
+minijail = "*" # provided by ebuild
+p9 = "*"
+
 [target.'cfg(windows)'.dependencies]
+anti_tamper = { path = "anti_tamper" }
+cros_async =  { path = "cros_async" }
+ctrlc = "*"
+futures = "0.3"
+gpu_display = { path = "gpu_display", optional = true }
+rand = "0.8"
+tracing = { path = "tracing" }
 tube_transporter = { path = "tube_transporter" }
+winapi = "*"
+win_util = { path = "win_util"}
 
 [dev-dependencies]
-base = { path = "base" }
-once_cell = "1.7"
+base = "*"
 
 [patch.crates-io]
 assertions = { path = "common/assertions" }

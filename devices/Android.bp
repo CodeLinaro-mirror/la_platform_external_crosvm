@@ -26,6 +26,7 @@ rust_test {
     edition: "2021",
     features: [
         "audio",
+        "balloon",
         "usb",
     ],
     rustlibs: [
@@ -37,7 +38,9 @@ rust_test {
         "libballoon_control",
         "libbase_rust",
         "libbit_field",
+        "libbytes",
         "libcfg_if",
+        "libchrono",
         "libcrc32fast",
         "libcros_async",
         "libdata_model",
@@ -65,6 +68,7 @@ rust_test {
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libtracing",
         "libusb_util",
         "libuuid",
         "libvfio_sys",
@@ -88,18 +92,7 @@ rust_test {
                 "libgpu_display",
                 "librutabaga_gfx",
             ],
-            shared_libs: [
-                "libvirglrenderer",
-                "libgfxstream_backend",
-            ],
-        },
-        android: {
-            shared_libs: ["libdrm"],
-            static_libs: [
-                "libepoxy",
-                "libgbm",
-                "libvirglrenderer",
-            ],
+            shared_libs: ["libgfxstream_backend"],
         },
     },
 }
@@ -115,6 +108,7 @@ rust_library {
     edition: "2021",
     features: [
         "audio",
+        "balloon",
         "usb",
     ],
     rustlibs: [
@@ -127,6 +121,7 @@ rust_library {
         "libbase_rust",
         "libbit_field",
         "libcfg_if",
+        "libchrono",
         "libcros_async",
         "libdata_model",
         "libdisk",
@@ -152,6 +147,7 @@ rust_library {
         "libsmallvec",
         "libsync_rust",
         "libthiserror",
+        "libtracing",
         "libusb_util",
         "libuuid",
         "libvfio_sys",

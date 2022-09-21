@@ -17,36 +17,71 @@
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::default::Default;
+use std::fmt;
+use std::mem;
 use std::panic;
-use std::str::FromStr;
-use std::sync::atomic::{fence, AtomicU32, Ordering};
+use std::sync::atomic::fence;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
-use std::{fmt, mem, thread};
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
-use base::{
-    error, info, AsRawDescriptor, Event, EventToken, MemoryMapping, MemoryMappingBuilder,
-    Protection, RawDescriptor, SafeDescriptor, SharedMemory, Timer, Tube, TubeError, WaitContext,
-};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::ensure;
+use anyhow::Context;
+use anyhow::Result;
+use base::error;
+use base::info;
+use base::AsRawDescriptor;
+use base::Event;
+use base::EventToken;
+use base::MemoryMapping;
+use base::MemoryMappingBuilder;
+use base::Protection;
+use base::RawDescriptor;
+use base::SafeDescriptor;
+use base::SharedMemory;
+use base::Timer;
+use base::Tube;
+use base::TubeError;
+use base::WaitContext;
 use data_model::DataInit;
 use hypervisor::Datamatch;
-use resources::{Alloc, MmioType, SystemAllocator};
-use serde::{Deserialize, Serialize};
+use resources::Alloc;
+use resources::AllocOptions;
+use resources::SystemAllocator;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde_keyvalue::FromKeyValues;
 use sync::Mutex;
 use thiserror::Error as ThisError;
+use vm_control::VmMemoryDestination;
+use vm_control::VmMemoryRequest;
+use vm_control::VmMemoryResponse;
+use vm_control::VmMemorySource;
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
 
-use vm_control::{VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
-use vm_memory::{GuestAddress, GuestMemory};
-
-use crate::pci::pci_configuration::{
-    PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciClassCode, PciConfiguration,
-    PciHeaderType, PciOtherSubclass, COMMAND_REG, COMMAND_REG_MEMORY_SPACE_MASK,
-};
-use crate::pci::pci_device::{BarRange, PciDevice, Result as PciResult};
-use crate::pci::{PciAddress, PciDeviceError};
+use crate::pci::pci_configuration::PciBarConfiguration;
+use crate::pci::pci_configuration::PciBarPrefetchable;
+use crate::pci::pci_configuration::PciBarRegionType;
+use crate::pci::pci_configuration::PciClassCode;
+use crate::pci::pci_configuration::PciConfiguration;
+use crate::pci::pci_configuration::PciHeaderType;
+use crate::pci::pci_configuration::PciOtherSubclass;
+use crate::pci::pci_configuration::COMMAND_REG;
+use crate::pci::pci_configuration::COMMAND_REG_MEMORY_SPACE_MASK;
+use crate::pci::pci_device::BarRange;
+use crate::pci::pci_device::PciDevice;
+use crate::pci::pci_device::Result as PciResult;
+use crate::pci::PciAddress;
+use crate::pci::PciDeviceError;
 use crate::vfio::VfioContainer;
-use crate::{UnpinRequest, UnpinResponse};
+use crate::UnpinRequest;
+use crate::UnpinResponse;
 
 const PCI_VENDOR_ID_COIOMMU: u16 = 0x1234;
 const PCI_DEVICE_ID_COIOMMU: u16 = 0xabcd;
@@ -84,24 +119,16 @@ enum Error {
 const UNPIN_DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 const UNPIN_GEN_DEFAULT_THRES: u64 = 10;
 /// Holds the coiommu unpin policy
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CoIommuUnpinPolicy {
     Off,
     Lru,
 }
 
-impl FromStr for CoIommuUnpinPolicy {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "off" => Ok(CoIommuUnpinPolicy::Off),
-            "lru" => Ok(CoIommuUnpinPolicy::Lru),
-            _ => Err(anyhow!(
-                "CoIommu doesn't have such unpin policy: {}",
-                s.to_string()
-            )),
-        }
+impl Default for CoIommuUnpinPolicy {
+    fn default() -> Self {
+        CoIommuUnpinPolicy::Off
     }
 }
 
@@ -116,14 +143,51 @@ impl fmt::Display for CoIommuUnpinPolicy {
     }
 }
 
+fn deserialize_unpin_interval<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Duration, D::Error> {
+    let secs = u64::deserialize(deserializer)?;
+
+    Ok(Duration::from_secs(secs))
+}
+
+fn deserialize_unpin_limit<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let limit = u64::deserialize(deserializer)?;
+
+    match limit {
+        0 => Err(serde::de::Error::custom(
+            "Please use non-zero unpin_limit value",
+        )),
+        limit => Ok(Some(limit)),
+    }
+}
+
+fn unpin_interval_default() -> Duration {
+    UNPIN_DEFAULT_INTERVAL
+}
+
+fn unpin_gen_threshold_default() -> u64 {
+    UNPIN_GEN_DEFAULT_THRES
+}
+
 /// Holds the parameters for a coiommu device
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields)]
 pub struct CoIommuParameters {
+    #[serde(default)]
     pub unpin_policy: CoIommuUnpinPolicy,
+    #[serde(
+        deserialize_with = "deserialize_unpin_interval",
+        default = "unpin_interval_default"
+    )]
     pub unpin_interval: Duration,
+    #[serde(deserialize_with = "deserialize_unpin_limit", default)]
     pub unpin_limit: Option<u64>,
     // Number of unpin intervals a pinned page must be busy for to be aged into the
     // older, less frequently checked generation.
+    #[serde(default = "unpin_gen_threshold_default")]
     pub unpin_gen_threshold: u64,
 }
 
@@ -974,7 +1038,7 @@ impl CoIommuDev {
         mem: GuestMemory,
         vfio_container: Arc<Mutex<VfioContainer>>,
         device_tube: Tube,
-        unpin_tube: Tube,
+        unpin_tube: Option<Tube>,
         endpoints: Vec<u16>,
         vcpu_count: u64,
         params: CoIommuParameters,
@@ -1043,7 +1107,7 @@ impl CoIommuDev {
             pin_kill_evt: None,
             unpin_thread: None,
             unpin_kill_evt: None,
-            unpin_tube: Some(unpin_tube),
+            unpin_tube,
             ioevents,
             vfio_container,
             pinstate: Arc::new(Mutex::new(CoIommuPinState {
@@ -1079,6 +1143,7 @@ impl CoIommuDev {
                 descriptor,
                 offset,
                 size: size as u64,
+                gpu_blob: false,
             },
             dest: VmMemoryDestination::GuestPhysicalAddress(gpa),
             prot,
@@ -1253,8 +1318,7 @@ impl CoIommuDev {
         name: &str,
     ) -> PciResult<u64> {
         let addr = resources
-            .mmio_allocator(MmioType::High)
-            .allocate_with_align(
+            .allocate_mmio(
                 size,
                 Alloc::PciBar {
                     bus: address.bus,
@@ -1263,7 +1327,7 @@ impl CoIommuDev {
                     bar: bar_num,
                 },
                 name.to_string(),
-                size,
+                AllocOptions::new().prefetchable(true).align(size),
             )
             .map_err(|e| PciDeviceError::IoAllocationFailed(size, e))?;
 

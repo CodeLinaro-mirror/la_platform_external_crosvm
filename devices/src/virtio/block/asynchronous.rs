@@ -3,40 +3,65 @@
 // found in the LICENSE file.
 
 use std::cell::RefCell;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 use std::mem::size_of;
 use std::rc::Rc;
 use std::result;
-use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::u32;
 
+use base::error;
+use base::info;
+use base::warn;
+use base::AsRawDescriptor;
+use base::Error as SysError;
+use base::Event;
+use base::RawDescriptor;
+use base::Result as SysResult;
+use base::Timer;
+use base::Tube;
+use base::TubeError;
+use cros_async::select5;
+use cros_async::sync::Mutex as AsyncMutex;
+use cros_async::AsyncError;
+use cros_async::AsyncTube;
+use cros_async::EventAsync;
+use cros_async::Executor;
+use cros_async::SelectResult;
+use cros_async::TimerAsync;
+use data_model::DataInit;
+use disk::AsyncDisk;
+use disk::ToAsyncDisk;
 use futures::pin_mut;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
 use remain::sorted;
 use thiserror::Error as ThisError;
-
-use base::Error as SysError;
-use base::Result as SysResult;
-use base::{error, info, warn, AsRawDescriptor, Event, RawDescriptor, Timer, Tube, TubeError};
-use cros_async::{
-    select5, sync::Mutex as AsyncMutex, AsyncError, AsyncTube, EventAsync, Executor, SelectResult,
-    TimerAsync,
-};
-use data_model::DataInit;
-use disk::{AsyncDisk, ToAsyncDisk};
-use vm_control::{DiskControlCommand, DiskControlResult};
+use vm_control::DiskControlCommand;
+use vm_control::DiskControlResult;
 use vm_memory::GuestMemory;
 
 use super::common::*;
-use crate::virtio::{
-    async_utils, block::sys::*, copy_config, DescriptorChain, DescriptorError, DeviceType,
-    Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice, Writer,
-};
+use crate::virtio::async_utils;
+use crate::virtio::block::sys::*;
+use crate::virtio::copy_config;
+use crate::virtio::DescriptorChain;
+use crate::virtio::DescriptorError;
+use crate::virtio::DeviceType;
+use crate::virtio::Interrupt;
+use crate::virtio::Queue;
+use crate::virtio::Reader;
+use crate::virtio::SignalableInterrupt;
+use crate::virtio::VirtioDevice;
+use crate::virtio::Writer;
 
 const QUEUE_SIZE: u16 = 256;
-const NUM_QUEUES: u16 = 16;
+pub const NUM_QUEUES: u16 = 16;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES as usize];
 
 #[sorted]
@@ -455,16 +480,17 @@ fn run_worker(
 
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct BlockAsync {
+    // We keep these members crate-public as they are accessed by the vhost-user device.
+    pub(crate) disk_image: Option<Box<dyn ToAsyncDisk>>,
+    pub(crate) disk_size: Arc<AtomicU64>,
+    pub(crate) avail_features: u64,
+    pub(crate) read_only: bool,
+    pub(crate) sparse: bool,
+    pub(crate) seg_max: u32,
+    pub(crate) block_size: u32,
+    pub(crate) id: Option<BlockId>,
     kill_evt: Option<Event>,
     worker_thread: Option<thread::JoinHandle<(Box<dyn ToAsyncDisk>, Option<Tube>)>>,
-    disk_image: Option<Box<dyn ToAsyncDisk>>,
-    disk_size: Arc<AtomicU64>,
-    avail_features: u64,
-    read_only: bool,
-    sparse: bool,
-    seg_max: u32,
-    block_size: u32,
-    id: Option<BlockId>,
     control_tube: Option<Tube>,
 }
 
@@ -500,8 +526,6 @@ impl BlockAsync {
         let seg_max = get_seg_max(QUEUE_SIZE);
 
         Ok(BlockAsync {
-            kill_evt: None,
-            worker_thread: None,
             disk_image: Some(disk_image),
             disk_size: Arc::new(AtomicU64::new(disk_size)),
             avail_features,
@@ -510,6 +534,8 @@ impl BlockAsync {
             seg_max,
             block_size,
             id,
+            kill_evt: None,
+            worker_thread: None,
             control_tube,
         })
     }
@@ -832,21 +858,22 @@ impl VirtioDevice for BlockAsync {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{File, OpenOptions};
+    use std::fs::File;
+    use std::fs::OpenOptions;
     use std::mem::size_of_val;
     use std::sync::atomic::AtomicU64;
 
-    use data_model::{Le32, Le64};
+    use data_model::Le32;
+    use data_model::Le64;
     use disk::SingleFileDisk;
     use hypervisor::ProtectionType;
     use tempfile::TempDir;
     use vm_memory::GuestAddress;
 
-    use crate::virtio::base_features;
-    use crate::virtio::block::common::*;
-    use crate::virtio::descriptor_utils::{create_descriptor_chain, DescriptorType};
-
     use super::*;
+    use crate::virtio::base_features;
+    use crate::virtio::descriptor_utils::create_descriptor_chain;
+    use crate::virtio::descriptor_utils::DescriptorType;
 
     #[test]
     fn read_size() {

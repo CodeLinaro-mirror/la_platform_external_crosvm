@@ -2,64 +2,52 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::marker::{Send, Sized};
+use std::marker::Send;
+use std::marker::Sized;
 
-use crate::{
-    pci::{CrosvmDeviceId, PciId},
-    Bus, BusDevice, IrqEdgeEvent, IrqLevelEvent,
-};
-use base::{Event, Result};
-use hypervisor::{IrqRoute, MPState, Vcpu};
+use base::Event;
+use base::Result;
+use hypervisor::IrqRoute;
+use hypervisor::MPState;
+use hypervisor::Vcpu;
 use resources::SystemAllocator;
+
+use crate::pci::CrosvmDeviceId;
+use crate::pci::PciId;
+use crate::Bus;
+use crate::BusDevice;
+use crate::IrqEdgeEvent;
+use crate::IrqLevelEvent;
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
         mod kvm;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        mod x86_64;
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        pub use x86_64::*;
-
-        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-        mod aarch64;
-        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-        pub use aarch64::*;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        mod pic;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        pub use pic::*;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        mod ioapic;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        pub use ioapic::*;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        mod apic;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        pub use apic::*;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        mod userspace;
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        pub use userspace::*;
-
         pub use self::kvm::KvmKernelIrqChip;
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         pub use self::kvm::KvmSplitIrqChip;
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         pub use self::kvm::{AARCH64_GIC_NR_IRQS, AARCH64_GIC_NR_SPIS};
-    } else if #[cfg(windows)] {
-        #[cfg(feature = "whpx")]
+    } else if #[cfg(all(windows, feature = "whpx"))] {
         mod whpx;
-        #[cfg(feature = "whpx")]
         pub use self::whpx::WhpxSplitIrqChip;
+    }
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
+        mod x86_64;
+        pub use x86_64::*;
+        mod pic;
+        pub use pic::*;
+        mod ioapic;
+        pub use ioapic::*;
+        mod apic;
+        pub use apic::*;
+        mod userspace;
+        pub use userspace::*;
+    } else if #[cfg(any(target_arch = "arm", target_arch = "aarch64"))] {
+        mod aarch64;
+        pub use aarch64::*;
     }
 }
 
@@ -73,7 +61,7 @@ struct IrqEvent {
     source: IrqEventSource,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum DeviceId {
     /// PCI Device, use its PciId directly.
     PciDeviceId(PciId),

@@ -30,6 +30,9 @@ class TestOption(enum.Enum):
     # Run tests single-threaded
     SINGLE_THREADED = "single_threaded"
 
+    # This test needs to be the only one runnning to prevent interference with other tests.
+    RUN_EXCLUSIVE = "run_exclusive"
+
     # This test needs longer than usual to run.
     LARGE = "large"
 
@@ -42,12 +45,10 @@ class TestOption(enum.Enum):
 # This is just too big to keep in main list for now
 WIN64_DISABLED_CRATES = [
     "aarch64",
-    "arch",
     "cros_asyncv2",
     "cros-fuzz",
     "crosvm_plugin",
     "crosvm-fuzz",
-    "crosvm",
     "ffi",
     "ffmpeg",
     "fuse",
@@ -57,6 +58,7 @@ WIN64_DISABLED_CRATES = [
     "io_uring",
     "kvm",
     "libcras_stub",
+    "libva",
     "libvda",
     "minijail-sys",
     "minijail",
@@ -67,12 +69,11 @@ WIN64_DISABLED_CRATES = [
     "tpm2-sys",
     "tpm2",
     "usb_util",
-    "x86_64",
 ]
 
 CRATE_OPTIONS: Dict[str, List[TestOption]] = {
     "base": [TestOption.SINGLE_THREADED, TestOption.LARGE],
-    "cros_async": [TestOption.LARGE],
+    "cros_async": [TestOption.LARGE, TestOption.RUN_EXCLUSIVE],
     "crosvm": [TestOption.SINGLE_THREADED],
     "crosvm_plugin": [
         TestOption.DO_NOT_BUILD_AARCH64,
@@ -81,6 +82,7 @@ CRATE_OPTIONS: Dict[str, List[TestOption]] = {
     "crosvm-fuzz": [TestOption.DO_NOT_BUILD],  # b/194499769
     "devices": [
         TestOption.SINGLE_THREADED,
+        TestOption.RUN_EXCLUSIVE,
         TestOption.LARGE,
         TestOption.DO_NOT_RUN_ON_FOREIGN_KERNEL,
         TestOption.DO_NOT_RUN_ARMHF,
@@ -95,6 +97,7 @@ CRATE_OPTIONS: Dict[str, List[TestOption]] = {
     ],  # b/181672912
     "integration_tests": [  # b/180196508
         TestOption.SINGLE_THREADED,
+        TestOption.RUN_EXCLUSIVE,
         TestOption.LARGE,
         TestOption.DO_NOT_RUN_AARCH64,
         TestOption.DO_NOT_RUN_ARMHF,
@@ -108,6 +111,15 @@ CRATE_OPTIONS: Dict[str, List[TestOption]] = {
         TestOption.DO_NOT_RUN_ON_FOREIGN_KERNEL,
     ],  # b/181674144
     "libcrosvm_control": [TestOption.DO_NOT_BUILD_ARMHF],  # b/210015864
+    "libva": [
+        # Libva only makes sense for x86 Linux platforms, disable building on others.
+        TestOption.DO_NOT_BUILD_AARCH64,
+        TestOption.DO_NOT_BUILD_ARMHF,
+        TestOption.DO_NOT_BUILD_WIN64,
+        # Only run libva on Linux x86. Note that all tests are not enabled, see b/238047780.
+        TestOption.DO_NOT_RUN_AARCH64,
+        TestOption.DO_NOT_RUN_ARMHF,
+    ],
     "libvda": [TestOption.DO_NOT_BUILD],  # b/202293971
     "rutabaga_gfx": [TestOption.DO_NOT_BUILD_ARMHF],  # b/210015864
     "vhost": [TestOption.DO_NOT_RUN_ON_FOREIGN_KERNEL],
@@ -118,8 +130,9 @@ for name in WIN64_DISABLED_CRATES:
     CRATE_OPTIONS[name] = CRATE_OPTIONS.get(name, []) + [TestOption.DO_NOT_BUILD_WIN64]
 
 BUILD_FEATURES: Dict[str, str] = {
-    "x86_64": "linux-x86_64",
-    "aarch64": "linux-aarch64",
-    "armhf": "linux-armhf",
-    "win64": "win64",
+    "x86_64-unknown-linux-gnu": "linux-x86_64",
+    "aarch64-unknown-linux-gnu": "linux-aarch64",
+    "armv7-unknown-linux-gnueabihf": "linux-armhf",
+    "x86_64-pc-windows-gnu": "win64",
+    "x86_64-pc-windows-msvc": "win64",
 }

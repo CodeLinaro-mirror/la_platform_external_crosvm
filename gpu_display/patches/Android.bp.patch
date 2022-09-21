@@ -2,7 +2,7 @@ diff --git a/gpu_display/Android.bp b/gpu_display/Android.bp
 index 3ce915ad..9d5ce4aa 100644
 --- a/gpu_display/Android.bp
 +++ b/gpu_display/Android.bp
-@@ -34,7 +34,19 @@ rust_library {
+@@ -62,7 +62,19 @@ rust_library {
      ],
      proc_macros: ["libremain"],
      static_libs: ["libdisplay_wl"],

@@ -4,39 +4,36 @@
 
 mod block;
 mod handler;
-mod worker;
-
-pub use self::block::*;
-pub use self::handler::VhostUserHandler;
 
 use remain::sorted;
 use thiserror::Error as ThisError;
 use vm_memory::GuestMemoryError;
 use vmm_vhost::Error as VhostError;
 
+pub use self::block::*;
+pub use self::handler::VhostUserHandler;
+
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
         mod console;
         mod fs;
-        #[cfg(feature = "gpu")]
         mod gpu;
         mod mac80211_hwsim;
         mod net;
-        #[cfg(feature = "audio")]
         mod snd;
         mod vsock;
         mod wl;
+        mod video;
 
-        #[cfg(feature = "audio")]
         pub use self::snd::*;
         pub use self::vsock::*;
         pub use self::wl::*;
         pub use self::net::*;
         pub use self::mac80211_hwsim::*;
-        #[cfg(feature = "gpu")]
         pub use self::gpu::*;
         pub use self::console::*;
         pub use self::fs::*;
+        pub use self::video::*;
     } else if #[cfg(windows)] {
         #[cfg(feature = "slirp")]
         pub mod net;
@@ -55,6 +52,9 @@ pub enum Error {
     /// Failed to create `base::Event`.
     #[error("failed to create Event: {0}")]
     CreateEvent(base::Error),
+    /// Unsupported shared memory mapper
+    #[error("unsupported shared memory mapper: {0}")]
+    CreateShmemMapperError(VhostError),
     /// Failed to get config.
     #[error("failed to get config: {0}")]
     GetConfig(VhostError),
@@ -125,15 +125,24 @@ pub enum Error {
     /// Failed to set the size of the queue.
     #[error("failed to set the size of the queue: {0}")]
     SetVringNum(VhostError),
+    /// Error getting the shmem regions.
+    #[error("failed to enumerate shmem regions {0}")]
+    ShmemRegions(VhostError),
     /// Failed to connect socket.
     #[error("failed to connect socket: {0}")]
     SocketConnect(std::io::Error),
     /// Failed to create Master from a UDS path.
     #[error("failed to connect to device socket while creating instance: {0}")]
     SocketConnectOnMasterCreate(VhostError),
+    /// Failed to spawn worker thread.
+    #[error("failed to spawn worker: {0}")]
+    SpawnWorker(std::io::Error),
     /// The tag for the Fs device was too long to fit in the config space.
     #[error("tag is too long: {len} > {max}")]
     TagTooLong { len: usize, max: usize },
+    /// Too many shmem regions.
+    #[error("too many shmem regions: {0} > 1")]
+    TooManyShmemRegions(usize),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

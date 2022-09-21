@@ -13,16 +13,23 @@ direct = []
 acpi_tables = { path = "../acpi_tables" }
 anyhow = "*"
 base = { path = "../base" }
+cfg-if = "1.0.0"
 devices = { path = "../devices" }
 gdbstub_arch = { version = "0.2.2", optional = true }
 hypervisor = { path = "../hypervisor" }
 kernel_cmdline = { path = "../kernel_cmdline" }
 libc = "*"
-minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
-power_monitor = { path = "../power_monitor" }
-remain = "*"
 resources = { path = "../resources" }
+remain = "*"
+serde = { version = "*", features = [ "derive"] }
 sync = { path = "../common/sync" }
 thiserror = "1.0.20"
 vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
+
+[target.'cfg(unix)'.dependencies]
+minijail = { path = "../../minijail/rust/minijail" } # provided by ebuild
+power_monitor = { path = "../power_monitor" }
+
+[target.'cfg(windows)'.dependencies]
+winapi = "*"

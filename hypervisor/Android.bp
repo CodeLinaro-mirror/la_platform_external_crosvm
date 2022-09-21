@@ -16,7 +16,6 @@ rust_test {
     host_supported: true,
     crate_name: "hypervisor",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
@@ -43,13 +42,100 @@ rust_test {
     proc_macros: ["libenumn"],
 }
 
+rust_defaults {
+    name: "hypervisor_test_defaults",
+    defaults: ["crosvm_defaults"],
+    crate_name: "hypervisor",
+    cargo_env_compat: true,
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    edition: "2021",
+    rustlibs: [
+        "libbase_rust",
+        "libbit_field",
+        "libbitflags",
+        "libdata_model",
+        "libdowncast_rs",
+        "libfnv",
+        "libhypervisor",
+        "libkvm",
+        "libkvm_sys",
+        "liblibc",
+        "libmemoffset",
+        "libonce_cell",
+        "libserde",
+        "libsync_rust",
+        "libvm_memory",
+    ],
+    proc_macros: ["libenumn"],
+}
+
+rust_test {
+    name: "hypervisor_test_tests_dirty_log",
+    defaults: ["hypervisor_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/dirty_log.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
+rust_test {
+    name: "hypervisor_test_tests_mmio_and_pio",
+    defaults: ["hypervisor_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/mmio_and_pio.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
+rust_test {
+    name: "hypervisor_test_tests_read_only_memory",
+    defaults: ["hypervisor_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/read_only_memory.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
+rust_test {
+    name: "hypervisor_test_tests_real_run_addr",
+    defaults: ["hypervisor_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/real_run_addr.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
+rust_test {
+    name: "hypervisor_test_tests_remove_memory",
+    defaults: ["hypervisor_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/remove_memory.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
+rust_test {
+    name: "hypervisor_test_tests_tsc_offsets",
+    defaults: ["hypervisor_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/tsc_offsets.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
 rust_library {
     name: "libhypervisor",
     defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "hypervisor",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
