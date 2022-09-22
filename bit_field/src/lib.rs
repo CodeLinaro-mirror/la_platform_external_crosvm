@@ -267,7 +267,8 @@
 //! }
 //! ```
 
-use std::fmt::{self, Display};
+use std::fmt;
+use std::fmt::Display;
 
 pub use bit_field_derive::bitfield;
 

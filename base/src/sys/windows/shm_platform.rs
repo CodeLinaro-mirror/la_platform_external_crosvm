@@ -3,11 +3,18 @@
 // found in the LICENSE file.
 
 use std::ffi::CStr;
+
 use win_util::create_file_mapping;
 use winapi::um::winnt::PAGE_EXECUTE_READWRITE;
 
-use super::{shm::SharedMemory, MemoryMapping, MmapError, Result};
-use crate::descriptor::{AsRawDescriptor, FromRawDescriptor, SafeDescriptor};
+use super::shm::SharedMemory;
+use super::MemoryMapping;
+use super::Result;
+use crate::descriptor::AsRawDescriptor;
+use crate::descriptor::FromRawDescriptor;
+use crate::descriptor::SafeDescriptor;
+use crate::MemoryMapping as CrateMemoryMapping;
+use crate::MmapError;
 
 impl SharedMemory {
     /// Creates a new shared memory file mapping with zero size.
@@ -44,7 +51,10 @@ impl SharedMemory {
         Ok(SharedMemory {
             descriptor: mapping_handle,
             size,
-            mapping,
+            mapping: CrateMemoryMapping {
+                mapping,
+                _file_descriptor: None,
+            },
             cursor: 0,
         })
     }
@@ -52,9 +62,11 @@ impl SharedMemory {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::ffi::CString;
+
     use winapi::shared::winerror::ERROR_NOT_ENOUGH_MEMORY;
+
+    use super::*;
 
     #[cfg_attr(all(target_os = "windows", target_env = "gnu"), ignore)]
     #[test]

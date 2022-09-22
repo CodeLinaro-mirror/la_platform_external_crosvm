@@ -3,18 +3,24 @@
 // found in the LICENSE file.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use base::Event;
-use devices::serial_device::{SerialHardware, SerialParameters, SerialType};
-use devices::{Bus, ProxyDevice, Serial};
+use devices::serial_device::SerialHardware;
+use devices::serial_device::SerialParameters;
+use devices::serial_device::SerialType;
+use devices::Bus;
+#[cfg(windows)]
+use devices::Minijail;
+use devices::Serial;
 use hypervisor::ProtectionType;
+#[cfg(unix)]
 use minijail::Minijail;
 use remain::sorted;
-use sync::Mutex;
 use thiserror::Error as ThisError;
 
 use crate::DeviceRegistrationError;
+
+mod sys;
 
 /// Add the default serial parameters for serial ports that have not already been specified.
 ///
@@ -77,11 +83,12 @@ pub const SERIAL_ADDR: [u64; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
 ///
 /// # Arguments
 ///
+/// * `protected_vm` - VM protection mode.
 /// * `io_bus` - Bus to add the devices to
 /// * `com_evt_1_3` - event for com1 and com3
 /// * `com_evt_1_4` - event for com2 and com4
-/// * `io_bus` - Bus to add the devices to
 /// * `serial_parameters` - definitions of serial parameter configurations.
+/// * `serial_jail` - minijail object cloned for use with each serial device.
 ///   All four of the traditional PC-style serial ports (COM1-COM4) must be specified.
 pub fn add_serial_devices(
     protected_vm: ProtectionType,
@@ -89,49 +96,49 @@ pub fn add_serial_devices(
     com_evt_1_3: &Event,
     com_evt_2_4: &Event,
     serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
-    serial_jail: Option<Minijail>,
-) -> Result<(), DeviceRegistrationError> {
-    for x in 0..=3 {
-        let com_evt = match x {
-            0 => com_evt_1_3,
-            1 => com_evt_2_4,
-            2 => com_evt_1_3,
-            3 => com_evt_2_4,
-            _ => com_evt_1_3,
+    #[cfg_attr(windows, allow(unused_variables))] serial_jail: Option<Minijail>,
+) -> std::result::Result<(), DeviceRegistrationError> {
+    for com_num in 0..=3 {
+        let com_evt = match com_num {
+            0 => &com_evt_1_3,
+            1 => &com_evt_2_4,
+            2 => &com_evt_1_3,
+            3 => &com_evt_2_4,
+            _ => &com_evt_1_3,
         };
 
         let param = serial_parameters
-            .get(&(SerialHardware::Serial, x + 1))
-            .ok_or(DeviceRegistrationError::MissingRequiredSerialDevice(x + 1))?;
+            .get(&(SerialHardware::Serial, com_num + 1))
+            .ok_or(DeviceRegistrationError::MissingRequiredSerialDevice(
+                com_num + 1,
+            ))?;
 
-        let mut preserved_fds = Vec::new();
+        let mut preserved_descriptors = Vec::new();
         let com = param
-            .create_serial_device::<Serial>(protected_vm, com_evt, &mut preserved_fds)
+            .create_serial_device::<Serial>(protected_vm, com_evt, &mut preserved_descriptors)
             .map_err(DeviceRegistrationError::CreateSerialDevice)?;
 
-        match serial_jail.as_ref() {
-            Some(jail) => {
-                let com = Arc::new(Mutex::new(
-                    ProxyDevice::new(
-                        com,
-                        &jail
-                            .try_clone()
-                            .map_err(DeviceRegistrationError::CloneJail)?,
-                        preserved_fds,
-                    )
-                    .map_err(DeviceRegistrationError::ProxyDeviceCreation)?,
-                ));
-                io_bus
-                    .insert(com.clone(), SERIAL_ADDR[x as usize], 0x8)
-                    .unwrap();
-            }
-            None => {
-                let com = Arc::new(Mutex::new(com));
-                io_bus
-                    .insert(com.clone(), SERIAL_ADDR[x as usize], 0x8)
-                    .unwrap();
-            }
-        }
+        #[cfg(unix)]
+        let serial_jail = if let Some(serial_jail) = serial_jail.as_ref() {
+            Some(
+                serial_jail
+                    .try_clone()
+                    .map_err(DeviceRegistrationError::CloneJail)?,
+            )
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let serial_jail = None;
+
+        sys::add_serial_device(
+            com_num as usize,
+            com,
+            param,
+            serial_jail,
+            preserved_descriptors,
+            io_bus,
+        )?;
     }
 
     Ok(())
@@ -204,8 +211,9 @@ pub fn get_serial_cmdline(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use kernel_cmdline::Cmdline;
+
+    use super::*;
 
     #[test]
     fn get_serial_cmdline_default() {

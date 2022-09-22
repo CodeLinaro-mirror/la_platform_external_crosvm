@@ -16,6 +16,7 @@ use thiserror::Error as ThisError;
 
 use super::{Error, Result};
 use crate::connection::{Endpoint as EndpointTrait, Listener as ListenerTrait, Req};
+use crate::message::{MasterReq, SlaveReq};
 
 /// Errors for `Device::recv_into_bufs()`.
 #[sorted]
@@ -39,7 +40,7 @@ impl From<RecvIntoBufsError> for Error {
 }
 
 /// VFIO device which can be used as virtio-vhost-user device backend.
-pub trait Device {
+pub trait Device: Send {
     /// This event must be read before handle_request() is called.
     fn event(&self) -> &Event;
 
@@ -58,6 +59,11 @@ pub trait Device {
         &mut self,
         iovs: &mut [IoSliceMut],
     ) -> std::result::Result<usize, RecvIntoBufsError>;
+
+    /// Constructs the slave request endpoint for the endpoint backed by this device.
+    fn create_slave_request_endpoint(
+        &mut self,
+    ) -> std::result::Result<Box<dyn EndpointTrait<SlaveReq>>, anyhow::Error>;
 }
 
 /// Listener for accepting incoming connections from virtio-vhost-user device through VFIO.
@@ -77,14 +83,18 @@ impl<D: Device> Listener<D> {
 
 impl<D: Device> ListenerTrait for Listener<D> {
     type Connection = D;
+    type Endpoint = Endpoint<MasterReq, D>;
 
-    fn accept(&mut self) -> Result<Option<Self::Connection>> {
+    fn accept(&mut self) -> Result<Option<Self::Endpoint>> {
         let mut device = self
             .device
             .take()
             .expect("Listener isn't initialized correctly");
         device.start().map_err(Error::VfioDeviceError)?;
-        Ok(Some(device))
+        Ok(Some(Endpoint {
+            device,
+            _r: PhantomData,
+        }))
     }
 
     fn set_nonblocking(&self, _block: bool) -> Result<()> {
@@ -106,17 +116,16 @@ pub struct Endpoint<R: Req, D: Device> {
     _r: PhantomData<R>,
 }
 
-impl<R: Req, D: Device> EndpointTrait<R> for Endpoint<R, D> {
-    type Listener = Listener<D>;
-
-    /// Create an endpoint from a stream object.
-    fn from_connection(device: D) -> Self {
+impl<D: Device, R: Req> From<D> for Endpoint<R, D> {
+    fn from(device: D) -> Self {
         Self {
             device,
             _r: PhantomData,
         }
     }
+}
 
+impl<R: Req, D: Device> EndpointTrait<R> for Endpoint<R, D> {
     fn connect<P: AsRef<Path>>(_path: P) -> Result<Self> {
         // TODO: remove this method from Endpoint trait?
         panic!("VfioEndpoint cannot create a connection from path");
@@ -140,6 +149,19 @@ impl<R: Req, D: Device> EndpointTrait<R> for Endpoint<R, D> {
 
         // VFIO backend doesn't receive any files.
         Ok((size, None))
+    }
+
+    fn create_slave_request_endpoint(
+        &mut self,
+        files: Option<Vec<File>>,
+    ) -> Result<Box<dyn EndpointTrait<SlaveReq>>> {
+        if files.is_some() {
+            return Err(Error::InvalidMessage);
+        }
+
+        self.device
+            .create_slave_request_endpoint()
+            .map_err(Error::VfioDeviceError)
     }
 }
 

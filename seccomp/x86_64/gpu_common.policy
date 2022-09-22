@@ -23,7 +23,7 @@ gettimeofday: 1
 io_uring_setup: 1
 io_uring_enter: 1
 kill: 1
-madvise: arg2 == MADV_DONTNEED || arg2 == MADV_DONTDUMP || arg2 == MADV_REMOVE
+madvise: arg2 == MADV_DONTNEED || arg2 == MADV_DONTDUMP || arg2 == MADV_REMOVE || arg2 == MADV_MERGEABLE
 mremap: 1
 munmap: 1
 nanosleep: 1
@@ -38,6 +38,7 @@ readv: 1
 recvfrom: 1
 recvmsg: 1
 restart_syscall: 1
+rseq: 1
 rt_sigaction: 1
 rt_sigprocmask: 1
 rt_sigreturn: 1
@@ -54,8 +55,8 @@ uname: 1
 # Rules specific to gpu
 connect: 1
 # 1033 is F_ADD_SEALS, 1034 is F_GET_SEALS
-fcntl: arg1 == F_DUPFD_CLOEXEC || arg1 == F_SETFD || arg1 == F_GETFL || \
-       arg1 == F_SETFL || arg1 == 1033 || arg1 == 1034
+fcntl: arg1 == F_DUPFD_CLOEXEC || arg1 == F_GETFD || arg1 == F_SETFD || \
+       arg1 == F_GETFL || arg1 == F_SETFL || arg1 == 1033 || arg1 == 1034
 fstat: 1
 # Used to set of size new memfd.
 ftruncate: 1
@@ -65,7 +66,7 @@ geteuid: 1
 getrandom: 1
 getuid: 1
 # 0x40086200 = DMA_BUF_IOCTL_SYNC, 0x6400 == DRM_IOCTL_BASE, 0x40087543 == UDMABUF_CREATE_LIST
-ioctl: arg1 == FIONBIO || arg1 == FIOCLEX || arg1 == 0x40086200 || arg1 & 0x6400 || arg1 == 0x40087543
+ioctl: arg1 == FIONBIO || arg1 == FIOCLEX || arg1 == 0x40086200 || arg1 & 0x6400 || arg1 == 0x40087543 || arg1 == 0x5421 || arg1 == 0xc0383e04
 lseek: 1
 lstat: 1
 # Used for sharing memory with wayland. Also internally by Intel anv.

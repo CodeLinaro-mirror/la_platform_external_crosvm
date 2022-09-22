@@ -5,27 +5,34 @@
 //! The mmap module provides a safe interface to map memory and ensures UnmapViewOfFile is called when the
 //! mmap object leaves scope.
 
-use std::{
-    io,
-    slice::{from_raw_parts, from_raw_parts_mut},
-};
+use std::io;
+use std::slice::from_raw_parts;
+use std::slice::from_raw_parts_mut;
 
-use libc::{
-    c_uint, c_void, {self},
-};
+use libc::c_int;
+use libc::c_uint;
+use libc::c_void;
+use win_util::allocation_granularity;
+use win_util::get_high_order;
+use win_util::get_low_order;
+use winapi::um::memoryapi::FlushViewOfFile;
+use winapi::um::memoryapi::MapViewOfFile;
+use winapi::um::memoryapi::MapViewOfFileEx;
+use winapi::um::memoryapi::UnmapViewOfFile;
+use winapi::um::memoryapi::FILE_MAP_READ;
+use winapi::um::memoryapi::FILE_MAP_WRITE;
 
-use win_util::{allocation_granularity, get_high_order, get_low_order};
-use winapi::um::memoryapi::{
-    FlushViewOfFile, MapViewOfFile, MapViewOfFileEx, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE,
-};
-
-use super::{mmap::Error, mmap::Result, MappedRegion, MemoryMapping, Protection, RawDescriptor};
+use super::mmap::Error;
+use super::mmap::MemoryMapping;
+use super::mmap::Result;
 use crate::descriptor::AsRawDescriptor;
 use crate::warn;
+use crate::MappedRegion;
+use crate::Protection;
+use crate::RawDescriptor;
 
-pub(super) const PROT_NONE: c_uint = 0;
-pub(super) const PROT_READ: c_uint = FILE_MAP_READ;
-pub(super) const PROT_WRITE: c_uint = FILE_MAP_WRITE;
+pub(crate) const PROT_READ: c_int = FILE_MAP_READ as c_int;
+pub(crate) const PROT_WRITE: c_int = FILE_MAP_WRITE as c_int;
 
 impl MemoryMapping {
     /// Creates an anonymous shared mapping of `size` bytes with `prot` protection.
@@ -300,92 +307,43 @@ pub struct MemoryMappingArena();
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{pagesize, SharedMemory},
-        *,
-    };
-    use crate::descriptor::FromRawDescriptor;
-    use data_model::{VolatileMemory, VolatileMemoryError};
-    use std::{ffi::CString, ptr};
+    use std::ffi::CString;
+    use std::ptr;
+
     use winapi::shared::winerror;
 
-    #[test]
-    fn basic_map() {
-        let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, 1024).unwrap();
-        assert_eq!(1024, m.size());
-    }
+    use super::super::pagesize;
+    use super::super::SharedMemory;
+    use super::Error;
+    use crate::descriptor::FromRawDescriptor;
+    use crate::MappedRegion;
+    use crate::MemoryMappingBuilder;
 
     #[test]
     fn map_invalid_fd() {
         let descriptor = unsafe { std::fs::File::from_raw_descriptor(ptr::null_mut()) };
-        let res = MemoryMapping::from_descriptor(&descriptor, 1024).unwrap_err();
-        if let Error::SystemCallFailed(e) = res {
-            assert_eq!(e.errno(), winerror::ERROR_INVALID_HANDLE as i32);
+        let res = MemoryMappingBuilder::new(1024)
+            .from_file(&descriptor)
+            .build()
+            .unwrap_err();
+        if let Error::StdSyscallFailed(e) = res {
+            assert_eq!(
+                e.raw_os_error(),
+                Some(winerror::ERROR_INVALID_HANDLE as i32)
+            );
         } else {
             panic!("unexpected error: {}", res);
         }
     }
 
     #[test]
-    fn test_write_past_end() {
-        let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, 5).unwrap();
-        let res = m.write_slice(&[1, 2, 3, 4, 5, 6], 0);
-        assert!(res.is_ok());
-        assert_eq!(res.unwrap(), 5);
-    }
-
-    #[test]
-    fn slice_size() {
-        let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, 5).unwrap();
-        let s = m.get_slice(2, 3).unwrap();
-        assert_eq!(s.size(), 3);
-    }
-
-    #[test]
-    fn slice_addr() {
-        let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, 5).unwrap();
-        let s = m.get_slice(2, 3).unwrap();
-        assert_eq!(s.as_ptr(), unsafe { m.as_ptr().offset(2) });
-    }
-
-    #[test]
-    fn slice_store() {
-        let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, 5).unwrap();
-        let r = m.get_ref(2).unwrap();
-        r.store(9u16);
-        assert_eq!(m.read_obj::<u16>(2).unwrap(), 9);
-    }
-
-    #[test]
-    fn slice_overflow_error() {
-        let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, 5).unwrap();
-        let res = m.get_slice(std::usize::MAX, 3).unwrap_err();
-        assert_eq!(
-            res,
-            VolatileMemoryError::Overflow {
-                base: std::usize::MAX,
-                offset: 3,
-            }
-        );
-    }
-    #[test]
-    fn slice_oob_error() {
-        let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, 5).unwrap();
-        let res = m.get_slice(3, 3).unwrap_err();
-        assert_eq!(res, VolatileMemoryError::OutOfBounds { addr: 6 });
-    }
-
-    #[test]
     fn from_descriptor_offset_invalid() {
         let shm = SharedMemory::new(&CString::new("test").unwrap(), 1028).unwrap();
-        let res = MemoryMapping::from_descriptor_offset(&shm, 4096, (i64::max_value() as u64) + 1)
+        let shm = crate::SharedMemory(shm);
+        let res = MemoryMappingBuilder::new(4096)
+            .from_shared_memory(&shm)
+            .offset((i64::max_value() as u64) + 1)
+            .build()
             .unwrap_err();
         match res {
             Error::InvalidOffset => {}
@@ -397,7 +355,11 @@ mod tests {
     fn arena_msync() {
         let size: usize = 0x40000;
         let shm = SharedMemory::new(&CString::new("test").unwrap(), size as u64).unwrap();
-        let m = MemoryMapping::from_descriptor(&shm, size).unwrap();
+        let shm = crate::SharedMemory(shm);
+        let m = MemoryMappingBuilder::new(size)
+            .from_shared_memory(&shm)
+            .build()
+            .unwrap();
         let ps = pagesize();
         <dyn MappedRegion>::msync(&m, 0, ps).unwrap();
         <dyn MappedRegion>::msync(&m, 0, size).unwrap();

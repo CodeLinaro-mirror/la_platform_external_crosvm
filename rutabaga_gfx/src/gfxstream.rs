@@ -10,26 +10,33 @@
 
 use std::cell::RefCell;
 use std::convert::TryInto;
-use std::mem::{size_of, transmute};
-use std::os::raw::{c_char, c_int, c_uint, c_void};
-use std::ptr::{null, null_mut};
+use std::mem::size_of;
+use std::mem::transmute;
+use std::os::raw::c_char;
+use std::os::raw::c_int;
+use std::os::raw::c_uint;
+use std::os::raw::c_void;
+use std::ptr::null;
+use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use base::{
-    ExternalMapping, ExternalMappingError, ExternalMappingResult, FromRawDescriptor,
-    IntoRawDescriptor, SafeDescriptor,
-};
-
-use crate::generated::virgl_renderer_bindings::{
-    iovec, virgl_box, virgl_renderer_resource_create_args,
-};
-
-use crate::renderer_utils::*;
-use crate::rutabaga_core::{RutabagaComponent, RutabagaContext, RutabagaResource};
-use crate::rutabaga_utils::*;
-
+use base::ExternalMapping;
+use base::ExternalMappingError;
+use base::ExternalMappingResult;
+use base::FromRawDescriptor;
+use base::IntoRawDescriptor;
+use base::SafeDescriptor;
 use data_model::VolatileSlice;
+
+use crate::generated::virgl_renderer_bindings::iovec;
+use crate::generated::virgl_renderer_bindings::virgl_box;
+use crate::generated::virgl_renderer_bindings::virgl_renderer_resource_create_args;
+use crate::renderer_utils::*;
+use crate::rutabaga_core::RutabagaComponent;
+use crate::rutabaga_core::RutabagaContext;
+use crate::rutabaga_core::RutabagaResource;
+use crate::rutabaga_utils::*;
 
 #[repr(C)]
 pub struct VirglRendererGlCtxParam {
@@ -101,7 +108,6 @@ extern "C" {
     ) -> c_int;
 
     fn pipe_virgl_renderer_resource_unref(res_handle: u32);
-    fn pipe_virgl_renderer_context_create(handle: u32, nlen: u32, name: *const c_char) -> c_int;
     fn pipe_virgl_renderer_context_destroy(handle: u32);
     fn pipe_virgl_renderer_transfer_read_iov(
         handle: u32,
@@ -161,6 +167,12 @@ extern "C" {
     ) -> c_int;
     fn stream_renderer_resource_unmap(res_handle: u32) -> c_int;
     fn stream_renderer_resource_map_info(res_handle: u32, map_info: *mut u32) -> c_int;
+    fn stream_renderer_context_create(
+        handle: u32,
+        nlen: u32,
+        name: *const c_char,
+        context_init: u32,
+    ) -> c_int;
     fn stream_renderer_context_create_fence(fence_id: u64, ctx_id: u32, ring_idx: u8) -> c_int;
 }
 
@@ -576,18 +588,23 @@ impl RutabagaComponent for Gfxstream {
     fn create_context(
         &self,
         ctx_id: u32,
-        _context_init: u32,
-        _context_name: Option<&str>,
+        context_init: u32,
+        context_name: Option<&str>,
         _fence_handler: RutabagaFenceHandler,
     ) -> RutabagaResult<Box<dyn RutabagaContext>> {
-        const CONTEXT_NAME: &[u8] = b"gpu_renderer";
-        // Safe because virglrenderer is initialized by now and the context name is statically
+        let mut name: &str = "gpu_renderer";
+        if let Some(name_string) = context_name.filter(|s| s.len() > 0) {
+            name = name_string;
+        }
+
+        // Safe because gfxstream is initialized by now and the context name is statically
         // allocated. The return value is checked before returning a new context.
         let ret = unsafe {
-            pipe_virgl_renderer_context_create(
+            stream_renderer_context_create(
                 ctx_id,
-                CONTEXT_NAME.len() as u32,
-                CONTEXT_NAME.as_ptr() as *const c_char,
+                name.len() as u32,
+                name.as_ptr() as *const c_char,
+                context_init,
             )
         };
         ret_to_res(ret)?;

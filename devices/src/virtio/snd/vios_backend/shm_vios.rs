@@ -2,29 +2,48 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::virtio::snd::constants::*;
-use crate::virtio::snd::layout::*;
-
-use base::{
-    error, AsRawDescriptor, Error as BaseError, Event, EventToken, FromRawDescriptor,
-    IntoRawDescriptor, MemoryMapping, MemoryMappingBuilder, MmapError, RawDescriptor,
-    SafeDescriptor, ScmSocket, UnixSeqpacket, WaitContext,
-};
-use data_model::{DataInit, VolatileMemory, VolatileMemoryError, VolatileSlice};
-
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{Error as IOError, ErrorKind as IOErrorKind, IoSliceMut, Seek, SeekFrom};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::io::Error as IOError;
+use std::io::ErrorKind as IOErrorKind;
+use std::io::IoSliceMut;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::os::unix::io::RawFd;
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, RecvError, Sender};
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::RecvError;
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use sync::Mutex;
-
+use base::error;
+use base::AsRawDescriptor;
+use base::Error as BaseError;
+use base::Event;
+use base::EventToken;
+use base::FromRawDescriptor;
+use base::IntoRawDescriptor;
+use base::MemoryMapping;
+use base::MemoryMappingBuilder;
+use base::MmapError;
+use base::RawDescriptor;
+use base::SafeDescriptor;
+use base::ScmSocket;
+use base::UnixSeqpacket;
+use base::WaitContext;
+use data_model::DataInit;
+use data_model::VolatileMemory;
+use data_model::VolatileMemoryError;
+use data_model::VolatileSlice;
 use remain::sorted;
+use sync::Mutex;
 use thiserror::Error as ThisError;
+
+use crate::virtio::snd::constants::*;
+use crate::virtio::snd::layout::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -447,14 +466,14 @@ impl VioSClient {
     }
 
     /// Get a list of file descriptors used by the implementation.
-    pub fn keep_fds(&self) -> Vec<RawFd> {
-        let control_fd = self.control_socket.lock().as_raw_fd();
-        let event_fd = self.event_socket.as_raw_fd();
+    pub fn keep_rds(&self) -> Vec<RawDescriptor> {
+        let control_desc = self.control_socket.lock().as_raw_descriptor();
+        let event_desc = self.event_socket.as_raw_descriptor();
         let recv_event = self.recv_event.as_raw_descriptor();
         let event_notifier = self.event_notifier.as_raw_descriptor();
-        let mut ret = vec![control_fd, event_fd, recv_event, event_notifier];
-        ret.append(&mut self.tx.keep_fds());
-        ret.append(&mut self.rx.keep_fds());
+        let mut ret = vec![control_desc, event_desc, recv_event, event_notifier];
+        ret.append(&mut self.tx.keep_rds());
+        ret.append(&mut self.rx.keep_rds());
         ret
     }
 
@@ -747,7 +766,7 @@ impl IoBufferQueue {
         seq_socket_send(&self.socket, msg)
     }
 
-    fn keep_fds(&self) -> Vec<RawDescriptor> {
+    fn keep_rds(&self) -> Vec<RawDescriptor> {
         vec![
             self.file.as_raw_descriptor(),
             self.socket.as_raw_descriptor(),

@@ -4,4 +4,6 @@
 
 set -e
 
-find . -type f -name Cargo.toml | xargs dirname | sort | xargs -L1 ./run_c2a.sh
+for i in $(find . -type f -name Cargo.toml | xargs dirname | sort); do
+    ./run_c2a.sh "$i"
+done

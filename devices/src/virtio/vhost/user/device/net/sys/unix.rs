@@ -7,30 +7,45 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Context;
 use argh::FromArgs;
+use base::error;
+use base::info;
 use base::validate_raw_descriptor;
-use base::{error, warn, Event, RawDescriptor};
-use cros_async::{EventAsync, Executor, IntoAsync, IoSourceExt};
-use futures::future::{AbortHandle, Abortable};
+use base::warn;
+use base::Event;
+use base::RawDescriptor;
+use cros_async::EventAsync;
+use cros_async::Executor;
+use cros_async::IntoAsync;
+use cros_async::IoSourceExt;
+use futures::future::AbortHandle;
+use futures::future::Abortable;
 use hypervisor::ProtectionType;
+use net_util::sys::unix::Tap;
+use net_util::MacAddress;
 use net_util::TapT;
-use net_util::{sys::unix::Tap, MacAddress};
 use sync::Mutex;
 use virtio_sys::virtio_net;
 use vm_memory::GuestMemory;
-use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
+use vmm_vhost::message::VhostUserProtocolFeatures;
+use vmm_vhost::message::VhostUserVirtioFeatures;
 
 use crate::virtio;
+use crate::virtio::net::process_rx;
 use crate::virtio::net::validate_and_configure_tap;
-use crate::virtio::net::{process_rx, NetError};
-use crate::virtio::vhost::user::device::handler::{
-    DeviceRequestHandler, Doorbell, VhostUserBackend,
-};
-use crate::virtio::vhost::user::device::net::{
-    run_ctrl_queue, run_tx_queue, NetBackend, NET_EXECUTOR,
-};
-use virtio::vhost::user::device::vvu::pci::VvuPciDevice;
+use crate::virtio::net::NetError;
+use crate::virtio::vhost::user::device::handler::sys::Doorbell;
+use crate::virtio::vhost::user::device::handler::VhostUserBackend;
+use crate::virtio::vhost::user::device::listener::sys::VhostUserListener;
+use crate::virtio::vhost::user::device::listener::VhostUserListenerTrait;
+use crate::virtio::vhost::user::device::net::run_ctrl_queue;
+use crate::virtio::vhost::user::device::net::run_tx_queue;
+use crate::virtio::vhost::user::device::net::NetBackend;
+use crate::virtio::vhost::user::device::net::NET_EXECUTOR;
+use crate::PciAddress;
 
 struct TapConfig {
     host_ip: Ipv4Addr,
@@ -315,31 +330,39 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
     let mut threads = Vec::with_capacity(num_devices);
 
     for (conn, backend) in devices {
+        let ex = Executor::new().context("failed to create executor")?;
+
         match conn {
             Connection::Socket(socket) => {
-                let ex = Executor::new().context("failed to create executor")?;
                 threads.push(thread::spawn(move || {
-                    let handler = DeviceRequestHandler::new(Box::new(backend));
                     NET_EXECUTOR.with(|thread_ex| {
                         let _ = thread_ex.set(ex.clone());
                     });
-                    ex.run_until(handler.run(&socket, &ex))?
+                    let listener = VhostUserListener::new_socket(&socket, None)?;
+                    // run_until() returns an Result<Result<..>> which the ? operator lets us
+                    // flatten.
+                    ex.run_until(listener.run_backend(Box::new(backend), &ex))?
                 }));
             }
             Connection::Vfio(device_name) => {
-                let device = VvuPciDevice::new(device_name.as_str(), backend.max_queue_num())?;
-                let ex = Executor::new().context("failed to create executor")?;
                 threads.push(thread::spawn(move || {
-                    let handler = DeviceRequestHandler::new(Box::new(backend));
                     NET_EXECUTOR.with(|thread_ex| {
                         let _ = thread_ex.set(ex.clone());
                     });
-                    ex.run_until(handler.run_vvu(device, &ex))?
+                    let listener = VhostUserListener::new_vvu(
+                        PciAddress::from_str(&device_name)?,
+                        backend.max_queue_num(),
+                        None,
+                    )?;
+                    // run_until() returns an Result<Result<..>> which the ? operator lets us
+                    // flatten.
+                    ex.run_until(listener.run_backend(Box::new(backend), &ex))?
                 }));
             }
         };
     }
 
+    info!("vhost-user net device ready, loop threads started.");
     for t in threads {
         match t.join() {
             Ok(r) => r?,

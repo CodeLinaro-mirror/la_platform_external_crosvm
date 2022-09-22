@@ -7,32 +7,38 @@ mod shm_vios;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use self::shm_streams::*;
-
 pub use self::shm_vios::*;
 
 pub mod streams;
-
 mod worker;
 
+use std::io::Error as IoError;
+use std::path::Path;
+use std::sync::mpsc::RecvError;
+use std::sync::mpsc::SendError;
+use std::sync::Arc;
 use std::thread;
 
-use crate::virtio::{copy_config, DescriptorError, DeviceType, Interrupt, Queue, VirtioDevice};
-use base::{error, Error as BaseError, Event, RawDescriptor};
-use data_model::{DataInit, Le32};
+use base::error;
+use base::Error as BaseError;
+use base::Event;
+use base::RawDescriptor;
+use data_model::DataInit;
+use data_model::Le32;
 use remain::sorted;
-use sync::Mutex;
-use vm_memory::GuestMemory;
-
-use std::path::Path;
-use std::sync::mpsc::{RecvError, SendError};
-use std::sync::Arc;
-
-use super::layout::*;
 use streams::StreamMsg;
+use sync::Mutex;
+use thiserror::Error as ThisError;
+use vm_memory::GuestMemory;
 use worker::*;
 
-use std::io::Error as IoError;
-use thiserror::Error as ThisError;
+use crate::virtio::copy_config;
+use crate::virtio::device_constants::snd::virtio_snd_config;
+use crate::virtio::DescriptorError;
+use crate::virtio::DeviceType;
+use crate::virtio::Interrupt;
+use crate::virtio::Queue;
+use crate::virtio::VirtioDevice;
 
 const QUEUE_SIZES: &[u16] = &[64, 64, 64, 64];
 
@@ -81,7 +87,7 @@ pub struct Sound {
 
 impl VirtioDevice for Sound {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
-        self.vios_client.keep_fds()
+        self.vios_client.keep_rds()
     }
 
     fn device_type(&self) -> DeviceType {

@@ -2,19 +2,34 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use libc::{EINVAL, ERANGE};
-use std::{path::Path, thread::JoinHandle};
+use std::path::Path;
+use std::thread::JoinHandle;
 
-use base::{
-    error, AsRawDescriptor, Descriptor, Error as SysError, Killable, MemoryMappingArena, MmapError,
-    Protection, SafeDescriptor, Tube, UnixSeqpacket, SIGRTMIN,
-};
-use hypervisor::{MemSlot, Vm};
-use resources::{Alloc, MmioType, SystemAllocator};
-use serde::{Deserialize, Serialize};
+use base::error;
+use base::AsRawDescriptor;
+use base::Descriptor;
+use base::Error as SysError;
+use base::Killable;
+use base::MemoryMappingArena;
+use base::MmapError;
+use base::Protection;
+use base::SafeDescriptor;
+use base::Tube;
+use base::UnixSeqpacket;
+use base::SIGRTMIN;
+use hypervisor::MemSlot;
+use hypervisor::Vm;
+use libc::EINVAL;
+use libc::ERANGE;
+use resources::Alloc;
+use resources::SystemAllocator;
+use serde::Deserialize;
+use serde::Serialize;
 use vm_memory::GuestAddress;
 
-use crate::{client::HandleRequestResult, VmRequest, VmResponse};
+use crate::client::HandleRequestResult;
+use crate::VmRequest;
+use crate::VmResponse;
 
 pub fn handle_request<T: AsRef<Path> + std::fmt::Debug>(
     request: &VmRequest,
@@ -22,7 +37,7 @@ pub fn handle_request<T: AsRef<Path> + std::fmt::Debug>(
 ) -> HandleRequestResult {
     match UnixSeqpacket::connect(&socket_path) {
         Ok(s) => {
-            let socket = Tube::new(s);
+            let socket = Tube::new_from_unix_seqpacket(s);
             if let Err(e) = socket.send(request) {
                 error!(
                     "failed to send request to socket at '{:?}': {}",
@@ -129,14 +144,12 @@ impl FsMappingRequest {
                 func,
                 bar,
             }) => {
-                match allocator
-                    .mmio_allocator(MmioType::High)
-                    .get(&Alloc::PciBar {
-                        bus,
-                        dev,
-                        func,
-                        bar,
-                    }) {
+                match allocator.mmio_allocator_any().get(&Alloc::PciBar {
+                    bus,
+                    dev,
+                    func,
+                    bar,
+                }) {
                     Some((range, _)) => {
                         let size: usize = match range.len().and_then(|x| x.try_into().ok()) {
                             Some(v) => v,

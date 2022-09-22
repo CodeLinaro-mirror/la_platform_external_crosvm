@@ -1,17 +1,16 @@
 diff --git a/base/Android.bp b/base/Android.bp
-index a3fe04d9..55ab423c 100644
+index d3544ede..faea7809 100644
 --- a/base/Android.bp
 +++ b/base/Android.bp
-@@ -13,8 +13,6 @@ package {
+@@ -13,7 +13,6 @@ package {
  rust_test {
      name: "base_test_src_lib",
      defaults: ["crosvm_defaults"],
--    // has rustc warnings
 -    host_supported: true,
      crate_name: "base",
      cargo_env_compat: true,
      cargo_pkg_version: "0.1.0",
-@@ -22,7 +20,7 @@ rust_test {
+@@ -21,7 +20,7 @@ rust_test {
      test_suites: ["general-tests"],
      auto_gen_config: true,
      test_options: {
@@ -20,8 +19,8 @@ index a3fe04d9..55ab423c 100644
      },
      edition: "2021",
      rustlibs: [
-@@ -44,13 +42,31 @@ rust_test {
-         "libbase_poll_token_derive",
+@@ -45,6 +44,25 @@ rust_test {
+         "libbase_event_token_derive",
          "libremain",
      ],
 +    target: {
@@ -46,16 +45,9 @@ index a3fe04d9..55ab423c 100644
  }
  
  rust_library {
-     name: "libbase_rust",
-     defaults: ["crosvm_defaults"],
-     stem: "libbase",
--    // has rustc warnings
-     host_supported: true,
-     crate_name: "base",
-     cargo_env_compat: true,
-@@ -77,4 +92,23 @@ rust_library {
-         "libbase_poll_token_derive",
-         "libremain",
+@@ -81,4 +99,23 @@ rust_library {
+     apex_available: [
+         "//apex_available:platform",
      ],
 +    target: {
 +        android: {

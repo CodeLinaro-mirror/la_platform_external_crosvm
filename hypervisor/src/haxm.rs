@@ -2,19 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::arch::x86_64::{CpuidResult, __cpuid};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::arch::x86_64::CpuidResult;
+use std::arch::x86_64::__cpuid;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
-use base::{AsRawDescriptor, RawDescriptor, Result, SafeDescriptor};
+use base::AsRawDescriptor;
+use base::RawDescriptor;
+use base::Result;
+use base::SafeDescriptor;
 
-use crate::{CpuId, CpuIdEntry, Hypervisor, HypervisorCap, HypervisorX86_64};
+use crate::CpuId;
+use crate::CpuIdEntry;
+use crate::Hypervisor;
+use crate::HypervisorCap;
+use crate::HypervisorX86_64;
 
 mod haxm_sys;
-use haxm_sys::*;
 // This is a HAXM-specific capability, so it's not present in the VmCap enum, and the
 // register_vm_log function does not exist on the Vm trait. But windows.rs will use it when
 // creating Haxm Vm instances, so we expose the cap constant here.
 pub use haxm_sys::HAX_CAP_VM_LOG;
+use haxm_sys::*;
 
 mod vcpu;
 pub use vcpu::*;
@@ -64,10 +73,12 @@ impl Haxm {
 
 impl Hypervisor for Haxm {
     fn check_capability(&self, cap: HypervisorCap) -> bool {
-        match cap {
-            HypervisorCap::UserMemory => true,
-            _ => false,
-        }
+        // under haxm, guests rely on this leaf to calibrate their
+        // clocksource.
+        matches!(
+            cap,
+            HypervisorCap::UserMemory | HypervisorCap::CalibratedTscLeafRequired
+        )
     }
 
     /// Makes a shallow clone of this `Hypervisor`.
@@ -278,7 +289,9 @@ impl HypervisorX86_64 for Haxm {
     }
 }
 
+// TODO(b:241252288): Enable tests disabled with dummy feature flag - enable_haxm_tests.
 #[cfg(test)]
+#[cfg(feature = "enable_haxm_tests")]
 mod tests {
     use super::*;
 
@@ -312,11 +325,11 @@ mod tests {
             .expect("failed to get leaf 0x1");
 
         // FPU should definitely exist
-        assert_ne!(entry.edx & Feature1Edx::FPU.bits(), 0);
+        assert_ne!(entry.cpuid.edx & Feature1Edx::FPU.bits(), 0);
         // SSSE3 almost certainly set
-        assert_ne!(entry.ecx & Feature1Ecx::SSSE3.bits(), 0);
+        assert_ne!(entry.cpuid.ecx & Feature1Ecx::SSSE3.bits(), 0);
         // VMX should not be set, HAXM does not support nested virt
-        assert_eq!(entry.ecx & Feature1Ecx::VMX.bits(), 0);
+        assert_eq!(entry.cpuid.ecx & Feature1Ecx::VMX.bits(), 0);
 
         // Check that leaf 0x15 is in the results
         cpuid
@@ -338,7 +351,7 @@ mod tests {
             .find(|entry| entry.function == 0x80000001)
             .expect("failed to get leaf 0x80000001");
         // NX should be set, Windows 8+ and HAXM require it
-        assert_ne!(entry.edx & Feature80000001Edx::NX.bits(), 0);
+        assert_ne!(entry.cpuid.edx & Feature80000001Edx::NX.bits(), 0);
     }
 
     #[test]

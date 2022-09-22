@@ -10,12 +10,14 @@ use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::str::Utf8Error;
 
-use base::{Error as BaseError, ExternalMappingError, SafeDescriptor};
+use base::Error as BaseError;
+use base::ExternalMappingError;
+use base::SafeDescriptor;
 use data_model::VolatileMemoryError;
 use remain::sorted;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
-
 #[cfg(feature = "vulkano")]
 use vulkano::device::DeviceCreationError;
 #[cfg(feature = "vulkano")]
@@ -159,6 +161,9 @@ pub enum RutabagaError {
     /// Invalid Capset
     #[error("invalid capset")]
     InvalidCapset,
+    /// A command buffer with insufficient space was submitted.
+    #[error("invalid command buffer submitted")]
+    InvalidCommandBuffer,
     /// A command size was submitted that was invalid.
     #[error("command buffer submitted with invalid size: {0}")]
     InvalidCommandSize(usize),
@@ -408,7 +413,6 @@ const GFXSTREAM_RENDERER_FLAGS_USE_GLX: u32 = 1 << 2;
 const GFXSTREAM_RENDERER_FLAGS_USE_SURFACELESS: u32 = 1 << 3;
 const GFXSTREAM_RENDERER_FLAGS_USE_GLES: u32 = 1 << 4;
 const GFXSTREAM_RENDERER_FLAGS_NO_VK_BIT: u32 = 1 << 5;
-const GFXSTREAM_RENDERER_FLAGS_NO_SYNCFD_BIT: u32 = 1 << 20;
 const GFXSTREAM_RENDERER_FLAGS_GUEST_USES_ANGLE: u32 = 1 << 21;
 const GFXSTREAM_RENDERER_FLAGS_VULKAN_NATIVE_SWAPCHAIN_BIT: u32 = 1 << 22;
 pub const GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB: u32 = 1 << 23;
@@ -454,11 +458,6 @@ impl GfxstreamFlags {
     /// Use GLES drivers.
     pub fn use_gles(self, v: bool) -> GfxstreamFlags {
         self.set_flag(GFXSTREAM_RENDERER_FLAGS_USE_GLES, v)
-    }
-
-    /// Use external synchronization.
-    pub fn use_syncfd(self, v: bool) -> GfxstreamFlags {
-        self.set_flag(GFXSTREAM_RENDERER_FLAGS_NO_SYNCFD_BIT, !v)
     }
 
     /// Support using Vulkan.

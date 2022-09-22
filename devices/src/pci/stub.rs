@@ -13,15 +13,21 @@
 //! something to the guest on function 0.
 
 use base::RawDescriptor;
-use resources::{Alloc, SystemAllocator};
+use resources::Alloc;
+use resources::SystemAllocator;
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::pci::pci_configuration::{
-    PciBarConfiguration, PciClassCode, PciConfiguration, PciHeaderType, PciProgrammingInterface,
-    PciSubclass,
-};
-use crate::pci::pci_device::{PciDevice, Result};
-use crate::pci::{PciAddress, PciDeviceError};
-use serde::{Deserialize, Serialize};
+use crate::pci::pci_configuration::PciBarConfiguration;
+use crate::pci::pci_configuration::PciClassCode;
+use crate::pci::pci_configuration::PciConfiguration;
+use crate::pci::pci_configuration::PciHeaderType;
+use crate::pci::pci_configuration::PciProgrammingInterface;
+use crate::pci::pci_configuration::PciSubclass;
+use crate::pci::pci_device::PciDevice;
+use crate::pci::pci_device::Result;
+use crate::pci::PciAddress;
+use crate::pci::PciDeviceError;
 
 #[derive(Serialize, Deserialize)]
 pub struct StubPciParameters {
@@ -87,6 +93,10 @@ impl PciDevice for StubPciDevice {
         "Stub".to_owned()
     }
 
+    fn preferred_address(&self) -> Option<PciAddress> {
+        Some(self.requested_address)
+    }
+
     fn allocate_address(&mut self, resources: &mut SystemAllocator) -> Result<PciAddress> {
         if self.assigned_address.is_none() {
             if resources.reserve_pci(
@@ -128,8 +138,11 @@ impl PciDevice for StubPciDevice {
 
 #[cfg(test)]
 mod test {
+    use resources::AddressRange;
+    use resources::SystemAllocator;
+    use resources::SystemAllocatorConfig;
+
     use super::*;
-    use resources::{AddressRange, SystemAllocator, SystemAllocatorConfig};
 
     const CONFIG: StubPciParameters = StubPciParameters {
         address: PciAddress {

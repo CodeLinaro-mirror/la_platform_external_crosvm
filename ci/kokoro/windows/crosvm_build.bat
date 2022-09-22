@@ -15,7 +15,7 @@ set rustup_version=1.24.3
 
 :: Install rust toolchain through rustup.
 echo [%TIME%] installing rustup %rustup_version%
-choco install --no-progress -y rustup.install --version=%rustup_version%
+choco install --no-progress -y rustup.install --version=%rustup_version% --ignore-checksums
 
 :: Reload path for installed rustup binary
 call RefreshEnv.cmd
@@ -47,7 +47,7 @@ py .\tools\clippy
 if %ERRORLEVEL% neq 0 ( exit /b %ERRORLEVEL% )
 
 echo [%TIME%] Calling crosvm\tools\run_tests
-py .\tools\run_tests --arch win64 -v
+py .\tools\run_tests --build-target=x86_64-pc-windows-msvc -v
 if %ERRORLEVEL% neq 0 ( exit /b %ERRORLEVEL% )
 
 exit /b %ERRORLEVEL%

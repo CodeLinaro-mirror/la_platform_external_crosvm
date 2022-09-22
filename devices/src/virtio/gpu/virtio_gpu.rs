@@ -9,41 +9,51 @@ use std::rc::Rc;
 use std::result::Result;
 use std::sync::Arc;
 
-use crate::virtio::gpu::GpuDisplayParameters;
-use crate::virtio::resource_bridge::{BufferInfo, PlaneInfo, ResourceInfo, ResourceResponse};
-use base::{error, ExternalMapping, Protection, SafeDescriptor, Tube};
-
+use base::error;
+use base::ExternalMapping;
+use base::Protection;
+use base::SafeDescriptor;
 use data_model::VolatileSlice;
-
 use gpu_display::*;
-use rutabaga_gfx::{
-    ResourceCreate3D, ResourceCreateBlob, Rutabaga, RutabagaBuilder, RutabagaFence,
-    RutabagaFenceHandler, RutabagaIovec, Transfer3D,
-};
-
 use libc::c_void;
-
-use resources::Alloc;
-
-use super::protocol::{
-    GpuResponse::{self, *},
-    GpuResponsePlaneInfo, VirtioGpuResult, VIRTIO_GPU_BLOB_FLAG_CREATE_GUEST_HANDLE,
-    VIRTIO_GPU_BLOB_MEM_HOST3D,
-};
-use super::udmabuf::UdmabufDriver;
-use super::VirtioScanoutBlobData;
+use rutabaga_gfx::ResourceCreate3D;
+use rutabaga_gfx::ResourceCreateBlob;
+use rutabaga_gfx::Rutabaga;
+use rutabaga_gfx::RutabagaBuilder;
+use rutabaga_gfx::RutabagaFence;
+use rutabaga_gfx::RutabagaFenceHandler;
+use rutabaga_gfx::RutabagaHandle;
+use rutabaga_gfx::RutabagaIovec;
+use rutabaga_gfx::Transfer3D;
+use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_DMABUF;
 use sync::Mutex;
+use vm_control::VmMemorySource;
+use vm_memory::udmabuf::UdmabufDriver;
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
 
-use vm_memory::{GuestAddress, GuestMemory};
-
-use vm_control::{MemSlot, VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
+use super::protocol::GpuResponse;
+use super::protocol::GpuResponse::*;
+use super::protocol::GpuResponsePlaneInfo;
+use super::protocol::VirtioGpuResult;
+use super::protocol::VIRTIO_GPU_BLOB_FLAG_CREATE_GUEST_HANDLE;
+use super::protocol::VIRTIO_GPU_BLOB_MEM_HOST3D;
+use super::VirtioScanoutBlobData;
+use crate::virtio::gpu::edid::DisplayInfo;
+use crate::virtio::gpu::edid::EdidBytes;
+use crate::virtio::gpu::GpuDisplayParameters;
+use crate::virtio::resource_bridge::BufferInfo;
+use crate::virtio::resource_bridge::PlaneInfo;
+use crate::virtio::resource_bridge::ResourceInfo;
+use crate::virtio::resource_bridge::ResourceResponse;
+use crate::virtio::SharedMemoryMapper;
 
 struct VirtioGpuResource {
     resource_id: u32,
     width: u32,
     height: u32,
     size: u64,
-    slot: Option<MemSlot>,
+    shmem_offset: Option<u64>,
     scanout_data: Option<VirtioScanoutBlobData>,
     display_import: Option<u32>,
 }
@@ -57,7 +67,7 @@ impl VirtioGpuResource {
             width,
             height,
             size,
-            slot: None,
+            shmem_offset: None,
             scanout_data: None,
             display_import: None,
         }
@@ -261,12 +271,12 @@ pub struct VirtioGpu {
     cursor_scanout: VirtioGpuScanout,
     // Maps event devices to scanout number.
     event_devices: Map<u32, u32>,
-    gpu_device_tube: Tube,
-    pci_bar: Alloc,
+    mapper: Box<dyn SharedMemoryMapper>,
     map_request: Arc<Mutex<Option<ExternalMapping>>>,
     rutabaga: Rutabaga,
     resources: Map<u32, VirtioGpuResource>,
     external_blob: bool,
+    refresh_rate: u32,
     udmabuf_driver: Option<UdmabufDriver>,
 }
 
@@ -299,8 +309,7 @@ impl VirtioGpu {
         display_params: Vec<GpuDisplayParameters>,
         rutabaga_builder: RutabagaBuilder,
         event_devices: Vec<EventDevice>,
-        gpu_device_tube: Tube,
-        pci_bar: Alloc,
+        mapper: Box<dyn SharedMemoryMapper>,
         map_request: Arc<Mutex<Option<ExternalMapping>>>,
         external_blob: bool,
         udmabuf: bool,
@@ -339,12 +348,12 @@ impl VirtioGpu {
             scanouts,
             cursor_scanout,
             event_devices: Default::default(),
-            gpu_device_tube,
-            pci_bar,
+            mapper,
             map_request,
             rutabaga,
             resources: Default::default(),
             external_blob,
+            refresh_rate: display_params[0].refresh_rate,
             udmabuf_driver,
         };
 
@@ -668,11 +677,11 @@ impl VirtioGpu {
         vecs: Vec<(GuestAddress, usize)>,
         mem: &GuestMemory,
     ) -> VirtioGpuResult {
-        let mut rutabaga_handle = None;
+        let mut descriptor = None;
         let mut rutabaga_iovecs = None;
 
         if resource_create_blob.blob_flags & VIRTIO_GPU_BLOB_FLAG_CREATE_GUEST_HANDLE != 0 {
-            rutabaga_handle = match self.udmabuf_driver {
+            descriptor = match self.udmabuf_driver {
                 Some(ref driver) => Some(driver.create_udmabuf(mem, &vecs[..])?),
                 None => return Err(ErrUnspec),
             }
@@ -686,7 +695,10 @@ impl VirtioGpu {
             resource_id,
             resource_create_blob,
             rutabaga_iovecs,
-            rutabaga_handle,
+            descriptor.map(|descriptor| RutabagaHandle {
+                os_handle: descriptor,
+                handle_type: RUTABAGA_MEM_HANDLE_TYPE_DMABUF,
+            }),
         )?;
 
         let resource = VirtioGpuResource::new(resource_id, 0, 0, resource_create_blob.size);
@@ -719,6 +731,7 @@ impl VirtioGpu {
                     descriptor: export.os_handle,
                     offset: 0,
                     size: resource.size,
+                    gpu_blob: true,
                 },
             }
         } else {
@@ -740,25 +753,12 @@ impl VirtioGpu {
             }
         };
 
-        let request = VmMemoryRequest::RegisterMemory {
-            source,
-            dest: VmMemoryDestination::ExistingAllocation {
-                allocation: self.pci_bar,
-                offset,
-            },
-            prot: Protection::read_write(),
-        };
-        self.gpu_device_tube.send(&request)?;
-        let response = self.gpu_device_tube.recv()?;
+        self.mapper
+            .add_mapping(source, offset, Protection::read_write())
+            .map_err(|_| ErrUnspec)?;
 
-        match response {
-            VmMemoryResponse::RegisterMemory { pfn: _, slot } => {
-                resource.slot = Some(slot);
-                Ok(OkMapInfo { map_info })
-            }
-            VmMemoryResponse::Err(e) => Err(ErrBase(e)),
-            _ => Err(ErrUnspec),
-        }
+        resource.shmem_offset = Some(offset);
+        Ok(OkMapInfo { map_info })
     }
 
     /// Uses the hypervisor to unmap the blob resource.
@@ -768,19 +768,19 @@ impl VirtioGpu {
             .get_mut(&resource_id)
             .ok_or(ErrInvalidResourceId)?;
 
-        let slot = resource.slot.ok_or(ErrUnspec)?;
-        let request = VmMemoryRequest::UnregisterMemory(slot);
-        self.gpu_device_tube.send(&request)?;
-        let response = self.gpu_device_tube.recv()?;
+        let shmem_offset = resource.shmem_offset.ok_or(ErrUnspec)?;
+        self.mapper
+            .remove_mapping(shmem_offset)
+            .map_err(|_| ErrUnspec)?;
+        resource.shmem_offset = None;
+        Ok(OkNoData)
+    }
 
-        match response {
-            VmMemoryResponse::Ok => {
-                resource.slot = None;
-                Ok(OkNoData)
-            }
-            VmMemoryResponse::Err(e) => Err(ErrBase(e)),
-            _ => Err(ErrUnspec),
-        }
+    /// Gets the EDID for the specified scanout ID. We return a virtual EDID that is identical
+    /// for all scanouts.
+    pub fn get_edid(&self, _scanout_id: u32) -> VirtioGpuResult {
+        let (width, height) = self.display_info()[0];
+        EdidBytes::new(&DisplayInfo::new(width, height, self.refresh_rate))
     }
 
     /// Creates a rutabaga context.

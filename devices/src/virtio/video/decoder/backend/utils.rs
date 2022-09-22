@@ -5,18 +5,19 @@
 // TODO(acourbot): Remove once we start using this file
 #![allow(dead_code)]
 
-use std::{
-    collections::{btree_map::Entry, BTreeMap, VecDeque},
-    time::Duration,
-};
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::time::Duration;
 
+use base::AsRawDescriptor;
 use base::Event;
+use sync::Mutex;
 use thiserror::Error as ThisError;
-
-use crate::virtio::video::resource::GuestResource;
 
 #[cfg(feature = "ffmpeg")]
 use crate::virtio::video::resource::BufferHandle;
+use crate::virtio::video::resource::GuestResource;
 
 /// Manages a pollable queue of events to be sent to the decoder or encoder.
 pub struct EventQueue<T> {
@@ -61,12 +62,6 @@ impl<T> EventQueue<T> {
         Ok(event)
     }
 
-    /// Return a reference to an `Event` on which the caller can poll to know when `dequeue_event`
-    /// can be called without blocking.
-    pub fn event_pipe(&self) -> &Event {
-        &self.event
-    }
-
     /// Remove all the posted events for which `predicate` returns `false`.
     pub fn retain<P: FnMut(&T) -> bool>(&mut self, predicate: P) {
         if self.pending_events.len() > 0 {
@@ -91,6 +86,52 @@ impl<T> EventQueue<T> {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.pending_events.len()
+    }
+}
+
+impl<T> AsRawDescriptor for EventQueue<T> {
+    fn as_raw_descriptor(&self) -> base::RawDescriptor {
+        self.event.as_raw_descriptor()
+    }
+}
+
+/// An `EventQueue` that is `Sync`, `Send`, and non-mut - i.e. that can easily be passed across
+/// threads and wrapped into a `Rc` or `Arc`.
+pub struct SyncEventQueue<T>(Mutex<EventQueue<T>>);
+
+impl<T> From<EventQueue<T>> for SyncEventQueue<T> {
+    fn from(queue: EventQueue<T>) -> Self {
+        Self(Mutex::new(queue))
+    }
+}
+
+impl<T> SyncEventQueue<T> {
+    /// Add `event` to the queue.
+    pub fn queue_event(&self, event: T) -> base::Result<()> {
+        self.0.lock().queue_event(event)
+    }
+
+    /// Read the next event, blocking until an event becomes available.
+    pub fn dequeue_event(&self) -> base::Result<T> {
+        self.0.lock().dequeue_event()
+    }
+
+    /// Remove all the posted events for which `predicate` returns `false`.
+    pub fn retain<P: FnMut(&T) -> bool>(&self, predicate: P) {
+        self.0.lock().retain(predicate)
+    }
+
+    /// Returns the number of events currently pending on this queue, i.e. the number of times
+    /// `dequeue_event` can be called without blocking.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.0.lock().len()
+    }
+}
+
+impl<T> AsRawDescriptor for SyncEventQueue<T> {
+    fn as_raw_descriptor(&self) -> base::RawDescriptor {
+        self.0.lock().as_raw_descriptor()
     }
 }
 
@@ -213,9 +254,12 @@ impl OutputQueue {
 mod tests {
     use std::time::Duration;
 
+    use base::EventToken;
+    use base::WaitContext;
+
     use super::*;
-    use crate::virtio::video::{decoder::DecoderEvent, format::Rect};
-    use base::{EventToken, WaitContext};
+    use crate::virtio::video::decoder::DecoderEvent;
+    use crate::virtio::video::format::Rect;
 
     /// Test basic queue/dequeue functionality of `EventQueue`.
     #[test]
@@ -272,8 +316,7 @@ mod tests {
         }
 
         let mut event_queue = EventQueue::new().unwrap();
-        let event_pipe = event_queue.event_pipe();
-        let wait_context = WaitContext::build_with(&[(event_pipe, Token::Event)]).unwrap();
+        let wait_context = WaitContext::build_with(&[(&event_queue, Token::Event)]).unwrap();
 
         // The queue is empty, so `event_pipe` should not signal.
         assert_eq!(wait_context.wait_timeout(Duration::ZERO).unwrap().len(), 0);

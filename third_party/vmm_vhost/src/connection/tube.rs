@@ -12,7 +12,8 @@ use base::{AsRawDescriptor, FromRawDescriptor, RawDescriptor, Tube};
 use serde::{Deserialize, Serialize};
 
 use super::{Error, Result};
-use crate::connection::{Endpoint, Listener, Req};
+use crate::connection::{Endpoint, Req};
+use crate::message::SlaveReq;
 use std::cmp::min;
 use std::fs::File;
 use std::marker::PhantomData;
@@ -27,21 +28,6 @@ struct RawDescriptorContainer {
 struct EndpointMessage {
     rds: Vec<RawDescriptorContainer>,
     data: Vec<u8>,
-}
-
-/// No-op for Tubes. Tubes are a socketpair() equivalent and cannot be listened for or connected.
-pub struct TubeListener;
-
-impl Listener for TubeListener {
-    type Connection = Tube;
-
-    fn accept(&mut self) -> Result<Option<Self::Connection>> {
-        unimplemented!("listeners for Tubes are not used")
-    }
-
-    fn set_nonblocking(&self, _block: bool) -> Result<()> {
-        unimplemented!("listeners for Tubes are not used")
-    }
 }
 
 /// Tube endpoint for vhost-user connection.
@@ -60,15 +46,6 @@ impl<R: Req> From<Tube> for TubeEndpoint<R> {
 }
 
 impl<R: Req> Endpoint<R> for TubeEndpoint<R> {
-    type Listener = TubeListener;
-
-    fn from_connection(tube: <<Self as Endpoint<R>>::Listener as Listener>::Connection) -> Self {
-        Self {
-            tube,
-            _r: PhantomData,
-        }
-    }
-
     fn connect<P: AsRef<Path>>(_path: P) -> Result<Self> {
         unimplemented!("connections not supported on Tubes")
     }
@@ -163,6 +140,13 @@ impl<R: Req> Endpoint<R> for TubeEndpoint<R> {
 
         Ok((bytes_read, files))
     }
+
+    fn create_slave_request_endpoint(
+        &mut self,
+        _files: Option<Vec<File>>,
+    ) -> Result<Box<dyn Endpoint<SlaveReq>>> {
+        unimplemented!("SET_SLAVE_REQ_FD not supported");
+    }
 }
 
 impl<R: Req> AsRawDescriptor for TubeEndpoint<R> {
@@ -186,8 +170,8 @@ mod tests {
     fn create_pair() -> (TubeEndpoint<MasterReq>, TubeEndpoint<MasterReq>) {
         let (master_tube, slave_tube) = Tube::pair().unwrap();
         (
-            TubeEndpoint::<MasterReq>::from_connection(master_tube),
-            TubeEndpoint::<MasterReq>::from_connection(slave_tube),
+            TubeEndpoint::<MasterReq>::from(master_tube),
+            TubeEndpoint::<MasterReq>::from(slave_tube),
         )
     }
 

@@ -12,32 +12,61 @@ our command line tools.
 
 Refer to the scripts in ./tools for example usage.
 """
-from __future__ import annotations
+import functools
+import json
+import sys
+import subprocess
 
+if sys.version_info.major != 3 or sys.version_info.minor < 8:
+    print("Python 3.8 or higher is required.")
+    print("Hint: Do not use crosvm tools inside cros_sdk.")
+    sys.exit(1)
+
+
+def ensure_package_exists(package: str):
+    """Installs the specified package via pip if it does not exist."""
+    try:
+        __import__(package)
+    except ImportError:
+        print(
+            f"Missing the python package {package}. Do you want to install? [y/N] ",
+            end="",
+            flush=True,
+        )
+        response = sys.stdin.readline()
+        if response[:1].lower() == "y":
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", package])
+        else:
+            sys.exit(1)
+
+
+ensure_package_exists("argh")
+
+from io import StringIO
+from math import ceil
+from multiprocessing.pool import ThreadPool
+from pathlib import Path
+from subprocess import DEVNULL, PIPE, STDOUT  # type: ignore
+from tempfile import gettempdir
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, TypeVar, Union, cast
+import argh  # type: ignore
 import argparse
 import contextlib
 import csv
 import getpass
-from math import ceil
 import os
 import re
 import shutil
-import subprocess
-import sys
-from tempfile import gettempdir
 import traceback
-from io import StringIO
-from multiprocessing.pool import ThreadPool
-from pathlib import Path
-from subprocess import DEVNULL, PIPE, STDOUT  # type: ignore
-from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, TypeVar, Union
-
 
 "Root directory of crosvm"
 CROSVM_ROOT = Path(__file__).parent.parent.parent.resolve()
 
 "Cargo.toml file of crosvm"
 CROSVM_TOML = CROSVM_ROOT / "Cargo.toml"
+
+"Url of crosvm's gerrit review host"
+GERRIT_URL = "https://chromium-review.googlesource.com"
 
 # Ensure that we really found the crosvm root directory
 assert 'name = "crosvm"' in CROSVM_TOML.read_text()
@@ -122,7 +151,7 @@ class Command(object):
     def __init__(
         self,
         *args: Any,
-        stdin_cmd: Optional[Command] = None,
+        stdin_cmd: Optional["Command"] = None,
         env_vars: Dict[str, str] = {},
     ):
         self.args = Command.__parse_cmd(args)
@@ -266,7 +295,7 @@ class Command(object):
         )
         return CommandResult(result.stdout, result.stderr, result.returncode)
 
-    def stream(self, stderr: Optional[int] = PIPE) -> subprocess.Popen[str]:
+    def stream(self, stderr: Optional[int] = PIPE) -> "subprocess.Popen[str]":
         """
         Runs a program and returns the Popen object of the running process.
         """
@@ -284,6 +313,13 @@ class Command(object):
         cmd = Command()
         cmd.args = self.args
         cmd.env_vars = {**self.env_vars, key: value}
+        return cmd
+
+    def add_path(self, new_path: str):
+        path_var = self.env_vars.get("PATH", os.environ.get("PATH", ""))
+        cmd = Command()
+        cmd.args = self.args
+        cmd.env_vars = {**self.env_vars, "PATH": f"{path_var}:{new_path}"}
         return cmd
 
     def foreach(self, arguments: Iterable[Any], batch_size: int = 1):
@@ -404,6 +440,11 @@ class ParallelCommands(object):
         with ThreadPool(os.cpu_count()) as pool:
             return pool.map(lambda command: command.stdout(), self.commands)
 
+    def success(self):
+        results = self.fg(check=False, quiet=False)
+        print(results)
+        return all(result == 0 for result in results)
+
 
 @contextlib.contextmanager
 def cwd_context(path: PathLike):
@@ -484,12 +525,6 @@ def run_commands(
     function arguments via argh: https://pythonhosted.org/argh
     """
     try:
-        import argh  # type: ignore
-    except ImportError as e:
-        print("Missing module:", e)
-        print("(Re-)Run ./tools/install-deps to install the required dependencies.")
-        sys.exit(1)
-    try:
         # Add global verbose arguments
         parser = argparse.ArgumentParser(usage=usage)
         add_verbose_args(parser)
@@ -538,7 +573,10 @@ def add_verbose_args(parser: argparse.ArgumentParser):
 
 
 def all_tracked_files():
-    return (Path(f) for f in cmd("git ls-files").lines())
+    for line in cmd("git ls-files").lines():
+        file = Path(line)
+        if file.is_file():
+            yield file
 
 
 def find_source_files(extension: str, ignore: List[str] = []):
@@ -559,7 +597,7 @@ def find_scripts(path: Path, shebang: str):
 
 
 def confirm(message: str, default=False):
-    print(message, "[y/N]" if default == False else "[Y/n]")
+    print(message, "[y/N]" if default == False else "[Y/n]", end=" ", flush=True)
     response = sys.stdin.readline().strip()
     if response in ("y", "Y"):
         return True
@@ -579,6 +617,7 @@ def get_gcloud_access_token():
     return cmd("gcloud auth print-access-token").stdout(check=False)
 
 
+@functools.lru_cache(maxsize=None)
 def curl_with_git_auth():
     """
     Returns a curl `Command` instance set up to use the same HTTP credentials as git.
@@ -609,6 +648,109 @@ def curl_with_git_auth():
         return cmd(f"curl -H @{AUTH_HEADERS_FILE}")
 
     raise Exception(f"Unsupported git credentials.helper: {helper}")
+
+
+def strip_xssi(response: str):
+    # See https://gerrit-review.googlesource.com/Documentation/rest-api.html#output
+    assert response.startswith(")]}'\n")
+    return response[5:]
+
+
+def gerrit_api_get(path: str):
+    response = cmd(f"curl --silent --fail {GERRIT_URL}/{path}").stdout()
+    return json.loads(strip_xssi(response))
+
+
+def gerrit_api_post(path: str, body: Any):
+    response = curl_with_git_auth()(
+        "--silent --fail",
+        "-X POST",
+        "-H",
+        quoted("Content-Type: application/json"),
+        "-d",
+        quoted(json.dumps(body)),
+        f"{GERRIT_URL}/a/{path}",
+    ).stdout()
+    if very_verbose():
+        print("Response:", response)
+    return json.loads(strip_xssi(response))
+
+
+class GerritChange(object):
+    """
+    Class to interact with the gerrit /changes/ API.
+
+    For information on the data format returned by the API, see:
+    https://gerrit-review.googlesource.com/Documentation/rest-api-changes.html#change-info
+    """
+
+    id: str
+    _data: Any
+
+    def __init__(self, data: Any):
+        self._data = data
+        self.id = data["id"]
+
+    @functools.cached_property
+    def _details(self) -> Any:
+        return gerrit_api_get(f"changes/{self.id}/detail")
+
+    @functools.cached_property
+    def _messages(self) -> List[Any]:
+        return gerrit_api_get(f"changes/{self.id}/messages")
+
+    @property
+    def status(self):
+        return cast(str, self._data["status"])
+
+    def get_votes(self, label_name: str) -> List[int]:
+        "Returns the list of votes on `label_name`"
+        label_info = self._details.get("labels", {}).get(label_name)
+        votes = label_info.get("all", [])
+        return [cast(int, v.get("value")) for v in votes]
+
+    def get_messages_by(self, email: str) -> List[str]:
+        "Returns all messages posted by the user with the specified `email`."
+        return [m["message"] for m in self._messages if m["author"].get("email") == email]
+
+    def review(self, message: str, labels: Dict[str, int]):
+        "Post review `message` and set the specified review `labels`"
+        print("Posting on", self, ":", message, labels)
+        gerrit_api_post(
+            f"changes/{self.id}/revisions/current/review",
+            {"message": message, "labels": labels},
+        )
+
+    def abandon(self, message: str):
+        print("Abandoning", self, ":", message)
+        gerrit_api_post(f"changes/{self.id}/abandon", {"message": message})
+
+    @classmethod
+    def query(cls, *queries: str):
+        "Returns a list of gerrit changes matching the provided list of queries."
+        return [cls(c) for c in gerrit_api_get(f"changes/?q={'+'.join(queries)}")]
+
+    def short_url(self):
+        return f"http://crrev.com/c/{self._data['_number']}"
+
+    def __str__(self):
+        return self.short_url()
+
+    def pretty_info(self):
+        return f"{self} - {self._data['subject']}"
+
+
+def is_cros_repo():
+    "Returns true if the crosvm repo is a symlink or worktree to a CrOS repo checkout."
+    dot_git = CROSVM_ROOT / ".git"
+    if not dot_git.is_symlink() and dot_git.is_dir():
+        return False
+    return (cros_repo_root() / ".repo").exists()
+
+
+def cros_repo_root():
+    "Root directory of the CrOS repo checkout."
+    return (CROSVM_ROOT / "../../..").resolve()
 
 
 if __name__ == "__main__":

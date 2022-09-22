@@ -2,14 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 
-use base::{error, Event, FileSync, RawDescriptor, Result};
+use base::error;
+#[cfg(windows)]
+use base::named_pipes;
+use base::Event;
+use base::FileSync;
+use base::RawDescriptor;
+use base::Result;
 use hypervisor::ProtectionType;
 
 use crate::pci::CrosvmDeviceId;
 use crate::serial_device::SerialInput;
-use crate::{BusAccessInfo, BusDevice, DeviceId, SerialDevice};
+use crate::BusAccessInfo;
+use crate::BusDevice;
+use crate::DeviceId;
+use crate::SerialDevice;
 
 const BOCHS_DEBUGCON_READBACK: u8 = 0xe9;
 
@@ -28,6 +38,17 @@ impl SerialDevice for Debugcon {
         _keep_rds: Vec<RawDescriptor>,
     ) -> Debugcon {
         Debugcon { out }
+    }
+
+    #[cfg(windows)]
+    fn new_with_pipe(
+        _protected_vm: ProtectionType,
+        _interrupt_evt: Event,
+        _pipe_in: named_pipes::PipeConnection,
+        _pipe_out: named_pipes::PipeConnection,
+        _keep_rds: Vec<RawDescriptor>,
+    ) -> Debugcon {
+        unimplemented!("new_with_pipe unimplemented for Debugcon");
     }
 }
 
@@ -69,11 +90,12 @@ impl Debugcon {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io;
     use std::sync::Arc;
 
     use sync::Mutex;
+
+    use super::*;
 
     const ADDR: BusAccessInfo = BusAccessInfo {
         offset: 0,

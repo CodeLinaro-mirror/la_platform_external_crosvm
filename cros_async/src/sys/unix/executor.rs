@@ -5,15 +5,18 @@
 use std::future::Future;
 
 use async_task::Task;
+use base::AsRawDescriptors;
+use base::RawDescriptor;
 
-use base::{AsRawDescriptors, RawDescriptor};
-
-use super::{
-    poll_source::Error as PollError, uring_executor::use_uring, FdExecutor, PollSource,
-    URingExecutor, UringSource,
-};
-
-use crate::{AsyncResult, IntoAsync, IoSourceExt};
+use super::poll_source::Error as PollError;
+use super::uring_executor::use_uring;
+use super::FdExecutor;
+use super::PollSource;
+use super::URingExecutor;
+use super::UringSource;
+use crate::AsyncResult;
+use crate::IntoAsync;
+use crate::IoSourceExt;
 
 pub(crate) fn async_uring_from<'a, F: IntoAsync + Send + 'a>(
     f: F,
@@ -78,7 +81,7 @@ pub(crate) fn async_poll_from_local<'a, F: IntoAsync + 'a>(
 /// // Write all bytes from `data` to `f`.
 /// async fn write_file(f: &dyn IoSourceExt<File>, mut data: Vec<u8>) -> AsyncResult<()> {
 ///     while data.len() > 0 {
-///         let (count, mut buf) = f.write_from_vec(Some(0), data).await?;
+///         let (count, mut buf) = f.write_from_vec(None, data).await?;
 ///
 ///         data = buf.split_off(count);
 ///     }
@@ -96,7 +99,7 @@ pub(crate) fn async_poll_from_local<'a, F: IntoAsync + 'a>(
 ///
 ///     while rem > 0 {
 ///         let buf = vec![0u8; min(rem, CHUNK_SIZE)];
-///         let (count, mut data) = from.read_to_vec(Some(0), buf).await?;
+///         let (count, mut data) = from.read_to_vec(None, buf).await?;
 ///
 ///         if count == 0 {
 ///             // End of file. Return the number of bytes transferred.
@@ -176,7 +179,7 @@ impl Executor {
         }
     }
 
-    /// Same as [`async_from`], but without the `Send` requirement and only usable on thread-local
+    /// Same as [`Executor::async_from()`], but without the `Send` requirement and only usable on thread-local
     /// executors.
     pub fn async_from_local<'a, F: IntoAsync + 'a>(
         &self,

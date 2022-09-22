@@ -2,7 +2,7 @@ diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
 index 05d589ae..77c154be 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
-@@ -33,14 +33,25 @@ rust_library {
+@@ -33,14 +33,26 @@ rust_library {
          "libthiserror",
      ],
      proc_macros: ["libremain"],
@@ -24,6 +24,7 @@ index 05d589ae..77c154be 100644
 +        },
 +        android: {
 +            shared_libs: [
++                "libcutils",
 +                "libdrm",
 +            ],
 +            static_libs: [
@@ -36,7 +37,7 @@ index 05d589ae..77c154be 100644
      apex_available: [
          "//apex_available:platform",
          "//apex_available:anyapex",
-@@ -75,12 +86,23 @@ rust_test {
+@@ -75,12 +86,24 @@ rust_test {
          "libthiserror",
      ],
      proc_macros: ["libremain"],
@@ -58,6 +59,7 @@ index 05d589ae..77c154be 100644
 +        },
 +        android: {
 +            shared_libs: [
++                "libcutils",
 +                "libdrm",
 +            ],
 +            static_libs: [

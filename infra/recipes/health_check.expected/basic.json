@@ -5,9 +5,13 @@
       "[CACHE]/builder/crosvm/tools/dev_container",
       "--verbose",
       "./tools/health-check",
-      "python"
+      "--all",
+      "a"
     ],
     "cwd": "[CACHE]/builder/crosvm",
+    "env": {
+      "CROSVM_CONTAINER_CACHE": "[CACHE]/builder/dev_container"
+    },
     "luci_context": {
       "realm": {
         "name": "crosvm/crosvm:ci"
@@ -20,7 +24,7 @@
         "hostname": "rdbhost"
       }
     },
-    "name": "Checking python"
+    "name": "Checking a"
   },
   {
     "cmd": [
@@ -28,9 +32,13 @@
       "[CACHE]/builder/crosvm/tools/dev_container",
       "--verbose",
       "./tools/health-check",
-      "misc"
+      "--all",
+      "b"
     ],
     "cwd": "[CACHE]/builder/crosvm",
+    "env": {
+      "CROSVM_CONTAINER_CACHE": "[CACHE]/builder/dev_container"
+    },
     "luci_context": {
       "realm": {
         "name": "crosvm/crosvm:ci"
@@ -43,17 +51,21 @@
         "hostname": "rdbhost"
       }
     },
-    "name": "Checking misc"
+    "name": "Checking b"
   },
   {
     "cmd": [
       "vpython3",
       "[CACHE]/builder/crosvm/tools/dev_container",
       "--verbose",
-      "./tools/health-check",
-      "fmt"
+      "mdbook",
+      "build",
+      "docs/book/"
     ],
     "cwd": "[CACHE]/builder/crosvm",
+    "env": {
+      "CROSVM_CONTAINER_CACHE": "[CACHE]/builder/dev_container"
+    },
     "luci_context": {
       "realm": {
         "name": "crosvm/crosvm:ci"
@@ -66,17 +78,19 @@
         "hostname": "rdbhost"
       }
     },
-    "name": "Checking fmt"
+    "name": "Checking mdbook"
   },
   {
     "cmd": [
       "vpython3",
       "[CACHE]/builder/crosvm/tools/dev_container",
       "--verbose",
-      "./tools/health-check",
-      "clippy"
+      "./tools/cargo-doc"
     ],
     "cwd": "[CACHE]/builder/crosvm",
+    "env": {
+      "CROSVM_CONTAINER_CACHE": "[CACHE]/builder/dev_container"
+    },
     "luci_context": {
       "realm": {
         "name": "crosvm/crosvm:ci"
@@ -89,6 +103,6 @@
         "hostname": "rdbhost"
       }
     },
-    "name": "Checking clippy"
+    "name": "Checking cargo docs"
   }
 ]

@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use core::ffi::c_void;
-use libc::{EBUSY, EINVAL, ENOENT, ENXIO};
 use std::arch::x86_64::CpuidResult;
 use std::cell::RefCell;
 use std::convert::TryInto;
@@ -11,19 +10,34 @@ use std::mem::size_of;
 use std::os::raw::c_int;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use winapi::shared::winerror::E_UNEXPECTED;
 
-use base::{Error, Result};
+use base::Error;
+use base::Result;
+use libc::EBUSY;
+use libc::EINVAL;
+use libc::ENOENT;
+use libc::ENXIO;
 use vm_memory::GuestAddress;
+use winapi::shared::winerror::E_UNEXPECTED;
 
 use super::types::*;
 use super::*;
-
-use crate::{
-    get_tsc_offset_from_msr, set_tsc_offset_via_msr, CpuId, CpuIdEntry, DebugRegs, Fpu,
-    HypervHypercall, IoOperation, IoParams, Register, Regs, Sregs, Vcpu, VcpuExit, VcpuRunHandle,
-    VcpuX86_64,
-};
+use crate::get_tsc_offset_from_msr;
+use crate::set_tsc_offset_via_msr;
+use crate::CpuId;
+use crate::CpuIdEntry;
+use crate::DebugRegs;
+use crate::Fpu;
+use crate::HypervHypercall;
+use crate::IoOperation;
+use crate::IoParams;
+use crate::Register;
+use crate::Regs;
+use crate::Sregs;
+use crate::Vcpu;
+use crate::VcpuExit;
+use crate::VcpuRunHandle;
+use crate::VcpuX86_64;
 
 const WHPX_EXIT_DIRECTION_MMIO_READ: u8 = 0;
 const WHPX_EXIT_DIRECTION_MMIO_WRITE: u8 = 1;
@@ -335,7 +349,7 @@ impl WhpxVcpu {
             index,
             safe_virtual_processor: Arc::new(safe_virtual_processor),
             vcpu_run_handle_fingerprint: Default::default(),
-            vm_partition: vm_partition.clone(),
+            vm_partition,
             last_exit_context: Arc::new(Default::default()),
             instruction_emulator: Arc::new(instruction_emulator),
             tsc_frequency: None,
@@ -411,11 +425,8 @@ impl WhpxVcpu {
             return Err(Error::new(EINVAL));
         }
 
-        let success = match id {
-            // Do nothing, we assume TSC is always invariant
-            HV_X64_MSR_TSC_INVARIANT_CONTROL => true,
-            _ => false,
-        };
+        // Do nothing, we assume TSC is always invariant
+        let success = matches!(id, HV_X64_MSR_TSC_INVARIANT_CONTROL);
 
         if !success {
             return self.inject_gp_fault();
@@ -508,8 +519,8 @@ impl Vcpu for WhpxVcpu {
             vm_partition: self.vm_partition.clone(),
             last_exit_context: self.last_exit_context.clone(),
             instruction_emulator: self.instruction_emulator.clone(),
-            tsc_frequency: self.tsc_frequency.clone(),
-            apic_frequency: self.apic_frequency.clone(),
+            tsc_frequency: self.tsc_frequency,
+            apic_frequency: self.apic_frequency,
         })
     }
 
@@ -1280,9 +1291,11 @@ fn get_msr_names(msrs: &[Register]) -> Vec<WHV_REGISTER_NAME> {
 // run calls are tested with the integration tests since the full vcpu needs to be setup for it.
 #[cfg(test)]
 mod tests {
+    use vm_memory::GuestAddress;
+    use vm_memory::GuestMemory;
+
     use super::*;
     use crate::VmX86_64;
-    use vm_memory::{GuestAddress, GuestMemory};
 
     fn new_vm(cpu_count: usize, mem: GuestMemory) -> WhpxVm {
         let whpx = Whpx::new().expect("failed to instantiate whpx");
