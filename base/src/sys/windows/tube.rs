@@ -13,10 +13,10 @@ use crate::descriptor::{AsRawDescriptor, FromRawDescriptor, SafeDescriptor};
 use crate::{
     platform::{deserialize_with_descriptors, RawDescriptor, SerializeDescriptors},
     tube::{Error, RecvTube, Result, SendTube},
-    BlockingMode, CloseNotifier, FramingMode, PollToken, ReadNotifier, StreamChannel,
+    BlockingMode, CloseNotifier, EventToken, FramingMode, ReadNotifier, StreamChannel,
 };
 use data_model::DataInit;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use serde::{de::DeserializeOwned, Deserialize, Serialize, Serializer};
 use std::{
     mem,
@@ -76,10 +76,9 @@ struct MsgHeader {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for MsgHeader {}
 
-lazy_static! {
-    static ref DH_TUBE: sync::Mutex<Option<DuplicateHandleTube>> = sync::Mutex::new(None);
-    static ref ALIAS_PID: sync::Mutex<Option<u32>> = sync::Mutex::new(None);
-}
+static DH_TUBE: Lazy<sync::Mutex<Option<DuplicateHandleTube>>> =
+    Lazy::new(|| sync::Mutex::new(None));
+static ALIAS_PID: Lazy<sync::Mutex<Option<u32>>> = Lazy::new(|| sync::Mutex::new(None));
 
 /// Set a tube to delegate duplicate handle calls.
 pub fn set_duplicate_handle_tube(dh_tube: DuplicateHandleTube) {
@@ -320,7 +319,7 @@ pub fn deserialize_and_recv<T: DeserializeOwned, F: Fn(&mut [u8]) -> io::Result<
     .map_err(Error::Json)
 }
 
-#[derive(PollToken, Eq, PartialEq, Copy, Clone)]
+#[derive(EventToken, Eq, PartialEq, Copy, Clone)]
 enum Token {
     SocketReady,
 }
@@ -404,12 +403,12 @@ impl DuplicateHandleTube {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EventContext, EventTrigger, PollToken, ReadNotifier};
+    use crate::{EventContext, EventToken, EventTrigger, ReadNotifier};
     use std::time;
 
     const EVENT_WAIT_TIME: time::Duration = time::Duration::from_secs(10);
 
-    #[derive(PollToken, Debug, Eq, PartialEq, Copy, Clone)]
+    #[derive(EventToken, Debug, Eq, PartialEq, Copy, Clone)]
     enum Token {
         ReceivedData,
     }

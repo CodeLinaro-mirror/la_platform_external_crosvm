@@ -2,24 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::{clone::Clone, default::Default, marker::Copy};
-
-use super::{PollToken, RawDescriptor};
+pub use super::wait::*;
+use super::RawDescriptor;
 use crate::descriptor::AsRawDescriptor;
-
-#[path = "win/wait.rs"]
-mod wait;
-pub use wait::*;
+use crate::EventToken;
 
 /// Represents descriptor-token pairs which represent an event which can be triggered in the
 /// EventContext
 #[derive(PartialEq)]
-pub struct EventTrigger<T: PollToken> {
-    token: T,
-    event: RawDescriptor,
+pub struct EventTrigger<T: EventToken> {
+    pub(crate) token: T,
+    pub(crate) event: RawDescriptor,
 }
 
-impl<T: PollToken> EventTrigger<T> {
+impl<T: EventToken> EventTrigger<T> {
     pub fn from(descriptor: &dyn AsRawDescriptor, token: T) -> Self {
         EventTrigger {
             token,
@@ -28,46 +24,13 @@ impl<T: PollToken> EventTrigger<T> {
     }
 }
 
-impl<T: PollToken> Clone for EventTrigger<T> {
+impl<T: EventToken> Clone for EventTrigger<T> {
     fn clone(&self) -> Self {
         EventTrigger {
             token: T::from_raw_token(self.token.as_raw_token()),
             event: self.event,
         }
     }
-}
-
-/// Represents an event that has been signaled and waited for via a wait function.
-#[derive(Copy, Clone, Debug)]
-pub struct TriggeredEvent<T: PollToken> {
-    pub token: T,
-    pub is_readable: bool,
-    pub is_writable: bool,
-    pub is_hungup: bool,
-}
-
-impl<T: PollToken> Default for TriggeredEvent<T> {
-    fn default() -> Self {
-        TriggeredEvent {
-            token: T::from_raw_token(0),
-            is_readable: false,
-            is_writable: false,
-            is_hungup: false,
-        }
-    }
-}
-
-/// Represents types of events to watch for.
-pub enum EventType {
-    // Used to to temporarily stop waiting for events without
-    // removing the associated descriptor from the WaitContext.
-    // In most cases if a descriptor no longer needs to be
-    // waited on, prefer removing it entirely with
-    // WaitContext#delete
-    None,
-    Read,
-    Write,
-    ReadWrite,
 }
 
 #[cfg(test)]
@@ -92,11 +55,11 @@ mod tests {
                 match event.token {
                     1 => {
                         evt1.read().unwrap();
-                        ctx.remove(&evt1).unwrap();
+                        ctx.delete(&evt1).unwrap();
                     }
                     2 => {
                         evt2.read().unwrap();
-                        ctx.remove(&evt2).unwrap();
+                        ctx.delete(&evt2).unwrap();
                     }
                     _ => panic!("unexpected token"),
                 };

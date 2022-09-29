@@ -17,7 +17,7 @@ use vm_memory::GuestMemory;
 
 use super::worker::Worker;
 use super::{Error, Result};
-use crate::virtio::{copy_config, Interrupt, Queue, VirtioDevice, TYPE_VSOCK};
+use crate::virtio::{copy_config, DeviceType, Interrupt, Queue, VirtioDevice};
 
 pub const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 3;
@@ -59,12 +59,7 @@ impl Vsock {
         let kill_evt = Event::new().map_err(Error::CreateKillEvent)?;
         let handle = VhostVsockHandle::new(device_file);
 
-        let avail_features = base_features
-            | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY
-            | 1 << virtio_sys::vhost::VIRTIO_RING_F_INDIRECT_DESC
-            | 1 << virtio_sys::vhost::VIRTIO_RING_F_EVENT_IDX
-            | 1 << virtio_sys::vhost::VHOST_F_LOG_ALL
-            | 1 << virtio_sys::vhost::VIRTIO_F_ANY_LAYOUT;
+        let avail_features = base_features;
 
         let mut interrupts = Vec::new();
         for _ in 0..NUM_QUEUES {
@@ -132,8 +127,8 @@ impl VirtioDevice for Vsock {
         keep_rds
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_VSOCK
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Vsock
     }
 
     fn queue_max_sizes(&self) -> &[u16] {

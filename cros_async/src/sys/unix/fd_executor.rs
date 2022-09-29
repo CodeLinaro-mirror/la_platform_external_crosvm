@@ -24,8 +24,8 @@ use std::{
 
 use async_task::Task;
 use base::{
-    add_fd_flags, warn, AsRawDescriptor, EpollContext, EpollEvents, Event as EventFd,
-    WatchingEvents,
+    add_fd_flags, warn, AsRawDescriptor, AsRawDescriptors, Event, EventType, RawDescriptor,
+    WaitContext,
 };
 use futures::task::noop_waker;
 use pin_utils::pin_mut;
@@ -43,12 +43,12 @@ use crate::{
 #[sorted]
 #[derive(Debug, ThisError)]
 pub enum Error {
-    /// Failed to clone the EventFd for waking the executor.
-    #[error("Failed to clone the EventFd for waking the executor: {0}")]
-    CloneEventFd(base::Error),
-    /// Failed to create the EventFd for waking the executor.
-    #[error("Failed to create the EventFd for waking the executor: {0}")]
-    CreateEventFd(base::Error),
+    /// Failed to clone the Event for waking the executor.
+    #[error("Failed to clone the Event for waking the executor: {0}")]
+    CloneEvent(base::Error),
+    /// Failed to create the Event for waking the executor.
+    #[error("Failed to create the Event for waking the executor: {0}")]
+    CreateEvent(base::Error),
     /// Creating a context to wait on FDs failed.
     #[error("An error creating the fd waiting context: {0}")]
     CreatingContext(base::Error),
@@ -58,9 +58,6 @@ pub enum Error {
     /// The Executor is gone.
     #[error("The FDExecutor is gone")]
     ExecutorGone,
-    /// PollContext failure.
-    #[error("PollContext failure: {0}")]
-    PollContextError(base::Error),
     /// An error occurred when setting the FD non-blocking.
     #[error("An error occurred setting the FD non-blocking: {0}.")]
     SettingNonBlocking(base::Error),
@@ -70,6 +67,9 @@ pub enum Error {
     /// A Waker was canceled, but the operation isn't running.
     #[error("Unknown waker")]
     UnknownWaker,
+    /// WaitContext failure.
+    #[error("WaitContext failure: {0}")]
+    WaitContextError(base::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -77,15 +77,15 @@ impl From<Error> for io::Error {
     fn from(e: Error) -> Self {
         use Error::*;
         match e {
-            CloneEventFd(e) => e.into(),
-            CreateEventFd(e) => e.into(),
+            CloneEvent(e) => e.into(),
+            CreateEvent(e) => e.into(),
             DuplicatingFd(e) => e.into(),
             ExecutorGone => io::Error::new(io::ErrorKind::Other, e),
             CreatingContext(e) => e.into(),
-            PollContextError(e) => e.into(),
             SettingNonBlocking(e) => e.into(),
             SubmittingWaker(e) => e.into(),
             UnknownWaker => io::Error::new(io::ErrorKind::Other, e),
+            WaitContextError(e) => e.into(),
         }
     }
 }
@@ -115,10 +115,7 @@ impl<F: AsRawDescriptor> RegisteredSource<F> {
     pub fn wait_readable(&self) -> Result<PendingOperation> {
         let ex = self.ex.upgrade().ok_or(Error::ExecutorGone)?;
 
-        let token = ex.add_operation(
-            self.source.as_raw_descriptor(),
-            WatchingEvents::empty().set_read(),
-        )?;
+        let token = ex.add_operation(self.source.as_raw_descriptor(), EventType::Read)?;
 
         Ok(PendingOperation {
             token: Some(token),
@@ -131,10 +128,7 @@ impl<F: AsRawDescriptor> RegisteredSource<F> {
     pub fn wait_writable(&self) -> Result<PendingOperation> {
         let ex = self.ex.upgrade().ok_or(Error::ExecutorGone)?;
 
-        let token = ex.add_operation(
-            self.source.as_raw_descriptor(),
-            WatchingEvents::empty().set_write(),
-        )?;
+        let token = ex.add_operation(self.source.as_raw_descriptor(), EventType::Write)?;
 
         Ok(PendingOperation {
             token: Some(token),
@@ -217,24 +211,21 @@ impl Drop for PendingOperation {
 // * The executor then polls the non-epoll future that became ready, any epoll futures that
 //   completed, and the notify_task function, which then queues up another read on the eventfd and
 //   the process can repeat.
-async fn notify_task(notify: EventFd, raw: Weak<RawExecutor>) {
+async fn notify_task(notify: Event, raw: Weak<RawExecutor>) {
     add_fd_flags(notify.as_raw_descriptor(), libc::O_NONBLOCK)
-        .expect("Failed to set notify EventFd as non-blocking");
+        .expect("Failed to set notify Event as non-blocking");
 
     loop {
         match notify.read() {
             Ok(_) => {}
             Err(e) if e.errno() == libc::EWOULDBLOCK => {}
-            Err(e) => panic!("Unexpected error while reading notify EventFd: {}", e),
+            Err(e) => panic!("Unexpected error while reading notify Event: {}", e),
         }
 
         if let Some(ex) = raw.upgrade() {
             let token = ex
-                .add_operation(
-                    notify.as_raw_descriptor(),
-                    WatchingEvents::empty().set_read(),
-                )
-                .expect("Failed to add notify EventFd to PollCtx");
+                .add_operation(notify.as_raw_descriptor(), EventType::Read)
+                .expect("Failed to add notify Event to PollCtx");
 
             // We don't want to hold an active reference to the executor in the .await below.
             mem::drop(ex);
@@ -247,7 +238,7 @@ async fn notify_task(notify: EventFd, raw: Weak<RawExecutor>) {
             match op.await {
                 Ok(()) => {}
                 Err(Error::ExecutorGone) => break,
-                Err(e) => panic!("Unexpected error while waiting for notify EventFd: {}", e),
+                Err(e) => panic!("Unexpected error while waiting for notify Event: {}", e),
             }
         } else {
             // The executor is gone so we should also exit.
@@ -256,9 +247,9 @@ async fn notify_task(notify: EventFd, raw: Weak<RawExecutor>) {
     }
 }
 
-// Indicates that the executor is either within or about to make a PollContext::wait() call. When a
-// waker sees this value, it will write to the notify EventFd, which will cause the
-// PollContext::wait() call to return.
+// Indicates that the executor is either within or about to make a WaitContext::wait() call. When a
+// waker sees this value, it will write to the notify Event, which will cause the
+// WaitContext::wait() call to return.
 const WAITING: i32 = 0x1d5b_c019u32 as i32;
 
 // Indicates that the executor is processing any futures that are ready to run.
@@ -269,26 +260,34 @@ const WOKEN: i32 = 0x3e4d_3276u32 as i32;
 
 struct RawExecutor {
     queue: RunnableQueue,
-    poll_ctx: EpollContext<usize>,
+    poll_ctx: WaitContext<usize>,
     ops: Mutex<Slab<OpStatus>>,
     blocking_pool: BlockingPool,
     state: AtomicI32,
-    notify: EventFd,
+    notify: Event,
+    // Descriptor of the original event that was cloned to create notify.
+    // This is only needed for the AsRawDescriptors implementation.
+    notify_dup: RawDescriptor,
 }
 
 impl RawExecutor {
-    fn new(notify: EventFd) -> Result<Self> {
+    fn new(notify: &Event) -> Result<Self> {
+        // Save the original descriptor before cloning. This descriptor will be used when creating
+        // the notify task, so we need to preserve it for AsRawDescriptors.
+        let notify_dup = notify.as_raw_descriptor();
+        let notify = notify.try_clone().map_err(Error::CloneEvent)?;
         Ok(RawExecutor {
             queue: RunnableQueue::new(),
-            poll_ctx: EpollContext::new().map_err(Error::CreatingContext)?,
+            poll_ctx: WaitContext::new().map_err(Error::CreatingContext)?,
             ops: Mutex::new(Slab::with_capacity(64)),
             blocking_pool: Default::default(),
             state: AtomicI32::new(PROCESSING),
             notify,
+            notify_dup,
         })
     }
 
-    fn add_operation(&self, fd: RawFd, events: WatchingEvents) -> Result<WakerToken> {
+    fn add_operation(&self, fd: RawFd, event_type: EventType) -> Result<WakerToken> {
         let duped_fd = unsafe {
             // Safe because duplicating an FD doesn't affect memory safety, and the dup'd FD
             // will only be added to the poll loop.
@@ -298,7 +297,7 @@ impl RawExecutor {
         let entry = ops.vacant_entry();
         let next_token = entry.key();
         self.poll_ctx
-            .add_fd_with_events(&duped_fd, events, next_token)
+            .add_for_event(&duped_fd, event_type, next_token)
             .map_err(Error::SubmittingWaker)?;
         entry.insert(OpStatus::Pending(OpData {
             file: duped_fd,
@@ -359,7 +358,6 @@ impl RawExecutor {
     }
 
     fn run<F: Future>(&self, cx: &mut Context, done: F) -> Result<F::Output> {
-        let events = EpollEvents::new();
         pin_mut!(done);
 
         loop {
@@ -384,16 +382,13 @@ impl RawExecutor {
                 continue;
             }
 
-            let events = self
-                .poll_ctx
-                .wait(&events)
-                .map_err(Error::PollContextError)?;
+            let events = self.poll_ctx.wait().map_err(Error::WaitContextError)?;
 
             // Set the state back to PROCESSING to prevent any tasks woken up by the loop below from
             // writing to the eventfd.
             self.state.store(PROCESSING, Ordering::Release);
             for e in events.iter() {
-                let token = e.token();
+                let token = e.token;
                 let mut ops = self.ops.lock();
 
                 // The op could have been canceled and removed by another thread so ignore it if it
@@ -408,7 +403,7 @@ impl RawExecutor {
 
                     self.poll_ctx
                         .delete(&file)
-                        .map_err(Error::PollContextError)?;
+                        .map_err(Error::WaitContextError)?;
 
                     if let Some(waker) = waker {
                         waker.wake();
@@ -442,9 +437,19 @@ impl RawExecutor {
             OpStatus::Pending(data) => self
                 .poll_ctx
                 .delete(&data.file)
-                .map_err(Error::PollContextError),
+                .map_err(Error::WaitContextError),
             OpStatus::Completed => Ok(()),
         }
+    }
+}
+
+impl AsRawDescriptors for RawExecutor {
+    fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
+        vec![
+            self.poll_ctx.as_raw_descriptor(),
+            self.notify.as_raw_descriptor(),
+            self.notify_dup,
+        ]
     }
 }
 
@@ -496,12 +501,8 @@ pub struct FdExecutor {
 
 impl FdExecutor {
     pub fn new() -> Result<FdExecutor> {
-        let notify = EventFd::new().map_err(Error::CreateEventFd)?;
-        let raw = notify
-            .try_clone()
-            .map_err(Error::CloneEventFd)
-            .and_then(RawExecutor::new)
-            .map(Arc::new)?;
+        let notify = Event::new().map_err(Error::CreateEvent)?;
+        let raw = RawExecutor::new(&notify).map(Arc::new)?;
 
         raw.spawn(notify_task(notify, Arc::downgrade(&raw)))
             .detach();
@@ -553,6 +554,12 @@ impl FdExecutor {
             source: f,
             ex: Arc::downgrade(&self.raw),
         })
+    }
+}
+
+impl AsRawDescriptors for FdExecutor {
+    fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
+        self.raw.as_raw_descriptors()
     }
 }
 

@@ -21,7 +21,6 @@ pub mod ioctl;
 pub mod syslog;
 mod acpi_event;
 mod capabilities;
-mod clock;
 mod descriptor;
 mod eventfd;
 mod file_flags;
@@ -31,15 +30,16 @@ mod mmap;
 pub mod net;
 mod netlink;
 mod notifiers;
+pub mod platform_timer_resolution;
 mod poll;
 mod priority;
-pub mod rand;
 mod sched;
 pub mod scoped_signal_handler;
 mod shm;
 pub mod signal;
 mod signalfd;
 mod sock_ctrl_msg;
+mod stream_channel;
 mod terminal;
 mod timer;
 pub mod vsock;
@@ -49,29 +49,28 @@ pub use crate::descriptor_reflection::{
     deserialize_with_descriptors, with_as_descriptor, with_raw_descriptor, FileSerdeWrapper,
     SerializeDescriptors,
 };
-pub use crate::{
-    errno::{Error, Result, *},
-    generate_scoped_event,
-};
+pub use crate::errno::{Error, Result, *};
 pub use acpi_event::*;
-pub use base_poll_token_derive::*;
 pub use capabilities::drop_capabilities;
-pub use clock::{Clock, FakeClock};
 pub use descriptor::*;
-pub use eventfd::*;
+// EventFd is deprecated. Use Event instead. EventFd will be removed as soon as rest of the current
+// users migrate.
+// TODO(b:231344063): Remove EventFd.
+pub use eventfd::{EventFd as Event, EventFd, EventReadResult};
 pub use file_flags::*;
 pub use get_filesystem_type::*;
 pub use ioctl::*;
 pub use mmap::*;
 pub use netlink::*;
-pub use poll::*;
+pub use poll::EventContext;
 pub use priority::*;
 pub use sched::*;
 pub use scoped_signal_handler::*;
-pub use shm::*;
+pub use shm::{kernel_has_memfd, MemfdSeals, SharedMemory, Unix as SharedMemoryUnix};
 pub use signal::*;
 pub use signalfd::*;
 pub use sock_ctrl_msg::*;
+pub use stream_channel::*;
 pub use terminal::*;
 pub use timer::*;
 
@@ -82,7 +81,7 @@ pub use file_traits::{
 };
 pub use mmap::Error as MmapError;
 pub use signalfd::Error as SignalFdError;
-pub use write_zeroes::{PunchHole, WriteZeroes, WriteZeroesAt};
+pub(crate) use write_zeroes::{file_punch_hole, file_write_zeroes_at};
 
 use std::{
     cell::Cell,
@@ -562,14 +561,12 @@ pub fn clear_fd_flags(fd: RawFd, clear_flags: c_int) -> Result<()> {
 
 /// Return a timespec filed with the specified Duration `duration`.
 pub fn duration_to_timespec(duration: Duration) -> libc::timespec {
-    // Safe because we are zero-initializing a struct with only primitive member fields.
-    let mut ts: libc::timespec = unsafe { mem::zeroed() };
-
-    ts.tv_sec = duration.as_secs() as libc::time_t;
     // nsec always fits in i32 because subsec_nanos is defined to be less than one billion.
     let nsec = duration.subsec_nanos() as i32;
-    ts.tv_nsec = libc::c_long::from(nsec);
-    ts
+    libc::timespec {
+        tv_sec: duration.as_secs() as libc::time_t,
+        tv_nsec: nsec.into(),
+    }
 }
 
 /// Return the maximum Duration that can be used with libc::timespec.
@@ -626,6 +623,12 @@ pub fn get_max_open_files() -> Result<u64> {
     } else {
         errno_result()
     }
+}
+
+/// Returns the number of online logical cores on the system.
+pub fn number_of_logical_cores() -> Result<usize> {
+    // Safe because we pass a flag for this call and the host supports this system call
+    Ok(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize)
 }
 
 #[cfg(test)]

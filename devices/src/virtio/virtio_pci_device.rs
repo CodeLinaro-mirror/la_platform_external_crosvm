@@ -14,13 +14,18 @@ use data_model::{DataInit, Le32};
 use hypervisor::Datamatch;
 use libc::ERANGE;
 use resources::{Alloc, MmioType, SystemAllocator};
+use virtio_sys::virtio_config::{
+    VIRTIO_CONFIG_S_ACKNOWLEDGE, VIRTIO_CONFIG_S_DRIVER, VIRTIO_CONFIG_S_DRIVER_OK,
+    VIRTIO_CONFIG_S_FAILED, VIRTIO_CONFIG_S_FEATURES_OK,
+};
 use vm_memory::GuestMemory;
 
 use super::*;
 use crate::pci::{
-    BarRange, MsixCap, MsixConfig, PciAddress, PciBarConfiguration, PciBarPrefetchable,
-    PciBarRegionType, PciCapability, PciCapabilityID, PciClassCode, PciConfiguration, PciDevice,
-    PciDeviceError, PciDisplaySubclass, PciHeaderType, PciId, PciInterruptPin, PciSubclass,
+    BarRange, MsixCap, MsixConfig, PciAddress, PciBarConfiguration, PciBarIndex,
+    PciBarPrefetchable, PciBarRegionType, PciCapability, PciCapabilityID, PciClassCode,
+    PciConfiguration, PciDevice, PciDeviceError, PciDisplaySubclass, PciHeaderType, PciId,
+    PciInterruptPin, PciSubclass,
 };
 use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
 use crate::IrqLevelEvent;
@@ -204,16 +209,22 @@ impl PciSubclass for PciVirtioSubclass {
 // Allocate one bar for the structs pointed to by the capability structures.
 const COMMON_CONFIG_BAR_OFFSET: u64 = 0x0000;
 const COMMON_CONFIG_SIZE: u64 = 56;
+const COMMON_CONFIG_LAST: u64 = COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE - 1;
 const ISR_CONFIG_BAR_OFFSET: u64 = 0x1000;
 const ISR_CONFIG_SIZE: u64 = 1;
+const ISR_CONFIG_LAST: u64 = ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE - 1;
 const DEVICE_CONFIG_BAR_OFFSET: u64 = 0x2000;
 const DEVICE_CONFIG_SIZE: u64 = 0x1000;
+const DEVICE_CONFIG_LAST: u64 = DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE - 1;
 const NOTIFICATION_BAR_OFFSET: u64 = 0x3000;
 const NOTIFICATION_SIZE: u64 = 0x1000;
+const NOTIFICATION_LAST: u64 = NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE - 1;
 const MSIX_TABLE_BAR_OFFSET: u64 = 0x6000;
 const MSIX_TABLE_SIZE: u64 = 0x1000;
+const MSIX_TABLE_LAST: u64 = MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE - 1;
 const MSIX_PBA_BAR_OFFSET: u64 = 0x7000;
 const MSIX_PBA_SIZE: u64 = 0x1000;
+const MSIX_PBA_LAST: u64 = MSIX_PBA_BAR_OFFSET + MSIX_PBA_SIZE - 1;
 const CAPABILITY_BAR_SIZE: u64 = 0x8000;
 
 const NOTIFY_OFF_MULTIPLIER: u32 = 4; // A dword per notification address.
@@ -231,6 +242,7 @@ pub struct VirtioPciDevice {
 
     device: Box<dyn VirtioDevice>,
     device_activated: bool,
+    disable_intx: bool,
 
     interrupt_status: Arc<AtomicUsize>,
     interrupt_evt: Option<IrqLevelEvent>,
@@ -251,6 +263,7 @@ impl VirtioPciDevice {
         mem: GuestMemory,
         device: Box<dyn VirtioDevice>,
         msi_device_tube: Tube,
+        disable_intx: bool,
     ) -> Result<Self> {
         let mut queue_evts = Vec::new();
         for _ in device.queue_max_sizes() {
@@ -265,7 +278,7 @@ impl VirtioPciDevice {
         let pci_device_id = VIRTIO_PCI_DEVICE_ID_BASE + device.device_type() as u16;
 
         let (pci_device_class, pci_device_subclass) = match device.device_type() {
-            TYPE_GPU => (
+            DeviceType::Gpu => (
                 PciClassCode::DisplayController,
                 &PciDisplaySubclass::Other as &dyn PciSubclass,
             ),
@@ -303,6 +316,7 @@ impl VirtioPciDevice {
             pci_address: device.pci_address(),
             device,
             device_activated: false,
+            disable_intx,
             interrupt_status: Arc::new(AtomicUsize::new(0)),
             interrupt_evt: None,
             queues,
@@ -324,10 +338,12 @@ impl VirtioPciDevice {
     }
 
     fn is_driver_ready(&self) -> bool {
-        let ready_bits =
-            (DEVICE_ACKNOWLEDGE | DEVICE_DRIVER | DEVICE_DRIVER_OK | DEVICE_FEATURES_OK) as u8;
-        self.common_config.driver_status == ready_bits
-            && self.common_config.driver_status & DEVICE_FAILED as u8 == 0
+        let ready_bits = (VIRTIO_CONFIG_S_ACKNOWLEDGE
+            | VIRTIO_CONFIG_S_DRIVER
+            | VIRTIO_CONFIG_S_DRIVER_OK
+            | VIRTIO_CONFIG_S_FEATURES_OK) as u8;
+        (self.common_config.driver_status & ready_bits) == ready_bits
+            && self.common_config.driver_status & VIRTIO_CONFIG_S_FAILED as u8 == 0
     }
 
     /// Determines if the driver has requested the device reset itself
@@ -512,7 +528,9 @@ impl PciDevice for VirtioPciDevice {
             PciInterruptPin::IntA,
             PciConfiguration::suggested_interrupt_pin,
         );
-        self.config_regs.set_irq(gsi as u8, pin);
+        if !self.disable_intx {
+            self.config_regs.set_irq(gsi as u8, pin);
+        }
         Some((gsi, pin))
     }
 
@@ -535,10 +553,7 @@ impl PciDevice for VirtioPciDevice {
                     func: address.func,
                     bar: 0,
                 },
-                format!(
-                    "virtio-{}-cap_bar",
-                    type_to_str(self.device.device_type()).unwrap_or("?")
-                ),
+                format!("virtio-{}-cap_bar", self.device.device_type()),
                 CAPABILITY_BAR_SIZE,
             )
             .map_err(|e| PciDeviceError::IoAllocationFailed(CAPABILITY_BAR_SIZE, e))?;
@@ -585,10 +600,7 @@ impl PciDevice for VirtioPciDevice {
                         func: address.func,
                         bar: config.bar_index() as u8,
                     },
-                    format!(
-                        "virtio-{}-custom_bar",
-                        type_to_str(self.device.device_type()).unwrap_or("?")
-                    ),
+                    format!("virtio-{}-custom_bar", self.device.device_type()),
                     config.size(),
                 )
                 .map_err(|e| PciDeviceError::IoAllocationFailed(config.size(), e))?;
@@ -658,125 +670,105 @@ impl PciDevice for VirtioPciDevice {
         (&mut self.config_regs).write_reg(reg_idx, offset, data)
     }
 
-    // Clippy: the value of COMMON_CONFIG_BAR_OFFSET happens to be zero so the
-    // expression `COMMON_CONFIG_BAR_OFFSET <= o` is always true, but this code
-    // is written such that the value of the const may be changed independently.
-    #[allow(clippy::absurd_extreme_comparisons)]
-    #[allow(clippy::manual_range_contains)]
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
-        // The driver is only allowed to do aligned, properly sized access.
-        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize);
-        if addr < bar0 || addr >= bar0 + CAPABILITY_BAR_SIZE {
-            let bar_config = self.config_regs.get_bars().find(|config| {
-                addr >= config.address() && addr < (config.address() + config.size())
-            });
-            if let Some(c) = bar_config {
-                self.device
-                    .read_bar(c.bar_index(), addr - c.address(), data);
-            }
-        } else {
-            let offset = addr - bar0;
+        let bar = match self
+            .config_regs
+            .get_bars()
+            .find(|bar| bar.address_range().contains(&addr))
+        {
+            Some(bar) => bar,
+            None => return,
+        };
+
+        if bar.bar_index() == self.settings_bar as PciBarIndex {
+            let offset = addr - bar.address();
             match offset {
-                o if COMMON_CONFIG_BAR_OFFSET <= o
-                    && o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE =>
-                {
-                    self.common_config.read(
-                        o - COMMON_CONFIG_BAR_OFFSET,
-                        data,
-                        &mut self.queues,
-                        self.device.as_mut(),
-                    )
-                }
-                o if ISR_CONFIG_BAR_OFFSET <= o && o < ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE => {
+                COMMON_CONFIG_BAR_OFFSET..=COMMON_CONFIG_LAST => self.common_config.read(
+                    offset - COMMON_CONFIG_BAR_OFFSET,
+                    data,
+                    &mut self.queues,
+                    self.device.as_mut(),
+                ),
+                ISR_CONFIG_BAR_OFFSET..=ISR_CONFIG_LAST => {
                     if let Some(v) = data.get_mut(0) {
                         // Reading this register resets it to 0.
                         *v = self.interrupt_status.swap(0, Ordering::SeqCst) as u8;
                     }
                 }
-                o if DEVICE_CONFIG_BAR_OFFSET <= o
-                    && o < DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE =>
-                {
-                    self.device.read_config(o - DEVICE_CONFIG_BAR_OFFSET, data);
+                DEVICE_CONFIG_BAR_OFFSET..=DEVICE_CONFIG_LAST => {
+                    self.device
+                        .read_config(offset - DEVICE_CONFIG_BAR_OFFSET, data);
                 }
-                o if NOTIFICATION_BAR_OFFSET <= o
-                    && o < NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE =>
-                {
+                NOTIFICATION_BAR_OFFSET..=NOTIFICATION_LAST => {
                     // Handled with ioevents.
                 }
-
-                o if MSIX_TABLE_BAR_OFFSET <= o && o < MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE => {
+                MSIX_TABLE_BAR_OFFSET..=MSIX_TABLE_LAST => {
                     self.msix_config
                         .lock()
-                        .read_msix_table(o - MSIX_TABLE_BAR_OFFSET, data);
+                        .read_msix_table(offset - MSIX_TABLE_BAR_OFFSET, data);
                 }
-
-                o if MSIX_PBA_BAR_OFFSET <= o && o < MSIX_PBA_BAR_OFFSET + MSIX_PBA_SIZE => {
+                MSIX_PBA_BAR_OFFSET..=MSIX_PBA_LAST => {
                     self.msix_config
                         .lock()
-                        .read_pba_entries(o - MSIX_PBA_BAR_OFFSET, data);
+                        .read_pba_entries(offset - MSIX_PBA_BAR_OFFSET, data);
                 }
-
                 _ => (),
             }
+        } else {
+            self.device
+                .read_bar(bar.bar_index(), addr - bar.address(), data);
         }
     }
 
-    #[allow(clippy::absurd_extreme_comparisons)]
-    #[allow(clippy::manual_range_contains)]
     fn write_bar(&mut self, addr: u64, data: &[u8]) {
-        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize);
-        if addr < bar0 || addr >= bar0 + CAPABILITY_BAR_SIZE {
-            let bar_config = self.config_regs.get_bars().find(|config| {
-                addr >= config.address() && addr < (config.address() + config.size())
-            });
-            if let Some(c) = bar_config {
-                self.device
-                    .write_bar(c.bar_index(), addr - c.address(), data);
-            }
-        } else {
-            let offset = addr - bar0;
+        let bar = match self
+            .config_regs
+            .get_bars()
+            .find(|bar| bar.address_range().contains(&addr))
+        {
+            Some(bar) => bar,
+            None => return,
+        };
+
+        if bar.bar_index() == self.settings_bar as PciBarIndex {
+            let offset = addr - bar.address();
             match offset {
-                o if COMMON_CONFIG_BAR_OFFSET <= o
-                    && o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE =>
-                {
-                    self.common_config.write(
-                        o - COMMON_CONFIG_BAR_OFFSET,
-                        data,
-                        &mut self.queues,
-                        self.device.as_mut(),
-                    )
-                }
-                o if ISR_CONFIG_BAR_OFFSET <= o && o < ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE => {
+                COMMON_CONFIG_BAR_OFFSET..=COMMON_CONFIG_LAST => self.common_config.write(
+                    offset - COMMON_CONFIG_BAR_OFFSET,
+                    data,
+                    &mut self.queues,
+                    self.device.as_mut(),
+                ),
+                ISR_CONFIG_BAR_OFFSET..=ISR_CONFIG_LAST => {
                     if let Some(v) = data.get(0) {
                         self.interrupt_status
                             .fetch_and(!(*v as usize), Ordering::SeqCst);
                     }
                 }
-                o if DEVICE_CONFIG_BAR_OFFSET <= o
-                    && o < DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE =>
-                {
-                    self.device.write_config(o - DEVICE_CONFIG_BAR_OFFSET, data);
+                DEVICE_CONFIG_BAR_OFFSET..=DEVICE_CONFIG_LAST => {
+                    self.device
+                        .write_config(offset - DEVICE_CONFIG_BAR_OFFSET, data);
                 }
-                o if NOTIFICATION_BAR_OFFSET <= o
-                    && o < NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE =>
-                {
+                NOTIFICATION_BAR_OFFSET..=NOTIFICATION_LAST => {
                     // Handled with ioevents.
                 }
-                o if MSIX_TABLE_BAR_OFFSET <= o && o < MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE => {
+                MSIX_TABLE_BAR_OFFSET..=MSIX_TABLE_LAST => {
                     let behavior = self
                         .msix_config
                         .lock()
-                        .write_msix_table(o - MSIX_TABLE_BAR_OFFSET, data);
+                        .write_msix_table(offset - MSIX_TABLE_BAR_OFFSET, data);
                     self.device.control_notify(behavior);
                 }
-                o if MSIX_PBA_BAR_OFFSET <= o && o < MSIX_PBA_BAR_OFFSET + MSIX_PBA_SIZE => {
+                MSIX_PBA_BAR_OFFSET..=MSIX_PBA_LAST => {
                     self.msix_config
                         .lock()
-                        .write_pba_entries(o - MSIX_PBA_BAR_OFFSET, data);
+                        .write_pba_entries(offset - MSIX_PBA_BAR_OFFSET, data);
                 }
-
                 _ => (),
             }
+        } else {
+            self.device
+                .write_bar(bar.bar_index(), addr - bar.address(), data);
         }
 
         if !self.device_activated && self.is_driver_ready() {

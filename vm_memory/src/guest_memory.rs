@@ -6,6 +6,7 @@
 
 use std::convert::{AsRef, TryFrom};
 use std::fs::File;
+use std::io::{Read, Write};
 use std::marker::{Send, Sync};
 use std::mem::size_of;
 use std::result;
@@ -13,18 +14,21 @@ use std::sync::Arc;
 
 use base::{pagesize, Error as SysError};
 use base::{
-    AsRawDescriptor, AsRawDescriptors, MappedRegion, MemfdSeals, MemoryMapping,
-    MemoryMappingBuilder, MemoryMappingUnix, MmapError, RawDescriptor, SharedMemory,
-    SharedMemoryUnix,
+    AsRawDescriptor, AsRawDescriptors, MappedRegion, MemoryMapping, MemoryMappingBuilder,
+    MmapError, RawDescriptor, SharedMemory,
 };
-use bitflags::bitflags;
+
 use cros_async::{mem, BackingMemory};
+
 use data_model::volatile_memory::*;
 use data_model::DataInit;
 use remain::sorted;
 use thiserror::Error;
 
 use crate::guest_address::GuestAddress;
+
+mod sys;
+pub use sys::MemoryPolicy;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -36,13 +40,13 @@ pub enum Error {
     #[error("size {0} must not be zero")]
     InvalidSize(usize),
     #[error("invalid guest memory access at addr={0}: {1}")]
-    MemoryAccess(GuestAddress, MmapError),
+    MemoryAccess(GuestAddress, #[source] MmapError),
     #[error("failed to set seals on shm region: {0}")]
-    MemoryAddSealsFailed(SysError),
-    #[error("failed to create shm region")]
-    MemoryCreationFailed(SysError),
+    MemoryAddSealsFailed(#[source] SysError),
+    #[error("failed to create shm region: {0}")]
+    MemoryCreationFailed(#[source] SysError),
     #[error("failed to map guest memory: {0}")]
-    MemoryMappingFailed(MmapError),
+    MemoryMappingFailed(#[source] MmapError),
     #[error("shm regions must be page aligned")]
     MemoryNotAligned,
     #[error("memory regions overlap")]
@@ -56,19 +60,13 @@ pub enum Error {
     #[error("DescriptorChain split is out of bounds: {0}")]
     SplitOutOfBounds(usize),
     #[error("{0}")]
-    VolatileMemoryAccess(VolatileMemoryError),
+    VolatileMemoryAccess(#[source] VolatileMemoryError),
 }
 
 pub type Result<T> = result::Result<T, Error>;
 
-bitflags! {
-    pub struct MemoryPolicy: u32 {
-        const USE_HUGEPAGES = 1;
-    }
-}
-
 /// A file-like object backing `MemoryRegion`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum BackingObject {
     Shm(Arc<SharedMemory>),
     File(Arc<File>),
@@ -95,6 +93,7 @@ impl AsRef<dyn AsRawDescriptor + Sync + Send> for BackingObject {
 /// A regions of memory mapped memory.
 /// Holds the memory mapping with its offset in guest memory.
 /// Also holds the backing object for the mapping and the offset in that object of the mapping.
+#[derive(Debug)]
 pub struct MemoryRegion {
     mapping: MemoryMapping,
     guest_base: GuestAddress,
@@ -161,13 +160,15 @@ impl MemoryRegion {
 }
 
 /// Tracks memory regions and where they are mapped in the guest, along with shm
-/// fds of the underlying memory regions.
-#[derive(Clone)]
+/// descriptors of the underlying memory regions.
+#[derive(Clone, Debug)]
 pub struct GuestMemory {
     regions: Arc<[MemoryRegion]>,
 }
 
 impl AsRawDescriptors for GuestMemory {
+    /// USE WITH CAUTION, the descriptors returned here are not necessarily
+    /// files!
     fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
         self.regions
             .iter()
@@ -189,15 +190,13 @@ impl GuestMemory {
             aligned_size += range.1;
         }
 
-        let mut seals = MemfdSeals::new();
+        // NOTE: Some tests rely on the GuestMemory's name when capturing metrics.
+        let name = "crosvm_guest";
+        // Shm must be mut even though it is only updated on Unix systems.
+        #[allow(unused_mut)]
+        let mut shm = SharedMemory::new(name, aligned_size).map_err(Error::MemoryCreationFailed)?;
 
-        seals.set_shrink_seal();
-        seals.set_grow_seal();
-        seals.set_seal_seal();
-
-        let mut shm = SharedMemory::named("crosvm_guest", aligned_size)
-            .map_err(Error::MemoryCreationFailed)?;
-        shm.add_seals(seals).map_err(Error::MemoryAddSealsFailed)?;
+        sys::finalize_shm(&mut shm)?;
 
         Ok(shm)
     }
@@ -206,8 +205,8 @@ impl GuestMemory {
     /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
     pub fn new(ranges: &[(GuestAddress, u64)]) -> Result<GuestMemory> {
         // Create shm
-
         let shm = Arc::new(GuestMemory::create_shm(ranges)?);
+
         // Create memory regions
         let mut regions = Vec::<MemoryRegion>::new();
         let mut offset = 0;
@@ -230,6 +229,7 @@ impl GuestMemory {
                 .offset(offset)
                 .build()
                 .map_err(Error::MemoryMappingFailed)?;
+
             regions.push(MemoryRegion {
                 mapping,
                 guest_base: range.0,
@@ -329,28 +329,6 @@ impl GuestMemory {
     /// Returns the size of the memory region in bytes.
     pub fn num_regions(&self) -> u64 {
         self.regions.len() as u64
-    }
-
-    /// Madvise away the address range in the host that is associated with the given guest range.
-    pub fn remove_range(&self, addr: GuestAddress, count: u64) -> Result<()> {
-        self.do_in_region(addr, move |mapping, offset, _| {
-            mapping
-                .remove_range(offset, count as usize)
-                .map_err(|e| Error::MemoryAccess(addr, e))
-        })
-    }
-
-    /// Handles guest memory policy hints/advices.
-    pub fn set_memory_policy(&self, mem_policy: MemoryPolicy) {
-        if mem_policy.contains(MemoryPolicy::USE_HUGEPAGES) {
-            for (_, region) in self.regions.iter().enumerate() {
-                let ret = region.mapping.use_hugepages();
-
-                if let Err(err) = ret {
-                    println!("Failed to enable HUGEPAGE for mapping {}", err);
-                }
-            }
-        }
     }
 
     /// Perform the specified action on each region's addresses.
@@ -633,10 +611,10 @@ impl GuestMemory {
     /// #     Ok(rand_val)
     /// # }
     /// ```
-    pub fn read_to_memory(
+    pub fn read_to_memory<F: Read + AsRawDescriptor>(
         &self,
         guest_addr: GuestAddress,
-        src: &dyn AsRawDescriptor,
+        src: &mut F,
         count: usize,
     ) -> Result<()> {
         self.do_in_region(guest_addr, move |mapping, offset, _| {
@@ -671,10 +649,10 @@ impl GuestMemory {
     /// #     Ok(())
     /// # }
     /// ```
-    pub fn write_from_memory(
+    pub fn write_from_memory<F: Write + AsRawDescriptor>(
         &self,
         guest_addr: GuestAddress,
-        dst: &dyn AsRawDescriptor,
+        dst: &mut F,
         count: usize,
     ) -> Result<()> {
         self.do_in_region(guest_addr, move |mapping, offset, _| {
@@ -818,14 +796,14 @@ impl GuestMemory {
     ///
     /// ```
     /// # use vm_memory::{GuestAddress, GuestMemory};
-    /// let addr_a = GuestAddress(0x1000);
-    /// let addr_b = GuestAddress(0x8000);
+    /// let addr_a = GuestAddress(0x10000);
+    /// let addr_b = GuestAddress(0x80000);
     /// let mut gm = GuestMemory::new(&vec![
-    ///     (addr_a, 0x2000),
-    ///     (addr_b, 0x3000)]).expect("failed to create GuestMemory");
-    /// let offset = gm.offset_from_base(GuestAddress(0x9500))
+    ///     (addr_a, 0x20000),
+    ///     (addr_b, 0x30000)]).expect("failed to create GuestMemory");
+    /// let offset = gm.offset_from_base(GuestAddress(0x95000))
     ///                .expect("failed to get offset");
-    /// assert_eq!(offset, 0x3500);
+    /// assert_eq!(offset, 0x35000);
     /// ```
     pub fn offset_from_base(&self, guest_addr: GuestAddress) -> Result<u64> {
         self.regions
@@ -850,62 +828,63 @@ unsafe impl BackingMemory for GuestMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use base::kernel_has_memfd;
 
     #[test]
     fn test_alignment() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
+        let start_addr2 = GuestAddress(0x10000);
 
         assert!(GuestMemory::new(&[(start_addr1, 0x100), (start_addr2, 0x400)]).is_err());
-        assert!(GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x1000)]).is_ok());
+        assert!(GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x10000)]).is_ok());
     }
 
     #[test]
     fn two_regions() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x4000);
-        assert!(GuestMemory::new(&[(start_addr1, 0x4000), (start_addr2, 0x4000)]).is_ok());
+        let start_addr2 = GuestAddress(0x10000);
+        assert!(GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x10000)]).is_ok());
     }
 
     #[test]
     fn overlap_memory() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        assert!(GuestMemory::new(&[(start_addr1, 0x2000), (start_addr2, 0x2000)]).is_err());
+        let start_addr2 = GuestAddress(0x10000);
+        assert!(GuestMemory::new(&[(start_addr1, 0x20000), (start_addr2, 0x20000)]).is_err());
     }
 
     #[test]
     fn region_hole() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x4000);
-        let gm = GuestMemory::new(&[(start_addr1, 0x2000), (start_addr2, 0x2000)]).unwrap();
-        assert!(gm.address_in_range(GuestAddress(0x1000)));
-        assert!(!gm.address_in_range(GuestAddress(0x3000)));
-        assert!(gm.address_in_range(GuestAddress(0x5000)));
-        assert!(!gm.address_in_range(GuestAddress(0x6000)));
-        assert!(!gm.address_in_range(GuestAddress(0x6000)));
-        assert!(gm.range_overlap(GuestAddress(0x1000), GuestAddress(0x3000)));
-        assert!(!gm.range_overlap(GuestAddress(0x3000), GuestAddress(0x4000)));
-        assert!(gm.range_overlap(GuestAddress(0x3000), GuestAddress(0x7000)));
-        assert!(gm.checked_offset(GuestAddress(0x1000), 0x1000).is_none());
-        assert!(gm.checked_offset(GuestAddress(0x5000), 0x800).is_some());
-        assert!(gm.checked_offset(GuestAddress(0x5000), 0x1000).is_none());
+        let start_addr2 = GuestAddress(0x40000);
+        let gm = GuestMemory::new(&[(start_addr1, 0x20000), (start_addr2, 0x20000)]).unwrap();
+        assert!(gm.address_in_range(GuestAddress(0x10000)));
+        assert!(!gm.address_in_range(GuestAddress(0x30000)));
+        assert!(gm.address_in_range(GuestAddress(0x50000)));
+        assert!(!gm.address_in_range(GuestAddress(0x60000)));
+        assert!(!gm.address_in_range(GuestAddress(0x60000)));
+        assert!(gm.range_overlap(GuestAddress(0x10000), GuestAddress(0x30000)),);
+        assert!(!gm.range_overlap(GuestAddress(0x30000), GuestAddress(0x40000)),);
+        assert!(gm.range_overlap(GuestAddress(0x30000), GuestAddress(0x70000)),);
+        assert!(gm.checked_offset(GuestAddress(0x10000), 0x10000).is_none());
+        assert!(gm.checked_offset(GuestAddress(0x50000), 0x8000).is_some());
+        assert!(gm.checked_offset(GuestAddress(0x50000), 0x10000).is_none());
     }
 
     #[test]
     fn test_read_u64() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        let gm = GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x1000)]).unwrap();
+        let start_addr2 = GuestAddress(0x10000);
+        let gm = GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x10000)]).unwrap();
 
         let val1: u64 = 0xaa55aa55aa55aa55;
         let val2: u64 = 0x55aa55aa55aa55aa;
         gm.write_obj_at_addr(val1, GuestAddress(0x500)).unwrap();
-        gm.write_obj_at_addr(val2, GuestAddress(0x1000 + 32))
+        gm.write_obj_at_addr(val2, GuestAddress(0x10000 + 32))
             .unwrap();
         let num1: u64 = gm.read_obj_from_addr(GuestAddress(0x500)).unwrap();
-        let num2: u64 = gm.read_obj_from_addr(GuestAddress(0x1000 + 32)).unwrap();
+        let num2: u64 = gm.read_obj_from_addr(GuestAddress(0x10000 + 32)).unwrap();
         assert_eq!(val1, num1);
         assert_eq!(val2, num2);
     }
@@ -913,17 +892,17 @@ mod tests {
     #[test]
     fn test_ref_load_u64() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        let gm = GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x1000)]).unwrap();
+        let start_addr2 = GuestAddress(0x10000);
+        let gm = GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x10000)]).unwrap();
 
         let val1: u64 = 0xaa55aa55aa55aa55;
         let val2: u64 = 0x55aa55aa55aa55aa;
         gm.write_obj_at_addr(val1, GuestAddress(0x500)).unwrap();
-        gm.write_obj_at_addr(val2, GuestAddress(0x1000 + 32))
+        gm.write_obj_at_addr(val2, GuestAddress(0x10000 + 32))
             .unwrap();
         let num1: u64 = gm.get_ref_at_addr(GuestAddress(0x500)).unwrap().load();
         let num2: u64 = gm
-            .get_ref_at_addr(GuestAddress(0x1000 + 32))
+            .get_ref_at_addr(GuestAddress(0x10000 + 32))
             .unwrap()
             .load();
         assert_eq!(val1, num1);
@@ -933,8 +912,8 @@ mod tests {
     #[test]
     fn test_ref_store_u64() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        let gm = GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x1000)]).unwrap();
+        let start_addr2 = GuestAddress(0x10000);
+        let gm = GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x10000)]).unwrap();
 
         let val1: u64 = 0xaa55aa55aa55aa55;
         let val2: u64 = 0x55aa55aa55aa55aa;
@@ -951,9 +930,9 @@ mod tests {
     #[test]
     fn test_memory_size() {
         let start_region1 = GuestAddress(0x0);
-        let size_region1 = 0x1000;
+        let size_region1 = 0x10000;
         let start_region2 = GuestAddress(0x10000);
-        let size_region2 = 0x2000;
+        let size_region2 = 0x20000;
         let gm = GuestMemory::new(&[(start_region1, size_region1), (start_region2, size_region2)])
             .unwrap();
 
@@ -969,8 +948,8 @@ mod tests {
     #[test]
     fn guest_to_host() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        let mem = GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x4000)]).unwrap();
+        let start_addr2 = GuestAddress(0x10000);
+        let mem = GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x40000)]).unwrap();
 
         // Verify the host addresses match what we expect from the mappings.
         let addr1_base = get_mapping(&mem, start_addr1).unwrap();
@@ -988,38 +967,43 @@ mod tests {
     #[test]
     fn guest_to_host_range() {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        let mem = GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x4000)]).unwrap();
+        let start_addr2 = GuestAddress(0x10000);
+        let mem = GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x40000)]).unwrap();
 
         // Verify the host addresses match what we expect from the mappings.
         let addr1_base = get_mapping(&mem, start_addr1).unwrap();
         let addr2_base = get_mapping(&mem, start_addr2).unwrap();
-        let host_addr1 = mem.get_host_address_range(start_addr1, 0x1000).unwrap();
-        let host_addr2 = mem.get_host_address_range(start_addr2, 0x1000).unwrap();
+        let host_addr1 = mem.get_host_address_range(start_addr1, 0x10000).unwrap();
+        let host_addr2 = mem.get_host_address_range(start_addr2, 0x10000).unwrap();
         assert_eq!(host_addr1, addr1_base);
         assert_eq!(host_addr2, addr2_base);
 
-        let host_addr3 = mem.get_host_address_range(start_addr2, 0x2000).unwrap();
+        let host_addr3 = mem.get_host_address_range(start_addr2, 0x20000).unwrap();
         assert_eq!(host_addr3, addr2_base);
 
         // Check that a valid guest address with an invalid size returns an error.
-        assert!(mem.get_host_address_range(start_addr1, 0x2000).is_err());
+        assert!(mem.get_host_address_range(start_addr1, 0x20000).is_err());
 
         // Check that a bad address returns an error.
         let bad_addr = GuestAddress(0x123456);
-        assert!(mem.get_host_address_range(bad_addr, 0x1000).is_err());
+        assert!(mem.get_host_address_range(bad_addr, 0x10000).is_err());
     }
 
     #[test]
     fn shm_offset() {
-        if !kernel_has_memfd() {
-            return;
+        #[cfg(unix)]
+        {
+            // This is simply a sanity check on linux platforms to ensure the tests
+            // won't run on old kernels that don't support memfd_create.
+            if !kernel_has_memfd() {
+                return;
+            }
         }
 
         let start_region1 = GuestAddress(0x0);
-        let size_region1 = 0x1000;
+        let size_region1 = 0x10000;
         let start_region2 = GuestAddress(0x10000);
-        let size_region2 = 0x2000;
+        let size_region2 = 0x20000;
         let gm = GuestMemory::new(&[(start_region1, size_region1), (start_region2, size_region2)])
             .unwrap();
 

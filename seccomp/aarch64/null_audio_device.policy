@@ -4,7 +4,7 @@
 
 @include /usr/share/policy/crosvm/common_device.policy
 
-madvise: 1
+lseek: 1
 prlimit64: 1
 setrlimit: 1
 openat: return ENOENT

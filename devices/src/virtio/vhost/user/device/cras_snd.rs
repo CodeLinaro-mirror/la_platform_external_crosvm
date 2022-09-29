@@ -2,13 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::os::unix::net::UnixListener;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context};
 use argh::FromArgs;
-use base::{warn, Event, UnlinkUnixListener};
+use base::{warn, Event};
 use cros_async::{sync::Mutex as AsyncMutex, EventAsync, Executor};
 use data_model::DataInit;
 use futures::channel::mpsc;
@@ -17,6 +16,7 @@ use hypervisor::ProtectionType;
 use once_cell::sync::OnceCell;
 use sync::Mutex;
 use vm_memory::GuestMemory;
+use vmm_vhost::connection::socket::{Endpoint as SocketEndpoint, Listener as SocketListener};
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::snd::cras_backend::{
@@ -88,10 +88,13 @@ impl CrasSndBackend {
 }
 
 impl VhostUserBackend for CrasSndBackend {
-    const MAX_QUEUE_NUM: usize = MAX_QUEUE_NUM;
-    const MAX_VRING_LEN: u16 = MAX_VRING_LEN;
+    fn max_queue_num(&self) -> usize {
+        return MAX_QUEUE_NUM;
+    }
 
-    type Error = anyhow::Error;
+    fn max_vring_len(&self) -> u16 {
+        return MAX_VRING_LEN;
+    }
 
     fn features(&self) -> u64 {
         self.avail_features
@@ -235,38 +238,29 @@ impl VhostUserBackend for CrasSndBackend {
 }
 
 #[derive(FromArgs)]
-#[argh(description = "")]
-struct Options {
-    #[argh(option, description = "path to a socket", arg_name = "PATH")]
+#[argh(subcommand, name = "cras-snd")]
+/// CRAS device
+pub struct Options {
+    #[argh(option, arg_name = "PATH")]
+    /// path to a socket
     socket: String,
-    #[argh(
-        option,
-        description = "comma separated key=value pairs for setting up cras snd devices.
-Possible key values:
-capture - Enable audio capture. Default to false.
-client_type - Set specific client type for cras backend.
-num_output_streams - Set number of output PCM streams.
-num_input_streams - Set number of input PCM streams.
-Example: [capture=true,client=crosvm,socket=unified,num_output_streams=1,num_input_streams=1]",
-        arg_name = "CONFIG"
-    )]
+    #[argh(option, arg_name = "CONFIG")]
+    /// comma separated key=value pairs for setting up cras snd devices.
+    /// Possible key values:
+    /// capture - Enable audio capture. Default to false.
+    /// client_type - Set specific client type for cras backend.
+    /// num_output_devices - Set number of output PCM devices.
+    /// num_input_devices - Set number of input PCM devices.
+    /// num_output_streams - Set number of output PCM streams per device.
+    /// num_input_streams - Set number of input PCM streams per device.
+    /// Example: [capture=true,client=crosvm,socket=unified,
+    /// num_output_devices=1,num_input_devices=1,num_output_streams=1,num_input_streams=1]
     config: Option<String>,
 }
 
 /// Starts a vhost-user snd device with the cras backend.
 /// Returns an error if the given `args` is invalid or the device fails to run.
-pub fn run_cras_snd_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
-    let opts = match Options::from_args(&[program_name], args) {
-        Ok(opts) => opts,
-        Err(e) => {
-            if e.status.is_err() {
-                bail!(e.output);
-            } else {
-                println!("{}", e.output);
-            }
-            return Ok(());
-        }
-    };
+pub fn run_cras_snd_device(opts: Options) -> anyhow::Result<()> {
     let params = opts
         .config
         .unwrap_or("".to_string())
@@ -275,9 +269,9 @@ pub fn run_cras_snd_device(program_name: &str, args: &[&str]) -> anyhow::Result<
     let snd_device = CrasSndBackend::new(params)?;
 
     // Create and bind unix socket
-    let listener = UnixListener::bind(opts.socket).map(UnlinkUnixListener)?;
+    let listener = SocketListener::new(opts.socket, true /* unlink */)?;
 
-    let handler = DeviceRequestHandler::new(snd_device);
+    let handler = DeviceRequestHandler::new(Box::new(snd_device));
 
     // Child, we can continue by spawning the executor and set up the device
     let ex = Executor::new().context("Failed to create executor")?;
@@ -285,5 +279,5 @@ pub fn run_cras_snd_device(program_name: &str, args: &[&str]) -> anyhow::Result<
     let _ = SND_EXECUTOR.set(ex.clone());
 
     // run_until() returns an Result<Result<..>> which the ? operator lets us flatten.
-    ex.run_until(handler.run_with_listener(listener, &ex))?
+    ex.run_until(handler.run_with_listener::<SocketEndpoint<_>>(listener, &ex))?
 }

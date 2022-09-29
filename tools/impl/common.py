@@ -17,25 +17,21 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import getpass
 from math import ceil
 import os
 import re
 import shutil
 import subprocess
 import sys
+from tempfile import gettempdir
 import traceback
 from io import StringIO
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from subprocess import DEVNULL, PIPE, STDOUT  # type: ignore
-from typing import Any, Callable, Iterable, NamedTuple, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, TypeVar, Union
 
-try:
-    import argh  # type: ignore
-except ImportError as e:
-    print("Missing module:", e)
-    print("(Re-)Run ./tools/install-deps to install the required dependencies.")
-    sys.exit(1)
 
 "Root directory of crosvm"
 CROSVM_ROOT = Path(__file__).parent.parent.parent.resolve()
@@ -46,6 +42,8 @@ CROSVM_TOML = CROSVM_ROOT / "Cargo.toml"
 # Ensure that we really found the crosvm root directory
 assert 'name = "crosvm"' in CROSVM_TOML.read_text()
 
+# File where to store http headers for gcloud authentication
+AUTH_HEADERS_FILE = Path(gettempdir()) / f"crosvm_gcloud_auth_headers_{getpass.getuser()}"
 
 PathLike = Union[Path, str]
 
@@ -125,14 +123,14 @@ class Command(object):
         self,
         *args: Any,
         stdin_cmd: Optional[Command] = None,
-        env_vars: dict[str, str] = {},
+        env_vars: Dict[str, str] = {},
     ):
         self.args = Command.__parse_cmd(args)
         self.stdin_cmd = stdin_cmd
         self.env_vars = env_vars
         if len(self.args) > 0:
             executable = self.args[0]
-            if Path(executable).exists:
+            if Path(executable).exists():
                 self.executable = Path(executable)
             else:
                 path = shutil.which(executable)
@@ -196,6 +194,9 @@ class Command(object):
             if check:
                 raise subprocess.CalledProcessError(result.returncode, str(self), result.stdout)
         return result.returncode
+
+    def success(self):
+        return self.fg(check=False, quiet=True) == 0
 
     def stdout(self, check: bool = True):
         """
@@ -361,13 +362,13 @@ class Command(object):
                     yield arg
 
     @staticmethod
-    def __parse_cmd(args: Iterable[Any]) -> list[str]:
+    def __parse_cmd(args: Iterable[Any]) -> List[str]:
         """Parses command line arguments for Command."""
         res = [parsed for arg in args for parsed in Command.__parse_cmd_args(arg)]
         return res
 
     @staticmethod
-    def __parse_cmd_args(arg: Any) -> list[str]:
+    def __parse_cmd_args(arg: Any) -> List[str]:
         """Parses a mixed type command line argument into a list of strings."""
         if isinstance(arg, Path):
             return [str(arg)]
@@ -447,7 +448,7 @@ class QuotedString(object):
 T = TypeVar("T")
 
 
-def batched(source: Iterable[T], max_batch_size: int) -> Iterable[list[T]]:
+def batched(source: Iterable[T], max_batch_size: int) -> Iterable[List[T]]:
     """
     Returns an iterator over batches of elements from source_list.
 
@@ -473,15 +474,25 @@ def run_main(main_fn: Callable[..., Any]):
     run_commands(default_fn=main_fn)
 
 
-def run_commands(*functions: Callable[..., Any], default_fn: Optional[Callable[..., Any]] = None):
+def run_commands(
+    *functions: Callable[..., Any],
+    default_fn: Optional[Callable[..., Any]] = None,
+    usage: Optional[str] = None,
+):
     """
     Allow the user to call the provided functions with command line arguments translated to
     function arguments via argh: https://pythonhosted.org/argh
     """
     try:
+        import argh  # type: ignore
+    except ImportError as e:
+        print("Missing module:", e)
+        print("(Re-)Run ./tools/install-deps to install the required dependencies.")
+        sys.exit(1)
+    try:
         # Add global verbose arguments
-        parser = argparse.ArgumentParser()
-        __add_verbose_args(parser)
+        parser = argparse.ArgumentParser(usage=usage)
+        add_verbose_args(parser)
 
         # Add provided commands to parser. Do not use sub-commands if we just got one function.
         if functions:
@@ -507,7 +518,7 @@ def very_verbose():
     return "-vv" in sys.argv or "--very-verbose" in sys.argv
 
 
-def __add_verbose_args(parser: argparse.ArgumentParser):
+def add_verbose_args(parser: argparse.ArgumentParser):
     # This just serves as documentation to argparse. The verbose variables are directly
     # parsed from argv above to ensure they are accessible early.
     parser.add_argument(
@@ -526,11 +537,15 @@ def __add_verbose_args(parser: argparse.ArgumentParser):
     )
 
 
-def find_source_files(extension: str, ignore: list[str] = []):
-    for file in Path(".").glob(f"**/*.{extension}"):
-        if file.is_relative_to("third_party"):
+def all_tracked_files():
+    return (Path(f) for f in cmd("git ls-files").lines())
+
+
+def find_source_files(extension: str, ignore: List[str] = []):
+    for file in all_tracked_files():
+        if file.suffix != f".{extension}":
             continue
-        if "target" in file.parts:
+        if file.is_relative_to("third_party"):
             continue
         if str(file) in ignore:
             continue
@@ -541,6 +556,59 @@ def find_scripts(path: Path, shebang: str):
     for file in path.glob("*"):
         if file.is_file() and file.open(errors="ignore").read(512).startswith(f"#!{shebang}"):
             yield file
+
+
+def confirm(message: str, default=False):
+    print(message, "[y/N]" if default == False else "[Y/n]")
+    response = sys.stdin.readline().strip()
+    if response in ("y", "Y"):
+        return True
+    if response in ("n", "N"):
+        return False
+    return default
+
+
+def get_cookie_file():
+    path = cmd("git config http.cookiefile").stdout(check=False)
+    return Path(path) if path else None
+
+
+def get_gcloud_access_token():
+    if not shutil.which("gcloud"):
+        return None
+    return cmd("gcloud auth print-access-token").stdout(check=False)
+
+
+def curl_with_git_auth():
+    """
+    Returns a curl `Command` instance set up to use the same HTTP credentials as git.
+
+    This currently supports two methods:
+    - git cookies (the default)
+    - gcloud
+
+    Most developers will use git cookies, which are passed to curl.
+
+    glloud for authorization can be enabled in git via `git config credential.helper gcloud.sh`.
+    If enabled in git, this command will also return a curl command using a gloud access token.
+    """
+    helper = cmd("git config credential.helper").stdout(check=False)
+
+    if not helper:
+        cookie_file = get_cookie_file()
+        if not cookie_file or not cookie_file.is_file():
+            raise Exception("git http cookiefile is not available.")
+        return cmd("curl --cookie", cookie_file)
+
+    if helper.endswith("gcloud.sh"):
+        token = get_gcloud_access_token()
+        if not token:
+            raise Exception("Cannot get gcloud access token.")
+        # Write token to a header file so it will not appear in logs or error messages.
+        AUTH_HEADERS_FILE.write_text(f"Authorization: Bearer {token}")
+        return cmd(f"curl -H @{AUTH_HEADERS_FILE}")
+
+    raise Exception(f"Unsupported git credentials.helper: {helper}")
 
 
 if __name__ == "__main__":

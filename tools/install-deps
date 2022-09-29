@@ -15,11 +15,16 @@ sudo apt-get install --yes --no-install-recommends \
     git \
     jq \
     libasound2-dev \
+    libavcodec-dev \
+    libavutil-dev \
     libclang-dev \
     libdbus-1-dev \
     libdrm-dev \
     libepoxy-dev \
     libssl-dev \
+    libswscale-dev \
+    libudev-dev \
+    libva-dev \
     libwayland-dev \
     libxext-dev \
     make \

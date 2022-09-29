@@ -8,7 +8,16 @@
   - [Custom Kernel / Rootfs](./running_crosvm/custom_kernel_rootfs.md)
   - [System Requirements](./running_crosvm/requirements.md)
   - [Features](./running_crosvm/features.md)
-  - [Devices](./running_crosvm/devices.md)
+  - [Programmatic Interaction](./running_crosvm/programmatic_interaction.md)
+- [Devices](./devices/index.md)
+  - [Block](./devices/block.md)
+  - [Network](./devices/net.md)
+  - [Balloon](./devices/balloon.md)
+  - [Pmem](./devices/pmem.md)
+  - [Wayland](./devices/wayland.md)
+  - [Video (experimental)](./devices/video.md)
+  - [Vhost-user](./devices/vhost_user.md)
+  - [VirtIO Vhost-user (VVU)](./devices/vvu.md)
 - [Integration](./integration/index.md)
   - [ChromeOS](./integration/chromeos.md)
 - [Architecture](./architecture.md)
@@ -21,8 +30,9 @@ ______________________________________________________________________
 - [Appendix](./appendix/index.md)
   - [Sandboxing](./appendix/sandboxing.md)
   - [Seccomp](./appendix/seccomp.md)
+  - [Memory Layout](./appendix/memory_layout.md)
   - [Minijail](./appendix/minijail.md)
 
 ______________________________________________________________________
 
-[API Documentation](./api.md)
+[Package Documentation](./package_documentation.md)

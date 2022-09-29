@@ -114,12 +114,204 @@ luci.bucket(name = "prod")
 # as the recipe bundler compiles them from your refs/heads/main branch.
 cipd_version = "refs/heads/main"
 
-# Example builder to verify configuration
-luci.builder(
-    name = "Example Builder",
-    bucket = "ci",
-    executable = luci.recipe(
-        name = "hello_world",
+# Configure Change Verifier to watch crosvm
+luci.cq(
+    status_host = "chromium-cq-status.appspot.com",
+)
+luci.cq_group(
+    name = "main",
+    watch = cq.refset(
+        repo = "https://chromium.googlesource.com/crosvm/crosvm",
+        refs = ["refs/heads/.+"],  # will watch all branches
     ),
-    schedule = "with 1m interval",
+)
+
+# Console showing all postsubmit verify builders
+luci.console_view(
+    name = "Postsubmit",
+    repo = "https://chromium.googlesource.com/crosvm/crosvm",
+)
+
+# View showing all infra builders
+luci.list_view(
+    name = "Infra",
+)
+
+def verify_builder(name, dimensions, presubmit = True, postsubmit = True, category = "generic", **args):
+    """Creates both a CI and try builder with the same properties.
+
+    The CI builder is attached to the gitlies poller and console view, and the try builder
+    is added to the change verifier.
+
+    Args:
+        name: Name of the builder
+        dimensions: Passed to luci.builder
+        presubmit: Create a presubmit builder (defaults to True)
+        postsubmit: Create a postsubmit builder (defaults to True)
+        category: Category of this builder in the concole view
+        **args: Passed to luci.builder
+    """
+
+    # CI builder
+    if postsubmit:
+        luci.builder(
+            name = name,
+            bucket = "ci",
+            service_account = "crosvm-luci-ci-builder@crosvm-infra.iam.gserviceaccount.com",
+            dimensions = dict(pool = "luci.crosvm.ci", **dimensions),
+            **args
+        )
+        luci.gitiles_poller(
+            name = "main source",
+            bucket = "ci",
+            repo = "https://chromium.googlesource.com/crosvm/crosvm",
+            triggers = ["ci/%s" % name],
+        )
+        luci.console_view_entry(
+            console_view = "Postsubmit",
+            builder = "ci/%s" % name,
+            category = category,
+        )
+
+    # Try builder
+    if presubmit:
+        luci.builder(
+            name = name,
+            bucket = "try",
+            service_account = "crosvm-luci-try-builder@crosvm-infra.iam.gserviceaccount.com",
+            dimensions = dict(pool = "luci.crosvm.try", **dimensions),
+            **args
+        )
+
+        # Attach try builder to Change Verifier
+        luci.cq_tryjob_verifier(
+            builder = "try/%s" % name,
+            cq_group = "main",
+        )
+
+def verify_linux_builder(arch, **kwargs):
+    """Creates a verify builder that builds crosvm on linux
+
+    Args:
+        arch: Architecture to build and test
+        **kwargs: Passed to verify_builder
+    """
+    verify_builder(
+        name = "crosvm_linux_%s" % arch,
+        dimensions = {
+            "os": "Ubuntu",
+            "cpu": "x86-64",
+        },
+        executable = luci.recipe(
+            name = "build_linux",
+        ),
+        properties = {
+            "test_arch": arch,
+        },
+        category = "linux",
+        **kwargs
+    )
+
+def verify_chromeos_builder(board, **kwargs):
+    """Creates a verify builder that builds crosvm for ChromeOS
+
+    Args:
+        board: ChromeOS board to build and test
+        **kwargs: Passed to verify_builder
+    """
+    verify_builder(
+        name = "crosvm_chromeos_%s" % board,
+        dimensions = {
+            "os": "Ubuntu",
+            "cpu": "x86-64",
+        },
+        executable = luci.recipe(
+            name = "build_chromeos",
+        ),
+        properties = {
+            "board": board,
+        },
+        category = "linux",
+        **kwargs
+    )
+
+def infra_builder(name, postsubmit, **args):
+    """Creates a ci job to run infra recipes that are not involved in verifying changes.
+
+    The builders are added to a separate infra dashboard.
+
+    Args:
+        name: Name of the builder
+        postsubmit: True if the builder should run after each submitted commit.
+        **args: Passed to luci.builder
+    """
+    luci.builder(
+        name = name,
+        bucket = "ci",
+        service_account = "crosvm-luci-ci-builder@crosvm-infra.iam.gserviceaccount.com",
+        dimensions = {
+            "pool": "luci.crosvm.ci",
+            "os": "Ubuntu",
+            "cpu": "x86-64",
+        },
+        **args
+    )
+    if postsubmit:
+        luci.gitiles_poller(
+            name = "main source",
+            bucket = "ci",
+            repo = "https://chromium.googlesource.com/crosvm/crosvm",
+            triggers = ["ci/%s" % name],
+        )
+    luci.list_view_entry(
+        list_view = "Infra",
+        builder = "ci/%s" % name,
+    )
+
+verify_linux_builder("x86_64")
+verify_linux_builder("aarch64")
+verify_linux_builder("armhf")
+
+verify_chromeos_builder("amd64-generic", presubmit = False)
+
+verify_builder(
+    name = "crosvm_windows",
+    dimensions = {
+        "os": "Windows",
+        "cpu": "x86-64",
+    },
+    executable = luci.recipe(
+        name = "build_windows",
+    ),
+    presubmit = False,
+    category = "windows",
+)
+
+verify_builder(
+    name = "crosvm_health_check",
+    dimensions = {
+        "os": "Ubuntu",
+        "cpu": "x86-64",
+    },
+    executable = luci.recipe(
+        name = "health_check",
+    ),
+    category = "linux",
+)
+
+infra_builder(
+    name = "crosvm_push_to_github",
+    executable = luci.recipe(
+        name = "push_to_github",
+    ),
+    postsubmit = True,
+)
+
+infra_builder(
+    name = "crosvm_update_chromeos_merges",
+    executable = luci.recipe(
+        name = "update_chromeos_merges",
+    ),
+    schedule = "0,30 * * * *",  # Run every 30 minutes
+    postsubmit = False,
 )

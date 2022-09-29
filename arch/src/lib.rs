@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! Virtual machine architecture support code.
+
 pub mod android;
 pub mod fdt;
 pub mod pstore;
@@ -18,12 +20,12 @@ use libc::sched_getcpu;
 
 use acpi_tables::aml::Aml;
 use acpi_tables::sdt::SDT;
-use base::{syslog, AsRawDescriptor, AsRawDescriptors, Event, Tube};
+use base::{syslog, AsRawDescriptor, AsRawDescriptors, Event, SendTube, Tube};
 use devices::virtio::VirtioDevice;
 use devices::{
     BarRange, Bus, BusDevice, BusDeviceObj, BusError, BusResumeDevice, HotPlugBus, IrqChip,
-    PciAddress, PciBridge, PciDevice, PciDeviceError, PciInterruptPin, PciRoot, ProxyDevice,
-    SerialHardware, SerialParameters, VfioPlatformDevice,
+    IrqEventSource, PciAddress, PciBus, PciDevice, PciDeviceError, PciInterruptPin, PciRoot,
+    ProxyDevice, SerialHardware, SerialParameters, VfioPlatformDevice,
 };
 use hypervisor::{IoEventAddress, ProtectionType, Vm};
 use minijail::Minijail;
@@ -40,12 +42,19 @@ use gdbstub_arch::x86::reg::X86_64CoreRegs as GdbStubRegs;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use {
     devices::IrqChipAArch64 as IrqChipArch,
-    hypervisor::{Hypervisor as HypervisorArch, VcpuAArch64 as VcpuArch, VmAArch64 as VmArch},
+    hypervisor::{
+        Hypervisor as HypervisorArch, VcpuAArch64 as VcpuArch, VcpuInitAArch64 as VcpuInitArch,
+        VmAArch64 as VmArch,
+    },
 };
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use {
     devices::IrqChipX86_64 as IrqChipArch,
-    hypervisor::{HypervisorX86_64 as HypervisorArch, VcpuX86_64 as VcpuArch, VmX86_64 as VmArch},
+    hypervisor::{
+        HypervisorX86_64 as HypervisorArch, VcpuInitX86_64 as VcpuInitArch, VcpuX86_64 as VcpuArch,
+        VmX86_64 as VmArch,
+    },
+    resources::AddressRange,
 };
 
 pub use serial::{
@@ -78,61 +87,72 @@ pub enum VcpuAffinity {
 
 /// Holds the pieces needed to build a VM. Passed to `build_vm` in the `LinuxArch` trait below to
 /// create a `RunnableLinuxVm`.
+#[sorted]
 pub struct VmComponents {
-    pub memory_size: u64,
-    pub swiotlb: Option<u64>,
-    pub vcpu_count: usize,
-    pub vcpu_affinity: Option<VcpuAffinity>,
-    pub cpu_clusters: Vec<Vec<usize>>,
-    pub cpu_capacity: BTreeMap<usize, u32>,
-    pub no_smt: bool,
-    pub hugepages: bool,
-    pub vm_image: VmImage,
-    pub android_fstab: Option<File>,
-    pub pstore: Option<Pstore>,
-    pub initrd_image: Option<File>,
-    pub extra_kernel_params: Vec<String>,
     pub acpi_sdts: Vec<SDT>,
-    pub rt_cpus: Vec<usize>,
+    pub android_fstab: Option<File>,
+    pub cpu_capacity: BTreeMap<usize, u32>,
+    pub cpu_clusters: Vec<Vec<usize>>,
     pub delay_rt: bool,
-    pub protected_vm: ProtectionType,
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    pub gdb: Option<(u32, Tube)>, // port and control tube.
-    pub dmi_path: Option<PathBuf>,
-    pub no_legacy: bool,
-    pub host_cpu_topology: bool,
-    pub itmt: bool,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub force_s2idle: bool,
     #[cfg(feature = "direct")]
     pub direct_gpe: Vec<u32>,
+    pub dmi_path: Option<PathBuf>,
+    pub extra_kernel_params: Vec<String>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub force_s2idle: bool,
+    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    pub gdb: Option<(u32, Tube)>, // port and control tube.
+    pub host_cpu_topology: bool,
+    pub hugepages: bool,
+    pub initrd_image: Option<File>,
+    pub itmt: bool,
+    pub memory_size: u64,
+    pub no_i8042: bool,
+    pub no_rtc: bool,
+    pub no_smt: bool,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub pci_low_start: Option<u64>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub pcie_ecam: Option<AddressRange>,
+    pub protected_vm: ProtectionType,
+    pub pstore: Option<Pstore>,
+    /// A file to load as pVM firmware. Must be `Some` iff
+    /// `protected_vm == ProtectionType::UnprotectedWithFirmware`.
+    pub pvm_fw: Option<File>,
+    pub rt_cpus: Vec<usize>,
+    pub swiotlb: Option<u64>,
+    pub vcpu_affinity: Option<VcpuAffinity>,
+    pub vcpu_count: usize,
+    pub vm_image: VmImage,
 }
 
 /// Holds the elements needed to run a Linux VM. Created by `build_vm`.
+#[sorted]
 pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
-    pub vm: V,
-    pub vcpu_count: usize,
-    /// If vcpus is None, then it's the responsibility of the vcpu thread to create vcpus.
-    /// If it's Some, then `build_vm` already created the vcpus.
-    pub vcpus: Option<Vec<Vcpu>>,
-    pub vcpu_affinity: Option<VcpuAffinity>,
-    pub no_smt: bool,
-    pub irq_chip: Box<dyn IrqChipArch>,
-    pub has_bios: bool,
-    pub io_bus: Arc<Bus>,
-    pub mmio_bus: Arc<Bus>,
-    pub pid_debug_label_map: BTreeMap<u32, String>,
-    pub suspend_evt: Event,
-    pub rt_cpus: Vec<usize>,
-    pub delay_rt: bool,
     pub bat_control: Option<BatControl>,
+    pub delay_rt: bool,
     #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
     pub gdb: Option<(u32, Tube)>,
+    pub has_bios: bool,
+    pub hotplug_bus: Vec<Arc<Mutex<dyn HotPlugBus>>>,
+    pub io_bus: Arc<Bus>,
+    pub irq_chip: Box<dyn IrqChipArch>,
+    pub mmio_bus: Arc<Bus>,
+    pub no_smt: bool,
+    pub pid_debug_label_map: BTreeMap<u32, String>,
     pub pm: Option<Arc<Mutex<dyn PmResource>>>,
     /// Devices to be notified before the system resumes from the S3 suspended state.
     pub resume_notify_devices: Vec<Arc<Mutex<dyn BusResumeDevice>>>,
     pub root_config: Arc<Mutex<PciRoot>>,
-    pub hotplug_bus: Vec<Arc<Mutex<dyn HotPlugBus>>>,
+    pub rt_cpus: Vec<usize>,
+    pub suspend_evt: Event,
+    pub vcpu_affinity: Option<VcpuAffinity>,
+    pub vcpu_count: usize,
+    pub vcpu_init: VcpuInitArch,
+    /// If vcpus is None, then it's the responsibility of the vcpu thread to create vcpus.
+    /// If it's Some, then `build_vm` already created the vcpus.
+    pub vcpus: Option<Vec<Vcpu>>,
+    pub vm: V,
 }
 
 /// The device and optional jail.
@@ -172,10 +192,8 @@ pub trait LinuxArch {
     /// # Arguments
     ///
     /// * `components` - Parts to use to build the VM.
-    /// * `exit_evt` - Event used by sub-devices to request that crosvm exit because guest
-    ///     wants to stop/shut down.
-    /// * `reset_evt` - Event used by sub-devices to request that crosvm exit because guest
-    ///     requested reset.
+    /// * `vm_evt_wrtube` - Tube used by sub-devices to request that crosvm exit because guest
+    ///     wants to stop/shut down or requested reset.
     /// * `system_allocator` - Allocator created by this trait's implementation of
     ///   `get_system_allocator_config`.
     /// * `serial_parameters` - Definitions for how the serial devices should be configured.
@@ -185,10 +203,10 @@ pub trait LinuxArch {
     /// * `ramoops_region` - Region allocated for ramoops.
     /// * `devices` - The devices to be built into the VM.
     /// * `irq_chip` - The IRQ chip implemention for the VM.
+    /// * `debugcon_jail` - Jail used for debugcon devices created here.
     fn build_vm<V, Vcpu>(
         components: VmComponents,
-        exit_evt: &Event,
-        reset_evt: &Event,
+        vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
@@ -198,6 +216,7 @@ pub trait LinuxArch {
         devices: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipArch,
         vcpu_ids: &mut Vec<usize>,
+        debugcon_jail: Option<Minijail>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmArch,
@@ -211,20 +230,29 @@ pub trait LinuxArch {
     /// * `hypervisor` - The `Hypervisor` that created the vcpu.
     /// * `irq_chip` - The `IrqChip` associated with this vm.
     /// * `vcpu` - The VCPU object to configure.
+    /// * `vcpu_init` - The data required to initialize VCPU registers and other state.
     /// * `vcpu_id` - The id of the given `vcpu`.
     /// * `num_cpus` - Number of virtual CPUs the guest will have.
     /// * `has_bios` - Whether the `VmImage` is a `Bios` image
+    /// * `no_smt` - Wheter diabling SMT.
+    /// * `host_cpu_topology` - whether enabling host cpu topology.
+    /// * `enable_pnp_data` - whether enabling PnP statistics data.
+    /// * `itmt` - whether enabling ITMT scheduler
+    /// * `force_calibrated_tsc_leaf` - whether to force using a calibrated TSC leaf (0x15).
     fn configure_vcpu<V: Vm>(
         vm: &V,
         hypervisor: &dyn HypervisorArch,
         irq_chip: &mut dyn IrqChipArch,
         vcpu: &mut dyn VcpuArch,
+        vcpu_init: &VcpuInitArch,
         vcpu_id: usize,
         num_cpus: usize,
         has_bios: bool,
         no_smt: bool,
         host_cpu_topology: bool,
+        enable_pnp_data: bool,
         itmt: bool,
+        force_calibrated_tsc_leaf: bool,
     ) -> Result<(), Self::Error>;
 
     /// Configures and add a pci device into vm
@@ -295,6 +323,9 @@ pub enum DeviceRegistrationError {
     /// Could not allocate IRQ resource for the device.
     #[error("Allocating IRQ resource: {0}")]
     AllocateIrqResource(devices::vfio::VfioError),
+    /// Broken pci topology
+    #[error("pci topology is broken")]
+    BrokenPciTopology,
     /// Unable to clone a jail for the device.
     #[error("failed to clone jail: {0}")]
     CloneJail(minijail::Error),
@@ -379,7 +410,7 @@ pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
         linux
             .irq_chip
             .as_irq_chip_mut()
-            .register_level_irq_event(gsi, &intx_event)
+            .register_level_irq_event(gsi, &intx_event, IrqEventSource::from_device(&device))
             .map_err(DeviceRegistrationError::RegisterIrqfd)?;
     }
 
@@ -461,7 +492,11 @@ pub fn generate_platform_bus(
                 let irq_evt =
                     devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
                 irq_chip
-                    .register_level_irq_event(irq_num, &irq_evt)
+                    .register_level_irq_event(
+                        irq_num,
+                        &irq_evt,
+                        IrqEventSource::from_device(&device),
+                    )
                     .map_err(DeviceRegistrationError::RegisterIrqfd)?;
                 device
                     .assign_level_platform_irq(&irq_evt, irq.index)
@@ -471,7 +506,11 @@ pub fn generate_platform_bus(
                 let irq_evt =
                     devices::IrqEdgeEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
                 irq_chip
-                    .register_edge_irq_event(irq_num, &irq_evt)
+                    .register_edge_irq_event(
+                        irq_num,
+                        &irq_evt,
+                        IrqEventSource::from_device(&device),
+                    )
                     .map_err(DeviceRegistrationError::RegisterIrqfd)?;
                 device
                     .assign_edge_platform_irq(&irq_evt, irq.index)
@@ -498,6 +537,83 @@ pub fn generate_platform_bus(
     Ok(pid_labels)
 }
 
+// Generate pci topology starting from parent bus
+pub fn generate_pci_topology(
+    parent_bus: Arc<Mutex<PciBus>>,
+    resources: &mut SystemAllocator,
+    io_ranges: &mut BTreeMap<usize, Vec<BarRange>>,
+    device_ranges: &mut BTreeMap<usize, Vec<BarRange>>,
+    device_addrs: &[PciAddress],
+    devices: &mut Vec<(Box<dyn PciDevice>, Option<Minijail>)>,
+) -> Result<(Vec<BarRange>, u8), DeviceRegistrationError> {
+    let mut bar_ranges = Vec::new();
+    let bus_num = parent_bus.lock().get_bus_num();
+    let mut subordinate_bus = bus_num;
+    for (dev_idx, addr) in device_addrs.iter().enumerate() {
+        // Only target for devices that located on this bus
+        if addr.bus == bus_num {
+            // If this device is a pci bridge (a.k.a., it has a pci bus structure),
+            // create its topology recursively
+            if let Some(child_bus) = devices[dev_idx].0.get_new_pci_bus() {
+                let (child_bar_ranges, child_sub_bus) = generate_pci_topology(
+                    child_bus.clone(),
+                    resources,
+                    io_ranges,
+                    device_ranges,
+                    device_addrs,
+                    devices,
+                )?;
+                let device = &mut devices[dev_idx].0;
+                parent_bus
+                    .lock()
+                    .add_child_bus(child_bus.clone())
+                    .map_err(|_| DeviceRegistrationError::BrokenPciTopology)?;
+                let bridge_window = device
+                    .configure_bridge_window(resources, &child_bar_ranges)
+                    .map_err(DeviceRegistrationError::ConfigureWindowSize)?;
+                bar_ranges.extend(bridge_window);
+
+                let ranges = device
+                    .allocate_io_bars(resources)
+                    .map_err(DeviceRegistrationError::AllocateIoAddrs)?;
+                io_ranges.insert(dev_idx, ranges.clone());
+                bar_ranges.extend(ranges);
+
+                let ranges = device
+                    .allocate_device_bars(resources)
+                    .map_err(DeviceRegistrationError::AllocateDeviceAddrs)?;
+                device_ranges.insert(dev_idx, ranges.clone());
+                bar_ranges.extend(ranges);
+
+                device.set_subordinate_bus(child_sub_bus);
+
+                subordinate_bus = std::cmp::max(subordinate_bus, child_sub_bus);
+            }
+        }
+    }
+
+    for (dev_idx, addr) in device_addrs.iter().enumerate() {
+        if addr.bus == bus_num {
+            let device = &mut devices[dev_idx].0;
+            // Allocate MMIO for non-bridge devices
+            if device.get_new_pci_bus().is_none() {
+                let ranges = device
+                    .allocate_io_bars(resources)
+                    .map_err(DeviceRegistrationError::AllocateIoAddrs)?;
+                io_ranges.insert(dev_idx, ranges.clone());
+                bar_ranges.extend(ranges);
+
+                let ranges = device
+                    .allocate_device_bars(resources)
+                    .map_err(DeviceRegistrationError::AllocateDeviceAddrs)?;
+                device_ranges.insert(dev_idx, ranges.clone());
+                bar_ranges.extend(ranges);
+            }
+        }
+    }
+    Ok((bar_ranges, subordinate_bus))
+}
+
 /// Creates a root PCI device for use by this Vm.
 pub fn generate_pci_root(
     mut devices: Vec<(Box<dyn PciDevice>, Option<Minijail>)>,
@@ -515,71 +631,30 @@ pub fn generate_pci_root(
     ),
     DeviceRegistrationError,
 > {
-    let mut root = PciRoot::new(Arc::downgrade(&mmio_bus), Arc::downgrade(&io_bus));
-    let mut pid_labels = BTreeMap::new();
-    // The map of (dev_idx, bus), find bus number through dev_idx in devices
-    let mut devid_buses: BTreeMap<usize, u8> = BTreeMap::new();
-    // The map of (bridge secondary bus number, Vec<sub device BarRange>)
-    let mut bridge_bar_ranges: BTreeMap<u8, Vec<BarRange>> = BTreeMap::new();
+    let mut device_addrs = Vec::new();
 
-    // Allocate PCI device address before allocating BARs.
-    let mut device_addrs = Vec::<PciAddress>::new();
-    for (dev_idx, (device, _jail)) in devices.iter_mut().enumerate() {
+    for (device, _jail) in devices.iter_mut() {
         let address = device
             .allocate_address(resources)
             .map_err(DeviceRegistrationError::AllocateDeviceAddrs)?;
         device_addrs.push(address);
-
-        if address.bus > 0 {
-            devid_buses.insert(dev_idx, address.bus);
-        }
-
-        if PciBridge::is_pci_bridge(device) {
-            let sec_bus = PciBridge::get_secondary_bus_num(device);
-            bridge_bar_ranges.insert(sec_bus, Vec::<BarRange>::new());
-        }
     }
 
-    // Allocate ranges that may need to be in the low MMIO region (MmioType::Low).
-    let mut io_ranges = BTreeMap::new();
-    for (dev_idx, (device, _jail)) in devices.iter_mut().enumerate() {
-        let mut ranges = device
-            .allocate_io_bars(resources)
-            .map_err(DeviceRegistrationError::AllocateIoAddrs)?;
-        io_ranges.insert(dev_idx, ranges.clone());
-
-        if let Some(bus) = devid_buses.get(&dev_idx) {
-            if let Some(bridge_bar) = bridge_bar_ranges.get_mut(bus) {
-                bridge_bar.append(&mut ranges);
-            }
-        }
-    }
-
-    // Allocate device ranges that may be in low or high MMIO after low-only ranges.
     let mut device_ranges = BTreeMap::new();
-    for (dev_idx, (device, _jail)) in devices.iter_mut().enumerate() {
-        let mut ranges = device
-            .allocate_device_bars(resources)
-            .map_err(DeviceRegistrationError::AllocateDeviceAddrs)?;
-        device_ranges.insert(dev_idx, ranges.clone());
+    let mut io_ranges = BTreeMap::new();
+    let root_bus = Arc::new(Mutex::new(PciBus::new(0, 0, false)));
 
-        if let Some(bus) = devid_buses.get(&dev_idx) {
-            if let Some(bridge_bar) = bridge_bar_ranges.get_mut(bus) {
-                bridge_bar.append(&mut ranges);
-            }
-        }
-    }
+    generate_pci_topology(
+        root_bus.clone(),
+        resources,
+        &mut io_ranges,
+        &mut device_ranges,
+        &device_addrs,
+        &mut devices,
+    )?;
 
-    for (device, _jail) in devices.iter_mut() {
-        if PciBridge::is_pci_bridge(device) {
-            let sec_bus = PciBridge::get_secondary_bus_num(device);
-            if let Some(bridge_bar) = bridge_bar_ranges.get(&sec_bus) {
-                device
-                    .configure_bridge_window(resources, bridge_bar)
-                    .map_err(DeviceRegistrationError::ConfigureWindowSize)?;
-            }
-        }
-    }
+    let mut root = PciRoot::new(Arc::downgrade(&mmio_bus), Arc::downgrade(&io_bus), root_bus);
+    let mut pid_labels = BTreeMap::new();
 
     // Allocate legacy INTx
     let mut pci_irqs = Vec::new();
@@ -606,14 +681,25 @@ pub fn generate_pci_root(
                 resources.reserve_irq(gsi);
             };
             irq_chip
-                .register_level_irq_event(gsi, &intx_event)
+                .register_level_irq_event(gsi, &intx_event, IrqEventSource::from_device(device))
                 .map_err(DeviceRegistrationError::RegisterIrqfd)?;
 
             pci_irqs.push((device_addrs[dev_idx], gsi, pin));
         }
     }
 
-    for (dev_idx, (mut device, jail)) in devices.into_iter().enumerate() {
+    // To prevent issues where device's on_sandbox may spawn thread before all
+    // sandboxed devices are sandboxed we partition iterator to go over sandboxed
+    // first
+    let devices = {
+        let (sandboxed, non_sandboxed): (Vec<_>, Vec<_>) = devices
+            .into_iter()
+            .enumerate()
+            .partition(|(_, (_, jail))| jail.is_some());
+        sandboxed.into_iter().chain(non_sandboxed.into_iter())
+    };
+
+    for (dev_idx, (mut device, jail)) in devices {
         let address = device_addrs[dev_idx];
 
         let mut keep_rds = device.keep_rds();
@@ -654,11 +740,12 @@ pub fn generate_pci_root(
                 .map_err(DeviceRegistrationError::MmioInsert)?;
         }
     }
+
     Ok((root, pci_irqs, pid_labels))
 }
 
-/// Adds goldfish battery
-/// return the platform needed resouces include its AML data, irq number
+/// Adds goldfish battery and returns the platform needed resources including
+/// its AML data and mmio base address
 ///
 /// # Arguments
 ///
@@ -675,7 +762,7 @@ pub fn add_goldfish_battery(
     irq_chip: &mut dyn IrqChip,
     irq_num: u32,
     resources: &mut SystemAllocator,
-) -> Result<Tube, DeviceRegistrationError> {
+) -> Result<(Tube, u64), DeviceRegistrationError> {
     let alloc = resources.get_anon_alloc();
     let mmio_base = resources
         .mmio_allocator(MmioType::Low)
@@ -687,12 +774,6 @@ pub fn add_goldfish_battery(
         )
         .map_err(DeviceRegistrationError::AllocateIoResource)?;
 
-    let irq_evt = devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
-
-    irq_chip
-        .register_level_irq_event(irq_num, &irq_evt)
-        .map_err(DeviceRegistrationError::RegisterIrqfd)?;
-
     let (control_tube, response_tube) =
         Tube::pair().map_err(DeviceRegistrationError::CreateTube)?;
 
@@ -703,10 +784,27 @@ pub fn add_goldfish_battery(
     #[cfg(not(feature = "power-monitor-powerd"))]
     let create_monitor = None;
 
-    let goldfish_bat =
-        devices::GoldfishBattery::new(mmio_base, irq_num, irq_evt, response_tube, create_monitor)
-            .map_err(DeviceRegistrationError::RegisterBattery)?;
+    let irq_evt = devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
+
+    let goldfish_bat = devices::GoldfishBattery::new(
+        mmio_base,
+        irq_num,
+        irq_evt
+            .try_clone()
+            .map_err(DeviceRegistrationError::EventClone)?,
+        response_tube,
+        create_monitor,
+    )
+    .map_err(DeviceRegistrationError::RegisterBattery)?;
     goldfish_bat.to_aml_bytes(amls);
+
+    irq_chip
+        .register_level_irq_event(
+            irq_num,
+            &irq_evt,
+            IrqEventSource::from_device(&goldfish_bat),
+        )
+        .map_err(DeviceRegistrationError::RegisterIrqfd)?;
 
     match battery_jail.as_ref() {
         Some(jail) => {
@@ -734,7 +832,7 @@ pub fn add_goldfish_battery(
         }
     }
 
-    Ok(control_tube)
+    Ok((control_tube, mmio_base))
 }
 
 /// Errors for image loading.
@@ -844,14 +942,15 @@ where
 /// Read and write permissions setting
 ///
 /// Wrap read_allow and write_allow to store them in MsrHandlers level.
-#[derive(Clone, Copy, Default, PartialEq)]
-pub struct MsrRWType {
-    pub read_allow: bool,
-    pub write_allow: bool,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MsrRWType {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
 }
 
 /// Handler types for userspace-msr
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MsrAction {
     /// Read and write from host directly, and the control of MSR will
     /// take effect on host.
@@ -887,32 +986,30 @@ impl MsrValueFrom {
     }
 }
 
-/// If user doesn't specific CPU0, the default source CPU is running CPU.
-impl Default for MsrValueFrom {
-    fn default() -> Self {
-        MsrValueFrom::RWFromRunningCPU
-    }
+/// Whether to force KVM-filtered MSRs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MsrFilter {
+    /// Leave it to hypervisor (KVM) default.
+    Default,
+    /// Don't let KVM do the default thing and use our userspace MSR
+    /// implementation.
+    Override,
 }
 
 /// Config option for userspace-msr handing
 ///
 /// MsrConfig will be collected with its corresponding MSR's index.
 /// eg, (msr_index, msr_config)
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone)]
 pub struct MsrConfig {
     /// If support RDMSR/WRMSR emulation in crosvm?
     pub rw_type: MsrRWType,
     /// Handlers should be used to handling MSR.
-    /// User must set this field.
-    pub action: Option<MsrAction>,
+    pub action: MsrAction,
     /// MSR source CPU.
     pub from: MsrValueFrom,
-}
-
-impl MsrConfig {
-    pub fn new() -> Self {
-        Default::default()
-    }
+    /// Whether to override KVM MSR emulation.
+    pub filter: MsrFilter,
 }
 
 #[sorted]
@@ -920,25 +1017,4 @@ impl MsrConfig {
 pub enum MsrExitHandlerError {
     #[error("Fail to create MSR handler")]
     HandlerCreateFailed,
-    #[error("Error parameter")]
-    InvalidParam,
-}
-
-pub trait MsrExitHandler {
-    fn read(&self, _index: u32) -> Option<u64> {
-        None
-    }
-
-    fn write(&self, _index: u32, _data: u64) -> Option<()> {
-        None
-    }
-
-    fn add_handler(
-        &mut self,
-        _index: u32,
-        _msr_config: MsrConfig,
-        _cpu_id: usize,
-    ) -> std::result::Result<(), MsrExitHandlerError> {
-        Ok(())
-    }
 }

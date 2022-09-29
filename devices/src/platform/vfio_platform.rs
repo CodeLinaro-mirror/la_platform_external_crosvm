@@ -1,12 +1,13 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+use crate::pci::CrosvmDeviceId;
 use crate::vfio::{VfioDevice, VfioError, VfioIrq};
-use crate::{BusAccessInfo, BusDevice, BusDeviceObj, IrqEdgeEvent, IrqLevelEvent};
+use crate::{BusAccessInfo, BusDevice, BusDeviceObj, DeviceId, IrqEdgeEvent, IrqLevelEvent};
 use anyhow::{bail, Context, Result};
 use base::{
     error, pagesize, AsRawDescriptor, AsRawDescriptors, Event, MappedRegion, MemoryMapping,
-    MemoryMappingBuilder, RawDescriptor, Tube,
+    MemoryMappingBuilder, Protection, RawDescriptor, Tube,
 };
 use resources::SystemAllocator;
 use std::fs::File;
@@ -32,6 +33,10 @@ pub struct VfioPlatformDevice {
 }
 
 impl BusDevice for VfioPlatformDevice {
+    fn device_id(&self) -> DeviceId {
+        CrosvmDeviceId::VfioPlatformDevice.into()
+    }
+
     fn debug_label(&self) -> String {
         format!("vfio {} device", self.device.device_name())
     }
@@ -180,7 +185,7 @@ impl VfioPlatformDevice {
                             size: mmap_size,
                         },
                         dest: VmMemoryDestination::GuestPhysicalAddress(guest_map_start),
-                        read_only: false,
+                        prot: Protection::read_write(),
                     })
                     .is_err()
                 {

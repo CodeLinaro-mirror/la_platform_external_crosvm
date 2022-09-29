@@ -8,9 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use base::{
-    error, warn, AsRawDescriptor, Descriptor, Error as SysError, Event, PollToken, WaitContext,
-};
+use base::{error, warn, Error as SysError, Event, EventToken, WaitContext};
 use bit_field::BitField1;
 use bit_field::*;
 use hypervisor::{PitChannelState, PitRWMode, PitRWState, PitState};
@@ -29,7 +27,10 @@ use base::FakeTimer as Timer;
 use base::Timer;
 
 use crate::bus::BusAccessInfo;
+use crate::pci::CrosvmDeviceId;
 use crate::BusDevice;
+use crate::DeviceId;
+use crate::IrqEdgeEvent;
 
 // Bitmask for areas of standard (non-ReadBack) Control Word Format. Constant
 // names are kept the same as Intel PIT data sheet.
@@ -148,6 +149,14 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 const MAX_TIMER_FREQ: u32 = 65536;
 
+#[derive(EventToken)]
+enum Token {
+    // The timer expired.
+    TimerExpire,
+    // The parent thread requested an exit.
+    Kill,
+}
+
 #[sorted]
 #[derive(Error, Debug)]
 pub enum PitError {
@@ -207,6 +216,10 @@ impl BusDevice for Pit {
         "userspace PIT".to_string()
     }
 
+    fn device_id(&self) -> DeviceId {
+        CrosvmDeviceId::Pit.into()
+    }
+
     fn write(&mut self, info: BusAccessInfo, data: &[u8]) {
         self.ensure_started();
 
@@ -252,7 +265,7 @@ impl BusDevice for Pit {
 }
 
 impl Pit {
-    pub fn new(interrupt_evt: Event, clock: Arc<Mutex<Clock>>) -> PitResult<Pit> {
+    pub fn new(interrupt_evt: IrqEdgeEvent, clock: Arc<Mutex<Clock>>) -> PitResult<Pit> {
         let mut counters = Vec::new();
         let mut interrupt = Some(interrupt_evt);
         for i in 0..NUM_OF_COUNTERS {
@@ -287,16 +300,21 @@ impl Pit {
     }
 
     fn start(&mut self) -> PitResult<()> {
+        let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
+            (&self.counters[0].lock().timer, Token::TimerExpire),
+            (&self.kill_evt, Token::Kill),
+        ])
+        .map_err(PitError::CreateWaitContext)?;
+
         let mut worker = Worker {
             pit_counter: self.counters[0].clone(),
-            fd: Descriptor(self.counters[0].lock().timer.as_raw_descriptor()),
+            wait_ctx,
         };
-        let evt = self.kill_evt.try_clone().map_err(PitError::CloneEvent)?;
 
         self.worker_thread = Some(
             thread::Builder::new()
                 .name("pit counter worker".to_string())
-                .spawn(move || worker.run(evt))
+                .spawn(move || worker.run())
                 .map_err(PitError::SpawnThread)?,
         );
 
@@ -356,7 +374,7 @@ impl Pit {
 // implement one-shot and repeating timer alarms. An 8254 has three counters.
 struct PitCounter {
     // Event to write when asserting an interrupt.
-    interrupt_evt: Option<Event>,
+    interrupt_evt: Option<IrqEdgeEvent>,
     // Stores the value with which the counter was initialized. Counters are 16-
     // bit values with an effective range of 1-65536 (65536 represented by 0).
     reload_value: u16,
@@ -435,7 +453,7 @@ fn get_monotonic_time() -> u64 {
 impl PitCounter {
     fn new(
         counter_id: usize,
-        interrupt_evt: Option<Event>,
+        interrupt_evt: Option<IrqEdgeEvent>,
         clock: Arc<Mutex<Clock>>,
     ) -> PitResult<PitCounter> {
         #[cfg(not(test))]
@@ -797,7 +815,7 @@ impl PitCounter {
     }
 
     fn timer_handler(&mut self) {
-        if let Err(e) = self.timer.wait() {
+        if let Err(e) = self.timer.mark_waited() {
             // Under the current Timer implementation (as of Jan 2019), this failure shouldn't
             // happen but implementation details may change in the future, and the failure
             // cases are complex to reason about. Because of this, avoid unwrap().
@@ -817,7 +835,7 @@ impl PitCounter {
         // and the code is simpler without the special case.
         if let Some(interrupt) = &mut self.interrupt_evt {
             // This is safe because the file descriptor is nonblocking and we're writing 1.
-            interrupt.write(1).unwrap();
+            interrupt.trigger().unwrap();
         }
     }
 
@@ -878,25 +896,13 @@ impl PitCounter {
 
 struct Worker {
     pit_counter: Arc<Mutex<PitCounter>>,
-    fd: Descriptor,
+    wait_ctx: WaitContext<Token>,
 }
 
 impl Worker {
-    fn run(&mut self, kill_evt: Event) -> PitResult<()> {
-        #[derive(PollToken)]
-        enum Token {
-            // The timer expired.
-            TimerExpire,
-            // The parent thread requested an exit.
-            Kill,
-        }
-
-        let wait_ctx: WaitContext<Token> =
-            WaitContext::build_with(&[(&self.fd, Token::TimerExpire), (&kill_evt, Token::Kill)])
-                .map_err(PitError::CreateWaitContext)?;
-
+    fn run(&mut self) -> PitResult<()> {
         loop {
-            let events = wait_ctx.wait().map_err(PitError::WaitError)?;
+            let events = self.wait_ctx.wait().map_err(PitError::WaitError)?;
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     Token::TimerExpire => {
@@ -998,11 +1004,11 @@ mod tests {
     }
 
     fn set_up() -> TestData {
-        let irqfd = Event::new().unwrap();
+        let evt = IrqEdgeEvent::new().unwrap();
         let clock = Arc::new(Mutex::new(Clock::new()));
         TestData {
-            pit: Pit::new(irqfd.try_clone().unwrap(), clock.clone()).unwrap(),
-            irqfd,
+            irqfd: evt.get_trigger().try_clone().unwrap(),
+            pit: Pit::new(evt, clock.clone()).unwrap(),
             clock,
         }
     }

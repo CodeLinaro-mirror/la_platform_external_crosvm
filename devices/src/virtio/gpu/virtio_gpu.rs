@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::virtio::gpu::GpuDisplayParameters;
 use crate::virtio::resource_bridge::{BufferInfo, PlaneInfo, ResourceInfo, ResourceResponse};
-use base::{error, ExternalMapping, SafeDescriptor, Tube};
+use base::{error, ExternalMapping, Protection, SafeDescriptor, Tube};
 
 use data_model::VolatileSlice;
 
@@ -559,9 +559,24 @@ impl VirtioGpu {
         Ok(OkNoData)
     }
 
+    pub fn needs_fence_poll(&mut self) -> bool {
+        self.rutabaga.use_timer_based_fence_polling
+    }
+
     /// Returns an array of RutabagaFence, describing completed fences.
     pub fn fence_poll(&mut self) -> Vec<RutabagaFence> {
         self.rutabaga.poll()
+    }
+
+    /// Polls the Rutabaga backend.
+    pub fn event_poll(&self) {
+        self.rutabaga.event_poll();
+    }
+
+    /// Gets a pollable eventfd that signals the device to wakeup and poll the
+    /// Rutabaga backend.
+    pub fn poll_descriptor(&self) -> Option<SafeDescriptor> {
+        self.rutabaga.poll_descriptor()
     }
 
     /// Creates a 3D resource with the given properties and resource_id.
@@ -731,7 +746,7 @@ impl VirtioGpu {
                 allocation: self.pci_bar,
                 offset,
             },
-            read_only: false,
+            prot: Protection::read_write(),
         };
         self.gpu_device_tube.send(&request)?;
         let response = self.gpu_device_tube.recv()?;

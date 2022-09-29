@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import enum
+from typing import List, Dict
 
 
 class TestOption(enum.Enum):
@@ -41,65 +42,37 @@ class TestOption(enum.Enum):
 # This is just too big to keep in main list for now
 WIN64_DISABLED_CRATES = [
     "aarch64",
-    "acpi_tables",
     "arch",
-    "assertions",
-    "audio_streams",
-    "bit_field_derive",
-    "bit_field",
     "cros_asyncv2",
     "cros-fuzz",
-    "crosvm_control",
     "crosvm_plugin",
     "crosvm-fuzz",
     "crosvm",
-    "data_model",
-    "devices",
-    "disk",
     "ffi",
+    "ffmpeg",
     "fuse",
     "fuzz",
     "gpu_display",
-    "hypervisor",
     "integration_tests",
     "io_uring",
-    "kernel_cmdline",
-    "kernel_loader",
-    "kvm_sys",
     "kvm",
     "libcras_stub",
     "libvda",
-    "linux_input_sys",
     "minijail-sys",
     "minijail",
-    "net_sys",
-    "net_util",
     "p9",
-    "power_monitor",
-    "protos",
     "qcow_utils",
-    "resources",
-    "rutabaga_gfx",
     "rutabaga_gralloc",
-    "sync",
     "system_api_stub",
     "tpm2-sys",
     "tpm2",
-    "usb_sys",
     "usb_util",
-    "vfio_sys",
-    "vhost",
-    "virtio_sys",
-    "vm_control",
-    "vm_memory",
-    "vmm_vhost",
-    "wire_format_derive",
     "x86_64",
 ]
 
-CRATE_OPTIONS: dict[str, list[TestOption]] = {
+CRATE_OPTIONS: Dict[str, List[TestOption]] = {
     "base": [TestOption.SINGLE_THREADED, TestOption.LARGE],
-    "cros_async": [TestOption.LARGE, TestOption.DO_NOT_RUN_ARMHF],
+    "cros_async": [TestOption.LARGE],
     "crosvm": [TestOption.SINGLE_THREADED],
     "crosvm_plugin": [
         TestOption.DO_NOT_BUILD_AARCH64,
@@ -113,6 +86,7 @@ CRATE_OPTIONS: dict[str, list[TestOption]] = {
         TestOption.DO_NOT_RUN_ARMHF,
     ],
     "disk": [TestOption.DO_NOT_RUN_AARCH64, TestOption.DO_NOT_RUN_ARMHF],  # b/202294155
+    "ffmpeg": [TestOption.DO_NOT_BUILD_ARMHF],  # Generated bindings are not 32-bit compatible.
     "fuzz": [TestOption.DO_NOT_BUILD],
     "hypervisor": [
         TestOption.DO_NOT_RUN_AARCH64,
@@ -143,7 +117,7 @@ CRATE_OPTIONS: dict[str, list[TestOption]] = {
 for name in WIN64_DISABLED_CRATES:
     CRATE_OPTIONS[name] = CRATE_OPTIONS.get(name, []) + [TestOption.DO_NOT_BUILD_WIN64]
 
-BUILD_FEATURES: dict[str, str] = {
+BUILD_FEATURES: Dict[str, str] = {
     "x86_64": "linux-x86_64",
     "aarch64": "linux-aarch64",
     "armhf": "linux-armhf",

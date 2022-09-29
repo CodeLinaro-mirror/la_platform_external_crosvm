@@ -107,10 +107,7 @@ pub(in crate::virtio::vhost::user::device::handler) fn system_clear_rd_flags(
     Ok(())
 }
 
-impl<B> DeviceRequestHandler<B>
-where
-    B: 'static + VhostUserBackend,
-{
+impl DeviceRequestHandler {
     pub async fn run(self, vhost_user_tube: Tube, exit_event: Event, ex: &Executor) -> Result<()> {
         let read_notifier = vhost_user_tube.get_read_notifier();
         let close_notifier = vhost_user_tube.get_close_notifier();
@@ -149,7 +146,7 @@ where
             EventAsync::new(exit_event, ex).context("failed to create an async event")?;
 
         let mut req_handler =
-            SlaveReqHandler::from_stream(vhost_user_tube, Arc::new(std::sync::Mutex::new(self)));
+            SlaveReqHandler::from_stream(vhost_user_tube, std::sync::Mutex::new(self));
 
         let read_event_fut = read_event.next_val().fuse();
         let close_event_fut = close_event.next_val().fuse();
@@ -220,9 +217,8 @@ mod tests {
         });
 
         // Device side
-        let backend = Arc::new(std::sync::Mutex::new(DeviceRequestHandler::new(
-            FakeBackend::new(),
-        )));
+        let backend =
+            std::sync::Mutex::new(DeviceRequestHandler::new(Box::new(FakeBackend::new())));
 
         let mut req_handler = SlaveReqHandler::from_stream(dev_tube, backend);
 

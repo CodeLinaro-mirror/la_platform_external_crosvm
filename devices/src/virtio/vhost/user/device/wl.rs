@@ -28,6 +28,9 @@ use crate::virtio::vhost::user::device::handler::{
 };
 use crate::virtio::{base_features, wl, Queue};
 
+const MAX_QUEUE_NUM: usize = wl::QUEUE_SIZES.len();
+const MAX_VRING_LEN: u16 = wl::QUEUE_SIZE;
+
 async fn run_out_queue(
     mut queue: Queue,
     mem: GuestMemory,
@@ -62,8 +65,8 @@ async fn run_in_queue(
             break;
         }
 
-        if let Err(wl::DescriptorsExhausted) =
-            wl::process_in_queue(&doorbell, &mut queue, &mem, &mut wlstate.borrow_mut())
+        if wl::process_in_queue(&doorbell, &mut queue, &mem, &mut wlstate.borrow_mut())
+            == Err(wl::DescriptorsExhausted)
         {
             if let Err(e) = kick_evt.next_val().await {
                 error!("Failed to read kick event for in queue: {}", e);
@@ -83,7 +86,7 @@ struct WlBackend {
     features: u64,
     acked_features: u64,
     wlstate: Option<Rc<RefCell<wl::WlState>>>,
-    workers: [Option<AbortHandle>; Self::MAX_QUEUE_NUM],
+    workers: [Option<AbortHandle>; MAX_QUEUE_NUM],
 }
 
 impl WlBackend {
@@ -113,10 +116,13 @@ impl WlBackend {
 }
 
 impl VhostUserBackend for WlBackend {
-    const MAX_QUEUE_NUM: usize = wl::QUEUE_SIZES.len();
-    const MAX_VRING_LEN: u16 = wl::QUEUE_SIZE;
+    fn max_queue_num(&self) -> usize {
+        return MAX_QUEUE_NUM;
+    }
 
-    type Error = anyhow::Error;
+    fn max_vring_len(&self) -> u16 {
+        return MAX_VRING_LEN;
+    }
 
     fn features(&self) -> u64 {
         self.features
@@ -251,7 +257,7 @@ impl VhostUserBackend for WlBackend {
     }
 }
 
-pub(crate) fn parse_wayland_sock(value: &str) -> Result<(String, PathBuf), String> {
+pub fn parse_wayland_sock(value: &str) -> Result<(String, PathBuf), String> {
     let mut components = value.split(',');
     let path = PathBuf::from(match components.next() {
         None => return Err("missing socket path".to_string()),
@@ -274,55 +280,33 @@ pub(crate) fn parse_wayland_sock(value: &str) -> Result<(String, PathBuf), Strin
 }
 
 #[derive(FromArgs)]
-#[argh(description = "")]
-struct Options {
-    #[argh(
-        option,
-        description = "path to bind a listening vhost-user socket",
-        arg_name = "PATH"
-    )]
+#[argh(subcommand, name = "wl")]
+/// Wayland device
+pub struct Options {
+    #[argh(option, arg_name = "PATH")]
+    /// path to bind a listening vhost-user socket
     socket: String,
-    #[argh(
-        option,
-        description = "path to a socket for wayland-specific messages",
-        arg_name = "PATH"
-    )]
+    #[argh(option, arg_name = "PATH")]
+    /// path to a socket for wayland-specific messages
     vm_socket: String,
-    #[argh(
-        option,
-        description = "path to one or more Wayland sockets. The unnamed socket is used for\
-        displaying virtual screens while the named ones are used for IPC",
-        from_str_fn(parse_wayland_sock),
-        arg_name = "PATH[,name=NAME]"
-    )]
+    #[argh(option, from_str_fn(parse_wayland_sock), arg_name = "PATH[,name=NAME]")]
+    /// path to one or more Wayland sockets. The unnamed socket is used for
+    /// displaying virtual screens while the named ones are used for IPC
     wayland_sock: Vec<(String, PathBuf)>,
-    #[argh(
-        option,
-        description = "path to the GPU resource bridge",
-        arg_name = "PATH"
-    )]
+    #[argh(option, arg_name = "PATH")]
+    /// path to the GPU resource bridge
     resource_bridge: Option<String>,
 }
 
 /// Starts a vhost-user wayland device.
 /// Returns an error if the given `args` is invalid or the device fails to run.
-pub fn run_wl_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
+pub fn run_wl_device(opts: Options) -> anyhow::Result<()> {
     let Options {
         vm_socket,
         wayland_sock,
         socket,
         resource_bridge,
-    } = match Options::from_args(&[program_name], args) {
-        Ok(opts) => opts,
-        Err(e) => {
-            if e.status.is_err() {
-                bail!(e.output);
-            } else {
-                println!("{}", e.output);
-            }
-            return Ok(());
-        }
-    };
+    } = opts;
 
     let wayland_paths: BTreeMap<_, _> = wayland_sock.into_iter().collect();
 
@@ -355,12 +339,12 @@ pub fn run_wl_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
         .accept()
         .map(Tube::new)
         .context("failed to accept vm socket connection")?;
-    let handler = DeviceRequestHandler::new(WlBackend::new(
+    let handler = DeviceRequestHandler::new(Box::new(WlBackend::new(
         &ex,
         wayland_paths,
         vm_socket,
         resource_bridge,
-    ));
+    )));
 
     // run_until() returns an Result<Result<..>> which the ? operator lets us flatten.
     ex.run_until(handler.run(socket, &ex))?

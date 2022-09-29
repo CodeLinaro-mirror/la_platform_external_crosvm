@@ -594,6 +594,19 @@ impl UnixSeqpacket {
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.set_timeout(timeout, libc::SO_SNDTIMEO)
     }
+
+    /// Sets the blocking mode for this socket.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let mut nonblocking = nonblocking as libc::c_int;
+        // Safe because the return value is checked, and this ioctl call sets the nonblocking mode
+        // and does not continue holding the file descriptor after the call.
+        let ret = unsafe { libc::ioctl(self.fd, libc::FIONBIO, &mut nonblocking) };
+        if ret < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Drop for UnixSeqpacket {
@@ -787,6 +800,19 @@ impl UnixSeqpacketListener {
         );
         Ok(path_os_str.into())
     }
+
+    /// Sets the blocking mode for this socket.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let mut nonblocking = nonblocking as libc::c_int;
+        // Safe because the return value is checked, and this ioctl call sets the nonblocking mode
+        // and does not continue holding the file descriptor after the call.
+        let ret = unsafe { libc::ioctl(self.fd, libc::FIONBIO, &mut nonblocking) };
+        if ret < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Drop for UnixSeqpacketListener {
@@ -875,6 +901,9 @@ mod tests {
 
     #[test]
     #[allow(clippy::unnecessary_cast)]
+    // c_char is u8 on aarch64 and i8 on x86, so clippy's suggested fix of changing
+    // `'a' as libc::c_char` below to `b'a'` won't work everywhere.
+    #[allow(clippy::char_lit_as_u8)]
     fn sockaddr_un_pass() {
         let path_size = 50;
         let (addr, len) =

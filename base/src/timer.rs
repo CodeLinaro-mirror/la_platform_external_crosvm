@@ -93,10 +93,13 @@ impl FakeTimer {
         Ok(())
     }
 
-    /// Waits until the timer expires, returning WaitResult::Expired when it expires.
+    /// Waits until the timer expires or an optional wait timeout expires, whichever happens first.
     ///
-    /// If timeout is not None, block for a maximum of the given `timeout` duration.
-    /// If a timeout occurs, return WaitResult::Timeout.
+    /// # Returns
+    ///
+    /// - `WaitResult::Expired` if the timer expired.
+    /// - `WaitResult::Timeout` if `timeout` was not `None` and the timer did not expire within the
+    ///   specified timeout period.
     pub fn wait_for(&mut self, timeout: Option<Duration>) -> Result<WaitResult> {
         let wait_start = Instant::now();
         loop {
@@ -132,8 +135,7 @@ impl FakeTimer {
         }
     }
 
-    /// Block for a maximum of the given `timeout` duration.
-    /// If a timeout occurs, return WaitResult::Timeout.
+    /// Waits until the timer expires.
     pub fn wait(&mut self) -> Result<WaitResult> {
         self.wait_for(None)
     }
@@ -199,7 +201,7 @@ mod tests {
     fn one_shot() {
         // This test relies on the host having a reliable clock and not being
         // overloaded, so it's marked as "ignore".  You can run by running
-        // cargo test -p win_sys_util timer -- --ignored
+        // cargo test -p base timer -- --ignored
 
         let mut tfd = Timer::new().expect("failed to create Timer");
 
@@ -243,7 +245,7 @@ mod tests {
     fn repeating() {
         // This test relies on the host having a reliable clock and not being
         // overloaded, so it's marked as "ignore".  You can run by running
-        // cargo test -p win_sys_util timer -- --ignored
+        // cargo test -p base timer -- --ignored
 
         let mut tfd = Timer::new().expect("failed to create Timer");
 
@@ -335,7 +337,7 @@ mod tests {
     fn zero_interval() {
         // This test relies on the host having a reliable clock and not being
         // overloaded, so it's marked as "ignore".  You can run by running
-        // cargo test -p win_sys_util timer -- --ignored
+        // cargo test -p base timer -- --ignored
 
         let mut tfd = Timer::new().expect("failed to create timer");
 

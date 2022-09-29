@@ -7,14 +7,14 @@ use std::mem;
 use std::result;
 use std::thread;
 
-use base::{error, warn, Error as SysError, Event, PollToken, RawDescriptor, WaitContext};
+use base::{error, warn, Error as SysError, Event, EventToken, RawDescriptor, WaitContext};
 use remain::sorted;
 use thiserror::Error;
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice,
-    Writer, TYPE_9P,
+    copy_config, DescriptorError, DeviceType, Interrupt, Queue, Reader, SignalableInterrupt,
+    VirtioDevice, Writer,
 };
 
 const QUEUE_SIZE: u16 = 128;
@@ -89,7 +89,7 @@ impl Worker {
     }
 
     fn run(&mut self, queue_evt: Event, kill_evt: Event) -> P9Result<()> {
-        #[derive(PollToken)]
+        #[derive(EventToken)]
         enum Token {
             // A request is ready on the queue.
             QueueReady,
@@ -169,8 +169,8 @@ impl VirtioDevice for P9 {
             .unwrap_or_else(Vec::new)
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_9P
+    fn device_type(&self) -> DeviceType {
+        DeviceType::P9
     }
 
     fn queue_max_sizes(&self) -> &[u16] {

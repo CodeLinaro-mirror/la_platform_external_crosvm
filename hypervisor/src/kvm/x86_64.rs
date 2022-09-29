@@ -2,11 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::arch::x86_64::__cpuid;
-
 use base::IoctlNr;
 
-use libc::E2BIG;
+use libc::{E2BIG, ENXIO};
+use std::arch::x86_64::CpuidResult;
 
 use base::{
     errno_result, error, ioctl, ioctl_with_mut_ptr, ioctl_with_mut_ref, ioctl_with_ptr,
@@ -18,7 +17,8 @@ use vm_memory::GuestAddress;
 
 use super::{Kvm, KvmVcpu, KvmVm};
 use crate::{
-    ClockState, CpuId, CpuIdEntry, DebugRegs, DescriptorTable, DeviceKind, Fpu, HypervisorX86_64,
+    get_tsc_offset_from_msr, host_phys_addr_bits, set_tsc_offset_via_msr, ClockState, CpuId,
+    CpuIdEntry, DebugRegs, DescriptorTable, DeviceKind, Fpu, HypervisorX86_64,
     IoapicRedirectionTableEntry, IoapicState, IrqSourceChip, LapicState, PicSelect, PicState,
     PitChannelState, PitState, ProtectionType, Register, Regs, Segment, Sregs, VcpuExit,
     VcpuX86_64, VmCap, VmX86_64, MAX_IOAPIC_PINS, NUM_IOAPIC_PINS,
@@ -79,16 +79,8 @@ impl Kvm {
 
     /// Get the size of guest physical addresses in bits.
     pub fn get_guest_phys_addr_bits(&self) -> u8 {
-        // Get host cpu max physical address bits.
         // Assume the guest physical address size is the same as the host.
-        let highest_ext_function = unsafe { __cpuid(0x80000000) };
-        if highest_ext_function.eax >= 0x80000008 {
-            let addr_size = unsafe { __cpuid(0x80000008) };
-            // Low 8 bits of 0x80000008 leaf: host physical address size in bits.
-            addr_size.eax as u8
-        } else {
-            36
-        }
+        host_phys_addr_bits()
     }
 }
 
@@ -324,8 +316,6 @@ impl KvmVm {
         cap.args[0] = (KVM_MSR_EXIT_REASON_UNKNOWN
             | KVM_MSR_EXIT_REASON_INVAL
             | KVM_MSR_EXIT_REASON_FILTER) as u64;
-        // TODO(b/215297064): Filter only the ones we care about with ioctl
-        // KVM_X86_SET_MSR_FILTER
 
         // Safe because we know that our file is a VM fd, we know that the
         // kernel will only read correct amount of memory from our pointer, and
@@ -350,6 +340,71 @@ impl KvmVm {
         // kernel will only read correct amount of memory from our pointer, and
         // we verify the return result.
         let ret = unsafe { ioctl_with_ref(self, KVM_ENABLE_CAP(), &cap) };
+        if ret < 0 {
+            errno_result()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Set msr filter.
+    pub fn set_msr_filter(&self, msr_list: (Vec<u32>, Vec<u32>)) -> Result<()> {
+        let mut rd_nmsrs: u32 = 0;
+        let mut wr_nmsrs: u32 = 0;
+        let mut rd_msr_bitmap: [u8; KVM_MSR_FILTER_RANGE_MAX_BYTES] =
+            [0xff; KVM_MSR_FILTER_RANGE_MAX_BYTES];
+        let mut wr_msr_bitmap: [u8; KVM_MSR_FILTER_RANGE_MAX_BYTES] =
+            [0xff; KVM_MSR_FILTER_RANGE_MAX_BYTES];
+        let (rd_msrs, wr_msrs) = msr_list;
+
+        for index in rd_msrs {
+            // currently we only consider the MSR lower than
+            // KVM_MSR_FILTER_RANGE_MAX_BITS
+            if index >= (KVM_MSR_FILTER_RANGE_MAX_BITS as u32) {
+                continue;
+            }
+            rd_nmsrs += 1;
+            rd_msr_bitmap[(index / 8) as usize] &= !(1 << (index & 0x7));
+        }
+        for index in wr_msrs {
+            // currently we only consider the MSR lower than
+            // KVM_MSR_FILTER_RANGE_MAX_BITS
+            if index >= (KVM_MSR_FILTER_RANGE_MAX_BITS as u32) {
+                continue;
+            }
+            wr_nmsrs += 1;
+            wr_msr_bitmap[(index / 8) as usize] &= !(1 << (index & 0x7));
+        }
+
+        let mut msr_filter = kvm_msr_filter {
+            flags: KVM_MSR_FILTER_DEFAULT_ALLOW,
+            ..Default::default()
+        };
+
+        let mut count = 0;
+        if rd_nmsrs > 0 {
+            msr_filter.ranges[count].flags = KVM_MSR_FILTER_READ;
+            msr_filter.ranges[count].nmsrs = KVM_MSR_FILTER_RANGE_MAX_BITS as u32;
+            msr_filter.ranges[count].base = 0x0;
+            msr_filter.ranges[count].bitmap = rd_msr_bitmap.as_mut_ptr();
+            count += 1;
+        }
+        if wr_nmsrs > 0 {
+            msr_filter.ranges[count].flags = KVM_MSR_FILTER_WRITE;
+            msr_filter.ranges[count].nmsrs = KVM_MSR_FILTER_RANGE_MAX_BITS as u32;
+            msr_filter.ranges[count].base = 0x0;
+            msr_filter.ranges[count].bitmap = wr_msr_bitmap.as_mut_ptr();
+            count += 1;
+        }
+
+        let mut ret = 0;
+        if count > 0 {
+            // Safe because we know that our file is a VM fd, we know that the
+            // kernel will only read correct amount of memory from our pointer, and
+            // we verify the return result.
+            ret = unsafe { ioctl_with_ref(self, KVM_X86_SET_MSR_FILTER(), &msr_filter) };
+        }
+
         if ret < 0 {
             errno_result()
         } else {
@@ -697,6 +752,21 @@ impl VcpuX86_64 for KvmVcpu {
             errno_result()
         }
     }
+
+    /// KVM does not support the VcpuExit::Cpuid exit type.
+    fn handle_cpuid(&mut self, _entry: &CpuIdEntry) -> Result<()> {
+        Err(Error::new(ENXIO))
+    }
+
+    fn get_tsc_offset(&self) -> Result<u64> {
+        // Use the default MSR-based implementation
+        get_tsc_offset_from_msr(self)
+    }
+
+    fn set_tsc_offset(&self, offset: u64) -> Result<()> {
+        // Use the default MSR-based implementation
+        set_tsc_offset_via_msr(self, offset)
+    }
 }
 
 impl KvmVcpu {
@@ -742,10 +812,12 @@ impl<'a> From<&'a KvmCpuId> for CpuId {
                 function: entry.function,
                 index: entry.index,
                 flags: entry.flags,
-                eax: entry.eax,
-                ebx: entry.ebx,
-                ecx: entry.ecx,
-                edx: entry.edx,
+                cpuid: CpuidResult {
+                    eax: entry.eax,
+                    ebx: entry.ebx,
+                    ecx: entry.ecx,
+                    edx: entry.edx,
+                },
             };
             cpu_id_entries.push(cpu_id_entry)
         }
@@ -762,10 +834,10 @@ impl From<&CpuId> for KvmCpuId {
                 function: e.function,
                 index: e.index,
                 flags: e.flags,
-                eax: e.eax,
-                ebx: e.ebx,
-                ecx: e.ecx,
-                edx: e.edx,
+                eax: e.cpuid.eax,
+                ebx: e.cpuid.ebx,
+                ecx: e.cpuid.ecx,
+                edx: e.cpuid.edx,
                 ..Default::default()
             };
         }

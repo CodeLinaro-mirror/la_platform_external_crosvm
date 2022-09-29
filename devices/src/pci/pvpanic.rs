@@ -5,7 +5,7 @@
 //! pvpanic is a simulated device, through which a guest panic event is sent to a VMM.
 //! This was initially developed for qemu with linux in-tree drivers and opensource
 //! driver for windows also exist now.
-//! https://fossies.org/linux/qemu/docs/specs/pvpanic.txt
+//! <https://fossies.org/linux/qemu/docs/specs/pvpanic.txt>
 //!
 //! This implementation emulates pci interface for pvpanic virtual device.
 
@@ -15,7 +15,7 @@
 use std::fmt;
 
 use base::RawDescriptor;
-use base::{self, error, Tube};
+use base::{self, error, SendTube, VmEventType};
 use resources::{Alloc, MmioType, SystemAllocator};
 
 use crate::pci::pci_configuration::{
@@ -69,11 +69,11 @@ impl fmt::Display for PvPanicCode {
 pub struct PvPanicPciDevice {
     pci_address: Option<PciAddress>,
     config_regs: PciConfiguration,
-    evt_tube: Tube,
+    evt_wrtube: SendTube,
 }
 
 impl PvPanicPciDevice {
-    pub fn new(evt_tube: Tube) -> PvPanicPciDevice {
+    pub fn new(evt_wrtube: SendTube) -> PvPanicPciDevice {
         let config_regs = PciConfiguration::new(
             PCI_VENDOR_ID_REDHAT,
             PCI_DEVICE_ID_REDHAT_PVPANIC,
@@ -89,7 +89,7 @@ impl PvPanicPciDevice {
         Self {
             pci_address: None,
             config_regs,
-            evt_tube,
+            evt_wrtube,
         }
     }
 }
@@ -182,8 +182,12 @@ impl PciDevice for PvPanicPciDevice {
         if addr != mmio_addr || data.len() != 1 {
             return;
         }
-        if let Err(e) = self.evt_tube.send::<u8>(&data[0]) {
-            error!("Failed to send to the panic event: {}", e);
+
+        if let Err(e) = self
+            .evt_wrtube
+            .send::<VmEventType>(&VmEventType::Panic(data[0]))
+        {
+            error!("Failed to write to the event tube: {}", e);
         }
     }
 }
@@ -191,23 +195,24 @@ impl PciDevice for PvPanicPciDevice {
 #[cfg(test)]
 mod test {
     use super::*;
-    use resources::{MemRegion, SystemAllocator, SystemAllocatorConfig};
+    use base::Tube;
+    use resources::{AddressRange, SystemAllocator, SystemAllocatorConfig};
 
     #[test]
     fn pvpanic_read_write() {
         let mut allocator = SystemAllocator::new(
             SystemAllocatorConfig {
-                io: Some(MemRegion {
-                    base: 0x1000,
-                    size: 0x2000,
+                io: Some(AddressRange {
+                    start: 0x1000,
+                    end: 0xffff,
                 }),
-                low_mmio: MemRegion {
-                    base: 0x2000_0000,
-                    size: 0x1000_0000,
+                low_mmio: AddressRange {
+                    start: 0x2000_0000,
+                    end: 0x2fffffff,
                 },
-                high_mmio: MemRegion {
-                    base: 0x1_0000_0000,
-                    size: 0x1000_0000,
+                high_mmio: AddressRange {
+                    start: 0x1_0000_0000,
+                    end: 0x1_0fff_ffff,
                 },
                 platform_mmio: None,
                 first_irq: 5,
@@ -217,7 +222,7 @@ mod test {
         )
         .unwrap();
 
-        let (evt_rdtube, evt_wrtube) = Tube::pair().unwrap();
+        let (evt_wrtube, evt_rdtube) = Tube::directional_pair().unwrap();
         let mut device = PvPanicPciDevice::new(evt_wrtube);
 
         assert!(device.allocate_address(&mut allocator).is_ok());
@@ -239,7 +244,7 @@ mod test {
         device.write_bar(mmio_addr, &data);
 
         // Verify the event
-        let val = evt_rdtube.recv::<u8>().unwrap();
-        assert_eq!(val, PVPANIC_CRASH_LOADED);
+        let val = evt_rdtube.recv::<VmEventType>().unwrap();
+        assert_eq!(val, VmEventType::Panic(PVPANIC_CRASH_LOADED));
     }
 }

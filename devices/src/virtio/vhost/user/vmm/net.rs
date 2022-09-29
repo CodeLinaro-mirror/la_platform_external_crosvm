@@ -2,24 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod sys;
+
 use std::cell::RefCell;
-use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::thread;
-use std::u32;
 
 use base::{error, Event, RawDescriptor};
 use virtio_sys::virtio_net;
-use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error};
-use crate::virtio::{Interrupt, Queue, VirtioDevice, VirtioNetConfig, TYPE_NET};
+use crate::virtio::{DeviceType, Interrupt, Queue, VirtioDevice, VirtioNetConfig};
 
 type Result<T> = std::result::Result<T, Error>;
 
-const QUEUE_SIZE: u16 = 256;
+const QUEUE_SIZE: u16 = 1024;
 
 pub struct Net {
     kill_evt: Option<Event>,
@@ -29,10 +27,8 @@ pub struct Net {
 }
 
 impl Net {
-    pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P) -> Result<Net> {
-        let socket = UnixStream::connect(&socket_path).map_err(Error::SocketConnect)?;
-
-        let allow_features = 1 << crate::virtio::VIRTIO_F_VERSION_1
+    fn get_all_features(base_features: u64) -> (u64, u64, VhostUserProtocolFeatures) {
+        let allow_features = base_features
             | 1 << virtio_net::VIRTIO_NET_F_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_CTRL_VQ
             | 1 << virtio_net::VIRTIO_NET_F_CTRL_GUEST_OFFLOADS
@@ -41,29 +37,14 @@ impl Net {
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_UFO
             | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO4
             | 1 << virtio_net::VIRTIO_NET_F_HOST_UFO
+            | 1 << virtio_net::VIRTIO_NET_F_MAC
             | 1 << virtio_net::VIRTIO_NET_F_MQ
-            | 1 << VIRTIO_RING_F_EVENT_IDX
-            | base_features
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
         let init_features = base_features | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
         let allow_protocol_features =
             VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::CONFIG;
 
-        let mut handler = VhostUserHandler::new_from_stream(
-            socket,
-            3, /* # of queues */
-            allow_features,
-            init_features,
-            allow_protocol_features,
-        )?;
-        let queue_sizes = handler.queue_sizes(QUEUE_SIZE, 3 /* rx, tx, ctrl */)?;
-
-        Ok(Net {
-            kill_evt: None,
-            worker_thread: None,
-            handler: RefCell::new(handler),
-            queue_sizes,
-        })
+        (allow_features, init_features, allow_protocol_features)
     }
 }
 
@@ -95,8 +76,8 @@ impl VirtioDevice for Net {
         }
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_NET
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Net
     }
 
     fn queue_max_sizes(&self) -> &[u16] {

@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{BusAccessInfo, BusDevice, IrqLevelEvent};
+use crate::{pci::CrosvmDeviceId, BusAccessInfo, BusDevice, DeviceId, IrqLevelEvent};
 use acpi_tables::{aml, aml::Aml};
 use base::{
-    error, warn, AsRawDescriptor, Descriptor, Event, PollToken, RawDescriptor, Tube, WaitContext,
+    error, warn, AsRawDescriptor, Descriptor, Event, EventToken, RawDescriptor, Tube, WaitContext,
 };
 use power_monitor::{BatteryStatus, CreatePowerMonitorFn};
 use remain::sorted;
@@ -141,12 +141,9 @@ fn command_monitor(
     create_power_monitor: Option<Box<dyn CreatePowerMonitorFn>>,
 ) {
     let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
-        (&Descriptor(tube.as_raw_descriptor()), Token::Commands),
-        (
-            &Descriptor(irq_evt.get_resample().as_raw_descriptor()),
-            Token::Resample,
-        ),
-        (&Descriptor(kill_evt.as_raw_descriptor()), Token::Kill),
+        (&tube, Token::Commands),
+        (irq_evt.get_resample(), Token::Resample),
+        (&kill_evt, Token::Kill),
     ]) {
         Ok(pc) => pc,
         Err(e) => {
@@ -172,7 +169,7 @@ fn command_monitor(
         None => None,
     };
 
-    #[derive(PollToken)]
+    #[derive(EventToken)]
     enum Token {
         Commands,
         Resample,
@@ -354,7 +351,7 @@ impl GoldfishBattery {
             Ok(v) => v,
             Err(e) => {
                 error!(
-                    "{}: failed to create kill EventFd pair: {}",
+                    "{}: failed to create kill Event pair: {}",
                     self.debug_label(),
                     e
                 );
@@ -403,6 +400,10 @@ impl Drop for GoldfishBattery {
 }
 
 impl BusDevice for GoldfishBattery {
+    fn device_id(&self) -> DeviceId {
+        CrosvmDeviceId::GoldfishBattery.into()
+    }
+
     fn debug_label(&self) -> String {
         "GoldfishBattery".to_owned()
     }

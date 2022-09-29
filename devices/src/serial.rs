@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+pub(crate) mod sys;
+
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -13,7 +15,9 @@ use base::{error, Event, FileSync, RawDescriptor, Result};
 use hypervisor::ProtectionType;
 
 use crate::bus::BusAccessInfo;
-use crate::{BusDevice, SerialDevice};
+use crate::pci::CrosvmDeviceId;
+use crate::serial_device::SerialInput;
+use crate::{BusDevice, DeviceId, SerialDevice};
 
 const LOOP_SIZE: usize = 0x40;
 
@@ -79,7 +83,7 @@ pub struct Serial {
     // Host input/output
     in_buffer: VecDeque<u8>,
     in_channel: Option<Receiver<u8>>,
-    input: Option<Box<dyn io::Read + Send>>,
+    input: Option<Box<dyn SerialInput>>,
     out: Option<Box<dyn io::Write + Send>>,
 }
 
@@ -87,7 +91,7 @@ impl SerialDevice for Serial {
     fn new(
         _protected_vm: ProtectionType,
         interrupt_evt: Event,
-        input: Option<Box<dyn io::Read + Send>>,
+        input: Option<Box<dyn SerialInput>>,
         out: Option<Box<dyn io::Write + Send>>,
         _sync: Option<Box<dyn FileSync + Send>>,
         _out_timestamp: bool,
@@ -112,6 +116,16 @@ impl SerialDevice for Serial {
 }
 
 impl Serial {
+    /// Returns a unique ID for the serial device.
+    pub fn device_id() -> DeviceId {
+        CrosvmDeviceId::Serial.into()
+    }
+
+    /// Returns a debug label for the serial device. Used when setting up `IrqEventSource`.
+    pub fn debug_label() -> String {
+        "serial".to_owned()
+    }
+
     /// Queues raw bytes for the guest to read and signals the interrupt if the line status would
     /// change. These bytes will be read by the guest before any bytes from the input stream that
     /// have not already been queued.
@@ -310,6 +324,10 @@ impl Serial {
 }
 
 impl BusDevice for Serial {
+    fn device_id(&self) -> DeviceId {
+        CrosvmDeviceId::Serial.into()
+    }
+
     fn debug_label(&self) -> String {
         "serial".to_owned()
     }

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! x86 architecture support.
+
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 
 mod fdt;
@@ -36,6 +38,7 @@ unsafe impl data_model::DataInit for mpspec::mpc_table {}
 unsafe impl data_model::DataInit for mpspec::mpc_lintsrc {}
 unsafe impl data_model::DataInit for mpspec::mpf_intel {}
 
+#[cfg(unix)]
 pub mod msr;
 
 mod acpi;
@@ -47,9 +50,9 @@ mod mptable;
 mod regs;
 mod smbios;
 
+use once_cell::sync::OnceCell;
 use std::arch::x86_64::__cpuid;
 use std::collections::BTreeMap;
-use std::convert::TryFrom;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Seek};
@@ -60,26 +63,29 @@ use crate::bootparam::boot_params;
 use acpi_tables::sdt::SDT;
 use acpi_tables::{aml, aml::Aml};
 use arch::{
-    get_serial_cmdline, GetSerialCmdlineError, MsrAction, MsrConfig, MsrRWType, MsrValueFrom,
-    RunnableLinuxVm, VmComponents, VmImage,
+    get_serial_cmdline, GetSerialCmdlineError, MsrAction, MsrConfig, MsrFilter, MsrRWType,
+    MsrValueFrom, RunnableLinuxVm, VmComponents, VmImage,
 };
-use base::{warn, Event};
+use base::{warn, Event, SendTube, TubeError};
 use devices::serial_device::{SerialHardware, SerialParameters};
 use devices::{
-    BusDeviceObj, BusResumeDevice, IrqChip, IrqChipX86_64, PciAddress, PciConfigIo, PciConfigMmio,
-    PciDevice, PciVirtualConfigMmio,
+    BusDevice, BusDeviceObj, BusResumeDevice, Debugcon, IrqChip, IrqChipX86_64, IrqEventSource,
+    PciAddress, PciConfigIo, PciConfigMmio, PciDevice, PciVirtualConfigMmio, ProxyDevice, Serial,
 };
-use hypervisor::{HypervisorX86_64, ProtectionType, VcpuX86_64, Vm, VmX86_64};
+use hypervisor::{
+    HypervisorX86_64, ProtectionType, VcpuInitX86_64, VcpuX86_64, Vm, VmCap, VmX86_64,
+};
+#[cfg(unix)]
 use minijail::Minijail;
 use remain::sorted;
-use resources::{MemRegion, SystemAllocator, SystemAllocatorConfig};
+use resources::{AddressRange, SystemAllocator, SystemAllocatorConfig};
 use sync::Mutex;
 use thiserror::Error;
 use vm_control::{BatControl, BatteryType};
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use {
-    gdbstub_arch::x86::reg::{X86SegmentRegs, X86_64CoreRegs},
+    gdbstub_arch::x86::reg::{X86SegmentRegs, X86_64CoreRegs, X87FpuInternalRegs},
     hypervisor::x86_64::{Regs, Sregs},
 };
 
@@ -96,6 +102,10 @@ pub enum Error {
     CloneEvent(base::Error),
     #[error("failed to clone IRQ chip: {0}")]
     CloneIrqChip(base::Error),
+    #[error("failed to clone jail: {0}")]
+    CloneJail(minijail::Error),
+    #[error("unable to clone a Tube: {0}")]
+    CloneTube(TubeError),
     #[error("the given kernel command line was invalid: {0}")]
     Cmdline(kernel_cmdline::Error),
     #[error("failed to configure hotplugged pci device: {0}")]
@@ -106,6 +116,8 @@ pub enum Error {
     CreateAcpi,
     #[error("unable to create battery devices: {0}")]
     CreateBatDevices(arch::DeviceRegistrationError),
+    #[error("could not create debugcon device: {0}")]
+    CreateDebugconDevice(devices::SerialError),
     #[error("unable to make an Event: {0}")]
     CreateEvent(base::Error),
     #[error("failed to create fdt: {0}")]
@@ -121,6 +133,8 @@ pub enum Error {
     CreatePit(base::Error),
     #[error("unable to make PIT device: {0}")]
     CreatePitDevice(devices::PitError),
+    #[error("unable to create proxy device: {0}")]
+    CreateProxyDevice(devices::ProxyError),
     #[error("unable to create serial devices: {0}")]
     CreateSerialDevices(arch::DeviceRegistrationError),
     #[error("failed to create socket: {0}")]
@@ -135,6 +149,8 @@ pub enum Error {
     EnableSplitIrqchip(base::Error),
     #[error("failed to get serial cmdline: {0}")]
     GetSerialCmdline(GetSerialCmdlineError),
+    #[error("failed to insert device onto bus: {0}")]
+    InsertBus(devices::BusError),
     #[error("the kernel extends past the end of RAM")]
     KernelOffsetPastEnd,
     #[error("error loading bios: {0}")]
@@ -157,6 +173,8 @@ pub enum Error {
     RegisterIrqfd(base::Error),
     #[error("error registering virtual socket device: {0}")]
     RegisterVsock(arch::DeviceRegistrationError),
+    #[error("error reserved pcie config mmio")]
+    ReservePcieCfgMmio(resources::Error),
     #[error("failed to set a hardware breakpoint: {0}")]
     SetHwBreakpoint(base::Error),
     #[error("failed to set interrupts: {0}")]
@@ -206,31 +224,12 @@ const MB: u64 = 1 << 20;
 const GB: u64 = 1 << 30;
 
 const BOOT_STACK_POINTER: u64 = 0x8000;
-// Make sure it align to 256MB for MTRR convenient
-const MEM_32BIT_GAP_SIZE: u64 = if cfg!(feature = "direct") {
-    // Allow space for identity mapping coreboot memory regions on the host
-    // which is found at around 7a00_0000 (little bit before 2GB)
-    //
-    // TODO(b/188011323): stop hardcoding sizes and addresses here and instead
-    // determine the memory map from how the VM has been configured via the
-    // command line.
-    2560 * MB
-} else {
-    768 * MB
-};
 const START_OF_RAM_32BITS: u64 = if cfg!(feature = "direct") { 0x1000 } else { 0 };
 const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
-// Reserved memory for nand_bios/LAPIC/IOAPIC/HPET/.....
-const RESERVED_MEM_SIZE: u64 = 0x800_0000;
-// Reserve 64MB for pcie enhanced configuration
-const PCIE_CFG_MMIO_SIZE: u64 = 0x400_0000;
-const PCIE_CFG_MMIO_START: u64 = FIRST_ADDR_PAST_32BITS - RESERVED_MEM_SIZE - PCIE_CFG_MMIO_SIZE;
 // Reserve memory region for pcie virtual configuration
-const PCIE_VCFG_MMIO_SIZE: u64 = PCIE_CFG_MMIO_SIZE;
-const END_ADDR_BEFORE_32BITS: u64 = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE;
-const PCI_MMIO_SIZE: u64 = MEM_32BIT_GAP_SIZE - RESERVED_MEM_SIZE - PCIE_CFG_MMIO_SIZE;
+const PCIE_VCFG_MMIO_SIZE: u64 = 0x400_0000;
 // Linux (with 4-level paging) has a physical memory limit of 46 bits (64 TiB).
-const HIGH_MMIO_MAX_END: u64 = 1u64 << 46;
+const HIGH_MMIO_MAX_END: u64 = (1u64 << 46) - 1;
 const KERNEL_64BIT_ENTRY_OFFSET: u64 = 0x200;
 const ZERO_PAGE_OFFSET: u64 = 0x7000;
 const TSS_ADDR: u64 = 0xfffb_d000;
@@ -250,6 +249,84 @@ pub const X86_64_SCI_IRQ: u32 = 5;
 // The CMOS RTC uses IRQ 8; start allocating IRQs at 9.
 pub const X86_64_IRQ_BASE: u32 = 9;
 const ACPI_HI_RSDP_WINDOW_BASE: u64 = 0x000E_0000;
+
+#[derive(Debug, PartialEq)]
+pub enum CpuManufacturer {
+    Intel,
+    Amd,
+    Unknown,
+}
+
+pub fn get_cpu_manufacturer() -> CpuManufacturer {
+    cpuid::cpu_manufacturer()
+}
+
+// Memory layout below 4G
+struct LowMemoryLayout {
+    // the pci mmio range below 4G
+    pci_mmio: AddressRange,
+    // the pcie cfg mmio range
+    pcie_cfg_mmio: AddressRange,
+}
+
+static LOW_MEMORY_LAYOUT: OnceCell<LowMemoryLayout> = OnceCell::new();
+
+fn init_low_memory_layout(pcie_ecam: Option<AddressRange>, pci_low_start: Option<u64>) {
+    LOW_MEMORY_LAYOUT.get_or_init(|| {
+        // Make sure it align to 256MB for MTRR convenient
+        const MEM_32BIT_GAP_SIZE: u64 = if cfg!(feature = "direct") {
+            // Allow space for identity mapping coreboot memory regions on the host
+            // which is found at around 7a00_0000 (little bit before 2GB)
+            //
+            // TODO(b/188011323): stop hardcoding sizes and addresses here and instead
+            // determine the memory map from how the VM has been configured via the
+            // command line.
+            2560 * MB
+        } else {
+            768 * MB
+        };
+        // Reserved memory for nand_bios/LAPIC/IOAPIC/HPET/.....
+        const RESERVED_MEM_SIZE: u64 = 0x800_0000;
+        const PCI_MMIO_END: u64 = FIRST_ADDR_PAST_32BITS - RESERVED_MEM_SIZE - 1;
+        // Reserve 64MB for pcie enhanced configuration
+        const DEFAULT_PCIE_CFG_MMIO_SIZE: u64 = 0x400_0000;
+        const DEFAULT_PCIE_CFG_MMIO_END: u64 = FIRST_ADDR_PAST_32BITS - RESERVED_MEM_SIZE - 1;
+        const DEFAULT_PCIE_CFG_MMIO_START: u64 =
+            DEFAULT_PCIE_CFG_MMIO_END - DEFAULT_PCIE_CFG_MMIO_SIZE + 1;
+        const DEFAULT_PCIE_CFG_MMIO: AddressRange = AddressRange {
+            start: DEFAULT_PCIE_CFG_MMIO_START,
+            end: DEFAULT_PCIE_CFG_MMIO_END,
+        };
+
+        let pcie_cfg_mmio = pcie_ecam.unwrap_or(DEFAULT_PCIE_CFG_MMIO);
+
+        let pci_mmio = if let Some(pci_low) = pci_low_start {
+            AddressRange {
+                start: pci_low,
+                end: PCI_MMIO_END,
+            }
+        } else {
+            AddressRange {
+                start: pcie_cfg_mmio
+                    .start
+                    .min(FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE),
+                end: PCI_MMIO_END,
+            }
+        };
+
+        LowMemoryLayout {
+            pci_mmio,
+            pcie_cfg_mmio,
+        }
+    });
+}
+
+fn read_pci_mmio_before_32bit() -> AddressRange {
+    LOW_MEMORY_LAYOUT.get().unwrap().pci_mmio
+}
+fn read_pcie_cfg_mmio() -> AddressRange {
+    LOW_MEMORY_LAYOUT.get().unwrap().pcie_cfg_mmio
+}
 
 /// The x86 reset vector for i386+ and x86_64 puts the processor into an "unreal mode" where it
 /// can access the last 1 MB of the 32-bit address space in 16-bit mode, and starts the instruction
@@ -272,8 +349,6 @@ fn configure_system(
     const KERNEL_HDR_MAGIC: u32 = 0x5372_6448;
     const KERNEL_LOADER_OTHER: u8 = 0xff;
     const KERNEL_MIN_ALIGNMENT_BYTES: u32 = 0x100_0000; // Must be non-zero.
-    let first_addr_past_32bits = GuestAddress(FIRST_ADDR_PAST_32BITS);
-    let end_32bit_gap_start = GuestAddress(END_ADDR_BEFORE_32BITS);
 
     params.hdr.type_of_loader = KERNEL_LOADER_OTHER;
     params.hdr.boot_flag = KERNEL_BOOT_FLAG_MAGIC;
@@ -291,47 +366,34 @@ fn configure_system(
 
     add_e820_entry(
         &mut params,
-        START_OF_RAM_32BITS,
-        EBDA_START - START_OF_RAM_32BITS,
+        AddressRange {
+            start: START_OF_RAM_32BITS,
+            end: EBDA_START - 1,
+        },
         E820Type::Ram,
     )?;
 
-    let mem_end = guest_mem.end_addr();
-    if mem_end < end_32bit_gap_start {
-        add_e820_entry(
-            &mut params,
-            kernel_addr.offset() as u64,
-            mem_end.offset_from(kernel_addr) as u64,
-            E820Type::Ram,
-        )?;
-    } else {
-        add_e820_entry(
-            &mut params,
-            kernel_addr.offset() as u64,
-            end_32bit_gap_start.offset_from(kernel_addr) as u64,
-            E820Type::Ram,
-        )?;
-        if mem_end > first_addr_past_32bits {
-            add_e820_entry(
-                &mut params,
-                first_addr_past_32bits.offset() as u64,
-                mem_end.offset_from(first_addr_past_32bits) as u64,
-                E820Type::Ram,
-            )?;
-        }
+    // GuestMemory::end_addr() returns the first address past the end, so subtract 1 to get the
+    // inclusive end.
+    let guest_mem_end = guest_mem.end_addr().offset() - 1;
+    let ram_below_4g = AddressRange {
+        start: kernel_addr.offset(),
+        end: guest_mem_end.min(read_pci_mmio_before_32bit().start - 1),
+    };
+    let ram_above_4g = AddressRange {
+        start: FIRST_ADDR_PAST_32BITS,
+        end: guest_mem_end,
+    };
+    add_e820_entry(&mut params, ram_below_4g, E820Type::Ram)?;
+    if !ram_above_4g.is_empty() {
+        add_e820_entry(&mut params, ram_above_4g, E820Type::Ram)?
     }
 
-    add_e820_entry(
-        &mut params,
-        PCIE_CFG_MMIO_START,
-        PCIE_CFG_MMIO_SIZE,
-        E820Type::Reserved,
-    )?;
+    add_e820_entry(&mut params, read_pcie_cfg_mmio(), E820Type::Reserved)?;
 
     add_e820_entry(
         &mut params,
-        X8664arch::get_pcie_vcfg_mmio_base(guest_mem),
-        PCIE_VCFG_MMIO_SIZE,
+        X8664arch::get_pcie_vcfg_mmio_range(guest_mem),
         E820Type::Reserved,
     )?;
 
@@ -348,17 +410,14 @@ fn configure_system(
 
 /// Add an e820 region to the e820 map.
 /// Returns Ok(()) if successful, or an error if there is no space left in the map.
-fn add_e820_entry(
-    params: &mut boot_params,
-    addr: u64,
-    size: u64,
-    mem_type: E820Type,
-) -> Result<()> {
+fn add_e820_entry(params: &mut boot_params, range: AddressRange, mem_type: E820Type) -> Result<()> {
     if params.e820_entries >= params.e820_table.len() as u8 {
         return Err(Error::E820Configuration);
     }
 
-    params.e820_table[params.e820_entries as usize].addr = addr;
+    let size = range.len().ok_or(Error::E820Configuration)?;
+
+    params.e820_table[params.e820_entries as usize].addr = range.start;
     params.e820_table[params.e820_entries as usize].size = size;
     params.e820_table[params.e820_entries as usize].type_ = mem_type as u32;
     params.e820_entries += 1;
@@ -373,8 +432,10 @@ fn add_e820_entry(
 fn arch_memory_regions(size: u64, bios_size: Option<u64>) -> Vec<(GuestAddress, u64)> {
     let mem_start = START_OF_RAM_32BITS;
     let mem_end = GuestAddress(size + mem_start);
+
     let first_addr_past_32bits = GuestAddress(FIRST_ADDR_PAST_32BITS);
-    let end_32bit_gap_start = GuestAddress(END_ADDR_BEFORE_32BITS);
+    let end_32bit_gap_start = GuestAddress(read_pci_mmio_before_32bit().start);
+
     let mut regions = Vec::new();
     if mem_end <= end_32bit_gap_start {
         regions.push((GuestAddress(mem_start), size));
@@ -404,30 +465,24 @@ impl arch::LinuxArch for X8664arch {
     fn guest_memory_layout(
         components: &VmComponents,
     ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error> {
+        init_low_memory_layout(components.pcie_ecam, components.pci_low_start);
+
         let bios_size = match &components.vm_image {
             VmImage::Bios(bios_file) => Some(bios_file.metadata().map_err(Error::LoadBios)?.len()),
             VmImage::Kernel(_) => None,
         };
+
         Ok(arch_memory_regions(components.memory_size, bios_size))
     }
 
     fn get_system_allocator_config<V: Vm>(vm: &V) -> SystemAllocatorConfig {
-        let guest_mem = vm.get_memory();
-        let high_mmio_start = Self::get_high_mmio_base(guest_mem);
-        let high_mmio_size = Self::get_high_mmio_size(vm);
         SystemAllocatorConfig {
-            io: Some(MemRegion {
-                base: 0xc000,
-                size: 0x4000,
+            io: Some(AddressRange {
+                start: 0xc000,
+                end: 0xffff,
             }),
-            low_mmio: MemRegion {
-                base: END_ADDR_BEFORE_32BITS,
-                size: PCI_MMIO_SIZE,
-            },
-            high_mmio: MemRegion {
-                base: high_mmio_start,
-                size: high_mmio_size,
-            },
+            low_mmio: read_pci_mmio_before_32bit(),
+            high_mmio: Self::get_high_mmio_range(vm),
             platform_mmio: None,
             first_irq: X86_64_IRQ_BASE,
         }
@@ -435,8 +490,7 @@ impl arch::LinuxArch for X8664arch {
 
     fn build_vm<V, Vcpu>(
         mut components: VmComponents,
-        exit_evt: &Event,
-        reset_evt: &Event,
+        vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
@@ -446,6 +500,7 @@ impl arch::LinuxArch for X8664arch {
         devs: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipX86_64,
         vcpu_ids: &mut Vec<usize>,
+        debugcon_jail: Option<Minijail>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -466,6 +521,13 @@ impl arch::LinuxArch for X8664arch {
         let mut noirq = true;
         let mut mptable = true;
         let mut sci_irq = X86_64_SCI_IRQ;
+
+        // punch pcie config mmio from pci low mmio, so that it couldn't be
+        // allocated to any device.
+        let pcie_cfg_mmio_range = read_pcie_cfg_mmio();
+        system_allocator
+            .reserve_mmio(pcie_cfg_mmio_range)
+            .map_err(Error::ReservePcieCfgMmio)?;
 
         for sdt in components.acpi_sdts.iter() {
             if sdt.is_signature(b"DSDT") || sdt.is_signature(b"APIC") {
@@ -504,24 +566,26 @@ impl arch::LinuxArch for X8664arch {
         .map_err(Error::CreatePciRoot)?;
 
         let pci = Arc::new(Mutex::new(pci));
-        pci.lock().enable_pcie_cfg_mmio(PCIE_CFG_MMIO_START);
+        pci.lock().enable_pcie_cfg_mmio(read_pcie_cfg_mmio().start);
         let pci_cfg = PciConfigIo::new(
             pci.clone(),
-            reset_evt.try_clone().map_err(Error::CloneEvent)?,
+            vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
         );
         let pci_bus = Arc::new(Mutex::new(pci_cfg));
         io_bus.insert(pci_bus, 0xcf8, 0x8).unwrap();
 
         let pcie_cfg_mmio = Arc::new(Mutex::new(PciConfigMmio::new(pci.clone(), 12)));
+        let pcie_cfg_mmio_range = read_pcie_cfg_mmio();
+        let pcie_cfg_mmio_len = pcie_cfg_mmio_range.len().unwrap();
         mmio_bus
-            .insert(pcie_cfg_mmio, PCIE_CFG_MMIO_START, PCIE_CFG_MMIO_SIZE)
+            .insert(pcie_cfg_mmio, pcie_cfg_mmio_range.start, pcie_cfg_mmio_len)
             .unwrap();
 
         let pcie_vcfg_mmio = Arc::new(Mutex::new(PciVirtualConfigMmio::new(pci.clone(), 12)));
         mmio_bus
             .insert(
                 pcie_vcfg_mmio,
-                Self::get_pcie_vcfg_mmio_base(&mem),
+                Self::get_pcie_vcfg_mmio_range(&mem).start,
                 PCIE_VCFG_MMIO_SIZE,
             )
             .unwrap();
@@ -529,13 +593,15 @@ impl arch::LinuxArch for X8664arch {
         // Event used to notify crosvm that guest OS is trying to suspend.
         let suspend_evt = Event::new().map_err(Error::CreateEvent)?;
 
-        if !components.no_legacy {
-            Self::setup_legacy_devices(
+        if !components.no_i8042 {
+            Self::setup_legacy_i8042_device(
                 &io_bus,
                 irq_chip.pit_uses_speaker_port(),
-                reset_evt.try_clone().map_err(Error::CloneEvent)?,
-                components.memory_size,
+                vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
             )?;
+        }
+        if !components.no_rtc {
+            Self::setup_legacy_cmos_device(&io_bus, components.memory_size)?;
         }
         Self::setup_serial_devices(
             components.protected_vm,
@@ -544,18 +610,23 @@ impl arch::LinuxArch for X8664arch {
             serial_parameters,
             serial_jail,
         )?;
+        Self::setup_debugcon_devices(
+            components.protected_vm,
+            &io_bus,
+            serial_parameters,
+            debugcon_jail,
+        )?;
 
         let mut resume_notify_devices = Vec::new();
 
         // each bus occupy 1MB mmio for pcie enhanced configuration
-        let max_bus = ((PCIE_CFG_MMIO_SIZE / 0x100000) - 1) as u8;
-
+        let max_bus = ((read_pcie_cfg_mmio().len().unwrap() / 0x100000) - 1) as u8;
         let (acpi_dev_resource, bat_control) = Self::setup_acpi_devices(
             &mem,
             &io_bus,
             system_allocator,
             suspend_evt.try_clone().map_err(Error::CloneEvent)?,
-            exit_evt.try_clone().map_err(Error::CloneEvent)?,
+            vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
             components.acpi_sdts,
             #[cfg(feature = "direct")]
             &components.direct_gpe,
@@ -603,7 +674,7 @@ impl arch::LinuxArch for X8664arch {
             host_cpus,
             vcpu_ids,
             &pci_irqs,
-            PCIE_CFG_MMIO_START,
+            read_pcie_cfg_mmio().start,
             max_bus,
             components.force_s2idle,
         )
@@ -627,6 +698,8 @@ impl arch::LinuxArch for X8664arch {
                 .map_err(Error::Cmdline)?;
         }
 
+        let mut vcpu_init = VcpuInitX86_64::default();
+
         match components.vm_image {
             VmImage::Bios(ref mut bios) => {
                 // Allow a bios to hardcode CMDLINE_OFFSET and read the kernel command line from it.
@@ -637,11 +710,10 @@ impl arch::LinuxArch for X8664arch {
                 )
                 .map_err(Error::LoadCmdline)?;
                 Self::load_bios(&mem, bios)?
+                // RIP and CS will be configured by `set_reset_vector()` later.
             }
             VmImage::Kernel(ref mut kernel_image) => {
-                // separate out load_kernel from other setup to get a specific error for
-                // kernel loading
-                let (params, kernel_end) = Self::load_kernel(&mem, kernel_image)?;
+                let (params, kernel_end, kernel_entry) = Self::load_kernel(&mem, kernel_image)?;
 
                 Self::setup_system_memory(
                     &mem,
@@ -651,6 +723,12 @@ impl arch::LinuxArch for X8664arch {
                     kernel_end,
                     params,
                 )?;
+
+                // Configure the VCPU for the Linux/x86 64-bit boot protocol.
+                // <https://www.kernel.org/doc/html/latest/x86/boot.html>
+                vcpu_init.regs.rip = kernel_entry.offset();
+                vcpu_init.regs.rsp = BOOT_STACK_POINTER;
+                vcpu_init.regs.rsi = ZERO_PAGE_OFFSET;
             }
         }
 
@@ -659,6 +737,7 @@ impl arch::LinuxArch for X8664arch {
             vcpu_count,
             vcpus: None,
             vcpu_affinity: components.vcpu_affinity,
+            vcpu_init,
             no_smt: components.no_smt,
             irq_chip: irq_chip.try_box_clone().map_err(Error::CloneIrqChip)?,
             has_bios: matches!(components.vm_image, VmImage::Bios(_)),
@@ -683,42 +762,41 @@ impl arch::LinuxArch for X8664arch {
         hypervisor: &dyn HypervisorX86_64,
         irq_chip: &mut dyn IrqChipX86_64,
         vcpu: &mut dyn VcpuX86_64,
+        vcpu_init: &VcpuInitX86_64,
         vcpu_id: usize,
         num_cpus: usize,
         has_bios: bool,
         no_smt: bool,
         host_cpu_topology: bool,
+        enable_pnp_data: bool,
         itmt: bool,
+        force_calibrated_tsc_leaf: bool,
     ) -> Result<()> {
-        cpuid::setup_cpuid(
-            hypervisor,
-            irq_chip,
-            vcpu,
-            vcpu_id,
-            num_cpus,
-            no_smt,
-            host_cpu_topology,
-            itmt,
-        )
-        .map_err(Error::SetupCpuid)?;
+        if !vm.check_capability(VmCap::EarlyInitCpuid) {
+            cpuid::setup_cpuid(
+                hypervisor,
+                irq_chip,
+                vcpu,
+                vcpu_id,
+                num_cpus,
+                no_smt,
+                host_cpu_topology,
+                enable_pnp_data,
+                itmt,
+                force_calibrated_tsc_leaf,
+            )
+            .map_err(Error::SetupCpuid)?;
+        }
 
         if has_bios {
+            regs::set_reset_vector(vcpu).map_err(Error::SetupRegs)?;
+            regs::reset_msrs(vcpu).map_err(Error::SetupMsrs)?;
             return Ok(());
         }
 
         let guest_mem = vm.get_memory();
-        let kernel_load_addr = GuestAddress(KERNEL_START_OFFSET);
-        regs::setup_msrs(vm, vcpu, END_ADDR_BEFORE_32BITS).map_err(Error::SetupMsrs)?;
-        let kernel_end = guest_mem
-            .checked_offset(kernel_load_addr, KERNEL_64BIT_ENTRY_OFFSET)
-            .ok_or(Error::KernelOffsetPastEnd)?;
-        regs::setup_regs(
-            vcpu,
-            (kernel_end).offset() as u64,
-            BOOT_STACK_POINTER as u64,
-            ZERO_PAGE_OFFSET as u64,
-        )
-        .map_err(Error::SetupRegs)?;
+        regs::setup_msrs(vm, vcpu, read_pci_mmio_before_32bit().start).map_err(Error::SetupMsrs)?;
+        vcpu.set_regs(&vcpu_init.regs).map_err(Error::WriteRegs)?;
         regs::setup_fpu(vcpu).map_err(Error::SetupFpu)?;
         regs::setup_sregs(guest_mem, vcpu).map_err(Error::SetupSregs)?;
         interrupts::set_lint(vcpu_id, irq_chip).map_err(Error::SetLint)?;
@@ -729,13 +807,17 @@ impl arch::LinuxArch for X8664arch {
     fn register_pci_device<V: VmX86_64, Vcpu: VcpuX86_64>(
         linux: &mut RunnableLinuxVm<V, Vcpu>,
         device: Box<dyn PciDevice>,
-        minijail: Option<Minijail>,
+        #[cfg(unix)] minijail: Option<Minijail>,
         resources: &mut SystemAllocator,
     ) -> Result<PciAddress> {
-        let pci_address = arch::configure_pci_device(linux, device, minijail, resources)
-            .map_err(Error::ConfigurePciDevice)?;
-
-        Ok(pci_address)
+        arch::configure_pci_device(
+            linux,
+            device,
+            #[cfg(unix)]
+            minijail,
+            resources,
+        )
+        .map_err(Error::ConfigurePciDevice)
     }
 
     #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
@@ -763,15 +845,41 @@ impl arch::LinuxArch for X8664arch {
             gs: sregs.gs.selector as u32,
         };
 
-        // TODO(keiichiw): Other registers such as FPU, xmm and mxcsr.
+        // x87 FPU internal state
+        // TODO(dverkamp): floating point tag word, instruction pointer, and data pointer
+        let fpu = vcpu.get_fpu().map_err(Error::ReadRegs)?;
+        let fpu_internal = X87FpuInternalRegs {
+            fctrl: u32::from(fpu.fcw),
+            fstat: u32::from(fpu.fsw),
+            fop: u32::from(fpu.last_opcode),
+            ..Default::default()
+        };
 
-        Ok(X86_64CoreRegs {
+        let mut regs = X86_64CoreRegs {
             regs,
             eflags,
             rip,
             segments,
-            ..Default::default()
-        })
+            st: Default::default(),
+            fpu: fpu_internal,
+            xmm: Default::default(),
+            mxcsr: fpu.mxcsr,
+        };
+
+        // x87 FPU registers: ST0-ST7
+        for (dst, src) in regs.st.iter_mut().zip(fpu.fpr.iter()) {
+            // `fpr` contains the x87 floating point registers in FXSAVE format.
+            // Each element contains an 80-bit floating point value in the low 10 bytes.
+            // The upper 6 bytes are reserved and can be ignored.
+            dst.copy_from_slice(&src[0..10])
+        }
+
+        // SSE registers: XMM0-XMM15
+        for (dst, src) in regs.xmm.iter_mut().zip(fpu.xmm.iter()) {
+            *dst = u128::from_le_bytes(*src);
+        }
+
+        Ok(regs)
     }
 
     #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
@@ -813,7 +921,24 @@ impl arch::LinuxArch for X8664arch {
 
         vcpu.set_sregs(&sregs).map_err(Error::WriteRegs)?;
 
-        // TODO(keiichiw): Other registers such as FPU, xmm and mxcsr.
+        // FPU and SSE registers
+        let mut fpu = vcpu.get_fpu().map_err(Error::ReadRegs)?;
+        fpu.fcw = regs.fpu.fctrl as u16;
+        fpu.fsw = regs.fpu.fstat as u16;
+        fpu.last_opcode = regs.fpu.fop as u16;
+        // TODO(dverkamp): floating point tag word, instruction pointer, and data pointer
+
+        // x87 FPU registers: ST0-ST7
+        for (dst, src) in fpu.fpr.iter_mut().zip(regs.st.iter()) {
+            dst[0..10].copy_from_slice(src);
+        }
+
+        // SSE registers: XMM0-XMM15
+        for (dst, src) in fpu.xmm.iter_mut().zip(regs.xmm.iter()) {
+            dst.copy_from_slice(&src.to_le_bytes());
+        }
+
+        vcpu.set_fpu(&fpu).map_err(Error::WriteRegs)?;
 
         Ok(())
     }
@@ -1090,15 +1215,37 @@ impl X8664arch {
     ///
     /// * `mem` - The memory to be used by the guest.
     /// * `kernel_image` - the File object for the specified kernel.
-    fn load_kernel(mem: &GuestMemory, kernel_image: &mut File) -> Result<(boot_params, u64)> {
-        let elf_result =
-            kernel_loader::load_kernel(mem, GuestAddress(KERNEL_START_OFFSET), kernel_image);
-        if elf_result == Err(kernel_loader::Error::InvalidElfMagicNumber) {
-            bzimage::load_bzimage(mem, GuestAddress(KERNEL_START_OFFSET), kernel_image)
-                .map_err(Error::LoadBzImage)
-        } else {
-            let kernel_end = elf_result.map_err(Error::LoadKernel)?;
-            Ok((Default::default(), kernel_end))
+    ///
+    /// # Returns
+    ///
+    /// On success, returns the Linux x86_64 boot protocol parameters, the first address past the
+    /// end of the kernel, and the entry point (initial `RIP` value).
+    fn load_kernel(
+        mem: &GuestMemory,
+        kernel_image: &mut File,
+    ) -> Result<(boot_params, u64, GuestAddress)> {
+        let kernel_start = GuestAddress(KERNEL_START_OFFSET);
+        match kernel_loader::load_kernel(mem, kernel_start, kernel_image) {
+            Ok(loaded_kernel) => {
+                // ELF kernels don't contain a `boot_params` structure, so synthesize a default one.
+                let boot_params = Default::default();
+                Ok((
+                    boot_params,
+                    loaded_kernel.address_range.end,
+                    loaded_kernel.entry,
+                ))
+            }
+            Err(kernel_loader::Error::InvalidElfMagicNumber) => {
+                // The image failed to parse as ELF, so try to load it as a bzImage.
+                let (boot_params, bzimage_end) =
+                    bzimage::load_bzimage(mem, kernel_start, kernel_image)
+                        .map_err(Error::LoadBzImage)?;
+                let bzimage_entry = mem
+                    .checked_offset(kernel_start, KERNEL_64BIT_ENTRY_OFFSET)
+                    .ok_or(Error::KernelOffsetPastEnd)?;
+                Ok((boot_params, bzimage_end, bzimage_entry))
+            }
+            Err(e) => Err(Error::LoadKernel(e)),
         }
     }
 
@@ -1179,30 +1326,24 @@ impl X8664arch {
         Ok(())
     }
 
-    fn get_pcie_vcfg_mmio_base(mem: &GuestMemory) -> u64 {
+    fn get_pcie_vcfg_mmio_range(mem: &GuestMemory) -> AddressRange {
         // Put PCIe VCFG region at a 2MB boundary after physical memory or 4gb, whichever is greater.
         let ram_end_round_2mb = (mem.end_addr().offset() + 2 * MB - 1) / (2 * MB) * (2 * MB);
-        std::cmp::max(ram_end_round_2mb, 4 * GB)
+        let start = std::cmp::max(ram_end_round_2mb, 4 * GB);
+        let end = start + PCIE_VCFG_MMIO_SIZE - 1;
+        AddressRange { start, end }
     }
 
-    /// This returns the start address of high mmio
-    ///
-    /// # Arguments
-    ///
-    /// * mem: The memory to be used by the guest
-    fn get_high_mmio_base(mem: &GuestMemory) -> u64 {
-        Self::get_pcie_vcfg_mmio_base(mem) + PCIE_VCFG_MMIO_SIZE
-    }
+    /// Returns the high mmio range
+    fn get_high_mmio_range<V: Vm>(vm: &V) -> AddressRange {
+        let mem = vm.get_memory();
+        let start = Self::get_pcie_vcfg_mmio_range(mem).end + 1;
 
-    /// This returns the size of high mmio
-    ///
-    /// # Arguments
-    ///
-    /// * `vm`: The virtual machine
-    fn get_high_mmio_size<V: Vm>(vm: &V) -> u64 {
-        let phys_mem_end = 1u64 << vm.get_guest_phys_addr_bits();
+        let phys_mem_end = (1u64 << vm.get_guest_phys_addr_bits()) - 1;
         let high_mmio_end = std::cmp::min(phys_mem_end, HIGH_MMIO_MAX_END);
-        high_mmio_end - Self::get_high_mmio_base(vm.get_memory())
+        let end = high_mmio_end - 1;
+
+        AddressRange { start, end }
     }
 
     /// This returns a minimal kernel command for this architecture
@@ -1213,27 +1354,37 @@ impl X8664arch {
         cmdline
     }
 
-    /// Sets up the legacy x86 IO platform devices
+    /// Sets up the legacy x86 i8042/KBD platform device
     ///
     /// # Arguments
     ///
     /// * - `io_bus` - the IO bus object
     /// * - `pit_uses_speaker_port` - does the PIT use port 0x61 for the PC speaker
-    /// * - `reset_evt` - the event object which should receive exit events
-    /// * - `mem_size` - the size in bytes of physical ram for the guest
-    fn setup_legacy_devices(
+    /// * - `vm_evt_wrtube` - the event object which should receive exit events
+    fn setup_legacy_i8042_device(
         io_bus: &devices::Bus,
         pit_uses_speaker_port: bool,
-        reset_evt: Event,
-        mem_size: u64,
+        vm_evt_wrtube: SendTube,
     ) -> Result<()> {
-        struct NoDevice;
-        impl devices::BusDevice for NoDevice {
-            fn debug_label(&self) -> String {
-                "no device".to_owned()
-            }
+        let i8042 = Arc::new(Mutex::new(devices::I8042Device::new(
+            vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
+        )));
+
+        if pit_uses_speaker_port {
+            io_bus.insert(i8042, 0x062, 0x3).unwrap();
+        } else {
+            io_bus.insert(i8042, 0x061, 0x4).unwrap();
         }
 
+        Ok(())
+    }
+
+    /// Sets up the legacy x86 CMOS/RTC platform device
+    /// # Arguments
+    ///
+    /// * - `io_bus` - the IO bus object
+    /// * - `mem_size` - the size in bytes of physical ram for the guest
+    fn setup_legacy_cmos_device(io_bus: &devices::Bus, mem_size: u64) -> Result<()> {
         let mem_regions = arch_memory_regions(mem_size, None);
 
         let mem_below_4g = mem_regions
@@ -1256,20 +1407,6 @@ impl X8664arch {
             )
             .unwrap();
 
-        let nul_device = Arc::new(Mutex::new(NoDevice));
-        let i8042 = Arc::new(Mutex::new(devices::I8042Device::new(
-            reset_evt.try_clone().map_err(Error::CloneEvent)?,
-        )));
-
-        if pit_uses_speaker_port {
-            io_bus.insert(i8042, 0x062, 0x3).unwrap();
-        } else {
-            io_bus.insert(i8042, 0x061, 0x4).unwrap();
-        }
-
-        io_bus.insert(nul_device.clone(), 0x0ed, 0x1).unwrap(); // most likely this one does nothing
-        io_bus.insert(nul_device, 0x0f0, 0x2).unwrap(); // ignore fpu
-
         Ok(())
     }
 
@@ -1291,7 +1428,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         resources: &mut SystemAllocator,
         suspend_evt: Event,
-        exit_evt: Event,
+        vm_evt_wrtube: SendTube,
         sdts: Vec<SDT>,
         #[cfg(feature = "direct")] direct_gpe: &[u32],
         irq_chip: &mut dyn IrqChip,
@@ -1307,7 +1444,7 @@ impl X8664arch {
         let bat_control = if let Some(battery_type) = battery.0 {
             match battery_type {
                 BatteryType::Goldfish => {
-                    let control_tube = arch::add_goldfish_battery(
+                    let (control_tube, _mmio_base) = arch::add_goldfish_battery(
                         &mut amls, battery.1, mmio_bus, irq_chip, sci_irq, resources,
                     )
                     .map_err(Error::CreateBatDevices)?;
@@ -1334,13 +1471,8 @@ impl X8664arch {
             None => 0x600,
         };
 
-        let pcie_vcfg = aml::Name::new("VCFG".into(), &Self::get_pcie_vcfg_mmio_base(mem));
+        let pcie_vcfg = aml::Name::new("VCFG".into(), &Self::get_pcie_vcfg_mmio_range(mem).start);
         pcie_vcfg.to_aml_bytes(&mut amls);
-
-        let pm_sci_evt = devices::IrqLevelEvent::new().map_err(Error::CreateEvent)?;
-        irq_chip
-            .register_level_irq_event(sci_irq, &pm_sci_evt)
-            .map_err(Error::RegisterIrqfd)?;
 
         #[cfg(feature = "direct")]
         let direct_gpe_info = if direct_gpe.is_empty() {
@@ -1361,14 +1493,23 @@ impl X8664arch {
             Some((direct_sci_evt, direct_gpe))
         };
 
+        let pm_sci_evt = devices::IrqLevelEvent::new().map_err(Error::CreateEvent)?;
+
         let mut pmresource = devices::ACPIPMResource::new(
-            pm_sci_evt,
+            pm_sci_evt.try_clone().map_err(Error::CloneEvent)?,
             #[cfg(feature = "direct")]
             direct_gpe_info,
             suspend_evt,
-            exit_evt,
+            vm_evt_wrtube,
         );
         pmresource.to_aml_bytes(&mut amls);
+        irq_chip
+            .register_level_irq_event(
+                sci_irq,
+                &pm_sci_evt,
+                IrqEventSource::from_device(&pmresource),
+            )
+            .map_err(Error::RegisterIrqfd)?;
         pmresource.start();
 
         let mut crs_entries: Vec<Box<dyn Aml>> = vec![
@@ -1376,7 +1517,7 @@ impl X8664arch {
             Box::new(aml::IO::new(0xcf8, 0xcf8, 1, 0x8)),
         ];
         for r in resources.mmio_pools() {
-            let entry: Box<dyn Aml> = match (u32::try_from(*r.start()), u32::try_from(*r.end())) {
+            let entry: Box<dyn Aml> = match (u32::try_from(r.start), u32::try_from(r.end)) {
                 (Ok(start), Ok(end)) => Box::new(aml::AddressSpace::new_memory(
                     aml::AddressSpaceCachable::NotCacheable,
                     true,
@@ -1386,8 +1527,8 @@ impl X8664arch {
                 _ => Box::new(aml::AddressSpace::new_memory(
                     aml::AddressSpaceCachable::NotCacheable,
                     true,
-                    *r.start(),
-                    *r.end(),
+                    r.start,
+                    r.end,
                 )),
             };
             crs_entries.push(entry);
@@ -1466,12 +1607,57 @@ impl X8664arch {
         )
         .map_err(Error::CreateSerialDevices)?;
 
+        let source = IrqEventSource {
+            device_id: Serial::device_id(),
+            queue_id: 0,
+            device_name: Serial::debug_label(),
+        };
         irq_chip
-            .register_edge_irq_event(X86_64_SERIAL_1_3_IRQ, &com_evt_1_3)
+            .register_edge_irq_event(X86_64_SERIAL_1_3_IRQ, &com_evt_1_3, source.clone())
             .map_err(Error::RegisterIrqfd)?;
         irq_chip
-            .register_edge_irq_event(X86_64_SERIAL_2_4_IRQ, &com_evt_2_4)
+            .register_edge_irq_event(X86_64_SERIAL_2_4_IRQ, &com_evt_2_4, source)
             .map_err(Error::RegisterIrqfd)?;
+
+        Ok(())
+    }
+
+    fn setup_debugcon_devices(
+        protected_vm: ProtectionType,
+        io_bus: &devices::Bus,
+        serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
+        debugcon_jail: Option<Minijail>,
+    ) -> Result<()> {
+        for param in serial_parameters.values() {
+            if param.hardware != SerialHardware::Debugcon {
+                continue;
+            }
+
+            let mut preserved_fds = Vec::new();
+            let con = param
+                .create_serial_device::<Debugcon>(
+                    protected_vm,
+                    // Debugcon doesn't use the interrupt event
+                    &Event::new().map_err(Error::CreateEvent)?,
+                    &mut preserved_fds,
+                )
+                .map_err(Error::CreateDebugconDevice)?;
+
+            let con: Arc<Mutex<dyn BusDevice>> = match debugcon_jail.as_ref() {
+                Some(jail) => Arc::new(Mutex::new(
+                    ProxyDevice::new(
+                        con,
+                        &jail.try_clone().map_err(Error::CloneJail)?,
+                        preserved_fds,
+                    )
+                    .map_err(Error::CreateProxyDevice)?,
+                )),
+                None => Arc::new(Mutex::new(con)),
+            };
+            io_bus
+                .insert(con.clone(), param.debugcon_port.into(), 1)
+                .map_err(Error::InsertBus)?;
+        }
 
         Ok(())
     }
@@ -1479,136 +1665,178 @@ impl X8664arch {
 
 #[sorted]
 #[derive(Error, Debug)]
-pub enum ItmtError {
+pub enum MsrError {
     #[error("CPU not support. Only intel CPUs support ITMT.")]
     CpuUnSupport,
     #[error("msr must be unique: {0}")]
     MsrDuplicate(u32),
 }
 
+fn insert_msr(
+    msr_map: &mut BTreeMap<u32, MsrConfig>,
+    key: u32,
+    msr_config: MsrConfig,
+) -> std::result::Result<(), MsrError> {
+    if msr_map.insert(key, msr_config).is_some() {
+        Err(MsrError::MsrDuplicate(key))
+    } else {
+        Ok(())
+    }
+}
+
+fn insert_msrs(
+    msr_map: &mut BTreeMap<u32, MsrConfig>,
+    msrs: &[(u32, MsrRWType, MsrAction, MsrValueFrom, MsrFilter)],
+) -> std::result::Result<(), MsrError> {
+    for msr in msrs {
+        insert_msr(
+            msr_map,
+            msr.0,
+            MsrConfig {
+                rw_type: msr.1,
+                action: msr.2,
+                from: msr.3,
+                filter: msr.4,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn set_enable_pnp_data_msr_config(
+    itmt: bool,
+    msr_map: &mut BTreeMap<u32, MsrConfig>,
+) -> std::result::Result<(), MsrError> {
+    let mut msrs = vec![
+        (
+            MSR_IA32_APERF,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+        (
+            MSR_IA32_MPERF,
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+    ];
+
+    // When itmt is enabled, the following 5 MSRs are already
+    // passed through or emulated, so just skip here.
+    if !itmt {
+        msrs.extend([
+            (
+                MSR_PLATFORM_INFO,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Override,
+            ),
+            (
+                MSR_TURBO_RATIO_LIMIT,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+            (
+                MSR_PM_ENABLE,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+            (
+                MSR_HWP_CAPABILITIES,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+            (
+                MSR_HWP_REQUEST,
+                MsrRWType::ReadOnly,
+                MsrAction::MsrPassthrough,
+                MsrValueFrom::RWFromRunningCPU,
+                MsrFilter::Default,
+            ),
+        ]);
+    }
+
+    insert_msrs(msr_map, &msrs)?;
+
+    Ok(())
+}
+
 const EBX_INTEL_GENU: u32 = 0x756e6547; // "Genu"
 const ECX_INTEL_NTEL: u32 = 0x6c65746e; // "ntel"
 const EDX_INTEL_INEI: u32 = 0x49656e69; // "ineI"
 
-fn check_itmt_cpu_support() -> std::result::Result<(), ItmtError> {
+fn check_itmt_cpu_support() -> std::result::Result<(), MsrError> {
     // Safe because we pass 0 for this call and the host supports the
     // `cpuid` instruction
     let entry = unsafe { __cpuid(0) };
     if entry.ebx == EBX_INTEL_GENU && entry.ecx == ECX_INTEL_NTEL && entry.edx == EDX_INTEL_INEI {
         Ok(())
     } else {
-        Err(ItmtError::CpuUnSupport)
+        Err(MsrError::CpuUnSupport)
     }
 }
 
 pub fn set_itmt_msr_config(
     msr_map: &mut BTreeMap<u32, MsrConfig>,
-) -> std::result::Result<(), ItmtError> {
+) -> std::result::Result<(), MsrError> {
     check_itmt_cpu_support()?;
 
-    if msr_map
-        .insert(
+    let msrs = vec![
+        (
             MSR_HWP_CAPABILITIES,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: false,
-                },
-                action: Some(MsrAction::MsrPassthrough),
-                // Compatible with the configuration in initramfs.
-                // TODO(b:225375705): Change to `RWFromRunningCPU` in the future.
-                from: MsrValueFrom::RWFromCPU0,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_HWP_CAPABILITIES));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+        (
             MSR_PM_ENABLE,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: true,
-                },
-                action: Some(MsrAction::MsrEmulate),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_PM_ENABLE));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadWrite,
+            MsrAction::MsrEmulate,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+        (
             MSR_HWP_REQUEST,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: true,
-                },
-                action: Some(MsrAction::MsrEmulate),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_HWP_REQUEST));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadWrite,
+            MsrAction::MsrEmulate,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+        (
             MSR_TURBO_RATIO_LIMIT,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: false,
-                },
-                action: Some(MsrAction::MsrPassthrough),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_TURBO_RATIO_LIMIT));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+        (
             MSR_PLATFORM_INFO,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: false,
-                },
-                action: Some(MsrAction::MsrPassthrough),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_PLATFORM_INFO));
-    }
-
-    if msr_map
-        .insert(
+            MsrRWType::ReadOnly,
+            MsrAction::MsrPassthrough,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+        (
             MSR_IA32_PERF_CTL,
-            MsrConfig {
-                rw_type: MsrRWType {
-                    read_allow: true,
-                    write_allow: true,
-                },
-                action: Some(MsrAction::MsrEmulate),
-                from: MsrValueFrom::RWFromRunningCPU,
-            },
-        )
-        .is_some()
-    {
-        return Err(ItmtError::MsrDuplicate(MSR_IA32_PERF_CTL));
-    }
+            MsrRWType::ReadWrite,
+            MsrAction::MsrEmulate,
+            MsrValueFrom::RWFromRunningCPU,
+            MsrFilter::Default,
+        ),
+    ];
+    insert_msrs(msr_map, &msrs)?;
 
     Ok(())
 }
@@ -1620,8 +1848,17 @@ mod test_integration;
 mod tests {
     use super::*;
 
+    const TEST_MEMORY_SIZE: u64 = 2 * GB;
+
+    fn setup() {
+        let pcie_ecam = Some(AddressRange::from_start_and_size(3 * GB, 256 * MB).unwrap());
+        let pci_start = Some(2 * GB);
+        init_low_memory_layout(pcie_ecam, pci_start);
+    }
+
     #[test]
     fn regions_lt_4gb_nobios() {
+        setup();
         let regions = arch_memory_regions(512 * MB, /* bios_size */ None);
         assert_eq!(1, regions.len());
         assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
@@ -1630,6 +1867,7 @@ mod tests {
 
     #[test]
     fn regions_gt_4gb_nobios() {
+        setup();
         let size = 4 * GB + 0x8000;
         let regions = arch_memory_regions(size, /* bios_size */ None);
         assert_eq!(2, regions.len());
@@ -1640,6 +1878,7 @@ mod tests {
 
     #[test]
     fn regions_lt_4gb_bios() {
+        setup();
         let bios_len = 1 * MB;
         let regions = arch_memory_regions(512 * MB, Some(bios_len));
         assert_eq!(2, regions.len());
@@ -1654,6 +1893,7 @@ mod tests {
 
     #[test]
     fn regions_gt_4gb_bios() {
+        setup();
         let bios_len = 1 * MB;
         let regions = arch_memory_regions(4 * GB + 0x8000, Some(bios_len));
         assert_eq!(3, regions.len());
@@ -1668,34 +1908,27 @@ mod tests {
 
     #[test]
     fn regions_eq_4gb_nobios() {
+        setup();
         // Test with exact size of 4GB - the overhead.
         let regions = arch_memory_regions(
-            4 * GB - MEM_32BIT_GAP_SIZE - START_OF_RAM_32BITS,
+            TEST_MEMORY_SIZE - START_OF_RAM_32BITS,
             /* bios_size */ None,
         );
         dbg!(&regions);
         assert_eq!(1, regions.len());
         assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
-        assert_eq!(
-            4 * GB - MEM_32BIT_GAP_SIZE - START_OF_RAM_32BITS,
-            regions[0].1
-        );
+        assert_eq!(TEST_MEMORY_SIZE - START_OF_RAM_32BITS, regions[0].1);
     }
 
     #[test]
     fn regions_eq_4gb_bios() {
+        setup();
         // Test with exact size of 4GB - the overhead.
         let bios_len = 1 * MB;
-        let regions = arch_memory_regions(
-            4 * GB - MEM_32BIT_GAP_SIZE - START_OF_RAM_32BITS,
-            Some(bios_len),
-        );
+        let regions = arch_memory_regions(TEST_MEMORY_SIZE - START_OF_RAM_32BITS, Some(bios_len));
         assert_eq!(2, regions.len());
         assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
-        assert_eq!(
-            4 * GB - MEM_32BIT_GAP_SIZE - START_OF_RAM_32BITS,
-            regions[0].1
-        );
+        assert_eq!(TEST_MEMORY_SIZE - START_OF_RAM_32BITS, regions[0].1);
         assert_eq!(
             GuestAddress(FIRST_ADDR_PAST_32BITS - bios_len),
             regions[1].0
@@ -1704,22 +1937,34 @@ mod tests {
     }
 
     #[test]
+    fn check_pci_mmio_layout() {
+        setup();
+
+        assert_eq!(read_pci_mmio_before_32bit().start, 2 * GB);
+        assert_eq!(read_pcie_cfg_mmio().start, 3 * GB);
+        assert_eq!(read_pcie_cfg_mmio().len().unwrap(), 256 * MB);
+    }
+
+    #[test]
     #[cfg(feature = "direct")]
+    #[ignore] // TODO(b/236253615): Fix and re-enable this test.
     fn end_addr_before_32bits() {
+        setup();
         // On volteer, type16 (coreboot) region is at 0x00000000769f3000-0x0000000076ffffff.
         // On brya, type16 region is at 0x0000000076876000-0x00000000803fffff
         let brya_type16_address = 0x7687_6000;
         assert!(
-            END_ADDR_BEFORE_32BITS < brya_type16_address,
+            read_pci_mmio_before_32bit().start < brya_type16_address,
             "{} < {}",
-            END_ADDR_BEFORE_32BITS,
+            read_pci_mmio_before_32bit().start,
             brya_type16_address
         );
     }
 
     #[test]
     fn check_32bit_gap_size_alignment() {
-        // 32bit gap memory is 256 MB aligned to be friendly for MTRR mappings.
-        assert_eq!(MEM_32BIT_GAP_SIZE % (256 * MB), 0);
+        setup();
+        // pci_low_start is 256 MB aligned to be friendly for MTRR mappings.
+        assert_eq!(read_pci_mmio_before_32bit().start % (256 * MB), 0);
     }
 }

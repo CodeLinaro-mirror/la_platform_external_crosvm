@@ -6,6 +6,8 @@ use std::future::Future;
 
 use async_task::Task;
 
+use base::{AsRawDescriptors, RawDescriptor};
+
 use super::{
     poll_source::Error as PollError, uring_executor::use_uring, FdExecutor, PollSource,
     URingExecutor, UringSource,
@@ -28,6 +30,24 @@ pub(crate) fn async_poll_from<'a, F: IntoAsync + Send + 'a>(
     Ok(PollSource::new(f, ex).map(|u| Box::new(u) as Box<dyn IoSourceExt<F> + Send>)?)
 }
 
+/// Same as [`async_uring_from`], but without the `Send` requirement and only usable on thread-local
+/// executors.
+pub(crate) fn async_uring_from_local<'a, F: IntoAsync + 'a>(
+    f: F,
+    ex: &URingExecutor,
+) -> AsyncResult<Box<dyn IoSourceExt<F> + 'a>> {
+    Ok(UringSource::new(f, ex).map(|u| Box::new(u) as Box<dyn IoSourceExt<F>>)?)
+}
+
+/// Same as [`async_poll_from`], but without the `Send` requirement and only usable on thread-local
+/// executors.
+pub(crate) fn async_poll_from_local<'a, F: IntoAsync + 'a>(
+    f: F,
+    ex: &FdExecutor,
+) -> AsyncResult<Box<dyn IoSourceExt<F> + 'a>> {
+    Ok(PollSource::new(f, ex).map(|u| Box::new(u) as Box<dyn IoSourceExt<F>>)?)
+}
+
 /// An executor for scheduling tasks that poll futures to completion.
 ///
 /// All asynchronous operations must run within an executor, which is capable of spawning futures as
@@ -40,7 +60,7 @@ pub(crate) fn async_poll_from<'a, F: IntoAsync + Send + 'a>(
 /// represented on the POSIX side as an enum, rather than a trait. This leads to some code &
 /// interface duplication, but as far as we understand that is unavoidable.
 ///
-/// See https://chromium-review.googlesource.com/c/chromiumos/platform/crosvm/+/2571401/2..6/cros_async/src/executor.rs#b75
+/// See <https://chromium-review.googlesource.com/c/chromiumos/platform/crosvm/+/2571401/2..6/cros_async/src/executor.rs#b75>
 /// for further details.
 ///
 /// # Examples
@@ -153,6 +173,18 @@ impl Executor {
         match self {
             Executor::Uring(ex) => async_uring_from(f, ex),
             Executor::Fd(ex) => async_poll_from(f, ex),
+        }
+    }
+
+    /// Same as [`async_from`], but without the `Send` requirement and only usable on thread-local
+    /// executors.
+    pub fn async_from_local<'a, F: IntoAsync + 'a>(
+        &self,
+        f: F,
+    ) -> AsyncResult<Box<dyn IoSourceExt<F> + 'a>> {
+        match self {
+            Executor::Uring(ex) => async_uring_from_local(f, ex),
+            Executor::Fd(ex) => async_poll_from_local(f, ex),
         }
     }
 
@@ -349,6 +381,15 @@ impl Executor {
         match self {
             Executor::Uring(ex) => Ok(ex.run_until(f)?),
             Executor::Fd(ex) => Ok(ex.run_until(f).map_err(PollError::Executor)?),
+        }
+    }
+}
+
+impl AsRawDescriptors for Executor {
+    fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
+        match self {
+            Executor::Uring(ex) => ex.as_raw_descriptors(),
+            Executor::Fd(ex) => ex.as_raw_descriptors(),
         }
     }
 }

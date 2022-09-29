@@ -1,10 +1,12 @@
 // Copyright 2021 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-//
-// Provides parts of crosvm as a library to communicate with running crosvm instances.
-// Usually you would need to invoke crosvm with subcommands and you'd get the result on
-// stdout.
+
+//! Provides parts of crosvm as a library to communicate with running crosvm instances.
+//!
+//! This crate is a programmatic alternative to invoking crosvm with subcommands that produce the
+//! result on stdout.
+
 use std::convert::{TryFrom, TryInto};
 use std::ffi::CStr;
 use std::panic::catch_unwind;
@@ -64,6 +66,21 @@ pub extern "C" fn crosvm_client_resume_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
             vms_request(&VmRequest::Resume, &socket_path).is_ok()
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// Creates an RT vCPU for the crosvm instance whose control socket is listening on `socket_path`.
+///
+/// The function returns true on success or false if an error occured.
+#[no_mangle]
+pub extern "C" fn crosvm_client_make_rt_vm(socket_path: *const c_char) -> bool {
+    catch_unwind(|| {
+        if let Some(socket_path) = validate_socket_path(socket_path) {
+            vms_request(&VmRequest::MakeRT, &socket_path).is_ok()
         } else {
             false
         }
@@ -157,10 +174,10 @@ pub extern "C" fn crosvm_client_usb_list(
 /// # Arguments
 ///
 /// * `socket_path` - Path to the crosvm control socket
-/// * `bus` - USB device bus ID
-/// * `addr` - USB device address
-/// * `vid` - USB device vendor ID
-/// * `pid` - USB device product ID
+/// * `bus` - USB device bus ID (unused)
+/// * `addr` - USB device address (unused)
+/// * `vid` - USB device vendor ID (unused)
+/// * `pid` - USB device product ID (unused)
 /// * `dev_path` - Path to the USB device (Most likely `/dev/bus/usb/<bus>/<addr>`).
 /// * `out_port` - (optional) internal port will be written here if provided.
 ///
@@ -168,10 +185,10 @@ pub extern "C" fn crosvm_client_usb_list(
 #[no_mangle]
 pub extern "C" fn crosvm_client_usb_attach(
     socket_path: *const c_char,
-    bus: u8,
-    addr: u8,
-    vid: u16,
-    pid: u16,
+    _bus: u8,
+    _addr: u8,
+    _vid: u16,
+    _pid: u16,
     dev_path: *const c_char,
     out_port: *mut u8,
 ) -> bool {
@@ -182,9 +199,7 @@ pub extern "C" fn crosvm_client_usb_attach(
             }
             let dev_path = Path::new(unsafe { CStr::from_ptr(dev_path) }.to_str().unwrap_or(""));
 
-            if let Ok(UsbControlResult::Ok { port }) =
-                do_usb_attach(&socket_path, bus, addr, vid, pid, dev_path)
-            {
+            if let Ok(UsbControlResult::Ok { port }) = do_usb_attach(&socket_path, dev_path) {
                 if !out_port.is_null() {
                     unsafe { *out_port = port };
                 }
@@ -290,6 +305,8 @@ pub struct BalloonStatsFfi {
     disk_caches: i64,
     hugetlb_allocations: i64,
     hugetlb_failures: i64,
+    shared_memory: i64,
+    unevictable_memory: i64,
 }
 
 impl From<&BalloonStats> for BalloonStatsFfi {
@@ -306,6 +323,8 @@ impl From<&BalloonStats> for BalloonStatsFfi {
             disk_caches: convert(other.disk_caches),
             hugetlb_allocations: convert(other.hugetlb_allocations),
             hugetlb_failures: convert(other.hugetlb_failures),
+            shared_memory: convert(other.shared_memory),
+            unevictable_memory: convert(other.unevictable_memory),
         }
     }
 }

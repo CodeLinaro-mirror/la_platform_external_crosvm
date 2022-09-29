@@ -13,12 +13,18 @@
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 pub mod gdb;
 
+#[cfg(unix)]
+use base::MemoryMappingBuilderUnix;
+#[cfg(windows)]
+use base::MemoryMappingBuilderWindows;
+
 pub mod client;
+pub mod display;
+pub mod sys;
 
 use std::convert::TryInto;
 use std::fmt::{self, Display};
 use std::fs::File;
-use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::result::Result as StdResult;
 use std::str::FromStr;
@@ -36,19 +42,28 @@ pub use balloon_control::BalloonStats;
 use balloon_control::{BalloonTubeCommand, BalloonTubeResult};
 
 use base::{
-    error, with_as_descriptor, AsRawDescriptor, Error as SysError, Event, ExternalMapping,
-    FromRawDescriptor, IntoRawDescriptor, Killable, MappedRegion, MemoryMappingArena,
-    MemoryMappingBuilder, MemoryMappingBuilderUnix, MmapError, Protection, Result, SafeDescriptor,
-    SharedMemory, Tube, SIGRTMIN,
+    error, info, warn, with_as_descriptor, AsRawDescriptor, Error as SysError, Event,
+    ExternalMapping, FromRawDescriptor, IntoRawDescriptor, MappedRegion, MemoryMappingBuilder,
+    MmapError, Protection, Result, SafeDescriptor, SharedMemory, Tube,
 };
+
 use hypervisor::{IrqRoute, IrqSource, Vm};
 use resources::{Alloc, MmioType, SystemAllocator};
 use rutabaga_gfx::{
     DrmFormat, ImageAllocationInfo, RutabagaGralloc, RutabagaGrallocFlags, RutabagaHandle,
     VulkanInfo,
 };
-use sync::Mutex;
+use sync::{Condvar, Mutex};
 use vm_memory::GuestAddress;
+
+use crate::display::{
+    AspectRatio, DisplaySize, GuestDisplayDensity, MouseMode, WindowEvent, WindowMode,
+    WindowVisibility,
+};
+
+use sys::kill_handle;
+#[cfg(unix)]
+pub use sys::{FsMappingRequest, VmMsyncRequest, VmMsyncResponse};
 
 /// Struct that describes the offset and stride of a plane located in GPU memory.
 #[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -171,10 +186,6 @@ pub enum DiskControlResult {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UsbControlCommand {
     AttachDevice {
-        bus: u8,
-        addr: u8,
-        vid: u16,
-        pid: u16,
         #[serde(with = "with_as_descriptor")]
         file: File,
     },
@@ -236,6 +247,7 @@ impl Display for UsbControlResult {
 #[derive(Serialize, Deserialize)]
 pub enum VmMemorySource {
     /// Register shared memory represented by the given descriptor.
+    /// On Windows, descriptor MUST be a mapping handle.
     SharedMemory(SharedMemory),
     /// Register a file mapping from the given descriptor.
     Descriptor {
@@ -264,16 +276,16 @@ impl VmMemorySource {
         self,
         map_request: Arc<Mutex<Option<ExternalMapping>>>,
         gralloc: &mut RutabagaGralloc,
-        read_only: bool,
+        prot: Protection,
     ) -> Result<(Box<dyn MappedRegion>, u64)> {
         let (mem_region, size) = match self {
             VmMemorySource::Descriptor {
                 descriptor,
                 offset,
                 size,
-            } => (map_descriptor(&descriptor, offset, size, read_only)?, size),
+            } => (map_descriptor(&descriptor, offset, size, prot)?, size),
             VmMemorySource::SharedMemory(shm) => {
-                (map_descriptor(&shm, 0, shm.size(), read_only)?, shm.size())
+                (map_descriptor(&shm, 0, shm.size(), prot)?, shm.size())
             }
             VmMemorySource::Vulkan {
                 descriptor,
@@ -355,7 +367,7 @@ pub enum VmMemoryRequest {
         /// Where to map the memory in the guest.
         dest: VmMemoryDestination,
         /// Whether to map the memory read only (true) or read-write (false).
-        read_only: bool,
+        prot: Protection,
     },
     /// Allocate GPU buffer of a given size/format and register the memory into guest address space.
     /// The response variant is `VmResponse::AllocateAndRegisterGpuMemory`
@@ -365,6 +377,16 @@ pub enum VmMemoryRequest {
         format: u32,
         /// Where to map the memory in the guest.
         dest: VmMemoryDestination,
+    },
+    /// Call hypervisor to free the given memory range.
+    DynamicallyFreeMemoryRange {
+        guest_address: GuestAddress,
+        size: u64,
+    },
+    /// Call hypervisor to reclaim a priorly freed memory range.
+    DynamicallyReclaimMemoryRange {
+        guest_address: GuestAddress,
+        size: u64,
     },
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
     UnregisterMemory(MemSlot),
@@ -389,12 +411,10 @@ impl VmMemoryRequest {
     ) -> VmMemoryResponse {
         use self::VmMemoryRequest::*;
         match self {
-            RegisterMemory {
-                source,
-                dest,
-                read_only,
-            } => {
-                let (mapped_region, size) = match source.map(map_request, gralloc, read_only) {
+            RegisterMemory { source, dest, prot } => {
+                // Correct on Windows because callers of this IPC guarantee descriptor is a mapping
+                // handle.
+                let (mapped_region, size) = match source.map(map_request, gralloc, prot) {
                     Ok((region, size)) => (region, size),
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
@@ -404,7 +424,12 @@ impl VmMemoryRequest {
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
 
-                let slot = match vm.add_memory_region(guest_addr, mapped_region, read_only, false) {
+                let slot = match vm.add_memory_region(
+                    guest_addr,
+                    mapped_region,
+                    prot == Protection::read(),
+                    false,
+                ) {
                     Ok(slot) => slot,
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
@@ -445,6 +470,20 @@ impl VmMemoryRequest {
                     desc: gpu_desc,
                 }
             }
+            DynamicallyFreeMemoryRange {
+                guest_address,
+                size,
+            } => match vm.handle_inflate(guest_address, size) {
+                Ok(_) => VmMemoryResponse::Ok,
+                Err(e) => VmMemoryResponse::Err(e),
+            },
+            DynamicallyReclaimMemoryRange {
+                guest_address,
+                size,
+            } => match vm.handle_deflate(guest_address, size) {
+                Ok(_) => VmMemoryResponse::Ok,
+                Err(e) => VmMemoryResponse::Err(e),
+            },
         }
     }
 
@@ -496,7 +535,7 @@ impl VmMemoryRequest {
         let descriptor =
             unsafe { SafeDescriptor::from_raw_descriptor(handle.os_handle.into_raw_descriptor()) };
 
-        let mapped_region = map_descriptor(&descriptor, 0, reqs.size, false)?;
+        let mapped_region = map_descriptor(&descriptor, 0, reqs.size, Protection::read_write())?;
         Ok((mapped_region, reqs.size, descriptor, desc))
     }
 }
@@ -619,45 +658,6 @@ pub enum VmIrqResponse {
     AllocateOneMsi { gsi: u32 },
     Ok,
     Err(SysError),
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum VmMsyncRequest {
-    /// Flush the content of a memory mapping to its backing file.
-    /// `slot` selects the arena (as returned by `Vm::add_mmap_arena`).
-    /// `offset` is the offset of the mapping to sync within the arena.
-    /// `size` is the size of the mapping to sync within the arena.
-    MsyncArena {
-        slot: MemSlot,
-        offset: usize,
-        size: usize,
-    },
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum VmMsyncResponse {
-    Ok,
-    Err(SysError),
-}
-
-impl VmMsyncRequest {
-    /// Executes this request on the given Vm.
-    ///
-    /// # Arguments
-    /// * `vm` - The `Vm` to perform the request on.
-    ///
-    /// This does not return a result, instead encapsulating the success or failure in a
-    /// `VmMsyncResponse` with the intended purpose of sending the response back over the socket
-    /// that received this `VmMsyncResponse`.
-    pub fn execute(&self, vm: &mut impl Vm) -> VmMsyncResponse {
-        use self::VmMsyncRequest::*;
-        match *self {
-            MsyncArena { slot, offset, size } => match vm.msync_memory_region(slot, offset, size) {
-                Ok(()) => VmMsyncResponse::Ok,
-                Err(e) => VmMsyncResponse::Err(e),
-            },
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -856,109 +856,21 @@ pub struct BatControl {
     pub control_tube: Tube,
 }
 
+/// Message for communicating a suspend or resume to the virtio-pvclock device.
 #[derive(Serialize, Deserialize, Debug)]
-pub enum FsMappingRequest {
-    /// Create an anonymous memory mapping that spans the entire region described by `Alloc`.
-    AllocateSharedMemoryRegion(Alloc),
-    /// Create a memory mapping.
-    CreateMemoryMapping {
-        /// The slot for a MemoryMappingArena, previously returned by a response to an
-        /// `AllocateSharedMemoryRegion` request.
-        slot: u32,
-        /// The file descriptor that should be mapped.
-        fd: SafeDescriptor,
-        /// The size of the mapping.
-        size: usize,
-        /// The offset into the file from where the mapping should start.
-        file_offset: u64,
-        /// The memory protection to be used for the mapping.  Protections other than readable and
-        /// writable will be silently dropped.
-        prot: u32,
-        /// The offset into the shared memory region where the mapping should be placed.
-        mem_offset: usize,
-    },
-    /// Remove a memory mapping.
-    RemoveMemoryMapping {
-        /// The slot for a MemoryMappingArena.
-        slot: u32,
-        /// The offset into the shared memory region.
-        offset: usize,
-        /// The size of the mapping.
-        size: usize,
-    },
+pub enum PvClockCommand {
+    Suspend,
+    Resume,
 }
 
-impl FsMappingRequest {
-    pub fn execute(&self, vm: &mut dyn Vm, allocator: &mut SystemAllocator) -> VmResponse {
-        use self::FsMappingRequest::*;
-        match *self {
-            AllocateSharedMemoryRegion(Alloc::PciBar {
-                bus,
-                dev,
-                func,
-                bar,
-            }) => {
-                match allocator
-                    .mmio_allocator(MmioType::High)
-                    .get(&Alloc::PciBar {
-                        bus,
-                        dev,
-                        func,
-                        bar,
-                    }) {
-                    Some((addr, length, _)) => {
-                        let arena = match MemoryMappingArena::new(*length as usize) {
-                            Ok(a) => a,
-                            Err(MmapError::SystemCallFailed(e)) => return VmResponse::Err(e),
-                            _ => return VmResponse::Err(SysError::new(EINVAL)),
-                        };
-
-                        match vm.add_memory_region(
-                            GuestAddress(*addr),
-                            Box::new(arena),
-                            false,
-                            false,
-                        ) {
-                            Ok(slot) => VmResponse::RegisterMemory {
-                                pfn: addr >> 12,
-                                slot,
-                            },
-                            Err(e) => VmResponse::Err(e),
-                        }
-                    }
-                    None => VmResponse::Err(SysError::new(EINVAL)),
-                }
-            }
-            CreateMemoryMapping {
-                slot,
-                ref fd,
-                size,
-                file_offset,
-                prot,
-                mem_offset,
-            } => {
-                match vm.add_fd_mapping(
-                    slot,
-                    mem_offset,
-                    size,
-                    fd,
-                    file_offset,
-                    Protection::from(prot as c_int & (libc::PROT_READ | libc::PROT_WRITE)),
-                ) {
-                    Ok(()) => VmResponse::Ok,
-                    Err(e) => VmResponse::Err(e),
-                }
-            }
-            RemoveMemoryMapping { slot, offset, size } => {
-                match vm.remove_mapping(slot, offset, size) {
-                    Ok(()) => VmResponse::Ok,
-                    Err(e) => VmResponse::Err(e),
-                }
-            }
-            _ => VmResponse::Err(SysError::new(EINVAL)),
-        }
-    }
+/// Message used by virtio-pvclock to communicate command results.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum PvClockCommandResponse {
+    Ok,
+    Err(SysError),
 }
+
+///
 /// A request to the main process to perform some operation on the VM.
 ///
 /// Unless otherwise noted, each request should expect a `VmResponse::Ok` to be received on success.
@@ -991,21 +903,21 @@ pub enum VmRequest {
     /// Command to set battery.
     BatCommand(BatteryType, BatControlCommand),
     /// Command to add/remove vfio pci device
-    VfioCommand { vfio_path: PathBuf, add: bool },
+    VfioCommand {
+        vfio_path: PathBuf,
+        add: bool,
+        hp_interrupt: bool,
+    },
 }
 
+/// WARNING: descriptor must be a mapping handle on Windows.
 fn map_descriptor(
     descriptor: &dyn AsRawDescriptor,
     offset: u64,
     size: u64,
-    read_only: bool,
+    prot: Protection,
 ) -> Result<Box<dyn MappedRegion>> {
     let size: usize = size.try_into().map_err(|_e| SysError::new(ERANGE))?;
-    let prot = if read_only {
-        Protection::read()
-    } else {
-        Protection::read_write()
-    };
     match MemoryMappingBuilder::new(size)
         .from_descriptor(descriptor)
         .offset(offset)
@@ -1015,6 +927,35 @@ fn map_descriptor(
         Ok(mmap) => Ok(Box::new(mmap)),
         Err(MmapError::SystemCallFailed(e)) => Err(e),
         _ => Err(SysError::new(EINVAL)),
+    }
+}
+
+fn generate_sleep_button_event(
+    pm: &mut Option<Arc<Mutex<dyn PmResource>>>,
+    guest_suspended_cvar: &Arc<(Mutex<bool>, Condvar)>,
+) {
+    // During suspend also emulate sleepbtn, which allows to suspend VM (if running e.g. acpid and
+    // reacts on sleep button events)
+    if let Some(pm) = pm {
+        pm.lock().slpbtn_evt();
+    } else {
+        error!("generating sleepbtn during suspend not supported");
+    }
+
+    let (lock, cvar) = &**guest_suspended_cvar;
+    let mut guest_suspended = lock.lock();
+
+    *guest_suspended = false;
+
+    // Wait for notification about guest suspension, if not received after 15sec,
+    // proceed anyway.
+    let result = cvar.wait_timeout(guest_suspended, std::time::Duration::from_secs(15));
+    guest_suspended = result.0;
+
+    if result.1.timed_out() {
+        warn!("Guest suspension timeout - proceeding anyway");
+    } else if *guest_suspended {
+        info!("Guest suspended");
     }
 }
 
@@ -1034,6 +975,8 @@ impl VmRequest {
         usb_control_tube: Option<&Tube>,
         bat_control: &mut Option<BatControl>,
         vcpu_handles: &[(JoinHandle<()>, mpsc::Sender<VcpuControl>)],
+        force_s2idle: bool,
+        guest_suspended_cvar: Arc<(Mutex<bool>, Condvar)>,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1059,11 +1002,27 @@ impl VmRequest {
                 }
             }
             VmRequest::Suspend => {
+                if force_s2idle {
+                    generate_sleep_button_event(pm, &guest_suspended_cvar);
+                }
+
                 *run_mode = Some(VmRunMode::Suspending);
                 VmResponse::Ok
             }
             VmRequest::Resume => {
                 *run_mode = Some(VmRunMode::Running);
+
+                if force_s2idle {
+                    // During resume also emulate powerbtn event which will allow to wakeup fully
+                    // suspended guest.
+                    if let Some(pm) = pm {
+                        pm.lock().pwrbtn_evt();
+                    } else {
+                        error!("triggering power btn during resume not supported");
+                        return VmResponse::Err(SysError::new(ENOTSUP));
+                    }
+                }
+
                 VmResponse::Ok
             }
             VmRequest::Gpe(gpe) => {
@@ -1076,11 +1035,12 @@ impl VmRequest {
                 }
             }
             VmRequest::MakeRT => {
+                #[allow(unused_variables)] // `handle` is unused on Windows.
                 for (handle, channel) in vcpu_handles {
                     if let Err(e) = channel.send(VcpuControl::MakeRT) {
                         error!("failed to send MakeRT: {}", e);
                     }
-                    let _ = handle.kill(SIGRTMIN() + 0);
+                    kill_handle(handle);
                 }
                 VmResponse::Ok
             }
@@ -1218,6 +1178,7 @@ impl VmRequest {
             VmRequest::VfioCommand {
                 vfio_path: _,
                 add: _,
+                hp_interrupt: _,
             } => VmResponse::Ok,
         }
     }
@@ -1289,6 +1250,75 @@ impl Display for VmResponse {
     }
 }
 
+/// Enum that comes from the Gpu device that will be received by the main event loop.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum GpuSendToService {
+    SendWindowState {
+        window_event: Option<WindowEvent>,
+        hwnd: usize,
+        visibility: WindowVisibility,
+        mode: WindowMode,
+        aspect_ratio: AspectRatio,
+        // TODO(b/203662783): Once we make the controller decide the initial size, this can be removed.
+        initial_guest_display_size: DisplaySize,
+        recommended_guest_display_density: GuestDisplayDensity,
+    },
+    SendExitWindowRequest,
+    SendMouseModeState {
+        mouse_mode: MouseMode,
+    },
+    SendGpuDevice {
+        description: String,
+    },
+}
+
+/// Enum that serves as a general purose Gpu device message that is sent to the main loop.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum GpuSendToMain {
+    // Send these messages to the controller.
+    SendToService(GpuSendToService),
+    // Send to Ac97 device to set mute state.
+    MuteAc97(bool),
+}
+
+/// Enum to send control requests to all Ac97 audio devices.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Ac97Control {
+    Mute(bool),
+}
+
+/// Enum that send controller Ipc requests from the main event loop to the GPU device.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ServiceSendToGpu {
+    ShowWindow {
+        mode: WindowMode,
+        aspect_ratio: AspectRatio,
+        guest_display_size: DisplaySize,
+    },
+    HideWindow,
+    Shutdown,
+    MouseInputMode {
+        mouse_mode: MouseMode,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base::Event;
+
+    #[test]
+    fn sock_send_recv_event() {
+        let (req, res) = Tube::pair().unwrap();
+        let e1 = Event::new().unwrap();
+        res.send(&e1).unwrap();
+
+        let recv_event: Event = req.recv().unwrap();
+        recv_event.write(1).unwrap();
+        assert_eq!(e1.read().unwrap(), 1);
+    }
+}
+
 #[sorted]
 #[derive(Error, Debug)]
 pub enum VirtioIOMMUVfioError {
@@ -1307,6 +1337,7 @@ pub enum VirtioIOMMUVfioCommand {
     // Add the vfio device attached to virtio-iommu.
     VfioDeviceAdd {
         endpoint_addr: u32,
+        wrapper_id: u32,
         #[serde(with = "with_as_descriptor")]
         container: File,
     },

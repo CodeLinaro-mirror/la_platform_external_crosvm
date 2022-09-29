@@ -18,7 +18,7 @@ use thiserror::Error;
 use vm_memory::GuestMemory;
 
 use crate::virtio::virtio_device::VirtioDevice;
-use crate::virtio::{self, copy_config, DescriptorError, Interrupt};
+use crate::virtio::{self, copy_config, DescriptorError, DeviceType, Interrupt};
 
 #[macro_use]
 mod macros;
@@ -39,8 +39,11 @@ mod resource;
 mod response;
 mod worker;
 
-#[cfg(all(feature = "video-decoder", not(feature = "libvda")))]
-compile_error!("The \"video-decoder\" feature requires \"libvda\" to also be enabled.");
+#[cfg(all(
+    feature = "video-decoder",
+    not(any(feature = "libvda", feature = "ffmpeg"))
+))]
+compile_error!("The \"video-decoder\" feature requires at least one of \"ffmpeg\" or \"libvda\" to also be enabled.");
 
 #[cfg(all(feature = "video-encoder", not(feature = "libvda")))]
 compile_error!("The \"video-encoder\" feature requires \"libvda\" to also be enabled.");
@@ -52,8 +55,17 @@ use command::ReadCmdError;
 use device::Device;
 use worker::Worker;
 
-const QUEUE_SIZE: u16 = 256;
-const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE, QUEUE_SIZE];
+// CMD_QUEUE_SIZE = max number of command descriptors for input and output queues
+// Experimentally, it appears a stream allocates 16 input and 26 output buffers = 42 total
+// For 8 simultaneous streams, 2 descs per buffer * 42 buffers * 8 streams = 672 descs
+// Allocate 1024 to give some headroom in case of extra streams/buffers
+//
+// TODO(b/204055006): Make cmd queue size dependent of
+// (max buf cnt for input + max buf cnt for output) * max descs per buffer * max nb of streams
+const CMD_QUEUE_SIZE: u16 = 1024;
+// EVENT_QUEUE_SIZE = max number of event descriptors for stream events like resolution changes
+const EVENT_QUEUE_SIZE: u16 = 256;
+const QUEUE_SIZES: &[u16] = &[CMD_QUEUE_SIZE, EVENT_QUEUE_SIZE];
 
 /// An error indicating something went wrong in virtio-video's worker.
 #[sorted]
@@ -132,6 +144,15 @@ pub enum VideoBackendType {
     Libvda,
     #[cfg(feature = "libvda")]
     LibvdaVd,
+    #[cfg(feature = "ffmpeg")]
+    Ffmpeg,
+}
+
+#[cfg(feature = "ffmpeg")]
+pub fn ffmpeg_supported_virtio_features() -> u64 {
+    1u64 << protocol::VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES
+        | 1u64 << protocol::VIRTIO_VIDEO_F_RESOURCE_NON_CONTIG
+        | 1u64 << protocol::VIRTIO_VIDEO_F_RESOURCE_VIRTIO_OBJECT
 }
 
 impl VirtioDevice for VideoDevice {
@@ -143,12 +164,12 @@ impl VirtioDevice for VideoDevice {
         keep_rds
     }
 
-    fn device_type(&self) -> u32 {
+    fn device_type(&self) -> DeviceType {
         match &self.device_type {
             #[cfg(feature = "video-decoder")]
-            VideoDeviceType::Decoder => virtio::TYPE_VIDEO_DEC,
+            VideoDeviceType::Decoder => DeviceType::VideoDec,
             #[cfg(feature = "video-encoder")]
-            VideoDeviceType::Encoder => virtio::TYPE_VIDEO_ENC,
+            VideoDeviceType::Encoder => DeviceType::VideoEnc,
         }
     }
 
@@ -164,6 +185,8 @@ impl VirtioDevice for VideoDevice {
             VideoBackendType::Libvda | VideoBackendType::LibvdaVd => {
                 vda::supported_virtio_features()
             }
+            #[cfg(feature = "ffmpeg")]
+            VideoBackendType::Ffmpeg => ffmpeg_supported_virtio_features(),
         };
 
         self.base_features | backend_features
@@ -179,6 +202,10 @@ impl VirtioDevice for VideoDevice {
             #[cfg(feature = "libvda")]
             VideoBackendType::LibvdaVd => {
                 (&mut device_name[0..8]).copy_from_slice("libvdavd".as_bytes())
+            }
+            #[cfg(feature = "ffmpeg")]
+            VideoBackendType::Ffmpeg => {
+                (&mut device_name[0..6]).copy_from_slice("ffmpeg".as_bytes())
             }
         };
         let mut cfg = protocol::virtio_video_config {
@@ -275,6 +302,11 @@ impl VirtioDevice for VideoDevice {
                             };
                             Box::new(decoder::Decoder::new(vda, resource_bridge, mem))
                         }
+                        #[cfg(feature = "ffmpeg")]
+                        VideoBackendType::Ffmpeg => {
+                            let ffmpeg = decoder::backend::ffmpeg::FfmpegDecoder::new();
+                            Box::new(decoder::Decoder::new(ffmpeg, resource_bridge, mem))
+                        }
                     };
 
                     if let Err(e) = worker.run(device) {
@@ -308,6 +340,11 @@ impl VirtioDevice for VideoDevice {
                         #[cfg(feature = "libvda")]
                         VideoBackendType::LibvdaVd => {
                             error!("Invalid backend for encoder");
+                            return;
+                        }
+                        #[cfg(feature = "ffmpeg")]
+                        VideoBackendType::Ffmpeg => {
+                            error!("ffmpeg encoder is not supported yet");
                             return;
                         }
                     };

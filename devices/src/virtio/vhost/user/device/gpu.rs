@@ -24,9 +24,13 @@ use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 use crate::virtio::{
     self, gpu,
     vhost::user::device::handler::{DeviceRequestHandler, Doorbell, VhostUserBackend},
+    vhost::user::device::vvu::pci::VvuPciDevice,
     vhost::user::device::wl::parse_wayland_sock,
     DescriptorChain, Gpu, GpuDisplayParameters, GpuParameters, Queue, QueueReader, VirtioDevice,
 };
+
+const MAX_QUEUE_NUM: usize = gpu::QUEUE_SIZES.len();
+const MAX_VRING_LEN: u16 = gpu::QUEUE_SIZES[0];
 
 #[derive(Clone)]
 struct SharedReader {
@@ -143,14 +147,17 @@ struct GpuBackend {
     state: Option<Rc<RefCell<gpu::Frontend>>>,
     fence_state: Arc<Mutex<gpu::FenceState>>,
     display_worker: Option<Task<()>>,
-    workers: [Option<Task<()>>; Self::MAX_QUEUE_NUM],
+    workers: [Option<Task<()>>; MAX_QUEUE_NUM],
 }
 
 impl VhostUserBackend for GpuBackend {
-    const MAX_QUEUE_NUM: usize = gpu::QUEUE_SIZES.len();
-    const MAX_VRING_LEN: u16 = gpu::QUEUE_SIZES[0];
+    fn max_queue_num(&self) -> usize {
+        return MAX_QUEUE_NUM;
+    }
 
-    type Error = anyhow::Error;
+    fn max_vring_len(&self) -> u16 {
+        return MAX_VRING_LEN;
+    }
 
     fn features(&self) -> u64 {
         self.gpu.borrow().features() | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
@@ -338,59 +345,45 @@ fn gpu_parameters_from_str(input: &str) -> Result<GpuParameters, String> {
 }
 
 #[derive(FromArgs)]
-#[argh(description = "run gpu device")]
-struct Options {
-    #[argh(
-        option,
-        description = "path to bind a listening vhost-user socket",
-        arg_name = "PATH"
-    )]
-    socket: String,
-    #[argh(
-        option,
-        description = "path to one or more Wayland sockets. The unnamed socket is \
-        used for displaying virtual screens while the named ones are used for IPC",
-        from_str_fn(parse_wayland_sock),
-        arg_name = "PATH[,name=NAME]"
-    )]
+/// GPU device
+#[argh(subcommand, name = "gpu")]
+pub struct Options {
+    #[argh(option, arg_name = "PATH")]
+    /// path to bind a listening vhost-user socket
+    socket: Option<String>,
+    #[argh(option, arg_name = "STRING")]
+    /// VFIO-PCI device name (e.g. '0000:00:07.0')
+    vfio: Option<String>,
+    #[argh(option, from_str_fn(parse_wayland_sock), arg_name = "PATH[,name=NAME]")]
+    /// path to one or more Wayland sockets. The unnamed socket is
+    /// used for displaying virtual screens while the named ones are used for IPC
     wayland_sock: Vec<(String, PathBuf)>,
-    #[argh(
-        option,
-        description = "path to one or more bridge sockets for communicating with \
-        other graphics devices (wayland, video, etc)",
-        arg_name = "PATH"
-    )]
+    #[argh(option, arg_name = "PATH")]
+    /// path to one or more bridge sockets for communicating with
+    /// other graphics devices (wayland, video, etc)
     resource_bridge: Vec<String>,
-    #[argh(option, description = " X11 display name to use", arg_name = "DISPLAY")]
+    #[argh(option, arg_name = "DISPLAY")]
+    /// X11 display name to use
     x_display: Option<String>,
     #[argh(
         option,
         from_str_fn(gpu_parameters_from_str),
         default = "Default::default()",
-        description = "a JSON object of virtio-gpu parameters",
         arg_name = "JSON"
     )]
+    /// a JSON object of virtio-gpu parameters
     params: GpuParameters,
 }
 
-pub fn run_gpu_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
+pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     let Options {
         x_display,
         params: mut gpu_parameters,
         resource_bridge,
         socket,
+        vfio,
         wayland_sock,
-    } = match Options::from_args(&[program_name], args) {
-        Ok(opts) => opts,
-        Err(e) => {
-            if e.status.is_err() {
-                bail!(e.output);
-            } else {
-                println!("{}", e.output);
-            }
-            return Ok(());
-        }
-    };
+    } = opts;
 
     base::syslog::init().context("failed to initialize syslog")?;
 
@@ -439,7 +432,11 @@ pub fn run_gpu_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
         .detach();
     }
 
-    let exit_evt = Event::new().context("failed to create Event")?;
+    // TODO(b/232344535): Read side of the tube is ignored currently.
+    // Complete the implementation by polling `exit_evt_rdtube` and
+    // kill the sibling VM.
+    let (exit_evt_wrtube, _) =
+        Tube::directional_pair().context("failed to create vm event tube")?;
 
     // Initialized later.
     let gpu_device_tube = None;
@@ -465,7 +462,7 @@ pub fn run_gpu_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
     let channels = wayland_paths;
 
     let gpu = Rc::new(RefCell::new(Gpu::new(
-        exit_evt,
+        exit_evt_wrtube,
         gpu_device_tube,
         Vec::new(), // resource_bridges, handled separately by us
         display_backends,
@@ -488,8 +485,17 @@ pub fn run_gpu_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
         display_worker: None,
         workers: Default::default(),
     };
+    let max_queue_num = backend.max_queue_num();
 
-    let handler = DeviceRequestHandler::new(backend);
+    let handler = DeviceRequestHandler::new(Box::new(backend));
     // run_until() returns an Result<Result<..>> which the ? operator lets us flatten.
-    ex.run_until(handler.run(socket, &ex))?
+    let res = match (socket, vfio) {
+        (Some(socket), None) => ex.run_until(handler.run(socket, &ex))?,
+        (None, Some(vfio)) => {
+            let device = VvuPciDevice::new(&vfio, max_queue_num)?;
+            ex.run_until(handler.run_vvu(device, &ex))?
+        }
+        _ => Err(anyhow!("exactly one of `--socket` or `--vfio` is required")),
+    };
+    res
 }

@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::thread;
 
 use base::Error as SysError;
-use base::{error, warn, AsRawDescriptor, Event, EventType, PollToken, RawDescriptor, WaitContext};
+use base::{
+    error, warn, AsRawDescriptor, Event, EventToken, EventType, RawDescriptor, WaitContext,
+};
 use data_model::{DataInit, Le16, Le64};
 use net_util::{Error as TapError, MacAddress, TapT};
 use remain::sorted;
@@ -24,8 +26,8 @@ use virtio_sys::virtio_net::{
 use vm_memory::GuestMemory;
 
 use super::{
-    copy_config, DescriptorError, Interrupt, Queue, Reader, SignalableInterrupt, VirtioDevice,
-    Writer, TYPE_NET,
+    copy_config, DescriptorError, DeviceType, Interrupt, Queue, Reader, SignalableInterrupt,
+    VirtioDevice, Writer,
 };
 
 const QUEUE_SIZE: u16 = 256;
@@ -312,7 +314,7 @@ pub fn process_ctrl<I: SignalableInterrupt, T: TapT>(
     Ok(())
 }
 
-#[derive(PollToken, Debug, Clone)]
+#[derive(EventToken, Debug, Clone)]
 pub enum Token {
     // A frame is available for reading from the tap device to receive in the guest.
     RxTap,
@@ -662,8 +664,8 @@ where
         keep_rds
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_NET
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Net
     }
 
     fn queue_max_sizes(&self) -> &[u16] {

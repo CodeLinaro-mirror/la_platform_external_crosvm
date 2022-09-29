@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::serial_device::{Error, SerialParameters};
-use base::{error, AsRawDescriptor, Event, FileSync, RawDescriptor};
+use base::{error, AsRawDescriptor, Event, FileSync, RawDescriptor, ReadNotifier};
 use base::{info, read_raw_stdin};
 use hypervisor::ProtectionType;
 use std::borrow::Cow;
@@ -15,16 +14,33 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use crate::serial_device::{Error, SerialInput, SerialParameters};
+
 pub const SYSTEM_SERIAL_TYPE_NAME: &str = "UnixSocket";
 
 // This wrapper is used in place of the libstd native version because we don't want
 // buffering for stdin.
-pub struct ConsoleInput;
+pub struct ConsoleInput(std::io::Stdin);
+
+impl ConsoleInput {
+    pub fn new() -> Self {
+        Self(std::io::stdin())
+    }
+}
+
 impl io::Read for ConsoleInput {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         read_raw_stdin(out).map_err(|e| e.into())
     }
 }
+
+impl ReadNotifier for ConsoleInput {
+    fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
+        &self.0
+    }
+}
+
+impl SerialInput for ConsoleInput {}
 
 /// Abstraction over serial-like devices that can be created given an event and optional input and
 /// output streams.
@@ -32,7 +48,7 @@ pub trait SerialDevice {
     fn new(
         protected_vm: ProtectionType,
         interrupt_evt: Event,
-        input: Option<Box<dyn io::Read + Send>>,
+        input: Option<Box<dyn SerialInput>>,
         output: Option<Box<dyn io::Write + Send>>,
         sync: Option<Box<dyn FileSync + Send>>,
         out_timestamp: bool,
@@ -115,7 +131,7 @@ pub(crate) fn create_system_type_serial_device<T: SerialDevice>(
     param: &SerialParameters,
     protected_vm: ProtectionType,
     evt: Event,
-    input: Option<Box<dyn io::Read + Send>>,
+    input: Option<Box<dyn SerialInput>>,
     keep_rds: &mut Vec<RawDescriptor>,
 ) -> std::result::Result<T, Error> {
     match &param.path {

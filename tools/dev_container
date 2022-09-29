@@ -21,30 +21,18 @@
 #   ./tools/dev_container --hermetic CMD
 
 import argparse
-import getpass
 from argh import arg  # type: ignore
-from impl.common import CROSVM_ROOT, run_main, cmd, chdir, quoted
+from impl.common import CROSVM_ROOT, cmd, chdir, quoted, run_main
+from typing import Optional, Tuple, List
+import getpass
+import shutil
 import sys
-import os
+import unittest
 
 CONTAINER_NAME = f"crosvm_dev_{getpass.getuser()}"
 IMAGE_VERSION = (CROSVM_ROOT / "tools/impl/dev_container/version").read_text().strip()
 
-try:
-    docker = cmd(os.environ.get("DOCKER", "docker"))
-except ValueError:
-    docker = cmd("podman")
-
-is_podman = docker.executable.name == "podman"
-
-# Enable interactive mode when running in an interactive terminal.
-TTY_ARGS = "--interactive --tty" if sys.stdin.isatty() else None
-
-
 DOCKER_ARGS = [
-    TTY_ARGS,
-    # Podman will not share devices when `--privileged` is specified
-    "--privileged" if not is_podman else None,
     # Share crosvm source
     f"--volume {quoted(CROSVM_ROOT)}:/workspace:rw",
     # Share devices and syslog
@@ -60,48 +48,134 @@ DOCKER_ARGS = [
     f"gcr.io/crosvm-packages/crosvm_dev:{IMAGE_VERSION}",
 ]
 
+PODMAN_IS_DEFAULT = shutil.which("docker") == None
 
-def container_revision(container_id: str):
+
+def container_revision(docker: cmd, container_id: str):
     image = docker("container inspect -f {{.Config.Image}}", container_id).stdout()
     parts = image.split(":")
     assert len(parts) == 2, f"Invalid image name {image}"
     return parts[1]
 
 
+def container_id(docker: cmd):
+    return docker(f"ps -a -q -f name={CONTAINER_NAME}").stdout()
+
+
+def container_is_running(docker: cmd):
+    return bool(docker(f"ps -q -f name={CONTAINER_NAME}").stdout())
+
+
+def delete_container(docker: cmd):
+    cid = container_id(docker)
+    if cid:
+        print(f"Deleting dev-container {cid}.")
+        docker("rm -f", cid).fg(quiet=True)
+        return True
+    return False
+
+
+def ensure_container_is_alive(docker: cmd, docker_args: List[Optional[str]]):
+    cid = container_id(docker)
+    if cid and not container_is_running(docker):
+        print("Existing dev-container is not running.")
+        delete_container(docker)
+    elif cid and container_revision(docker, cid) != IMAGE_VERSION:
+        print(f"New image is available.")
+        delete_container(docker)
+
+    if not container_is_running(docker):
+        # Run neverending sleep to keep container alive while we 'docker exec' commands.
+        docker(f"run --detach --name {CONTAINER_NAME}", *docker_args, "sleep infinity").stdout()
+        cid = container_id(docker)
+        print(f"Started dev-container ({cid}).")
+    else:
+        cid = container_id(docker)
+        print(f"Using existing dev-container ({cid}).")
+    return cid
+
+
 @arg("command", nargs=argparse.REMAINDER)
-def main(command: tuple[str, ...], stop: bool = False, hermetic: bool = False):
+def main(
+    command: Tuple[str, ...],
+    stop: bool = False,
+    hermetic: bool = False,
+    interactive: bool = False,
+    podman: bool = PODMAN_IS_DEFAULT,
+    self_test: bool = False,
+):
     chdir(CROSVM_ROOT)
-    container_id = docker(f"ps -q -f name={CONTAINER_NAME}").stdout()
+
+    docker = cmd("podman" if podman else "docker")
+    docker_args = [
+        # Podman will not share devices when `--privileged` is specified
+        "--privileged" if not podman else None,
+        *DOCKER_ARGS,
+    ]
+
+    if podman:
+        print("WARNING: Running dev_container with podman is not fully supported.")
+        print("Some crosvm tests require privileges podman cannot provide and may fail.")
+        print()
+
+    if self_test:
+        TestDevContainer.docker = docker
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestDevContainer)
+        unittest.TextTestRunner().run(suite)
+        return
+
+    if stop:
+        if not delete_container(docker):
+            print(f"Dev-container is not running.")
+        return
+
+    # If a command is provided run non-interactive unless explicitly asked for.
+    tty_args = []
+    if not command or interactive:
+        if not sys.stdin.isatty():
+            raise Exception("Trying to run an interactive session in a non-interactive terminal.")
+        tty_args = ["--interactive", "--tty"]
 
     # Start an interactive shell by default
     if not command:
         command = ("/bin/bash",)
 
     quoted_cmd = list(map(quoted, command))
-
-    if stop:
-        if container_id:
-            print(f"Stopping dev-container {container_id}.")
-            docker("rm -f", container_id).fg(quiet=True)
-        else:
-            print(f"Dev-container is not running.")
-        return
-
     if hermetic:
-        docker(f"run --rm", *DOCKER_ARGS, *quoted_cmd).fg()
+        docker(f"run --rm", *tty_args, *docker_args, *quoted_cmd).fg()
     else:
-        if container_id and container_revision(container_id) != IMAGE_VERSION:
-            print(f"New image is available. Stopping old container ({container_id}).")
-            docker("rm -f", container_id).fg(quiet=True)
-            container_id = None
+        cid = ensure_container_is_alive(docker, docker_args)
+        docker("exec", *tty_args, cid, *quoted_cmd).fg()
 
-        if not container_id:
-            container_id = docker(f"run --detach --name {CONTAINER_NAME}", *DOCKER_ARGS).stdout()
-            print(f"Started dev-container ({container_id}).")
-        else:
-            print(f"Using existing dev-container instance ({container_id}).")
 
-        docker("exec", TTY_ARGS, container_id, *quoted_cmd).fg()
+class TestDevContainer(unittest.TestCase):
+    """Runs live tests using the docker service."""
+
+    docker: cmd
+
+    def setUp(self):
+        # Start with a stopped container for each test.
+        delete_container(self.docker)
+
+    def test_stopped_container(self):
+        # Create but do not run a new container.
+        self.docker(f"create --name {CONTAINER_NAME}", *DOCKER_ARGS, "sleep infinity").stdout()
+        self.assertTrue(container_id(self.docker))
+        self.assertFalse(container_is_running(self.docker))
+
+    def test_container_reuse(self):
+        cid = ensure_container_is_alive(self.docker, DOCKER_ARGS)
+        cid2 = ensure_container_is_alive(self.docker, DOCKER_ARGS)
+        self.assertEqual(cid, cid2)
+
+    def test_handling_of_stopped_container(self):
+        cid = ensure_container_is_alive(self.docker, DOCKER_ARGS)
+        self.docker("kill", cid).fg()
+
+        # Make sure we can get back into a good state and execute commands.
+        ensure_container_is_alive(self.docker, DOCKER_ARGS)
+        self.assertTrue(container_is_running(self.docker))
+        main(("true",))
 
 
 if __name__ == "__main__":

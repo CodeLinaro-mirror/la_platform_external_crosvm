@@ -13,6 +13,7 @@ use std::str::Utf8Error;
 use base::{Error as BaseError, ExternalMappingError, SafeDescriptor};
 use data_model::VolatileMemoryError;
 use remain::sorted;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[cfg(feature = "vulkano")]
@@ -123,6 +124,7 @@ pub const RUTABAGA_CAPSET_VIRGL2: u32 = 2;
 pub const RUTABAGA_CAPSET_GFXSTREAM: u32 = 3;
 pub const RUTABAGA_CAPSET_VENUS: u32 = 4;
 pub const RUTABAGA_CAPSET_CROSS_DOMAIN: u32 = 5;
+pub const RUTABAGA_CAPSET_DRM: u32 = 6;
 
 /// An error generated while using this crate.
 #[sorted]
@@ -290,15 +292,16 @@ pub type RutabagaResult<T> = std::result::Result<T, RutabagaError>;
 
 /// Flags for virglrenderer.  Copied from virglrenderer bindings.
 const VIRGLRENDERER_USE_EGL: u32 = 1 << 0;
-const VIRGLRENDERER_THREAD_SYNC: u32 = 1 << 1;
+pub const VIRGLRENDERER_THREAD_SYNC: u32 = 1 << 1;
 const VIRGLRENDERER_USE_GLX: u32 = 1 << 2;
 const VIRGLRENDERER_USE_SURFACELESS: u32 = 1 << 3;
 const VIRGLRENDERER_USE_GLES: u32 = 1 << 4;
 const VIRGLRENDERER_USE_EXTERNAL_BLOB: u32 = 1 << 5;
 const VIRGLRENDERER_VENUS: u32 = 1 << 6;
 const VIRGLRENDERER_NO_VIRGL: u32 = 1 << 7;
-const VIRGLRENDERER_USE_ASYNC_FENCE_CB: u32 = 1 << 8;
+pub const VIRGLRENDERER_USE_ASYNC_FENCE_CB: u32 = 1 << 8;
 const VIRGLRENDERER_RENDER_SERVER: u32 = 1 << 9;
+const VIRGLRENDERER_DRM: u32 = 1 << 10;
 
 /// virglrenderer flag struct.
 #[derive(Copy, Clone)]
@@ -313,6 +316,12 @@ impl Default for VirglRendererFlags {
             .use_surfaceless(true)
             .use_gles(true)
             .use_render_server(false)
+    }
+}
+
+impl From<VirglRendererFlags> for u32 {
+    fn from(flags: VirglRendererFlags) -> u32 {
+        flags.0
     }
 }
 
@@ -344,6 +353,11 @@ impl VirglRendererFlags {
     /// Enable venus support
     pub fn use_venus(self, v: bool) -> VirglRendererFlags {
         self.set_flag(VIRGLRENDERER_VENUS, v)
+    }
+
+    /// Enable drm native context support
+    pub fn use_drm(self, v: bool) -> VirglRendererFlags {
+        self.set_flag(VIRGLRENDERER_DRM, v)
     }
 
     /// Use EGL for context creation.
@@ -396,10 +410,17 @@ const GFXSTREAM_RENDERER_FLAGS_USE_GLES: u32 = 1 << 4;
 const GFXSTREAM_RENDERER_FLAGS_NO_VK_BIT: u32 = 1 << 5;
 const GFXSTREAM_RENDERER_FLAGS_NO_SYNCFD_BIT: u32 = 1 << 20;
 const GFXSTREAM_RENDERER_FLAGS_GUEST_USES_ANGLE: u32 = 1 << 21;
+const GFXSTREAM_RENDERER_FLAGS_VULKAN_NATIVE_SWAPCHAIN_BIT: u32 = 1 << 22;
+pub const GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB: u32 = 1 << 23;
 
 /// gfxstream flag struct.
 #[derive(Copy, Clone, Default)]
 pub struct GfxstreamFlags(u32);
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RutabagaWsi {
+    Vulkan,
+}
 
 impl GfxstreamFlags {
     /// Create new gfxstream flags.
@@ -448,6 +469,26 @@ impl GfxstreamFlags {
     /// Use ANGLE as the guest GLES driver.
     pub fn use_guest_angle(self, v: bool) -> GfxstreamFlags {
         self.set_flag(GFXSTREAM_RENDERER_FLAGS_GUEST_USES_ANGLE, v)
+    }
+
+    /// Use async fence completion callback.
+    pub fn use_async_fence_cb(self, v: bool) -> GfxstreamFlags {
+        self.set_flag(GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB, v)
+    }
+
+    /// Use the Vulkan swapchain to draw on the host window.
+    pub fn set_wsi(self, v: Option<&RutabagaWsi>) -> GfxstreamFlags {
+        let use_vulkan_swapchain = matches!(v, Some(RutabagaWsi::Vulkan));
+        self.set_flag(
+            GFXSTREAM_RENDERER_FLAGS_VULKAN_NATIVE_SWAPCHAIN_BIT,
+            use_vulkan_swapchain,
+        )
+    }
+}
+
+impl From<GfxstreamFlags> for u32 {
+    fn from(flags: GfxstreamFlags) -> u32 {
+        flags.0
     }
 }
 

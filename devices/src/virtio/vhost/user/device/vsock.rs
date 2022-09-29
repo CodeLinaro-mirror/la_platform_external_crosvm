@@ -37,23 +37,20 @@ use vmm_vhost::{
 };
 use vmm_vhost::{Protocol, SlaveListener};
 
-use crate::{
-    vfio::VfioRegionAddr,
-    virtio::{
-        base_features,
-        vhost::{
-            user::device::{
-                handler::{
-                    create_guest_memory,
-                    sys::{create_vvu_guest_memory, run_handler, HandlerTypeSys},
-                    vmm_va_to_gpa, HandlerType, MappingInfo,
-                },
-                vvu::{doorbell::DoorbellRegion, pci::VvuPciDevice, VvuDevice},
+use crate::virtio::{
+    base_features,
+    vhost::{
+        user::device::{
+            handler::{
+                create_guest_memory,
+                sys::{create_vvu_guest_memory, run_handler, HandlerTypeSys},
+                vmm_va_to_gpa, HandlerType, MappingInfo,
             },
-            vsock,
+            vvu::{doorbell::DoorbellRegion, pci::VvuPciDevice, VvuDevice},
         },
-        Queue, SignalableInterrupt,
+        vsock,
     },
+    Queue, SignalableInterrupt,
 };
 
 const MAX_VRING_LEN: u16 = vsock::QUEUE_SIZE;
@@ -363,18 +360,7 @@ impl VhostUserSlaveReqHandlerMut for VsockBackend {
         let index = usize::from(index);
         let event = match &self.handler_type {
             HandlerType::SystemHandlerType(HandlerTypeSys::Vvu { vfio_dev, caps, .. }) => {
-                let vfio = Arc::clone(vfio_dev);
-                let base = caps.doorbell_base_addr();
-                let addr = VfioRegionAddr {
-                    index: base.index,
-                    addr: base.addr + (index as u64 * caps.doorbell_off_multiplier() as u64),
-                };
-
-                let doorbell = DoorbellRegion {
-                    vfio,
-                    index: index as u8,
-                    addr,
-                };
+                let doorbell = DoorbellRegion::new(index as u8, vfio_dev, caps)?;
                 let call_evt = match self.call_evts[index].as_ref() {
                     None => {
                         let evt = Arc::new(Mutex::new(doorbell));
@@ -521,7 +507,7 @@ impl VhostUserSlaveReqHandlerMut for VsockBackend {
 async fn run_device<P: AsRef<Path>>(
     ex: &Executor,
     socket: P,
-    backend: Arc<StdMutex<VsockBackend>>,
+    backend: StdMutex<VsockBackend>,
 ) -> anyhow::Result<()> {
     let listener = UnixListener::bind(socket)
         .map(UnlinkUnixListener)
@@ -537,28 +523,24 @@ async fn run_device<P: AsRef<Path>>(
 }
 
 #[derive(FromArgs)]
-#[argh(description = "")]
-struct Options {
-    #[argh(
-        option,
-        description = "path to bind a listening vhost-user socket",
-        arg_name = "PATH"
-    )]
+#[argh(subcommand, name = "vsock")]
+/// Vsock device
+pub struct Options {
+    #[argh(option, arg_name = "PATH")]
+    /// path to bind a listening vhost-user socket
     socket: Option<String>,
-    #[argh(option, description = "name of vfio pci device", arg_name = "STRING")]
+    #[argh(option, arg_name = "STRING")]
+    /// name of vfio pci device
     vfio: Option<String>,
-    #[argh(
-        option,
-        description = "the vsock context id for this device",
-        arg_name = "INT"
-    )]
+    #[argh(option, arg_name = "INT")]
+    /// the vsock context id for this device
     cid: u64,
     #[argh(
         option,
-        description = "path to the vhost-vsock control socket",
         default = "String::from(\"/dev/vhost-vsock\")",
         arg_name = "PATH"
     )]
+    /// path to the vhost-vsock control socket
     vhost_socket: String,
 }
 
@@ -581,7 +563,6 @@ fn run_vvu_device<P: AsRef<Path>>(
         }),
     )
     .map(StdMutex::new)
-    .map(Arc::new)
     .context("failed to create `VsockBackend`")?;
     let driver = VvuDevice::new(device);
 
@@ -604,27 +585,14 @@ fn run_vvu_device<P: AsRef<Path>>(
 }
 
 /// Returns an error if the given `args` is invalid or the device fails to run.
-pub fn run_vsock_device(program_name: &str, args: &[&str]) -> anyhow::Result<()> {
-    let opts = match Options::from_args(&[program_name], args) {
-        Ok(opts) => opts,
-        Err(e) => {
-            if e.status.is_err() {
-                bail!(e.output);
-            } else {
-                println!("{}", e.output);
-            }
-            return Ok(());
-        }
-    };
-
+pub fn run_vsock_device(opts: Options) -> anyhow::Result<()> {
     let ex = Executor::new().context("failed to create executor")?;
 
     match (opts.socket, opts.vfio) {
         (Some(socket), None) => {
             let backend =
                 VsockBackend::new(&ex, opts.cid, opts.vhost_socket, HandlerType::VhostUser)
-                    .map(StdMutex::new)
-                    .map(Arc::new)?;
+                    .map(StdMutex::new)?;
 
             // TODO: Replace the `and_then` with `Result::flatten` once it is stabilized.
             ex.run_until(run_device(&ex, socket, backend))

@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use base::{info, Event};
+use base::{info, Event, MemoryMapping, MemoryMappingBuilder};
 use data_model::DataInit;
 use memoffset::offset_of;
 use resources::Alloc;
 use vfio_sys::*;
-use virtio_sys::vhost::VIRTIO_F_VERSION_1;
+use virtio_sys::virtio_config::{self, VIRTIO_F_VERSION_1};
 
 use crate::pci::{MsixCap, PciAddress, PciCapabilityID, CAPABILITY_LIST_HEAD_OFFSET};
 use crate::vfio::{VfioDevice, VfioPciConfig, VfioRegionAddr};
@@ -214,12 +214,41 @@ macro_rules! read_notify_cfg_field {
     };
 }
 
-/// A wrapper of VVU's notification resource which works as an interrupt for a virtqueue.
-pub struct QueueNotifier(VfioRegionAddr);
+/// A VVU notification resource which works as an interrupt for a virtqueue.
+pub struct QueueNotifier {
+    addr: u64,
+    mmap: MemoryMapping,
+}
 
 impl QueueNotifier {
-    pub fn notify(&self, vfio_dev: &VfioDevice, index: u16) {
-        vfio_dev.region_write_to_addr(&index, &self.0, 0);
+    /// Initialize a new QueueNotifier structure given the queue index, the vfio
+    /// device, and the VvuPciCaps.
+    pub fn new(
+        queue_type: QueueType,
+        device: &Arc<VfioDevice>,
+        caps: &VvuPciCaps,
+    ) -> Result<QueueNotifier> {
+        let addr =
+            caps.notify_base_addr.addr + (queue_type as u64 * caps.notify_off_multiplier as u64);
+        let mmap_region = device.get_region_mmap(caps.notify_base_addr.index);
+        let region_offset = device.get_region_offset(caps.notify_base_addr.index);
+        let offset = region_offset + mmap_region[0].offset;
+
+        let mmap = MemoryMappingBuilder::new(mmap_region[0].size as usize)
+            .from_file(device.device_file())
+            .offset(offset)
+            .build()?;
+
+        Ok(QueueNotifier { addr, mmap })
+    }
+
+    pub fn notify(&self) {
+        // It's okay to not handle a failure here because if this fails we cannot recover
+        // anyway. The mmap address should be correct as initialized in the 'new()' function
+        // according to the given vfio device.
+        self.mmap
+            .write_obj(0_u8, self.addr as usize)
+            .expect("unable to write to mmap area");
     }
 }
 
@@ -296,13 +325,13 @@ impl VvuPciDevice {
         lower as u64 | ((upper as u64) << 32)
     }
 
-    fn set_device_feature(&self, features: u64) {
+    fn set_guest_feature(&self, features: u64) {
         let lower: u32 = (features & (u32::MAX as u64)) as u32;
         let upper: u32 = (features >> 32) as u32;
-        write_common_cfg_field!(self, device_feature_select, 0);
-        write_common_cfg_field!(self, device_feature, lower);
-        write_common_cfg_field!(self, device_feature_select, 1);
-        write_common_cfg_field!(self, device_feature, upper);
+        write_common_cfg_field!(self, guest_feature_select, 0);
+        write_common_cfg_field!(self, guest_feature, lower);
+        write_common_cfg_field!(self, guest_feature_select, 1);
+        write_common_cfg_field!(self, guest_feature, upper);
     }
 
     /// Creates the VVU's virtqueue (i.e. rxq or txq).
@@ -339,7 +368,7 @@ impl VvuPciDevice {
         let notify_off: u16 = read_common_cfg_field!(self, queue_notify_off);
         let mut notify_addr = self.caps.notify_base_addr.clone();
         notify_addr.addr += notify_off as u64 * self.caps.notify_off_multiplier as u64;
-        let notifier = QueueNotifier(notify_addr);
+        let notifier = QueueNotifier::new(typ, &self.vfio_dev, &self.caps)?;
 
         write_common_cfg_field!(self, queue_enable, 1_u16);
 
@@ -349,10 +378,10 @@ impl VvuPciDevice {
     /// Creates the VVU's rxq and txq.
     fn create_queues(&self) -> Result<(Vec<UserQueue>, Vec<QueueNotifier>)> {
         let (rxq, rxq_notifier) = self.create_queue(QueueType::Rx)?;
-        rxq_notifier.notify(&self.vfio_dev, QueueType::Rx as u16);
+        rxq_notifier.notify();
 
         let (txq, txq_notifier) = self.create_queue(QueueType::Tx)?;
-        txq_notifier.notify(&self.vfio_dev, QueueType::Tx as u16);
+        txq_notifier.notify();
 
         Ok((vec![rxq, txq], vec![rxq_notifier, txq_notifier]))
     }
@@ -453,13 +482,12 @@ impl VvuPciDevice {
         }
 
         self.set_status(
-            (virtio_sys::vhost::VIRTIO_CONFIG_S_ACKNOWLEDGE
-                | virtio_sys::vhost::VIRTIO_CONFIG_S_DRIVER) as u8,
+            (virtio_config::VIRTIO_CONFIG_S_ACKNOWLEDGE | virtio_config::VIRTIO_CONFIG_S_DRIVER)
+                as u8,
         );
 
         // TODO(b/207364742): Support VIRTIO_RING_F_EVENT_IDX.
         let required_features = 1u64 << VIRTIO_F_VERSION_1;
-        self.set_device_feature(required_features);
         let enabled_features = self.get_device_feature();
         if (required_features & enabled_features) != required_features {
             bail!(
@@ -468,7 +496,8 @@ impl VvuPciDevice {
                 enabled_features
             );
         };
-        self.set_status(virtio_sys::vhost::VIRTIO_CONFIG_S_FEATURES_OK as u8);
+        self.set_guest_feature(required_features);
+        self.set_status(virtio_config::VIRTIO_CONFIG_S_FEATURES_OK as u8);
 
         // Initialize Virtqueues
         let (queues, queue_notifiers) = self.create_queues()?;
@@ -479,7 +508,7 @@ impl VvuPciDevice {
         self.irqs = irqs;
         self.notification_evts = notification_evts;
 
-        self.set_status(virtio_sys::vhost::VIRTIO_CONFIG_S_DRIVER_OK as u8);
+        self.set_status(virtio_config::VIRTIO_CONFIG_S_DRIVER_OK as u8);
 
         Ok(())
     }

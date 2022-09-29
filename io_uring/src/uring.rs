@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use base::{
-    AsRawDescriptor, MappedRegion, MemoryMapping, MemoryMappingBuilder, Protection, RawDescriptor,
-    WatchingEvents,
+    AsRawDescriptor, EventType, MappedRegion, MemoryMapping, MemoryMappingBuilder, Protection,
+    RawDescriptor,
 };
 use data_model::IoBufMut;
 use remain::sorted;
@@ -101,8 +101,15 @@ impl io_uring_sqe {
         self.__bindgen_anon_3.rw_flags = val;
     }
 
-    pub fn set_poll_events(&mut self, val: u16) {
-        self.__bindgen_anon_3.poll_events = val;
+    pub fn set_poll_events(&mut self, val: u32) {
+        let val = if cfg!(target_endian = "big") {
+            // Swap words on big-endian platforms to match the original ABI where poll_events was 16
+            // bits wide.
+            val.rotate_left(16)
+        } else {
+            val
+        };
+        self.__bindgen_anon_3.poll32_events = val;
     }
 }
 
@@ -205,12 +212,12 @@ impl SubmitQueue {
 /// # use std::fs::File;
 /// # use std::os::unix::io::AsRawFd;
 /// # use std::path::Path;
-/// # use base::WatchingEvents;
+/// # use base::EventType;
 /// # use io_uring::URingContext;
 /// let f = File::open(Path::new("/dev/zero")).unwrap();
 /// let uring = URingContext::new(16).unwrap();
 /// uring
-///   .add_poll_fd(f.as_raw_fd(), &WatchingEvents::empty().set_read(), 454)
+///   .add_poll_fd(f.as_raw_fd(), EventType::Read, 454)
 /// .unwrap();
 /// let (user_data, res) = uring.wait().unwrap().next().unwrap();
 /// assert_eq!(user_data, 454 as io_uring::UserData);
@@ -529,17 +536,12 @@ impl URingContext {
     /// `wait`.
     /// Note that io_uring is always a one shot poll. After the fd is returned, it must be re-added
     /// to get future events.
-    pub fn add_poll_fd(
-        &self,
-        fd: RawFd,
-        events: &WatchingEvents,
-        user_data: UserData,
-    ) -> Result<()> {
+    pub fn add_poll_fd(&self, fd: RawFd, events: EventType, user_data: UserData) -> Result<()> {
         self.submit_ring.lock().prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_POLL_ADD as u8;
             sqe.fd = fd;
             sqe.user_data = user_data;
-            sqe.set_poll_events(events.get_raw() as u16);
+            sqe.set_poll_events(events.into());
 
             sqe.set_addr(0);
             sqe.len = 0;
@@ -551,20 +553,37 @@ impl URingContext {
     }
 
     /// Removes an FD that was previously added with `add_poll_fd`.
-    pub fn remove_poll_fd(
-        &self,
-        fd: RawFd,
-        events: &WatchingEvents,
-        user_data: UserData,
-    ) -> Result<()> {
+    pub fn remove_poll_fd(&self, fd: RawFd, events: EventType, user_data: UserData) -> Result<()> {
         self.submit_ring.lock().prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_POLL_REMOVE as u8;
             sqe.fd = fd;
             sqe.user_data = user_data;
-            sqe.set_poll_events(events.get_raw() as u16);
+            sqe.set_poll_events(events.into());
 
             sqe.set_addr(0);
             sqe.len = 0;
+            sqe.set_off(0);
+            sqe.set_buf_index(0);
+            sqe.ioprio = 0;
+            sqe.flags = 0;
+        })
+    }
+
+    /// Attempt to cancel an already issued request. addr must contain the user_data field of the
+    /// request that should be cancelled. The cancellation request will complete with one of the
+    /// following results codes. If found, the res field of the cqe will contain 0. If not found,
+    /// res will contain -ENOENT. If found and attempted cancelled, the res field will contain
+    /// -EALREADY. In this case, the request may or may not terminate. In general, requests that
+    /// are interruptible (like socket IO) will get cancelled, while disk IO requests cannot be
+    /// cancelled if already started.
+    pub fn async_cancel(&self, addr: UserData, user_data: UserData) -> Result<()> {
+        self.submit_ring.lock().prep_next_sqe(|sqe, _iovec| {
+            sqe.opcode = IORING_OP_ASYNC_CANCEL as u8;
+            sqe.user_data = user_data;
+            sqe.set_addr(addr);
+
+            sqe.len = 0;
+            sqe.fd = 0;
             sqe.set_off(0);
             sqe.set_buf_index(0);
             sqe.ioprio = 0;
@@ -892,7 +911,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use base::{pipe, PollContext};
+    use base::{pipe, WaitContext};
     use sync::{Condvar, Mutex};
     use tempfile::{tempfile, TempDir};
 
@@ -1062,11 +1081,11 @@ mod tests {
         f.write_all(&buf).unwrap();
         f.write_all(&buf).unwrap();
 
-        let ctx: PollContext<u64> = PollContext::build_with(&[(&uring, 1)]).unwrap();
+        let ctx: WaitContext<u64> = WaitContext::build_with(&[(&uring, 1)]).unwrap();
         {
             // Test that the uring context isn't readable before any events are complete.
             let events = ctx.wait_timeout(Duration::from_millis(1)).unwrap();
-            assert!(events.iter_readable().next().is_none());
+            assert!(events.iter().next().is_none());
         }
 
         unsafe {
@@ -1077,8 +1096,9 @@ mod tests {
             uring.submit().unwrap();
             // Poll for completion with epoll.
             let events = ctx.wait().unwrap();
-            let event = events.iter_readable().next().unwrap();
-            assert_eq!(event.token(), 1);
+            let event = events.iter().next().unwrap();
+            assert!(event.is_readable);
+            assert_eq!(event.token, 1);
             let (user_data, res) = uring.wait().unwrap().next().unwrap();
             assert_eq!(user_data, 55_u64);
             assert_eq!(res.unwrap(), buf.len() as u32);
@@ -1224,7 +1244,7 @@ mod tests {
         let f = File::open(Path::new("/dev/zero")).unwrap();
         let uring = URingContext::new(16).unwrap();
         uring
-            .add_poll_fd(f.as_raw_fd(), &WatchingEvents::empty().set_read(), 454)
+            .add_poll_fd(f.as_raw_fd(), EventType::Read, 454)
             .unwrap();
         let (user_data, res) = uring.wait().unwrap().next().unwrap();
         assert_eq!(user_data, 454_u64);
@@ -1242,7 +1262,7 @@ mod tests {
                 uring
                     .add_poll_fd(
                         f.as_raw_fd(),
-                        &WatchingEvents::empty().set_read(),
+                        EventType::Read,
                         (sqe_batch * num_entries + i) as u64,
                     )
                     .unwrap();
@@ -1252,11 +1272,7 @@ mod tests {
         // Adding more than the number of cqes will cause the uring to return ebusy, make sure that
         // is handled cleanly and wait still returns the completed entries.
         uring
-            .add_poll_fd(
-                f.as_raw_fd(),
-                &WatchingEvents::empty().set_read(),
-                (num_entries * 3) as u64,
-            )
+            .add_poll_fd(f.as_raw_fd(), EventType::Read, (num_entries * 3) as u64)
             .unwrap();
         // The first wait call should return the cques that are already filled.
         {

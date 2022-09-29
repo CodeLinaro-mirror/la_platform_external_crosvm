@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod parameters;
 mod protocol;
 mod udmabuf;
 mod udmabuf_bindings;
 mod virtio_gpu;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::convert::TryFrom;
 use std::i64;
 use std::io::Read;
@@ -22,8 +23,8 @@ use std::time::Duration;
 use anyhow::Context;
 
 use base::{
-    debug, error, warn, AsRawDescriptor, Event, ExternalMapping, PollToken, RawDescriptor,
-    SafeDescriptor, Tube, WaitContext,
+    debug, error, warn, AsRawDescriptor, Event, EventToken, ExternalMapping, RawDescriptor,
+    SafeDescriptor, SendTube, Tube, VmEventType, WaitContext,
 };
 
 use data_model::*;
@@ -39,8 +40,8 @@ use sync::Mutex;
 use vm_memory::{GuestAddress, GuestMemory};
 
 use super::{
-    copy_config, resource_bridge::*, DescriptorChain, Interrupt, Queue, Reader,
-    SignalableInterrupt, VirtioDevice, Writer, TYPE_GPU,
+    copy_config, resource_bridge::*, DescriptorChain, DeviceType, Interrupt, Queue, Reader,
+    SignalableInterrupt, VirtioDevice, Writer,
 };
 
 use super::{PciCapabilityType, VirtioPciShmCap};
@@ -57,46 +58,16 @@ use crate::pci::{
     PciAddress, PciBarConfiguration, PciBarPrefetchable, PciBarRegionType, PciCapability,
 };
 
-pub const DEFAULT_DISPLAY_WIDTH: u32 = 1280;
-pub const DEFAULT_DISPLAY_HEIGHT: u32 = 1024;
+pub use parameters::{
+    DisplayParameters as GpuDisplayParameters, GpuParameters, DEFAULT_DISPLAY_HEIGHT,
+    DEFAULT_DISPLAY_WIDTH,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GpuMode {
     Mode2D,
     ModeVirglRenderer,
     ModeGfxstream,
-}
-
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-pub struct GpuDisplayParameters {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Default for GpuDisplayParameters {
-    fn default() -> Self {
-        GpuDisplayParameters {
-            width: DEFAULT_DISPLAY_WIDTH,
-            height: DEFAULT_DISPLAY_HEIGHT,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GpuParameters {
-    pub displays: Vec<GpuDisplayParameters>,
-    pub renderer_use_egl: bool,
-    pub renderer_use_gles: bool,
-    pub renderer_use_glx: bool,
-    pub renderer_use_surfaceless: bool,
-    pub gfxstream_use_guest_angle: bool,
-    pub gfxstream_use_syncfd: bool,
-    pub use_vulkan: bool,
-    pub udmabuf: bool,
-    pub mode: GpuMode,
-    pub cache_path: Option<String>,
-    pub cache_size: Option<String>,
 }
 
 // First queue is for virtio gpu commands. Second queue is for cursor commands, which we expect
@@ -106,30 +77,6 @@ pub const FENCE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 pub const GPU_BAR_NUM: u8 = 4;
 pub const GPU_BAR_OFFSET: u64 = 0;
-pub const GPU_BAR_SIZE: u64 = 1 << 28;
-
-impl Default for GpuParameters {
-    fn default() -> Self {
-        GpuParameters {
-            displays: vec![],
-            renderer_use_egl: true,
-            renderer_use_gles: true,
-            renderer_use_glx: false,
-            renderer_use_surfaceless: true,
-            gfxstream_use_guest_angle: false,
-            gfxstream_use_syncfd: true,
-            use_vulkan: false,
-            mode: if cfg!(feature = "virgl_renderer") {
-                GpuMode::ModeVirglRenderer
-            } else {
-                GpuMode::Mode2D
-            },
-            cache_path: None,
-            cache_size: None,
-            udmabuf: false,
-        }
-    }
-}
 
 #[derive(Copy, Clone, Debug)]
 pub struct VirtioScanoutBlobData {
@@ -140,7 +87,7 @@ pub struct VirtioScanoutBlobData {
     pub offsets: [u32; 4],
 }
 
-#[derive(Hash, Eq, PartialEq)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum VirtioGpuRing {
     Global,
     ContextSpecific { ctx_id: u32, ring_idx: u8 },
@@ -156,7 +103,7 @@ struct FenceDescriptor {
 #[derive(Default)]
 pub struct FenceState {
     descs: Vec<FenceDescriptor>,
-    completed_fences: HashMap<VirtioGpuRing, u64>,
+    completed_fences: BTreeMap<VirtioGpuRing, u64>,
 }
 
 pub trait QueueReader {
@@ -787,11 +734,15 @@ impl Frontend {
     pub fn has_pending_fences(&self) -> bool {
         !self.fence_state.lock().descs.is_empty()
     }
+
+    pub fn event_poll(&self) {
+        self.virtio_gpu.event_poll();
+    }
 }
 
 struct Worker {
     interrupt: Arc<Interrupt>,
-    exit_evt: Event,
+    exit_evt_wrtube: SendTube,
     mem: GuestMemory,
     ctrl_queue: SharedQueueReader,
     ctrl_evt: Event,
@@ -804,7 +755,7 @@ struct Worker {
 
 impl Worker {
     fn run(&mut self) {
-        #[derive(PollToken)]
+        #[derive(EventToken)]
         enum Token {
             CtrlQueue,
             CursorQueue,
@@ -812,6 +763,7 @@ impl Worker {
             InterruptResample,
             Kill,
             ResourceBridge { index: usize },
+            VirtioGpuPoll,
         }
 
         let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
@@ -836,6 +788,13 @@ impl Worker {
             }
         }
 
+        if let Some(poll_desc) = self.state.virtio_gpu.poll_descriptor() {
+            if let Err(e) = wait_ctx.add(&poll_desc, Token::VirtioGpuPoll) {
+                error!("failed adding poll eventfd to WaitContext: {}", e);
+                return;
+            }
+        }
+
         for (index, bridge) in self.resource_bridges.iter().enumerate() {
             if let Err(e) = wait_ctx.add(bridge, Token::ResourceBridge { index }) {
                 error!("failed to add resource bridge to WaitContext: {}", e);
@@ -854,11 +813,12 @@ impl Worker {
         let mut process_resource_bridge = Vec::with_capacity(self.resource_bridges.len());
         'wait: loop {
             // If there are outstanding fences, wake up early to poll them.
-            let duration = if self.state.has_pending_fences() {
-                FENCE_POLL_INTERVAL
-            } else {
-                Duration::new(i64::MAX as u64, 0)
-            };
+            let duration =
+                if self.state.virtio_gpu.needs_fence_poll() && self.state.has_pending_fences() {
+                    FENCE_POLL_INTERVAL
+                } else {
+                    Duration::new(i64::MAX as u64, 0)
+                };
 
             let events = match wait_ctx.wait_timeout(duration) {
                 Ok(v) => v,
@@ -901,7 +861,7 @@ impl Worker {
                     Token::Display => {
                         let close_requested = self.state.process_display();
                         if close_requested {
-                            let _ = self.exit_evt.write(1);
+                            let _ = self.exit_evt_wrtube.send::<VmEventType>(&VmEventType::Exit);
                         }
                     }
                     Token::ResourceBridge { index } => {
@@ -909,6 +869,9 @@ impl Worker {
                     }
                     Token::InterruptResample => {
                         self.interrupt.interrupt_resample();
+                    }
+                    Token::VirtioGpuPoll => {
+                        self.state.event_poll();
                     }
                     Token::Kill => {
                         break 'wait;
@@ -926,7 +889,9 @@ impl Worker {
                 signal_used_ctrl = true;
             }
 
-            self.state.fence_poll();
+            if self.state.virtio_gpu.needs_fence_poll() {
+                self.state.fence_poll();
+            }
 
             // Process the entire control queue before the resource bridge in case a resource is
             // created or destroyed by the control queue. Processing the resource bridge first may
@@ -984,7 +949,7 @@ impl DisplayBackend {
 }
 
 pub struct Gpu {
-    exit_evt: Event,
+    exit_evt_wrtube: SendTube,
     gpu_device_tube: Option<Tube>,
     resource_bridges: Vec<Tube>,
     event_devices: Vec<EventDevice>,
@@ -995,17 +960,19 @@ pub struct Gpu {
     display_params: Vec<GpuDisplayParameters>,
     rutabaga_builder: Option<RutabagaBuilder>,
     pci_bar: Option<Alloc>,
+    pci_bar_size: u64,
     map_request: Arc<Mutex<Option<ExternalMapping>>>,
     external_blob: bool,
     rutabaga_component: RutabagaComponentType,
     base_features: u64,
     udmabuf: bool,
     render_server_fd: Option<SafeDescriptor>,
+    context_mask: u64,
 }
 
 impl Gpu {
     pub fn new(
-        exit_evt: Event,
+        exit_evt_wrtube: SendTube,
         gpu_device_tube: Option<Tube>,
         resource_bridges: Vec<Tube>,
         display_backends: Vec<DisplayBackend>,
@@ -1017,23 +984,6 @@ impl Gpu {
         base_features: u64,
         channels: BTreeMap<String, PathBuf>,
     ) -> Gpu {
-        let virglrenderer_flags = VirglRendererFlags::new()
-            .use_egl(gpu_parameters.renderer_use_egl)
-            .use_gles(gpu_parameters.renderer_use_gles)
-            .use_glx(gpu_parameters.renderer_use_glx)
-            .use_surfaceless(gpu_parameters.renderer_use_surfaceless)
-            .use_external_blob(external_blob)
-            .use_venus(gpu_parameters.use_vulkan)
-            .use_render_server(render_server_fd.is_some());
-        let gfxstream_flags = GfxstreamFlags::new()
-            .use_egl(gpu_parameters.renderer_use_egl)
-            .use_gles(gpu_parameters.renderer_use_gles)
-            .use_glx(gpu_parameters.renderer_use_glx)
-            .use_surfaceless(gpu_parameters.renderer_use_surfaceless)
-            .use_guest_angle(gpu_parameters.gfxstream_use_guest_angle)
-            .use_syncfd(gpu_parameters.gfxstream_use_syncfd)
-            .use_vulkan(gpu_parameters.use_vulkan);
-
         let mut rutabaga_channels: Vec<RutabagaChannel> = Vec::new();
         for (channel_name, path) in &channels {
             match &channel_name[..] {
@@ -1063,15 +1013,23 @@ impl Gpu {
             display_height = gpu_parameters.displays[0].height;
         }
 
-        let rutabaga_builder = RutabagaBuilder::new(component)
+        let rutabaga_builder = RutabagaBuilder::new(component, gpu_parameters.context_mask)
             .set_display_width(display_width)
             .set_display_height(display_height)
-            .set_virglrenderer_flags(virglrenderer_flags)
-            .set_gfxstream_flags(gfxstream_flags)
-            .set_rutabaga_channels(rutabaga_channels_opt);
+            .set_rutabaga_channels(rutabaga_channels_opt)
+            .set_use_egl(gpu_parameters.renderer_use_egl)
+            .set_use_gles(gpu_parameters.renderer_use_gles)
+            .set_use_glx(gpu_parameters.renderer_use_glx)
+            .set_use_surfaceless(gpu_parameters.renderer_use_surfaceless)
+            .set_use_vulkan(gpu_parameters.use_vulkan)
+            .set_use_syncfd(gpu_parameters.gfxstream_use_syncfd)
+            .set_use_guest_angle(gpu_parameters.gfxstream_use_guest_angle)
+            .set_wsi(gpu_parameters.wsi.as_ref())
+            .set_use_external_blob(external_blob)
+            .set_use_render_server(render_server_fd.is_some());
 
         Gpu {
-            exit_evt,
+            exit_evt_wrtube,
             gpu_device_tube,
             resource_bridges,
             event_devices,
@@ -1082,12 +1040,14 @@ impl Gpu {
             display_params: gpu_parameters.displays.clone(),
             rutabaga_builder: Some(rutabaga_builder),
             pci_bar: None,
+            pci_bar_size: gpu_parameters.pci_bar_size,
             map_request,
             external_blob,
             rutabaga_component: component,
             base_features,
             udmabuf: gpu_parameters.udmabuf,
             render_server_fd,
+            context_mask: gpu_parameters.context_mask,
         }
     }
 
@@ -1135,28 +1095,31 @@ impl Gpu {
             events_read |= VIRTIO_GPU_EVENT_DISPLAY;
         }
 
-        let num_capsets = match self.rutabaga_component {
-            RutabagaComponentType::Rutabaga2D => 0,
-            _ => {
-                let mut num_capsets = 0;
+        let num_capsets = match self.context_mask {
+            0 => {
+                match self.rutabaga_component {
+                    RutabagaComponentType::Rutabaga2D => 0,
+                    _ => {
+                        #[allow(unused_mut)]
+                        let mut num_capsets = 0;
 
-                // Cross-domain (like virtio_wl with llvmpipe) is always available.
-                num_capsets += 1;
+                        // Three capsets for virgl_renderer
+                        #[cfg(feature = "virgl_renderer")]
+                        {
+                            num_capsets += 3;
+                        }
 
-                // Three capsets for virgl_renderer
-                #[cfg(feature = "virgl_renderer")]
-                {
-                    num_capsets += 3;
+                        // One capset for gfxstream
+                        #[cfg(feature = "gfxstream")]
+                        {
+                            num_capsets += 1;
+                        }
+
+                        num_capsets
+                    }
                 }
-
-                // One capset for gfxstream
-                #[cfg(feature = "gfxstream")]
-                {
-                    num_capsets += 1;
-                }
-
-                num_capsets
             }
+            _ => self.context_mask.count_ones(),
         };
 
         virtio_gpu_config {
@@ -1199,7 +1162,7 @@ impl VirtioDevice for Gpu {
             keep_rds.push(render_server_fd.as_raw_descriptor());
         }
 
-        keep_rds.push(self.exit_evt.as_raw_descriptor());
+        keep_rds.push(self.exit_evt_wrtube.as_raw_descriptor());
         for bridge in &self.resource_bridges {
             keep_rds.push(bridge.as_raw_descriptor());
         }
@@ -1207,8 +1170,8 @@ impl VirtioDevice for Gpu {
         keep_rds
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_GPU
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Gpu
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
@@ -1265,10 +1228,10 @@ impl VirtioDevice for Gpu {
             return;
         }
 
-        let exit_evt = match self.exit_evt.try_clone() {
+        let exit_evt_wrtube = match self.exit_evt_wrtube.try_clone() {
             Ok(e) => e,
             Err(e) => {
-                error!("error cloning exit event: {}", e);
+                error!("error cloning exit tube: {}", e);
                 return;
             }
         };
@@ -1331,7 +1294,7 @@ impl VirtioDevice for Gpu {
 
                         Worker {
                             interrupt: irq,
-                            exit_evt,
+                            exit_evt_wrtube,
                             mem,
                             ctrl_queue: ctrl_queue.clone(),
                             ctrl_evt,
@@ -1366,7 +1329,7 @@ impl VirtioDevice for Gpu {
         });
         vec![PciBarConfiguration::new(
             GPU_BAR_NUM as usize,
-            GPU_BAR_SIZE,
+            self.pci_bar_size,
             PciBarRegionType::Memory64BitRegion,
             PciBarPrefetchable::NotPrefetchable,
         )]
@@ -1377,7 +1340,7 @@ impl VirtioDevice for Gpu {
             PciCapabilityType::SharedMemoryConfig,
             GPU_BAR_NUM,
             GPU_BAR_OFFSET,
-            GPU_BAR_SIZE,
+            self.pci_bar_size,
             VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
         ))]
     }

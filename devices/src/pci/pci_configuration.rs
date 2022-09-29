@@ -21,6 +21,7 @@ pub const COMMAND_REG_IO_SPACE_MASK: u32 = 0x0000_0001;
 pub const COMMAND_REG_MEMORY_SPACE_MASK: u32 = 0x0000_0002;
 const STATUS_REG: usize = 1;
 pub const STATUS_REG_CAPABILITIES_USED_MASK: u32 = 0x0010_0000;
+#[allow(dead_code)]
 #[cfg(unix)]
 pub const CLASS_REG: usize = 2;
 #[cfg(feature = "direct")]
@@ -705,6 +706,10 @@ impl PciBarConfiguration {
 
     pub fn address(&self) -> u64 {
         self.addr
+    }
+
+    pub fn address_range(&self) -> std::ops::Range<u64> {
+        self.addr..self.addr + self.size
     }
 
     pub fn set_address(mut self, addr: u64) -> Self {

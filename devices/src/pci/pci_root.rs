@@ -7,16 +7,16 @@ use std::convert::TryInto;
 use std::ops::Bound::Included;
 use std::sync::{Arc, Weak};
 
-use base::{error, Event, RawDescriptor};
+use base::{error, RawDescriptor, SendTube, VmEventType};
 use sync::Mutex;
 
 use crate::pci::pci_configuration::{
     PciBarConfiguration, PciBridgeSubclass, PciClassCode, PciConfiguration, PciHeaderType,
     HEADER_TYPE_MULTIFUNCTION_MASK, HEADER_TYPE_REG,
 };
-use crate::pci::pci_device::{Error, PciDevice};
+use crate::pci::pci_device::{Error, PciBus, PciDevice};
 use crate::pci::{PciAddress, PciId, PCI_VENDOR_ID_INTEL};
-use crate::{Bus, BusAccessInfo, BusDevice, BusType};
+use crate::{Bus, BusAccessInfo, BusDevice, BusType, DeviceId};
 use resources::SystemAllocator;
 
 // A PciDevice that holds the root hub's configuration.
@@ -63,6 +63,8 @@ pub struct PciRoot {
     mmio_bus: Weak<Bus>,
     /// IO bus (x86 only - for non-x86 platforms, this is just an empty Bus).
     io_bus: Weak<Bus>,
+    /// Root pci bus (bus 0)
+    root_bus: Arc<Mutex<PciBus>>,
     /// Bus configuration for the root device.
     root_configuration: PciRootConfiguration,
     /// Devices attached to this bridge.
@@ -76,10 +78,11 @@ const PCIE_XBAR_BASE_ADDR: usize = 24;
 
 impl PciRoot {
     /// Create an empty PCI root bus.
-    pub fn new(mmio_bus: Weak<Bus>, io_bus: Weak<Bus>) -> Self {
+    pub fn new(mmio_bus: Weak<Bus>, io_bus: Weak<Bus>, root_bus: Arc<Mutex<PciBus>>) -> Self {
         PciRoot {
             mmio_bus,
             io_bus,
+            root_bus,
             root_configuration: PciRootConfiguration {
                 config: PciConfiguration::new(
                     PCI_VENDOR_ID_INTEL,
@@ -108,6 +111,16 @@ impl PciRoot {
         // Ignore attempt to replace PCI Root host bridge.
         if !address.is_root() {
             self.devices.insert(address, device);
+        }
+
+        if let Err(e) = self.root_bus.lock().add_child_device(address) {
+            error!("add device error: {}", e);
+        }
+    }
+
+    pub fn add_bridge(&mut self, bridge_bus: Arc<Mutex<PciBus>>) {
+        if let Err(e) = self.root_bus.lock().add_child_bus(bridge_bus) {
+            error!("add bridge error: {}", e);
         }
     }
 
@@ -248,18 +261,18 @@ pub struct PciConfigIo {
     pci_root: Arc<Mutex<PciRoot>>,
     /// Current address to read/write from (0xcf8 register, litte endian).
     config_address: u32,
-    /// Event to signal that the quest requested reset via writing to 0xcf9 register.
-    reset_evt: Event,
+    /// Tube to signal that the guest requested reset via writing to 0xcf9 register.
+    reset_evt_wrtube: SendTube,
 }
 
 impl PciConfigIo {
     const REGISTER_BITS_NUM: usize = 8;
 
-    pub fn new(pci_root: Arc<Mutex<PciRoot>>, reset_evt: Event) -> Self {
+    pub fn new(pci_root: Arc<Mutex<PciRoot>>, reset_evt_wrtube: SendTube) -> Self {
         PciConfigIo {
             pci_root,
             config_address: 0,
-            reset_evt,
+            reset_evt_wrtube,
         }
     }
 
@@ -314,7 +327,7 @@ impl BusDevice for PciConfigIo {
         format!("pci config io-port 0x{:03x}", self.config_address)
     }
 
-    fn device_id(&self) -> u32 {
+    fn device_id(&self) -> DeviceId {
         PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
     }
 
@@ -344,7 +357,10 @@ impl BusDevice for PciConfigIo {
         // `offset` is relative to 0xcf8
         match info.offset {
             _o @ 1 if data.len() == 1 && data[0] & PCI_RESET_CPU_BIT != 0 => {
-                if let Err(e) = self.reset_evt.write(1) {
+                if let Err(e) = self
+                    .reset_evt_wrtube
+                    .send::<VmEventType>(&VmEventType::Reset)
+                {
                     error!("failed to trigger PCI 0xcf9 reset event: {}", e);
                 }
             }
@@ -391,7 +407,7 @@ impl BusDevice for PciConfigMmio {
         "pci config mmio".to_owned()
     }
 
-    fn device_id(&self) -> u32 {
+    fn device_id(&self) -> DeviceId {
         PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
     }
 
@@ -448,7 +464,7 @@ impl BusDevice for PciVirtualConfigMmio {
         "pci virtual config mmio".to_owned()
     }
 
-    fn device_id(&self) -> u32 {
+    fn device_id(&self) -> DeviceId {
         PciId::new(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82441).into()
     }
 

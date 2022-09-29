@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! Linux VFIO (Virtual Function I/O) bindings.
+//!
+//! <https://www.kernel.org/doc/html/latest/driver-api/vfio.html>
+
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -44,12 +48,6 @@ ioctl_io_nr!(
     PLAT_IRQ_FORWARD_SET,
     PLAT_IRQ_FORWARD_TYPE,
     PLAT_IRQ_FORWARD_BASE
-);
-
-ioctl_io_nr!(
-    PLAT_IRQ_WAKE_SET,
-    PLAT_IRQ_FORWARD_TYPE,
-    PLAT_IRQ_FORWARD_BASE + 1
 );
 
 ioctl_io_nr!(

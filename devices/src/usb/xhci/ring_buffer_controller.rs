@@ -10,7 +10,7 @@ use std::sync::{Arc, MutexGuard};
 use sync::Mutex;
 
 use anyhow::Context;
-use base::{error, Error as SysError, Event, WatchingEvents};
+use base::{error, Error as SysError, Event, EventType};
 use remain::sorted;
 use thiserror::Error;
 use vm_memory::{GuestAddress, GuestMemory};
@@ -107,7 +107,7 @@ where
         event_loop
             .add_event(
                 &controller.event,
-                WatchingEvents::empty().set_read(),
+                EventType::Read,
                 Arc::downgrade(&event_handler),
             )
             .map_err(Error::AddEvent)?;
@@ -167,7 +167,7 @@ where
 {
     fn drop(&mut self) {
         // Remove self from the event loop.
-        if let Err(e) = self.event_loop.remove_event_for_fd(&self.event) {
+        if let Err(e) = self.event_loop.remove_event_for_descriptor(&self.event) {
             error!(
                 "cannot remove ring buffer controller from event loop: {}",
                 e

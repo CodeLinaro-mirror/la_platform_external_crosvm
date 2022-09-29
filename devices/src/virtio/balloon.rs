@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod sys;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,8 +22,8 @@ use data_model::{DataInit, Le16, Le32, Le64};
 use vm_memory::{GuestAddress, GuestMemory};
 
 use super::{
-    async_utils, copy_config, descriptor_utils, DescriptorChain, Interrupt, Queue, Reader,
-    SignalableInterrupt, VirtioDevice, TYPE_BALLOON,
+    async_utils, copy_config, descriptor_utils, DescriptorChain, DeviceType, Interrupt, Queue,
+    Reader, SignalableInterrupt, VirtioDevice,
 };
 use crate::{UnpinRequest, UnpinResponse};
 
@@ -137,12 +139,6 @@ const VIRTIO_BALLOON_EVENT_PUFF_FAILURE: u32 = 2;
 #[derive(Copy, Clone, Default)]
 struct virtio_balloon_event_header {
     evt_type: Le32,
-}
-
-fn send_adjusted_response(tube: &Tube, num_pages: u32) -> std::result::Result<(), base::TubeError> {
-    let num_bytes = (num_pages as u64) << VIRTIO_BALLOON_PFN_SHIFT;
-    let result = BalloonTubeResult::Adjusted { num_bytes };
-    tube.send(&result)
 }
 
 // Safe because it only has data and has no implicit padding.
@@ -287,7 +283,7 @@ async fn handle_stats_queue(
     mut queue: Queue,
     mut queue_event: EventAsync,
     mut stats_rx: mpsc::Receiver<u64>,
-    command_tube: &Tube,
+    command_tube: &AsyncTube,
     state: Arc<AsyncMutex<BalloonState>>,
     interrupt: Rc<RefCell<Interrupt>>,
 ) {
@@ -337,7 +333,8 @@ async fn handle_stats_queue(
             stats,
             id,
         };
-        if let Err(e) = command_tube.send(&result) {
+        let send_result = command_tube.send(result).await;
+        if let Err(e) = send_result {
             error!("failed to send stats result: {}", e);
         }
     }
@@ -347,7 +344,7 @@ async fn handle_event(
     state: Arc<AsyncMutex<BalloonState>>,
     interrupt: Rc<RefCell<Interrupt>>,
     r: &mut Reader,
-    command_tube: &Tube,
+    command_tube: &AsyncTube,
 ) -> Result<()> {
     match r.read_obj::<virtio_balloon_event_header>() {
         Ok(hdr) => match hdr.evt_type.to_native() {
@@ -361,7 +358,8 @@ async fn handle_event(
                     interrupt.borrow().signal_config_changed();
 
                     state.failable_update = false;
-                    return send_adjusted_response(command_tube, state.actual_pages)
+                    return sys::send_adjusted_response_async(command_tube, state.actual_pages)
+                        .await
                         .map_err(BalloonError::SendResponse);
                 }
             }
@@ -381,7 +379,7 @@ async fn handle_events_queue(
     mut queue_event: EventAsync,
     state: Arc<AsyncMutex<BalloonState>>,
     interrupt: Rc<RefCell<Interrupt>>,
-    command_tube: &Tube,
+    command_tube: &AsyncTube,
 ) -> Result<()> {
     loop {
         let avail_desc = queue
@@ -424,7 +422,7 @@ async fn handle_command_tube(
 
                     if allow_failure {
                         if num_pages == state.actual_pages {
-                            send_adjusted_response(command_tube, num_pages)
+                            sys::send_adjusted_response(command_tube, num_pages)
                                 .map_err(BalloonError::SendResponse)?;
                         } else {
                             state.failable_update = true;
@@ -450,6 +448,7 @@ fn run_worker(
     mut queue_evts: Vec<Event>,
     mut queues: Vec<Queue>,
     command_tube: Tube,
+    #[cfg(windows)] dynamic_mapping_tube: Tube,
     inflate_tube: Option<Tube>,
     interrupt: Interrupt,
     kill_evt: Event,
@@ -474,9 +473,14 @@ fn run_worker(
             &inflate_tube,
             interrupt.clone(),
             |guest_address, len| {
-                if let Err(e) = mem.remove_range(guest_address, len) {
-                    warn!("Marking pages unused failed: {}, addr={}", e, guest_address);
-                }
+                sys::free_memory(
+                    &guest_address,
+                    len,
+                    #[cfg(windows)]
+                    dynamic_mapping_tube,
+                    #[cfg(unix)]
+                    &mem,
+                )
             },
         );
         pin_mut!(inflate);
@@ -490,7 +494,14 @@ fn run_worker(
             deflate_event,
             &None,
             interrupt.clone(),
-            |_, _| {}, // Ignore these.
+            |guest_address, len| {
+                sys::reclaim_memory(
+                    &guest_address,
+                    len,
+                    #[cfg(windows)]
+                    dynamic_mapping_tube,
+                )
+            },
         );
         pin_mut!(deflate);
 
@@ -557,6 +568,8 @@ fn run_worker(
 /// Virtio device for memory balloon inflation/deflation.
 pub struct Balloon {
     command_tube: Tube,
+    #[cfg(windows)]
+    dynamic_mapping_tube: Option<Tube>,
     inflate_tube: Option<Tube>,
     state: Arc<AsyncMutex<BalloonState>>,
     features: u64,
@@ -583,6 +596,7 @@ impl Balloon {
     pub fn new(
         base_features: u64,
         command_tube: Tube,
+        #[cfg(windows)] dynamic_mapping_tube: Tube,
         inflate_tube: Option<Tube>,
         init_balloon_size: u64,
         mode: BalloonMode,
@@ -599,6 +613,8 @@ impl Balloon {
 
         Ok(Balloon {
             command_tube,
+            #[cfg(windows)]
+            dynamic_mapping_tube: Some(dynamic_mapping_tube),
             inflate_tube,
             state: Arc::new(AsyncMutex::new(BalloonState {
                 num_pages: (init_balloon_size >> VIRTIO_BALLOON_PFN_SHIFT) as u32,
@@ -647,8 +663,8 @@ impl VirtioDevice for Balloon {
         rds
     }
 
-    fn device_type(&self) -> u32 {
-        TYPE_BALLOON
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Balloon
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
@@ -662,15 +678,8 @@ impl VirtioDevice for Balloon {
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         let mut config = self.get_config();
         copy_config(config.as_mut_slice(), offset, data, 0);
-        let mut state = block_on(self.state.lock());
-        state.actual_pages = config.actual.to_native();
 
-        if state.failable_update && state.actual_pages == state.num_pages {
-            state.failable_update = false;
-            if let Err(e) = send_adjusted_response(&self.command_tube, state.num_pages) {
-                error!("Failed to send response {:?}", e);
-            }
-        }
+        sys::send_adjusted_response_if_needed(&self.state, &self.command_tube, config);
     }
 
     fn features(&self) -> u64 {
@@ -707,6 +716,7 @@ impl VirtioDevice for Balloon {
         self.kill_evt = Some(self_kill_evt);
 
         let state = self.state.clone();
+
         #[allow(deprecated)]
         let command_tube = match self.command_tube.try_clone() {
             Ok(tube) => tube,
@@ -715,6 +725,8 @@ impl VirtioDevice for Balloon {
                 return;
             }
         };
+        #[cfg(windows)]
+        let mapping_tube = self.dynamic_mapping_tube.take().unwrap();
         let inflate_tube = self.inflate_tube.take();
         let worker_result = thread::Builder::new()
             .name("virtio_balloon".to_string())
@@ -723,6 +735,8 @@ impl VirtioDevice for Balloon {
                     queue_evts,
                     queues,
                     command_tube,
+                    #[cfg(windows)]
+                    mapping_tube,
                     inflate_tube,
                     interrupt,
                     kill_evt,

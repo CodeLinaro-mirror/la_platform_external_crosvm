@@ -2,11 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! Bindings for the ChromeOS `powerd` D-Bus API.
+//!
+//! <https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/power_manager/README.md>
+
 use std::error::Error;
-use std::os::unix::io::RawFd;
+
+use base::RawDescriptor;
 
 pub trait PowerMonitor {
-    fn poll_fd(&self) -> RawFd;
+    fn poll_fd(&self) -> RawDescriptor;
     fn read_message(&mut self) -> std::result::Result<Option<PowerData>, Box<dyn Error>>;
 }
 

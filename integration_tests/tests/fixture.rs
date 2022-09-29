@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use libc::O_DIRECT;
 use std::ffi::CString;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::str::from_utf8;
 use std::sync::mpsc::sync_channel;
 use std::sync::Once;
 use std::thread;
@@ -18,6 +18,7 @@ use std::{env, process::Child};
 
 use anyhow::{anyhow, Result};
 use base::syslog;
+use libc::O_DIRECT;
 use tempfile::TempDir;
 
 const PREBUILT_URL: &str = "https://storage.googleapis.com/chromeos-localmirror/distfiles";
@@ -79,18 +80,29 @@ fn rootfs_path() -> PathBuf {
 
 /// The crosvm binary is expected to be alongside to the integration tests
 /// binary. Alternatively in the parent directory (cargo will put the
-/// test binary in target/debug/deps/ but the crosvm binary in target/debug).
+/// test binary in target/debug/deps/ but the crosvm binary in target/debug)
 fn find_crosvm_binary() -> PathBuf {
+    cfg_if::cfg_if! {
+        if #[cfg(features="direct")] {
+            let binary_name = "crosvm-direct";
+        } else {
+            let binary_name = "crosvm";
+        }
+    }
+
     let exe_dir = env::current_exe().unwrap().parent().unwrap().to_path_buf();
-    let first = exe_dir.join("crosvm");
+    let first = exe_dir.join(binary_name);
     if first.exists() {
         return first;
     }
-    let second = exe_dir.parent().unwrap().join("crosvm");
+    let second = exe_dir.parent().unwrap().join(binary_name);
     if second.exists() {
         return second;
     }
-    panic!("Cannot find ./crosvm or ../crosvm alongside test binary.");
+    panic!(
+        "Cannot find {} in ./ or ../ alongside test binary.",
+        binary_name
+    );
 }
 
 /// Safe wrapper for libc::mkfifo
@@ -141,17 +153,33 @@ fn download_file(url: &str, destination: &Path) -> Result<()> {
     }
 }
 
-fn crosvm_command(command: &str, args: &[&str]) -> Result<()> {
-    println!("$ crosvm {} {:?}", command, &args.join(" "));
-    let status = Command::new(find_crosvm_binary())
-        .arg(command)
-        .args(args)
-        .status()?;
+/// Configuration to start `TestVm`.
+#[derive(Default)]
+pub struct Config {
+    /// Extra arguments for the `run` subcommand.
+    extra_args: Vec<String>,
 
-    if !status.success() {
-        Err(anyhow!("Command failed with exit code {}", status))
-    } else {
-        Ok(())
+    /// Use `O_DIRECT` for the rootfs.
+    o_direct: bool,
+}
+
+impl Config {
+    /// Creates a new `run` command with `extra_args`.
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Uses extra arguments for `crosvm run`.
+    #[allow(dead_code)]
+    pub fn extra_args(mut self, args: Vec<String>) -> Self {
+        self.extra_args = args;
+        self
+    }
+
+    /// Uses `O_DIRECT` for the rootfs.
+    pub fn o_direct(mut self) -> Self {
+        self.o_direct = true;
+        self
     }
 }
 
@@ -166,8 +194,7 @@ pub struct TestVm {
     from_guest_reader: BufReader<File>,
     to_guest: File,
     control_socket_path: PathBuf,
-    process: Child,
-    debug: bool,
+    process: Option<Child>, // Use `Option` to allow taking the ownership in `Drop::drop()`.
 }
 
 impl TestVm {
@@ -260,7 +287,7 @@ impl TestVm {
 
     /// Instanciate a new crosvm instance. The first call will trigger the download of prebuilt
     /// files if necessary.
-    pub fn new(additional_arguments: &[&str], debug: bool, o_direct: bool) -> Result<TestVm> {
+    pub fn new(cfg: Config) -> Result<TestVm> {
         static PREP_ONCE: Once = Once::new();
         PREP_ONCE.call_once(TestVm::initialize_once);
 
@@ -277,13 +304,17 @@ impl TestVm {
         command.args(&["run", "--disable-sandbox"]);
         TestVm::configure_serial_devices(&mut command, &from_guest_pipe, &to_guest_pipe);
         command.args(&["--socket", control_socket_path.to_str().unwrap()]);
-        command.args(additional_arguments);
+        command.args(cfg.extra_args);
 
-        TestVm::configure_kernel(&mut command, o_direct);
+        TestVm::configure_kernel(&mut command, cfg.o_direct);
+
+        // Set `Stdio::piped` so we can forward the outputs to stdout later.
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
 
         println!("$ {:?}", command);
 
-        let process = command.spawn()?;
+        let process = Some(command.spawn()?);
 
         // Open pipes. Panic if we cannot connect after a timeout.
         let (to_guest, from_guest) = panic_on_timeout(
@@ -303,7 +334,6 @@ impl TestVm {
             to_guest: to_guest?,
             control_socket_path,
             process,
-            debug,
         })
     }
 
@@ -328,28 +358,68 @@ impl TestVm {
             output.push_str(&line);
         }
         let trimmed = output.trim();
-        if self.debug {
-            println!("<- {:?}", trimmed);
-        }
+        println!("<- {:?}", trimmed);
+
         Ok(trimmed.to_string())
     }
 
+    fn crosvm_command(&self, command: &str) -> Result<()> {
+        let args = [self.control_socket_path.to_str().unwrap()];
+        println!("$ crosvm {} {:?}", command, &args.join(" "));
+
+        let mut cmd = Command::new(find_crosvm_binary());
+        cmd.arg(command).args(args);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let output = cmd.output()?;
+        // Print both the crosvm's stdout/stderr to stdout so that they'll be shown when the test
+        // is failed.
+        println!(
+            "`crosvm {}` stdout:\n{}",
+            command,
+            from_utf8(&output.stdout).unwrap()
+        );
+        println!(
+            "`crosvm {}` stderr:\n{}",
+            command,
+            from_utf8(&output.stderr).unwrap()
+        );
+
+        if !output.status.success() {
+            Err(anyhow!("Command failed with exit code {}", output.status))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn stop(&self) -> Result<()> {
-        crosvm_command("stop", &[self.control_socket_path.to_str().unwrap()])
+        self.crosvm_command("stop")
     }
 
     pub fn suspend(&self) -> Result<()> {
-        crosvm_command("suspend", &[self.control_socket_path.to_str().unwrap()])
+        self.crosvm_command("suspend")
     }
 
     pub fn resume(&self) -> Result<()> {
-        crosvm_command("resume", &[self.control_socket_path.to_str().unwrap()])
+        self.crosvm_command("resume")
     }
 }
 
 impl Drop for TestVm {
     fn drop(&mut self) {
         self.stop().unwrap();
-        self.process.wait().unwrap();
+        let output = self.process.take().unwrap().wait_with_output().unwrap();
+
+        // Print both the crosvm's stdout/stderr to stdout so that they'll be shown when the test
+        // is failed.
+        println!(
+            "TestVm stdout:\n{}",
+            std::str::from_utf8(&output.stdout).unwrap()
+        );
+        println!(
+            "TestVm stderr:\n{}",
+            std::str::from_utf8(&output.stderr).unwrap()
+        );
     }
 }

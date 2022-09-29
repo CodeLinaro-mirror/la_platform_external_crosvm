@@ -2,41 +2,35 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-pub(crate) use base::SharedMemoryUnix as SharedMemorySys;
-
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
-use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::vfio::{VfioDevice, VfioRegionAddr};
-use crate::virtio::interrupt::SignalableInterrupt;
-use crate::virtio::vhost::user::device::handler::{
-    DeviceRequestHandler, Doorbell, GuestAddress, HandlerType, MappingInfo, MemoryRegion,
-    VhostUserBackend,
-};
-use crate::virtio::vhost::user::device::vvu::{
-    device::VvuDevice,
-    doorbell::DoorbellRegion,
-    pci::{VvuPciCaps, VvuPciDevice},
-};
-
-use anyhow::{anyhow, bail};
-use anyhow::{Context, Result};
-use base::{
-    clear_fd_flags, error, info, AsRawDescriptor, Event, SafeDescriptor, UnlinkUnixListener,
-};
+use anyhow::{bail, Context, Result};
+use base::{clear_fd_flags, error, info, AsRawDescriptor, Event, SafeDescriptor};
 use cros_async::{AsyncWrapper, Executor};
 use vm_memory::GuestMemory;
 use vmm_vhost::{
     connection::{
+        socket::{Endpoint as SocketEndpoint, Listener as SocketListener},
         vfio::{Endpoint as VfioEndpoint, Listener as VfioListener},
         Endpoint,
     },
     message::{MasterReq, VhostUserMemoryRegion},
     Error as VhostError, Protocol, Result as VhostResult, SlaveListener, SlaveReqHandler,
     VhostUserSlaveReqHandler,
+};
+
+use crate::vfio::{VfioDevice, VfioRegionAddr};
+use crate::virtio::interrupt::SignalableInterrupt;
+use crate::virtio::vhost::user::device::handler::{
+    DeviceRequestHandler, Doorbell, GuestAddress, HandlerType, MappingInfo, MemoryRegion,
+};
+use crate::virtio::vhost::user::device::vvu::{
+    device::VvuDevice,
+    doorbell::DoorbellRegion,
+    pci::{VvuPciCaps, VvuPciDevice},
 };
 
 pub(crate) enum HandlerTypeSys {
@@ -161,18 +155,8 @@ pub(in crate::virtio::vhost::user::device::handler) fn system_create_doorbell(
             caps,
             ..
         } => {
-            let base = caps.doorbell_base_addr();
-            let addr = VfioRegionAddr {
-                index: base.index,
-                addr: base.addr + (index as u64 * caps.doorbell_off_multiplier() as u64),
-            };
-            Ok(Doorbell::SystemDoorbell(DoorbellSys::Vfio(
-                DoorbellRegion {
-                    vfio: Arc::clone(device),
-                    index,
-                    addr,
-                },
-            )))
+            let doorbell = DoorbellRegion::new(index as u8, device, caps)?;
+            Ok(Doorbell::SystemDoorbell(DoorbellSys::Vfio(doorbell)))
         }
     }
 }
@@ -255,37 +239,47 @@ where
     }
 }
 
-impl<B> DeviceRequestHandler<B>
-where
-    B: 'static + VhostUserBackend,
-{
+impl DeviceRequestHandler {
     /// Creates a listening socket at `socket` and handles incoming messages from the VMM, which are
     /// dispatched to the device backend via the `VhostUserBackend` trait methods.
     pub async fn run<P: AsRef<Path>>(self, socket: P, ex: &Executor) -> Result<()> {
-        let listener = UnixListener::bind(socket)
-            .map(UnlinkUnixListener)
-            .context("failed to create a UNIX domain socket listener")?;
-        return self.run_with_listener(listener, ex).await;
+        let listener = SocketListener::new(socket, true /* unlink */)
+            .context("failed to create a socket listener")?;
+        self.run_with_listener::<SocketEndpoint<_>>(listener, ex)
+            .await
     }
 
     /// Attaches to an already bound socket via `listener` and handles incoming messages from the
     /// VMM, which are dispatched to the device backend via the `VhostUserBackend` trait methods.
-    pub async fn run_with_listener(
-        self,
-        listener: UnlinkUnixListener,
-        ex: &Executor,
-    ) -> Result<()> {
-        let (socket, _) = ex
-            .spawn_blocking(move || {
-                listener
-                    .accept()
-                    .context("failed to accept an incoming connection")
-            })
-            .await?;
-        let req_handler =
-            SlaveReqHandler::from_stream(socket, Arc::new(std::sync::Mutex::new(self)));
+    pub async fn run_with_listener<E>(self, listener: E::Listener, ex: &Executor) -> Result<()>
+    where
+        E: Endpoint<MasterReq> + AsRawDescriptor,
+        E::Listener: AsRawDescriptor,
+    {
+        let mut listener = SlaveListener::<E, _>::new(listener, std::sync::Mutex::new(self))?;
+        listener.set_nonblocking(true)?;
 
-        run_handler(req_handler, ex).await
+        loop {
+            // If the listener is not ready on the first call to `accept` and returns `None`, we
+            // temporarily convert it into an async I/O source and yield until it signals there is
+            // input data awaiting, before trying again.
+            match listener
+                .accept()
+                .context("failed to accept an incoming connection")?
+            {
+                Some(req_handler) => return run_handler(req_handler, ex).await,
+                None => {
+                    // Nobody is on the other end yet, wait until we get a connection.
+                    let async_waiter = ex
+                        .async_from_local(AsyncWrapper::new(listener))
+                        .context("failed to create async waiter")?;
+                    async_waiter.wait_readable().await?;
+
+                    // Retrieve the listener back so we can use it again.
+                    listener = async_waiter.into_source().into_inner();
+                }
+            }
+        }
     }
 
     /// Starts listening virtio-vhost-user device with VFIO to handle incoming vhost-user messages
@@ -296,24 +290,10 @@ where
             caps: device.caps.clone(),
             notification_evts: std::mem::take(&mut device.notification_evts),
         });
-        let driver = VvuDevice::new(device);
 
-        let mut listener = VfioListener::new(driver)
-            .map_err(|e| anyhow!("failed to create a VFIO listener: {}", e))
-            .and_then(|l| {
-                SlaveListener::<VfioEndpoint<_, _>, _>::new(
-                    l,
-                    Arc::new(std::sync::Mutex::new(self)),
-                )
-                .map_err(|e| anyhow!("failed to create SlaveListener: {}", e))
-            })?;
-
-        let req_handler = listener
-            .accept()
-            .map_err(|e| anyhow!("failed to accept VFIO connection: {}", e))?
-            .expect("vvu proxy is unavailable via VFIO");
-
-        run_handler(req_handler, ex).await
+        let listener = VfioListener::new(VvuDevice::new(device))?;
+        self.run_with_listener::<VfioEndpoint<_, _>>(listener, ex)
+            .await
     }
 }
 
@@ -378,9 +358,8 @@ mod tests {
         });
 
         // Device side
-        let handler = Arc::new(std::sync::Mutex::new(DeviceRequestHandler::new(
-            FakeBackend::new(),
-        )));
+        let handler =
+            std::sync::Mutex::new(DeviceRequestHandler::new(Box::new(FakeBackend::new())));
         let mut listener = SlaveListener::<SocketEndpoint<_>, _>::new(listener, handler).unwrap();
 
         // Notify listener is ready.

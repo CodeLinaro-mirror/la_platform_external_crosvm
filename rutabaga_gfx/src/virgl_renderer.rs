@@ -9,8 +9,12 @@
 
 use std::cell::RefCell;
 use std::cmp::min;
+use std::convert::TryFrom;
 use std::mem::{size_of, transmute};
 use std::os::raw::{c_char, c_void};
+use std::os::unix::io::AsRawFd;
+use std::panic::catch_unwind;
+use std::process::abort;
 use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,12 +38,52 @@ type Query = virgl_renderer_export_query;
 /// The virtio-gpu backend state tracker which supports accelerated rendering.
 pub struct VirglRenderer {
     // Cookie must be kept alive until VirglRenderer is dropped.
-    _cookie: Box<VirglCookie>,
-    fence_state: Rc<RefCell<FenceState>>,
+    _cookie: Rc<RefCell<VirglCookie>>,
 }
 
 struct VirglRendererContext {
     ctx_id: u32,
+}
+
+fn import_resource(resource: &mut RutabagaResource) {
+    if (resource.import_mask & (1 << (RutabagaComponentType::VirglRenderer as u32))) != 0 {
+        return;
+    }
+
+    if let Some(handle) = &resource.handle {
+        if handle.handle_type == RUTABAGA_MEM_HANDLE_TYPE_DMABUF {
+            // TODO: b/234881451 -- update virgl_renderer and uncomment lines below. Remove
+            // abort() call. The abort call is currently in use since Android isn't using the calls
+            // below.
+            std::process::abort();
+//            if let Ok(dmabuf_fd) = base::clone_descriptor(&handle.os_handle) {
+//                // Safe because we are being passed a valid fd
+//                unsafe {
+//                    let dmabuf_size = libc::lseek64(dmabuf_fd, 0, libc::SEEK_END);
+//                    libc::lseek64(dmabuf_fd, 0, libc::SEEK_SET);
+//                    let args = virgl_renderer_resource_import_blob_args {
+//                        res_handle: resource.resource_id,
+//                        blob_mem: resource.blob_mem,
+//                        fd_type: VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF,
+//                        fd: dmabuf_fd,
+//                        size: dmabuf_size as u64,
+//                    };
+//                    let ret = virgl_renderer_resource_import_blob(&args);
+//                    if ret != 0 {
+//                        // import_blob can fail if we've previously imported this resource,
+//                        // but in any case virglrenderer does not take ownership of the fd
+//                        // in error paths
+//                        //
+//                        // Because of the re-import case we must still fall through to the
+//                        // virgl_renderer_ctx_attach_resource() call.
+//                        libc::close(dmabuf_fd);
+//                        return;
+//                    }
+//                    resource.import_mask |= 1 << (RutabagaComponentType::VirglRenderer as u32);
+//                }
+//            }
+        }
+    }
 }
 
 impl RutabagaContext for VirglRendererContext {
@@ -61,6 +105,8 @@ impl RutabagaContext for VirglRendererContext {
     }
 
     fn attach(&mut self, resource: &mut RutabagaResource) {
+        import_resource(resource);
+
         // The context id and resource id must be valid because the respective instances ensure
         // their lifetime.
         unsafe {
@@ -79,6 +125,18 @@ impl RutabagaContext for VirglRendererContext {
     fn component_type(&self) -> RutabagaComponentType {
         RutabagaComponentType::VirglRenderer
     }
+
+    fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
+        let ret = unsafe {
+            virgl_renderer_context_create_fence(
+                fence.ctx_id,
+                fence.flags,
+                fence.ring_idx as u64,
+                fence.fence_id,
+            )
+        };
+        ret_to_res(ret)
+    }
 }
 
 impl Drop for VirglRendererContext {
@@ -90,14 +148,13 @@ impl Drop for VirglRendererContext {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "arm"))]
 extern "C" fn debug_callback(fmt: *const ::std::os::raw::c_char, ap: stdio::va_list) {
     const BUF_LEN: usize = 256;
     let mut v = [b' '; BUF_LEN];
 
     let printed_len = unsafe {
         let ptr = v.as_mut_ptr() as *mut ::std::os::raw::c_char;
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
         let size = BUF_LEN as ::std::os::raw::c_ulong;
         #[cfg(target_arch = "arm")]
         let size = BUF_LEN as ::std::os::raw::c_uint;
@@ -117,6 +174,28 @@ extern "C" fn debug_callback(fmt: *const ::std::os::raw::c_char, ap: stdio::va_l
     }
 }
 
+/// TODO(ryanneph): re-evaluate if "ring_idx: u8" can be used instead so we can drop this in favor
+/// of the common write_context_fence() from renderer_utils before promoting to
+/// cfg(feature = "virgl_renderer").
+#[cfg(feature = "virgl_renderer_next")]
+extern "C" fn write_context_fence(cookie: *mut c_void, ctx_id: u32, ring_idx: u64, fence_id: u64) {
+    catch_unwind(|| {
+        assert!(!cookie.is_null());
+        let cookie = unsafe { &*(cookie as *mut VirglCookie) };
+
+        // Call fence completion callback
+        if let Some(handler) = &cookie.fence_handler {
+            handler.call(RutabagaFence {
+                flags: RUTABAGA_FLAG_FENCE | RUTABAGA_FLAG_INFO_RING_IDX,
+                fence_id,
+                ctx_id,
+                ring_idx: ring_idx as u8,
+            });
+        }
+    })
+    .unwrap_or_else(|_| abort())
+}
+
 const VIRGL_RENDERER_CALLBACKS: &virgl_renderer_callbacks = &virgl_renderer_callbacks {
     #[cfg(not(feature = "virgl_renderer_next"))]
     version: 1,
@@ -127,7 +206,10 @@ const VIRGL_RENDERER_CALLBACKS: &virgl_renderer_callbacks = &virgl_renderer_call
     destroy_gl_context: None,
     make_current: None,
     get_drm_fd: None,
+    #[cfg(not(feature = "virgl_renderer_next"))]
     write_context_fence: None,
+    #[cfg(feature = "virgl_renderer_next")]
+    write_context_fence: Some(write_context_fence),
     #[cfg(not(feature = "virgl_renderer_next"))]
     get_server_fd: None,
     #[cfg(feature = "virgl_renderer_next")]
@@ -210,36 +292,34 @@ impl VirglRenderer {
             return Err(RutabagaError::AlreadyInUse);
         }
 
-        let fence_state = Rc::new(RefCell::new(FenceState {
-            latest_fence: 0,
-            handler: Some(fence_handler),
+        let fence_state = Rc::new(RefCell::new(FenceState { latest_fence: 0 }));
+
+        // Cookie is intentionally never freed because virglrenderer never gets uninitialized.
+        // Otherwise, Resource and Context would become invalid because their lifetime is not tied
+        // to the Renderer instance. Doing so greatly simplifies the ownership for users of this
+        // library.
+        let cookie = Rc::new(RefCell::new(VirglCookie {
+            fence_state,
+            render_server_fd,
+            fence_handler: Some(fence_handler),
+            use_async_fence_cb: (u32::from(virglrenderer_flags) & VIRGLRENDERER_USE_ASYNC_FENCE_CB)
+                != 0,
         }));
 
-        let mut cookie = Box::new(VirglCookie {
-            fence_state: Rc::clone(&fence_state),
-            render_server_fd,
-        });
-
-        #[cfg(any(target_arch = "arm", target_arch = "x86", target_arch = "x86_64"))]
-        unsafe {
-            virgl_set_debug_callback(Some(debug_callback))
-        };
+        unsafe { virgl_set_debug_callback(Some(debug_callback)) };
 
         // Safe because a valid cookie and set of callbacks is used and the result is checked for
         // error.
         let ret = unsafe {
             virgl_renderer_init(
-                &mut *cookie as *mut _ as *mut c_void,
+                Rc::clone(&cookie).as_ptr() as *mut c_void,
                 virglrenderer_flags.into(),
                 transmute(VIRGL_RENDERER_CALLBACKS),
             )
         };
 
         ret_to_res(ret)?;
-        Ok(Box::new(VirglRenderer {
-            _cookie: cookie,
-            fence_state,
-        }))
+        Ok(Box::new(VirglRenderer { _cookie: cookie }))
     }
 
     #[allow(unused_variables)]
@@ -354,7 +434,22 @@ impl RutabagaComponent for VirglRenderer {
 
     fn poll(&self) -> u32 {
         unsafe { virgl_renderer_poll() };
-        self.fence_state.borrow().latest_fence
+        self._cookie.borrow().fence_state.borrow().latest_fence
+    }
+
+    fn event_poll(&self) {
+        unsafe { virgl_renderer_poll() };
+    }
+
+    fn poll_descriptor(&self) -> Option<SafeDescriptor> {
+        // Safe because it can be called anytime and returns -1 in the event of an error.
+        let fd = unsafe { virgl_renderer_get_poll_fd() };
+        if fd >= 0 {
+            if let Ok(dup_fd) = SafeDescriptor::try_from(&fd as &dyn AsRawFd) {
+                return Some(dup_fd);
+            }
+        }
+        None
     }
 
     fn create_3d(
@@ -392,6 +487,7 @@ impl RutabagaComponent for VirglRenderer {
             info_3d: self.query(resource_id).ok(),
             vulkan_info: None,
             backing_iovecs: None,
+            import_mask: 1 << (RutabagaComponentType::VirglRenderer as u32),
         })
     }
 
@@ -557,6 +653,7 @@ impl RutabagaComponent for VirglRenderer {
                 info_3d: self.query(resource_id).ok(),
                 vulkan_info: None,
                 backing_iovecs: iovec_opt,
+                import_mask: 1 << (RutabagaComponentType::VirglRenderer as u32),
             })
         }
         #[cfg(not(feature = "virgl_renderer_next"))]

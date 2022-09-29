@@ -26,7 +26,7 @@ use hypervisor::{DeviceKind, Vm};
 use once_cell::sync::OnceCell;
 use remain::sorted;
 use resources::address_allocator::AddressAllocator;
-use resources::{Alloc, Error as ResourcesError};
+use resources::{AddressRange, Alloc, Error as ResourcesError};
 use sync::Mutex;
 use thiserror::Error;
 use vfio_sys::*;
@@ -108,6 +108,20 @@ enum KvmVfioGroupOps {
 #[repr(u32)]
 enum IommuType {
     Type1V2 = VFIO_TYPE1v2_IOMMU,
+    // ChromeOS specific vfio_iommu_type1 implementation that is optimized for
+    // small, dynamic mappings. For clients which create large, relatively
+    // static mappings, Type1V2 is still preferred.
+    //
+    // See crrev.com/c/3593528 for the implementation.
+    Type1ChromeOS = 100001,
+}
+
+// Hint as to whether IOMMU mappings will tend to be large and static or
+// small and dynamic.
+#[derive(PartialEq)]
+enum IommuMappingHint {
+    Static,
+    Dynamic,
 }
 
 /// VfioContainer contain multi VfioGroup, and delegate an IOMMU domain table
@@ -132,16 +146,7 @@ impl VfioContainer {
             .open("/dev/vfio/vfio")
             .map_err(VfioError::OpenContainer)?;
 
-        // Safe as file is vfio container descriptor and ioctl is defined by kernel.
-        let version = unsafe { ioctl(&container, VFIO_GET_API_VERSION()) };
-        if version as u8 != VFIO_API_VERSION {
-            return Err(VfioError::VfioApiVersion);
-        }
-
-        Ok(VfioContainer {
-            container,
-            groups: HashMap::new(),
-        })
+        Self::new_from_container(container)
     }
 
     // Construct a VfioContainer from an exist container file.
@@ -237,7 +242,7 @@ impl VfioContainer {
         Ok(iommu_info.iova_pgsizes)
     }
 
-    pub fn vfio_iommu_iova_get_iova_ranges(&self) -> Result<Vec<vfio_iova_range>> {
+    pub fn vfio_iommu_iova_get_iova_ranges(&self) -> Result<Vec<AddressRange>> {
         // Query the buffer size needed fetch the capabilities.
         let mut iommu_info_argsz = vfio_iommu_type1_info {
             argsz: mem::size_of::<vfio_iommu_type1_info>() as u32,
@@ -298,7 +303,13 @@ impl VfioContainer {
                         range_offset + i as usize * mem::size_of::<vfio_iova_range>(),
                     ));
                 }
-                return Ok(ret);
+                return Ok(ret
+                    .iter()
+                    .map(|range| AddressRange {
+                        start: range.start,
+                        end: range.end,
+                    })
+                    .collect());
             }
             offset = header.next as usize;
         }
@@ -306,7 +317,15 @@ impl VfioContainer {
         Err(VfioError::IommuGetCapInfo)
     }
 
-    fn init_vfio_iommu(&mut self) -> Result<()> {
+    fn init_vfio_iommu(&mut self, hint: IommuMappingHint) -> Result<()> {
+        // If we expect granular, dynamic mappings (i.e. viommu/coiommu), try the
+        // ChromeOS Type1ChromeOS first, then fall back to upstream versions.
+        if hint == IommuMappingHint::Dynamic {
+            if self.set_iommu(IommuType::Type1ChromeOS) == 0 {
+                return Ok(());
+            }
+        }
+
         if !self.check_extension(IommuType::Type1V2) {
             return Err(VfioError::VfioType1V2);
         }
@@ -329,9 +348,16 @@ impl VfioContainer {
             None => {
                 let group = Arc::new(Mutex::new(VfioGroup::new(self, id)?));
                 if self.groups.is_empty() {
-                    // Before the first group is added into container, do once per
-                    // container initialization.
-                    self.init_vfio_iommu()?;
+                    // Before the first group is added into container, do once per container
+                    // initialization. Both coiommu and virtio-iommu rely on small, dynamic
+                    // mappings. However, if an iommu is not enabled, then we map the entirety
+                    // of guest memory as a small number of large, static mappings.
+                    let mapping_hint = if iommu_enabled {
+                        IommuMappingHint::Dynamic
+                    } else {
+                        IommuMappingHint::Static
+                    };
+                    self.init_vfio_iommu(mapping_hint)?;
 
                     if !iommu_enabled {
                         vm.get_memory().with_regions(
@@ -373,7 +399,7 @@ impl VfioContainer {
                 if self.groups.is_empty() {
                     // Before the first group is added into container, do once per
                     // container initialization.
-                    self.init_vfio_iommu()?;
+                    self.init_vfio_iommu(IommuMappingHint::Static)?;
                 }
 
                 self.groups.insert(id, group.clone());
@@ -407,13 +433,18 @@ impl VfioContainer {
         }
     }
 
-    pub fn into_raw_descriptor(&self) -> Result<RawDescriptor> {
+    pub fn clone_as_raw_descriptor(&self) -> Result<RawDescriptor> {
         let raw_descriptor = unsafe { libc::dup(self.container.as_raw_descriptor()) };
         if raw_descriptor < 0 {
             Err(VfioError::ContainerDupError)
         } else {
             Ok(raw_descriptor)
         }
+    }
+
+    // Gets group ids for all groups in the container.
+    pub fn group_ids(&self) -> Vec<&u32> {
+        self.groups.keys().collect()
     }
 }
 
@@ -508,7 +539,7 @@ impl VfioGroup {
             },
         };
 
-        // Safe as we are the owner of vfio_dev_fd and vfio_dev_attr which are valid value,
+        // Safe as we are the owner of vfio_dev_descriptor and vfio_dev_attr which are valid value,
         // and we verify the return value.
         if 0 != unsafe {
             ioctl_with_ref(
@@ -533,7 +564,7 @@ impl VfioGroup {
             return Err(VfioError::GroupGetDeviceFD(get_error()));
         }
 
-        // Safe as ret is valid FD
+        // Safe as ret is valid descriptor
         Ok(unsafe { File::from_raw_descriptor(ret) })
     }
 
@@ -618,6 +649,7 @@ impl VfioCommonTrait for VfioCommonSetup {
                 let group_id = VfioGroup::get_group_id(path)?;
 
                 // One VFIO container is used for all devices belong to one VFIO group
+                // NOTE: vfio_wrapper relies on each container containing exactly one group.
                 IOMMU_CONTAINERS.with(|v| {
                     if let Some(ref mut containers) = *v.borrow_mut() {
                         let container = containers
@@ -731,11 +763,7 @@ impl VfioDevice {
         group.lock().add_device_num();
         let group_descriptor = group.lock().as_raw_descriptor();
 
-        let iova_ranges = container
-            .lock()
-            .vfio_iommu_iova_get_iova_ranges()?
-            .into_iter()
-            .map(|r| std::ops::RangeInclusive::new(r.start, r.end));
+        let iova_ranges = container.lock().vfio_iommu_iova_get_iova_ranges()?;
         let iova_alloc = AddressAllocator::new_from_list(iova_ranges, None, None)
             .map_err(VfioError::Resources)?;
 
@@ -780,11 +808,7 @@ impl VfioDevice {
         group.lock().add_device_num();
         let group_descriptor = group.lock().as_raw_descriptor();
 
-        let iova_ranges = container
-            .lock()
-            .vfio_iommu_iova_get_iova_ranges()?
-            .into_iter()
-            .map(|r| std::ops::RangeInclusive::new(r.start, r.end));
+        let iova_ranges = container.lock().vfio_iommu_iova_get_iova_ranges()?;
         let iova_alloc = AddressAllocator::new_from_list(iova_ranges, None, None)
             .map_err(VfioError::Resources)?;
 
@@ -1138,7 +1162,7 @@ impl VfioDevice {
                         cap_info = Some((cap_type_info.type_, cap_type_info.subtype));
                     } else if cap_header.id as u32 == VFIO_REGION_INFO_CAP_MSIX_MAPPABLE {
                         mmaps.push(vfio_region_sparse_mmap_area {
-                            offset: region_with_cap[0].region_info.offset,
+                            offset: 0,
                             size: region_with_cap[0].region_info.size,
                         });
                     }

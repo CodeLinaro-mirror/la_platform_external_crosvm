@@ -88,7 +88,15 @@ impl<D: Device> ListenerTrait for Listener<D> {
     }
 
     fn set_nonblocking(&self, _block: bool) -> Result<()> {
-        unimplemented!("set_nonblocking");
+        // `accept` will never block on a VFIO connection.
+        Ok(())
+    }
+}
+
+impl<D: Device> AsRawDescriptor for Listener<D> {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        // `Listener::accept` cannot return `None` so this method won't ever be called.
+        unreachable!()
     }
 }
 

@@ -12,14 +12,17 @@ use std::{
     ptr::{copy_nonoverlapping, null_mut, read_unaligned, write_unaligned},
 };
 
-use crate::external_mapping::ExternalMapping;
-use crate::AsRawDescriptor;
-use libc::{
-    c_int, c_void, read, write, {self},
+use log::warn;
+
+use crate::{
+    external_mapping::ExternalMapping, AsRawDescriptor, Descriptor,
+    MemoryMapping as CrateMemoryMapping, MemoryMappingBuilder, RawDescriptor, SafeDescriptor,
 };
+use libc::{self, c_int, c_void, read, write};
 use remain::sorted;
 
 use data_model::{volatile_memory::*, DataInit};
+use serde::{Deserialize, Serialize};
 
 use super::{pagesize, Error as ErrnoError};
 
@@ -50,7 +53,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Memory access type for anonymous shared memory mapping.
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
 pub struct Protection(c_int);
 impl Protection {
     /// Returns Protection allowing no access.
@@ -344,7 +347,7 @@ impl MemoryMapping {
     ///
     /// This function should not be called before the caller unmaps any mmap'd regions already
     /// present at `(addr..addr+size)`.
-    pub unsafe fn from_fd_offset_protection_fixed(
+    pub unsafe fn from_descriptor_offset_protection_fixed(
         addr: *mut u8,
         fd: &dyn AsRawDescriptor,
         size: usize,
@@ -696,7 +699,35 @@ impl MemoryMapping {
             )
         };
         if ret < 0 {
-            Err(Error::InvalidRange(mem_offset, count, self.size()))
+            Err(Error::SystemCallFailed(super::Error::last()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Disable host swap for this mapping.
+    pub fn lock_all(&self) -> Result<()> {
+        let ret = unsafe {
+            // Safe because MLOCK_ONFAULT only affects the swap behavior of the kernel, so it
+            // has no impact on rust semantics.
+            // TODO(raging): use the explicit declaration of mlock2, which was being merged
+            // as of when the call below was being worked on.
+            libc::syscall(
+                libc::SYS_mlock2,
+                (self.addr as usize) as *const libc::c_void,
+                self.size(),
+                libc::MLOCK_ONFAULT,
+            )
+        };
+        if ret < 0 {
+            let errno = super::Error::last();
+            warn!(
+                "failed to mlock at {:#x} with length {}: {}",
+                (self.addr as usize) as u64,
+                self.size(),
+                errno,
+            );
+            Err(Error::SystemCallFailed(errno))
         } else {
             Ok(())
         }
@@ -873,7 +904,7 @@ impl MemoryMappingArena {
         // This is safe since the range has been validated.
         let mmap = unsafe {
             match fd {
-                Some((fd, fd_offset)) => MemoryMapping::from_fd_offset_protection_fixed(
+                Some((fd, fd_offset)) => MemoryMapping::from_descriptor_offset_protection_fixed(
                     self.addr.add(offset),
                     fd,
                     size,
@@ -939,6 +970,12 @@ impl From<MemoryMapping> for MemoryMappingArena {
     }
 }
 
+impl From<CrateMemoryMapping> for MemoryMappingArena {
+    fn from(mmap: CrateMemoryMapping) -> Self {
+        MemoryMappingArena::from(mmap.mapping)
+    }
+}
+
 impl Drop for MemoryMappingArena {
     fn drop(&mut self) {
         // This is safe because we own this memory range, and nobody else is holding a reference to
@@ -946,6 +983,127 @@ impl Drop for MemoryMappingArena {
         unsafe {
             libc::munmap(self.addr as *mut libc::c_void, self.size);
         }
+    }
+}
+
+impl CrateMemoryMapping {
+    pub fn use_hugepages(&self) -> Result<()> {
+        self.mapping.use_hugepages()
+    }
+
+    pub fn read_to_memory(
+        &self,
+        mem_offset: usize,
+        src: &dyn AsRawDescriptor,
+        count: usize,
+    ) -> Result<()> {
+        self.mapping.read_to_memory(mem_offset, src, count)
+    }
+
+    pub fn write_from_memory(
+        &self,
+        mem_offset: usize,
+        dst: &dyn AsRawDescriptor,
+        count: usize,
+    ) -> Result<()> {
+        self.mapping.write_from_memory(mem_offset, dst, count)
+    }
+
+    pub fn from_raw_ptr(addr: RawDescriptor, size: usize) -> Result<CrateMemoryMapping> {
+        return MemoryMapping::from_fd_offset(&Descriptor(addr), size, 0).map(|mapping| {
+            CrateMemoryMapping {
+                mapping,
+                _file_descriptor: None,
+            }
+        });
+    }
+}
+
+pub trait Unix {
+    /// Remove the specified range from the mapping.
+    fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()>;
+    /// Disable host swap for this mapping.
+    fn lock_all(&self) -> Result<()>;
+}
+
+impl Unix for CrateMemoryMapping {
+    fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()> {
+        self.mapping.remove_range(mem_offset, count)
+    }
+    fn lock_all(&self) -> Result<()> {
+        self.mapping.lock_all()
+    }
+}
+
+pub trait MemoryMappingBuilderUnix<'a> {
+    #[allow(clippy::wrong_self_convention)]
+    fn from_descriptor(self, descriptor: &'a dyn AsRawDescriptor) -> MemoryMappingBuilder;
+}
+
+impl<'a> MemoryMappingBuilderUnix<'a> for MemoryMappingBuilder<'a> {
+    /// Build the memory mapping given the specified descriptor to mapped memory
+    ///
+    /// Default: Create a new memory mapping.
+    #[allow(clippy::wrong_self_convention)]
+    fn from_descriptor(mut self, descriptor: &'a dyn AsRawDescriptor) -> MemoryMappingBuilder {
+        self.descriptor = Some(descriptor);
+        self
+    }
+}
+
+impl<'a> MemoryMappingBuilder<'a> {
+    /// Request that the mapped pages are pre-populated
+    ///
+    /// Default: Do not populate
+    pub fn populate(mut self) -> MemoryMappingBuilder<'a> {
+        self.populate = true;
+        self
+    }
+
+    /// Build a MemoryMapping from the provided options.
+    pub fn build(self) -> Result<CrateMemoryMapping> {
+        match self.descriptor {
+            None => {
+                if self.populate {
+                    // Population not supported for new mmaps
+                    return Err(Error::InvalidArgument);
+                }
+                MemoryMappingBuilder::wrap(
+                    MemoryMapping::new_protection(
+                        self.size,
+                        self.protection.unwrap_or_else(Protection::read_write),
+                    )?,
+                    None,
+                )
+            }
+            Some(descriptor) => MemoryMappingBuilder::wrap(
+                MemoryMapping::from_fd_offset_protection_populate(
+                    descriptor,
+                    self.size,
+                    self.offset.unwrap_or(0),
+                    self.protection.unwrap_or_else(Protection::read_write),
+                    self.populate,
+                )?,
+                None,
+            ),
+        }
+    }
+
+    pub(crate) fn wrap(
+        mapping: MemoryMapping,
+        file_descriptor: Option<&'a dyn AsRawDescriptor>,
+    ) -> Result<CrateMemoryMapping> {
+        let file_descriptor = match file_descriptor {
+            Some(descriptor) => Some(
+                SafeDescriptor::try_from(descriptor)
+                    .map_err(|_| Error::SystemCallFailed(ErrnoError::last()))?,
+            ),
+            None => None,
+        };
+        Ok(CrateMemoryMapping {
+            mapping,
+            _file_descriptor: file_descriptor,
+        })
     }
 }
 

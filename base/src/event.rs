@@ -2,22 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::{mem, ops::Deref, ptr, time::Duration};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::descriptor::{AsRawDescriptor, FromRawDescriptor, IntoRawDescriptor};
 pub use crate::platform::EventReadResult;
-use crate::{generate_scoped_event, platform::EventFd, RawDescriptor, Result};
+use crate::{platform::Event as PlatformEvent, RawDescriptor, Result};
 
-/// See [EventFd](crate::platform::EventFd) for struct- and method-level
+/// See the [platform-specific Event struct](crate::platform::Event) for struct- and method-level
 /// documentation.
+// TODO(b:231344063) Move/update documentation.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Event(pub EventFd);
+pub struct Event(pub PlatformEvent);
 impl Event {
     pub fn new() -> Result<Event> {
-        EventFd::new().map(Event)
+        PlatformEvent::new().map(Event)
     }
 
     pub fn write(&self, v: u64) -> Result<()> {
@@ -45,7 +46,7 @@ impl AsRawDescriptor for Event {
 
 impl FromRawDescriptor for Event {
     unsafe fn from_raw_descriptor(descriptor: RawDescriptor) -> Self {
-        Event(EventFd::from_raw_descriptor(descriptor))
+        Event(PlatformEvent::from_raw_descriptor(descriptor))
     }
 }
 
@@ -54,5 +55,3 @@ impl IntoRawDescriptor for Event {
         self.0.into_raw_descriptor()
     }
 }
-
-generate_scoped_event!(Event);
