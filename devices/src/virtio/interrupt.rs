@@ -14,6 +14,7 @@ use sync::Mutex;
 use super::INTERRUPT_STATUS_CONFIG_CHANGED;
 use super::INTERRUPT_STATUS_USED_RING;
 use super::VIRTIO_MSI_NO_VECTOR;
+use crate::irq_event::IrqEdgeEvent;
 use crate::irq_event::IrqLevelEvent;
 use crate::pci::MsixConfig;
 
@@ -37,11 +38,20 @@ pub trait SignalableInterrupt {
     fn do_interrupt_resample(&self);
 }
 
-pub struct Interrupt {
-    interrupt_status: Arc<AtomicUsize>,
-    interrupt_evt: IrqLevelEvent,
+struct TransportPci {
+    irq_evt_lvl: IrqLevelEvent,
     msix_config: Option<Arc<Mutex<MsixConfig>>>,
     config_msix_vector: u16,
+}
+
+enum Transport {
+    Pci { pci: TransportPci },
+    Mmio { irq_evt_edge: IrqEdgeEvent },
+}
+
+pub struct Interrupt {
+    interrupt_status: Arc<AtomicUsize>,
+    transport: Transport,
 }
 
 impl SignalableInterrupt for Interrupt {
@@ -51,13 +61,15 @@ impl SignalableInterrupt for Interrupt {
     /// Write to the irqfd to VMM to deliver virtual interrupt to the guest
     fn signal(&self, vector: u16, interrupt_status_mask: u32) {
         // Don't need to set ISR for MSI-X interrupts
-        if let Some(msix_config) = &self.msix_config {
-            let mut msix_config = msix_config.lock();
-            if msix_config.enabled() {
-                if vector != VIRTIO_MSI_NO_VECTOR {
-                    msix_config.trigger(vector);
+        if let Transport::Pci { pci } = &self.transport {
+            if let Some(msix_config) = &pci.msix_config {
+                let mut msix_config = msix_config.lock();
+                if msix_config.enabled() {
+                    if vector != VIRTIO_MSI_NO_VECTOR {
+                        msix_config.trigger(vector);
+                    }
+                    return;
                 }
-                return;
             }
         }
 
@@ -68,22 +80,35 @@ impl SignalableInterrupt for Interrupt {
             .fetch_or(interrupt_status_mask as usize, Ordering::SeqCst)
             == 0
         {
-            // Write to irqfd to inject INTx interrupt
-            self.interrupt_evt.trigger().unwrap();
+            // Write to irqfd to inject PCI INTx or MMIO interrupt
+            match &self.transport {
+                Transport::Pci { pci } => pci.irq_evt_lvl.trigger().unwrap(),
+                Transport::Mmio { irq_evt_edge } => irq_evt_edge.trigger().unwrap(),
+            }
         }
     }
 
     fn signal_config_changed(&self) {
-        self.signal(self.config_msix_vector, INTERRUPT_STATUS_CONFIG_CHANGED)
+        let vector = match &self.transport {
+            Transport::Pci { pci } => pci.config_msix_vector,
+            _ => VIRTIO_MSI_NO_VECTOR,
+        };
+        self.signal(vector, INTERRUPT_STATUS_CONFIG_CHANGED)
     }
 
     fn get_resample_evt(&self) -> Option<&Event> {
-        Some(self.interrupt_evt.get_resample())
+        match &self.transport {
+            Transport::Pci { pci } => Some(pci.irq_evt_lvl.get_resample()),
+            _ => None,
+        }
     }
 
     fn do_interrupt_resample(&self) {
         if self.interrupt_status.load(Ordering::SeqCst) != 0 {
-            self.interrupt_evt.trigger().unwrap();
+            match &self.transport {
+                Transport::Pci { pci } => pci.irq_evt_lvl.trigger().unwrap(),
+                _ => panic!("do_interrupt_resample() not supported"),
+            }
         }
     }
 }
@@ -133,31 +158,53 @@ impl<I: SignalableInterrupt> SignalableInterrupt for Rc<RefCell<I>> {
 impl Interrupt {
     pub fn new(
         interrupt_status: Arc<AtomicUsize>,
-        interrupt_evt: IrqLevelEvent,
+        irq_evt_lvl: IrqLevelEvent,
         msix_config: Option<Arc<Mutex<MsixConfig>>>,
         config_msix_vector: u16,
     ) -> Interrupt {
         Interrupt {
             interrupt_status,
-            interrupt_evt,
-            msix_config,
-            config_msix_vector,
+            transport: Transport::Pci {
+                pci: TransportPci {
+                    irq_evt_lvl,
+                    msix_config,
+                    config_msix_vector,
+                },
+            },
+        }
+    }
+
+    pub fn new_mmio(interrupt_status: Arc<AtomicUsize>, irq_evt_edge: IrqEdgeEvent) -> Interrupt {
+        Interrupt {
+            interrupt_status,
+            transport: Transport::Mmio { irq_evt_edge },
         }
     }
 
     /// Get a reference to the interrupt event.
     pub fn get_interrupt_evt(&self) -> &Event {
-        self.interrupt_evt.get_trigger()
+        match &self.transport {
+            Transport::Pci { pci } => pci.irq_evt_lvl.get_trigger(),
+            Transport::Mmio { irq_evt_edge } => irq_evt_edge.get_trigger(),
+        }
     }
 
     /// Handle interrupt resampling event, reading the value from the event and doing the resample.
     pub fn interrupt_resample(&self) {
-        self.interrupt_evt.clear_resample();
-        self.do_interrupt_resample();
+        match &self.transport {
+            Transport::Pci { pci } => {
+                pci.irq_evt_lvl.clear_resample();
+                self.do_interrupt_resample();
+            }
+            _ => panic!("interrupt_resample() not supported"),
+        }
     }
 
     /// Get a reference to the msix configuration
     pub fn get_msix_config(&self) -> &Option<Arc<Mutex<MsixConfig>>> {
-        &self.msix_config
+        match &self.transport {
+            Transport::Pci { pci } => &pci.msix_config,
+            _ => &None,
+        }
     }
 }

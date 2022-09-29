@@ -95,6 +95,7 @@ use devices::PciAddress;
 use devices::PciConfigIo;
 use devices::PciConfigMmio;
 use devices::PciDevice;
+use devices::PciRoot;
 use devices::PciRootCommand;
 use devices::PciVirtualConfigMmio;
 use devices::Pflash;
@@ -190,6 +191,8 @@ pub enum Error {
     CreateSocket(io::Error),
     #[error("failed to create VCPU: {0}")]
     CreateVcpu(base::Error),
+    #[error("failed to create Virtio MMIO bus: {0}")]
+    CreateVirtioMmioBus(arch::DeviceRegistrationError),
     #[error("invalid e820 setup params")]
     E820Configuration,
     #[cfg(feature = "direct")]
@@ -605,7 +608,7 @@ impl arch::LinuxArch for X8664arch {
         let mmio_bus = Arc::new(devices::Bus::new());
         let io_bus = Arc::new(devices::Bus::new());
 
-        let (pci_devices, _others): (Vec<_>, Vec<_>) = devs
+        let (pci_devices, devs): (Vec<_>, Vec<_>) = devs
             .into_iter()
             .partition(|(dev, _)| dev.as_pci_device().is_some());
 
@@ -614,7 +617,7 @@ impl arch::LinuxArch for X8664arch {
             .map(|(dev, jail_orig)| (dev.into_pci_device().unwrap(), jail_orig))
             .collect();
 
-        let (pci, pci_irqs, pid_debug_label_map) = arch::generate_pci_root(
+        let (pci, pci_irqs, mut pid_debug_label_map) = arch::generate_pci_root(
             pci_devices,
             irq_chip.as_irq_chip_mut(),
             mmio_bus.clone(),
@@ -649,6 +652,26 @@ impl arch::LinuxArch for X8664arch {
                 pcie_vcfg_range.len().unwrap(),
             )
             .unwrap();
+
+        let (virtio_mmio_devices, _others): (Vec<_>, Vec<_>) = devs
+            .into_iter()
+            .partition(|(dev, _)| dev.as_virtio_mmio_device().is_some());
+
+        let virtio_mmio_devices = virtio_mmio_devices
+            .into_iter()
+            .map(|(dev, jail_orig)| (*(dev.into_virtio_mmio_device().unwrap()), jail_orig))
+            .collect();
+        let (mut virtio_mmio_pid, sdts) = arch::generate_virtio_mmio_bus(
+            virtio_mmio_devices,
+            irq_chip.as_irq_chip_mut(),
+            &mmio_bus,
+            system_allocator,
+            &mut vm,
+            components.acpi_sdts,
+        )
+        .map_err(Error::CreateVirtioMmioBus)?;
+        components.acpi_sdts = sdts;
+        pid_debug_label_map.append(&mut virtio_mmio_pid);
 
         // Event used to notify crosvm that guest OS is trying to suspend.
         let suspend_evt = Event::new().map_err(Error::CreateEvent)?;
@@ -701,6 +724,7 @@ impl arch::LinuxArch for X8664arch {
         // each bus occupy 1MB mmio for pcie enhanced configuration
         let max_bus = (pcie_cfg_mmio_len / 0x100000 - 1) as u8;
         let (acpi_dev_resource, bat_control) = Self::setup_acpi_devices(
+            pci.clone(),
             &mem,
             &io_bus,
             system_allocator,
@@ -852,6 +876,8 @@ impl arch::LinuxArch for X8664arch {
             gdb: components.gdb,
             pm: Some(acpi_dev_resource.pm),
             root_config: pci,
+            #[cfg(unix)]
+            platform_devices: Vec::new(),
             hotplug_bus: BTreeMap::new(),
         })
     }
@@ -1568,6 +1594,7 @@ impl X8664arch {
     /// * - `battery` indicate whether to create the battery
     /// * - `mmio_bus` the MMIO bus to add the devices to
     fn setup_acpi_devices(
+        pci_root: Arc<Mutex<PciRoot>>,
         mem: &GuestMemory,
         io_bus: &devices::Bus,
         resources: &mut SystemAllocator,
@@ -1693,29 +1720,35 @@ impl X8664arch {
             crs_entries.push(entry);
         }
 
-        let mut pci_dsdt_inner_data: Vec<&dyn aml::Aml> = Vec::new();
-        let hid = aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0A08"));
-        pci_dsdt_inner_data.push(&hid);
-        let cid = aml::Name::new("_CID".into(), &aml::EISAName::new("PNP0A03"));
-        pci_dsdt_inner_data.push(&cid);
-        let adr = aml::Name::new("_ADR".into(), &aml::ZERO);
-        pci_dsdt_inner_data.push(&adr);
-        let seg = aml::Name::new("_SEG".into(), &aml::ZERO);
-        pci_dsdt_inner_data.push(&seg);
-        let uid = aml::Name::new("_UID".into(), &aml::ZERO);
-        pci_dsdt_inner_data.push(&uid);
-        let supp = aml::Name::new("SUPP".into(), &aml::ZERO);
-        pci_dsdt_inner_data.push(&supp);
-        let crs = aml::Name::new(
-            "_CRS".into(),
-            &aml::ResourceTemplate::new(crs_entries.iter().map(|b| b.as_ref()).collect()),
-        );
-        pci_dsdt_inner_data.push(&crs);
+        aml::Device::new(
+            "_SB_.PC00".into(),
+            vec![
+                &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0A08")),
+                &aml::Name::new("_CID".into(), &aml::EISAName::new("PNP0A03")),
+                &aml::Name::new("_ADR".into(), &aml::ZERO),
+                &aml::Name::new("_SEG".into(), &aml::ZERO),
+                &aml::Name::new("_UID".into(), &aml::ZERO),
+                &aml::Name::new("SUPP".into(), &aml::ZERO),
+                &aml::Name::new(
+                    "_CRS".into(),
+                    &aml::ResourceTemplate::new(crs_entries.iter().map(|b| b.as_ref()).collect()),
+                ),
+                &PciRootOSC {},
+            ],
+        )
+        .to_aml_bytes(&mut amls);
 
-        let pci_root_osc = PciRootOSC {};
-        pci_dsdt_inner_data.push(&pci_root_osc);
-
-        aml::Device::new("_SB_.PCI0".into(), pci_dsdt_inner_data).to_aml_bytes(&mut amls);
+        let root_bus = pci_root.lock().get_root_bus();
+        let addresses = root_bus.lock().get_downstream_devices();
+        for address in addresses {
+            if let Some(acpi_path) = pci_root.lock().acpi_path(&address) {
+                aml::Device::new(
+                    (*acpi_path).into(),
+                    vec![&aml::Name::new("_ADR".into(), &address.acpi_adr())],
+                )
+                .to_aml_bytes(&mut amls);
+            }
+        }
 
         let pm = Arc::new(Mutex::new(pmresource));
         io_bus

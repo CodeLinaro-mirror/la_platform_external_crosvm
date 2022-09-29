@@ -82,7 +82,7 @@ const AARCH64_FDT_OFFSET_IN_BIOS_MODE: u64 = 0x0;
 const AARCH64_BIOS_OFFSET: u64 = AARCH64_FDT_MAX_SIZE;
 const AARCH64_BIOS_MAX_LEN: u64 = 1 << 20;
 
-const AARCH64_PROTECTED_VM_FW_MAX_SIZE: u64 = 0x200000;
+const AARCH64_PROTECTED_VM_FW_MAX_SIZE: u64 = 0x400000;
 const AARCH64_PROTECTED_VM_FW_START: u64 =
     AARCH64_PHYS_MEM_START - AARCH64_PROTECTED_VM_FW_MAX_SIZE;
 
@@ -441,13 +441,14 @@ impl arch::LinuxArch for AArch64 {
             .into_iter()
             .map(|(dev, jail_orig)| (*(dev.into_platform_device().unwrap()), jail_orig))
             .collect();
-        let mut platform_pid_debug_label_map = arch::sys::unix::generate_platform_bus(
-            platform_devices,
-            irq_chip.as_irq_chip_mut(),
-            &mmio_bus,
-            system_allocator,
-        )
-        .map_err(Error::CreatePlatformBus)?;
+        let (platform_devices, mut platform_pid_debug_label_map) =
+            arch::sys::unix::generate_platform_bus(
+                platform_devices,
+                irq_chip.as_irq_chip_mut(),
+                &mmio_bus,
+                system_allocator,
+            )
+            .map_err(Error::CreatePlatformBus)?;
         pid_debug_label_map.append(&mut platform_pid_debug_label_map);
 
         Self::add_arch_devs(
@@ -592,6 +593,7 @@ impl arch::LinuxArch for AArch64 {
             pm: None,
             resume_notify_devices: Vec::new(),
             root_config: pci_root,
+            platform_devices,
             hotplug_bus: BTreeMap::new(),
         })
     }
