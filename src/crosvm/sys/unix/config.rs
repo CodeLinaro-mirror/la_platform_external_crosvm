@@ -6,10 +6,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+#[cfg(feature = "gpu")]
+use devices::virtio::GpuDisplayParameters;
 #[cfg(feature = "gfxstream")]
 use devices::virtio::GpuMode;
 #[cfg(feature = "gpu")]
-use devices::virtio::{GpuDisplayParameters, GpuParameters};
+use devices::virtio::GpuParameters;
 use devices::IommuDevType;
 use devices::PciAddress;
 use devices::SerialParameters;
@@ -111,7 +113,6 @@ pub fn check_serial_params(_serial_params: &SerialParameters) -> Result<(), Stri
 }
 
 pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
-    crate::crosvm::check_opt_path!(cfg.vhost_vsock_device);
     if cfg.host_ip.is_some() || cfg.netmask.is_some() || cfg.mac_address.is_some() {
         if cfg.host_ip.is_none() {
             return Err("`host-ip` missing from network config".to_string());
@@ -349,9 +350,10 @@ mod tests {
 
     #[test]
     fn parse_coiommu_options() {
+        use std::time::Duration;
+
         use devices::CoIommuParameters;
         use devices::CoIommuUnpinPolicy;
-        use std::time::Duration;
 
         // unpin_policy
         let coiommu_params = from_key_values::<CoIommuParameters>("unpin_policy=off").unwrap();

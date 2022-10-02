@@ -4,18 +4,15 @@
 
 use std::sync::Arc;
 
+use base::debug;
 use base::error;
 use base::info;
-use base::warn;
 use base::AcpiNotifyEvent;
 use base::NetlinkGenericSocket;
 use sync::Mutex;
 
 use crate::acpi::ACPIPMError;
-use crate::acpi::ACPIPMFixedEvent;
 use crate::acpi::GpeResource;
-use crate::acpi::Pm1Resource;
-use crate::IrqLevelEvent;
 
 pub(crate) fn get_acpi_event_sock() -> Result<Option<NetlinkGenericSocket>, ACPIPMError> {
     // Get group id corresponding to acpi_mc_group of acpi_event family
@@ -57,8 +54,6 @@ fn get_acpi_event_group() -> Option<u32> {
 pub(crate) fn acpi_event_run(
     acpi_event_sock: &Option<NetlinkGenericSocket>,
     gpe0: &Arc<Mutex<GpeResource>>,
-    pm1: &Arc<Mutex<Pm1Resource>>,
-    sci_evt: &IrqLevelEvent,
     ignored_gpe: &[u32],
 ) {
     let acpi_event_sock = acpi_event_sock.as_ref().unwrap();
@@ -80,33 +75,10 @@ pub(crate) fn acpi_event_run(
         };
         match acpi_event.device_class.as_str() {
             "gpe" => {
-                acpi_event_handle_gpe(
-                    acpi_event.data,
-                    acpi_event._type,
-                    gpe0,
-                    sci_evt,
-                    ignored_gpe,
-                );
+                acpi_event_handle_gpe(acpi_event.data, acpi_event._type, gpe0, ignored_gpe);
             }
-            "button/power" => acpi_event_handle_power_button(acpi_event, pm1, sci_evt),
-            c => warn!("unknown acpi event {}", c),
+            c => debug!("ignored acpi event {}", c),
         };
-    }
-}
-
-const ACPI_BUTTON_NOTIFY_STATUS: u32 = 0x80;
-
-fn acpi_event_handle_power_button(
-    acpi_event: AcpiNotifyEvent,
-    pm1: &Arc<Mutex<Pm1Resource>>,
-    sci_evt: &IrqLevelEvent,
-) {
-    // If received power button event, emulate PM/PWRBTN_STS and trigger SCI
-    if acpi_event._type == ACPI_BUTTON_NOTIFY_STATUS && acpi_event.bus_id.contains("LNXPWRBN") {
-        let mut pm1 = pm1.lock();
-
-        pm1.status |= ACPIPMFixedEvent::PowerButton.bitmask();
-        pm1.trigger_sci(sci_evt);
     }
 }
 
@@ -114,19 +86,14 @@ fn acpi_event_handle_gpe(
     gpe_number: u32,
     _type: u32,
     gpe0: &Arc<Mutex<GpeResource>>,
-    sci_evt: &IrqLevelEvent,
     ignored_gpe: &[u32],
 ) {
-    // If gpe event, emulate GPE and trigger SCI
+    // If gpe event fired in the host, notify registered GpeNotify listeners
     if _type == 0 && gpe_number < 256 && !ignored_gpe.contains(&gpe_number) {
-        let mut gpe0 = gpe0.lock();
-        let byte = gpe_number as usize / 8;
-
-        if byte >= gpe0.status.len() {
-            error!("gpe_evt: GPE register {} does not exist", byte);
-            return;
+        if let Some(notify_devs) = gpe0.lock().gpe_notify.get(&gpe_number) {
+            for notify_dev in notify_devs.iter() {
+                notify_dev.lock().notify();
+            }
         }
-        gpe0.status[byte] |= 1 << (gpe_number % 8);
-        gpe0.trigger_sci(sci_evt);
     }
 }

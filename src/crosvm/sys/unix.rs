@@ -74,6 +74,7 @@ use devices::virtio::BalloonFeatures;
 use devices::virtio::BalloonMode;
 #[cfg(feature = "gpu")]
 use devices::virtio::EventDevice;
+use devices::virtio::VirtioTransportType;
 #[cfg(feature = "audio")]
 use devices::Ac97Dev;
 use devices::BusDeviceObj;
@@ -114,6 +115,7 @@ use devices::PcieUpstreamPort;
 use devices::PvPanicCode;
 use devices::PvPanicPciDevice;
 use devices::StubPciDevice;
+use devices::VirtioMmioDevice;
 use devices::VirtioPciDevice;
 #[cfg(feature = "usb")]
 use devices::XhciController;
@@ -811,28 +813,38 @@ fn create_devices(
     )?;
 
     for stub in stubs {
-        let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
-        control_tubes.push(TaggedControlTube::VmIrq(msi_host_tube));
+        match stub.dev.transport_type() {
+            VirtioTransportType::Pci => {
+                let (msi_host_tube, msi_device_tube) =
+                    Tube::pair().context("failed to create tube")?;
+                control_tubes.push(TaggedControlTube::VmIrq(msi_host_tube));
 
-        let shared_memory_tube = if stub.dev.get_shared_memory_region().is_some() {
-            let (host_tube, device_tube) =
-                Tube::pair().context("failed to create VVU proxy tube")?;
-            control_tubes.push(TaggedControlTube::VmMemory(host_tube));
-            Some(device_tube)
-        } else {
-            None
-        };
+                let shared_memory_tube = if stub.dev.get_shared_memory_region().is_some() {
+                    let (host_tube, device_tube) =
+                        Tube::pair().context("failed to create VVU proxy tube")?;
+                    control_tubes.push(TaggedControlTube::VmMemory(host_tube));
+                    Some(device_tube)
+                } else {
+                    None
+                };
 
-        let dev = VirtioPciDevice::new(
-            vm.get_memory().clone(),
-            stub.dev,
-            msi_device_tube,
-            cfg.disable_virtio_intx,
-            shared_memory_tube,
-        )
-        .context("failed to create virtio pci dev")?;
+                let dev = VirtioPciDevice::new(
+                    vm.get_memory().clone(),
+                    stub.dev,
+                    msi_device_tube,
+                    cfg.disable_virtio_intx,
+                    shared_memory_tube,
+                )
+                .context("failed to create virtio pci dev")?;
 
-        devices.push((Box::new(dev) as Box<dyn BusDeviceObj>, stub.jail));
+                devices.push((Box::new(dev) as Box<dyn BusDeviceObj>, stub.jail));
+            }
+            VirtioTransportType::Mmio => {
+                let dev = VirtioMmioDevice::new(vm.get_memory().clone(), stub.dev)
+                    .context("failed to create virtio mmio dev")?;
+                devices.push((Box::new(dev) as Box<dyn BusDeviceObj>, stub.jail));
+            }
+        }
     }
 
     #[cfg(feature = "audio")]
@@ -1389,7 +1401,12 @@ where
             (
                 None,
                 Some(Tube::new_from_unix_seqpacket(
-                    UnixSeqpacket::connect(path).context("failed to create balloon control")?,
+                    UnixSeqpacket::connect(path).with_context(|| {
+                        format!(
+                            "failed to connect to balloon control socket {}",
+                            path.display(),
+                        )
+                    })?,
                 )),
             )
         } else {
@@ -2274,7 +2291,12 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         None => None,
         Some(cgroup_path) => {
             // Move main process to cgroup_path
-            let mut f = File::create(&cgroup_path.join("tasks"))?;
+            let mut f = File::create(&cgroup_path.join("tasks")).with_context(|| {
+                format!(
+                    "failed to create vcpu-cgroup-path {}",
+                    cgroup_path.display(),
+                )
+            })?;
             f.write_all(process::id().to_string().as_bytes())?;
             Some(f)
         }
@@ -2774,13 +2796,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 /// The jailing business is nasty and potentially unsafe if done from the wrong context - do not
 /// call outside of `start_devices`!
 ///
-/// Returns the jail the device process is running in, as well as its pid.
+/// Returns the pid of the jailed device process.
 fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
     jail_config: &Option<JailConfig>,
     params: &T,
     vhost: &str,
     name: &str,
-) -> anyhow::Result<(Minijail, libc::pid_t, Option<Box<dyn std::any::Any>>)> {
+) -> anyhow::Result<(libc::pid_t, Option<Box<dyn std::any::Any>>)> {
     let mut keep_rds = Vec::new();
 
     base::syslog::push_descriptors(&mut keep_rds);
@@ -2847,7 +2869,7 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
             // to clean up ourselves.
 
             info!("process for device {} (PID {}) started", &name, pid);
-            Ok((jail, pid, parent_resources))
+            Ok((pid, parent_resources))
         }
     }
 }
@@ -2856,12 +2878,7 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
     struct DeviceJailInfo {
         // Unique name for the device, in the form `foomatic-0`.
         name: String,
-        // Jail the device process is running in.
-        // We are just keeping it alive for as long as the device process needs to run.
-        #[allow(dead_code)]
-        jail: Minijail,
-        #[allow(dead_code)]
-        drop_resources: Option<Box<dyn std::any::Any>>,
+        _drop_resources: Option<Box<dyn std::any::Any>>,
     }
 
     fn add_device<T: VirtioDeviceBuilder>(
@@ -2873,15 +2890,14 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
     ) -> anyhow::Result<()> {
         let name = format!("{}-{}", T::NAME, i);
 
-        let (jail, pid, drop_resources) =
+        let (pid, _drop_resources) =
             jail_and_start_vu_device::<T>(jail_config, device_params, vhost, &name)?;
 
         devices_jails.insert(
             pid,
             DeviceJailInfo {
                 name,
-                jail,
-                drop_resources,
+                _drop_resources,
             },
         );
 

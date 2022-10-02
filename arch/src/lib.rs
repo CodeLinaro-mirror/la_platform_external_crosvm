@@ -58,6 +58,7 @@ use devices::PciRootCommand;
 use devices::ProxyDevice;
 use devices::SerialHardware;
 use devices::SerialParameters;
+use devices::VirtioMmioDevice;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs as GdbStubRegs;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -188,6 +189,8 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub mmio_bus: Arc<Bus>,
     pub no_smt: bool,
     pub pid_debug_label_map: BTreeMap<u32, String>,
+    #[cfg(unix)]
+    pub platform_devices: Vec<Arc<Mutex<dyn BusDevice>>>,
     pub pm: Option<Arc<Mutex<dyn PmResource>>>,
     /// Devices to be notified before the system resumes from the S3 suspended state.
     pub resume_notify_devices: Vec<Arc<Mutex<dyn BusResumeDevice>>>,
@@ -395,6 +398,9 @@ pub enum DeviceRegistrationError {
     /// Could not create an event.
     #[error("failed to create event: {0}")]
     EventCreate(base::Error),
+    /// Failed to generate ACPI content.
+    #[error("failed to generate ACPI content")]
+    GenerateAcpi,
     /// No more IRQs are available.
     #[error("no more IRQs are available")]
     IrqsExhausted,
@@ -538,6 +544,80 @@ pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
     }
 
     Ok(pci_address)
+}
+
+/// Creates a Virtio MMIO devices for use by this Vm.
+pub fn generate_virtio_mmio_bus(
+    devices: Vec<(VirtioMmioDevice, Option<Minijail>)>,
+    irq_chip: &mut dyn IrqChip,
+    mmio_bus: &Bus,
+    resources: &mut SystemAllocator,
+    vm: &mut impl Vm,
+    mut sdts: Vec<SDT>,
+) -> Result<(BTreeMap<u32, String>, Vec<SDT>), DeviceRegistrationError> {
+    let mut pid_labels = BTreeMap::new();
+
+    for dev_value in devices.into_iter() {
+        #[cfg(unix)]
+        let (mut device, jail) = dev_value;
+        #[cfg(windows)]
+        let (mut device, _) = dev_value;
+
+        let ranges = device
+            .allocate_regions(resources)
+            .map_err(DeviceRegistrationError::AllocateIoResource)?;
+
+        let mut keep_rds = device.keep_rds();
+        syslog::push_descriptors(&mut keep_rds);
+
+        let irq_num = resources
+            .allocate_irq()
+            .ok_or(DeviceRegistrationError::AllocateIrq)?;
+        let irq_evt = devices::IrqEdgeEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
+        irq_chip
+            .register_edge_irq_event(irq_num, &irq_evt, IrqEventSource::from_device(&device))
+            .map_err(DeviceRegistrationError::RegisterIrqfd)?;
+        device.assign_irq(&irq_evt, irq_num);
+        keep_rds.extend(irq_evt.as_raw_descriptors());
+
+        for (event, addr, datamatch) in device.ioevents() {
+            let io_addr = IoEventAddress::Mmio(addr);
+            vm.register_ioevent(event, io_addr, datamatch)
+                .map_err(DeviceRegistrationError::RegisterIoevent)?;
+            keep_rds.push(event.as_raw_descriptor());
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            sdts = device
+                .generate_acpi(sdts)
+                .ok_or(DeviceRegistrationError::GenerateAcpi)?;
+        }
+
+        #[cfg(unix)]
+        let arced_dev: Arc<Mutex<dyn BusDevice>> = if let Some(jail) = jail {
+            let proxy = ProxyDevice::new(device, jail, keep_rds)
+                .map_err(DeviceRegistrationError::ProxyDeviceCreation)?;
+            pid_labels.insert(proxy.pid() as u32, proxy.debug_label());
+            Arc::new(Mutex::new(proxy))
+        } else {
+            device.on_sandboxed();
+            Arc::new(Mutex::new(device))
+        };
+
+        #[cfg(windows)]
+        let arced_dev = {
+            device.on_sandboxed();
+            Arc::new(Mutex::new(device))
+        };
+
+        for range in &ranges {
+            mmio_bus
+                .insert(arced_dev.clone(), range.0, range.1)
+                .map_err(DeviceRegistrationError::MmioInsert)?;
+        }
+    }
+    Ok((pid_labels, sdts))
 }
 
 // Generate pci topology starting from parent bus
