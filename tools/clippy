@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,7 +14,7 @@ from impl.common import CROSVM_ROOT, cwd, run_main, cmd, chdir
 from impl.test_runner import get_workspace_excludes
 from impl.test_target import Triple
 
-clippy = cmd("cargo clippy")
+clippy = cmd("cargo clippy").with_color_flag()
 
 excluded_crates: list[str] = list(get_workspace_excludes(Triple.host_default()))
 features: str = ""

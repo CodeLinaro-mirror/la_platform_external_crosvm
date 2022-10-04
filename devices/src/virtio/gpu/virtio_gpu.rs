@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -333,12 +333,9 @@ impl VirtioGpu {
         let scanouts = display_params
             .iter()
             .enumerate()
-            .map(|(display_index, &display_param)| {
-                VirtioGpuScanout::new(
-                    display_param.width,
-                    display_param.height,
-                    display_index as u32,
-                )
+            .map(|(display_index, display_param)| {
+                let (width, height) = display_param.get_virtual_display_size();
+                VirtioGpuScanout::new(width, height, display_index as u32)
             })
             .collect::<Vec<_>>();
         let cursor_scanout = VirtioGpuScanout::new_cursor();
@@ -429,6 +426,13 @@ impl VirtioGpu {
     pub fn flush_resource(&mut self, resource_id: u32) -> VirtioGpuResult {
         if resource_id == 0 {
             return Ok(OkNoData);
+        }
+
+        #[cfg(windows)]
+        match self.rutabaga.resource_flush(resource_id) {
+            Ok(_) => return Ok(OkNoData),
+            Err(RutabagaError::Unsupported) => {}
+            Err(e) => return Err(ErrRutabaga(e)),
         }
 
         let resource = self
@@ -566,15 +570,6 @@ impl VirtioGpu {
     pub fn create_fence(&mut self, rutabaga_fence: RutabagaFence) -> VirtioGpuResult {
         self.rutabaga.create_fence(rutabaga_fence)?;
         Ok(OkNoData)
-    }
-
-    pub fn needs_fence_poll(&mut self) -> bool {
-        self.rutabaga.use_timer_based_fence_polling
-    }
-
-    /// Returns an array of RutabagaFence, describing completed fences.
-    pub fn fence_poll(&mut self) -> Vec<RutabagaFence> {
-        self.rutabaga.poll()
     }
 
     /// Polls the Rutabaga backend.

@@ -118,14 +118,14 @@ all-linux = [
     "virgl_renderer",
     "x",
     ]
-win64 = ["devices/stats", "balloon", "haxm"]
+win64 = ["stats", "balloon", "haxm"]
 audio = ["devices/audio"]
 audio_cras = ["devices/audio_cras"]
 balloon = ["devices/balloon", "vm_control/balloon"]
-chromeos = ["base/chromeos", "audio_cras", "devices/chromeos"]
+chromeos = ["base/chromeos", "audio_cras", "devices/chromeos", "panic-memfd"]
 composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
 crash-report = []
-default = ["audio", "balloon", "gpu", "usb"]
+default = ["audio", "balloon", "gpu", "qcow", "usb"]
 default-no-sandbox = []
 direct = ["balloon", "devices/direct", "arch/direct", "x86_64/direct"]
 ffmpeg = ["devices/ffmpeg"]
@@ -144,10 +144,13 @@ linux-armhf = [
     ]
 linux-x86_64 = ["all-linux", "plugin"]
 linux-aarch64 = ["all-linux"]
+panic-memfd = []
 plugin = ["protos/plugin", "crosvm_plugin", "kvm", "kvm_sys", "protobuf"]
 plugin-render-server = []
 power-monitor-powerd = ["arch/power-monitor-powerd"]
+qcow = ["disk/qcow"]
 slirp = ["devices/slirp"]
+stats = ["devices/stats"]
 tpm = ["devices/tpm"]
 usb = ["devices/usb"]
 video-decoder = ["devices/video-decoder"]
@@ -168,13 +171,14 @@ base = "*"
 bit_field = { path = "bit_field" }
 broker_ipc = { path = "broker_ipc" }
 cfg-if = "1.0.0"
+cros_async = { path = "cros_async" }
 crosvm_plugin = { path = "crosvm_plugin", optional = true }
 data_model = "*"
 devices = { path = "devices" }
 disk = { path = "disk" }
 enumn = "0.1.0"
-gdbstub = { version = "0.6.1", optional = true }
-gdbstub_arch = { version = "0.2.2", optional = true }
+gdbstub = { version = "0.6.3", optional = true }
+gdbstub_arch = { version = "0.2.4", optional = true }
 rutabaga_gfx = { path = "rutabaga_gfx"}
 hypervisor = { path = "hypervisor" }
 kernel_cmdline = { path = "kernel_cmdline" }
@@ -227,6 +231,9 @@ tracing = { path = "tracing" }
 tube_transporter = { path = "tube_transporter" }
 winapi = "*"
 win_util = { path = "win_util"}
+
+[build-dependencies]
+cc = "*"
 
 [dev-dependencies]
 base = "*"

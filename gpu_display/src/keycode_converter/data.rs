@@ -1,3 +1,7 @@
+// Copyright 2022 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 #[derive(Debug, Clone, Copy)]
 pub struct MapEntry {
     pub linux_keycode: u16,
@@ -297,7 +301,7 @@ pub const KEYCODE_MAP: [MapEntry; 88] = [
         mac: 0x0027,
     },
     MapEntry {
-        linux_keycode: 399,
+        linux_keycode: 41,
         xkb: 0x0031,
         win: 0x0029,
         mac: 0x0032,

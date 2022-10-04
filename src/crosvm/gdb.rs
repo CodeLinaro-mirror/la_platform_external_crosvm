@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -42,9 +42,6 @@ use vm_control::VcpuDebugStatusMessage;
 use vm_control::VmRequest;
 use vm_control::VmResponse;
 use vm_memory::GuestAddress;
-
-#[cfg(target_arch = "x86_64")]
-type ArchUsize = u64;
 
 pub fn gdb_thread(mut gdbstub: GdbStub, port: u32) {
     let addr = format!("0.0.0.0:{}", port);
@@ -111,6 +108,7 @@ pub struct GdbStub {
     from_vcpu: mpsc::Receiver<VcpuDebugStatusMessage>,
 
     single_step: bool,
+    max_hw_breakpoints: Option<usize>,
     hw_breakpoints: Vec<GuestAddress>,
 }
 
@@ -125,6 +123,7 @@ impl GdbStub {
             vcpu_com,
             from_vcpu,
             single_step: false,
+            max_hw_breakpoints: None,
             hw_breakpoints: Default::default(),
         }
     }
@@ -146,6 +145,20 @@ impl GdbStub {
             Ok(VmResponse::Ok) => Ok(()),
             Ok(r) => Err(Error::UnexpectedVmResponse(r)),
             Err(e) => Err(Error::VmResponse(e)),
+        }
+    }
+
+    fn max_hw_breakpoints_request(&self) -> TargetResult<usize, Self> {
+        match self.vcpu_request(VcpuControl::Debug(VcpuDebug::GetHwBreakPointCount)) {
+            Ok(VcpuDebugStatus::HwBreakPointCount(n)) => Ok(n),
+            Ok(s) => {
+                error!("Unexpected vCPU response for GetHwBreakPointCount: {:?}", s);
+                Err(NonFatal)
+            }
+            Err(e) => {
+                error!("Failed to request GetHwBreakPointCount: {}", e);
+                Err(NonFatal)
+            }
         }
     }
 }
@@ -326,9 +339,14 @@ impl HwBreakpoint for GdbStub {
         addr: <Self::Arch as Arch>::Usize,
         _kind: <Self::Arch as Arch>::BreakpointKind,
     ) -> TargetResult<bool, Self> {
-        // If we already have 4 breakpoints, we cannot set a new one.
-        if self.hw_breakpoints.len() >= 4 {
-            error!("Not allowed to set more than 4 HW breakpoints");
+        let max_count = *(match &mut self.max_hw_breakpoints {
+            None => self
+                .max_hw_breakpoints
+                .insert(self.max_hw_breakpoints_request()?),
+            Some(c) => c,
+        });
+        if self.hw_breakpoints.len() >= max_count {
+            error!("Not allowed to set more than {} HW breakpoints", max_count);
             return Err(NonFatal);
         }
         self.hw_breakpoints.push(GuestAddress(addr));
@@ -378,7 +396,7 @@ struct GdbStubEventLoop;
 impl BlockingEventLoop for GdbStubEventLoop {
     type Target = GdbStub;
     type Connection = Box<dyn ConnectionExt<Error = std::io::Error>>;
-    type StopReason = SingleThreadStopReason<ArchUsize>;
+    type StopReason = SingleThreadStopReason<<GdbArch as Arch>::Usize>;
 
     fn wait_for_stop_reason(
         target: &mut Self::Target,

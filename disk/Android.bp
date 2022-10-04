@@ -32,6 +32,7 @@ rust_test {
         "libfutures",
         "liblibc",
         "libserde",
+        "libsync_rust",
         "libtempfile",
         "libthiserror",
         "libvm_memory",
@@ -52,12 +53,14 @@ rust_library {
     srcs: ["src/disk.rs"],
     edition: "2021",
     features: [
+        "android-sparse", // Added manually
         "composite-disk", // Added manually
+        "qcow",
     ],
     rustlibs: [
         "libbase_rust",
-        "libcrc32fast", // Added manually
         "libcfg_if",
+        "libcrc32fast", // Added manually
         "libcros_async",
         "libdata_model",
         "libfutures",
@@ -65,6 +68,7 @@ rust_library {
         "libprotobuf", // Added manually
         "libprotos", // Added manually
         "libserde",
+        "libsync_rust",
         "libtempfile",
         "libthiserror",
         "libuuid", // Added manually

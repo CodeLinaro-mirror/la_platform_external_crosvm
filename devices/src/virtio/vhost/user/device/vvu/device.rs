@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,7 +28,6 @@ use base::Event;
 use base::MappedRegion;
 use base::MemoryMappingBuilder;
 use base::MemoryMappingBuilderUnix;
-use base::Protection;
 use base::RawDescriptor;
 use base::SafeDescriptor;
 use cros_async::EventAsync;
@@ -546,7 +545,7 @@ impl BackendChannelInner {
                 let mapping = MemoryMappingBuilder::new(msg.len as usize)
                     .from_descriptor(&file)
                     .offset(msg.fd_offset)
-                    .protection(Protection::from(msg.flags.bits() as libc::c_int))
+                    .protection(msg.flags.into())
                     .build()
                     .context("failed to map file")?;
 

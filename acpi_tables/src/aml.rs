@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -163,8 +163,14 @@ pub type Byte = u8;
 
 impl Aml for Byte {
     fn to_aml_bytes(&self, bytes: &mut Vec<u8>) {
-        bytes.push(BYTEPREFIX);
-        bytes.push(*self);
+        match *self {
+            0 => ZERO.to_aml_bytes(bytes),
+            1 => ONE.to_aml_bytes(bytes),
+            _ => {
+                bytes.push(BYTEPREFIX);
+                bytes.push(*self);
+            }
+        }
     }
 }
 
@@ -172,8 +178,12 @@ pub type Word = u16;
 
 impl Aml for Word {
     fn to_aml_bytes(&self, bytes: &mut Vec<u8>) {
-        bytes.push(WORDPREFIX);
-        bytes.append(&mut self.to_le_bytes().to_vec());
+        if *self <= Byte::max_value().into() {
+            (*self as Byte).to_aml_bytes(bytes);
+        } else {
+            bytes.push(WORDPREFIX);
+            bytes.append(&mut self.to_le_bytes().to_vec());
+        }
     }
 }
 
@@ -181,8 +191,12 @@ pub type DWord = u32;
 
 impl Aml for DWord {
     fn to_aml_bytes(&self, bytes: &mut Vec<u8>) {
-        bytes.push(DWORDPREFIX);
-        bytes.append(&mut self.to_le_bytes().to_vec());
+        if *self <= Word::max_value().into() {
+            (*self as Word).to_aml_bytes(bytes);
+        } else {
+            bytes.push(DWORDPREFIX);
+            bytes.append(&mut self.to_le_bytes().to_vec());
+        }
     }
 }
 
@@ -190,8 +204,12 @@ pub type QWord = u64;
 
 impl Aml for QWord {
     fn to_aml_bytes(&self, bytes: &mut Vec<u8>) {
-        bytes.push(QWORDPREFIX);
-        bytes.append(&mut self.to_le_bytes().to_vec());
+        if *self <= DWord::max_value().into() {
+            (*self as DWord).to_aml_bytes(bytes);
+        } else {
+            bytes.push(QWORDPREFIX);
+            bytes.append(&mut self.to_le_bytes().to_vec());
+        }
     }
 }
 
@@ -347,27 +365,16 @@ impl Aml for EISAName {
     }
 }
 
-fn create_integer(v: usize, bytes: &mut Vec<u8>) {
-    if v == 0_usize {
-        ZERO.to_aml_bytes(bytes);
-    } else if v == 1_usize {
-        ONE.to_aml_bytes(bytes);
-    } else if v <= u8::max_value().into() {
-        (v as u8).to_aml_bytes(bytes);
-    } else if v <= u16::max_value().into() {
-        (v as u16).to_aml_bytes(bytes);
-    } else if v <= u32::max_value() as usize {
-        (v as u32).to_aml_bytes(bytes);
-    } else {
-        (v as u64).to_aml_bytes(bytes);
-    }
-}
-
 pub type Usize = usize;
 
 impl Aml for Usize {
     fn to_aml_bytes(&self, bytes: &mut Vec<u8>) {
-        create_integer(*self, bytes);
+        #[cfg(target_pointer_width = "16")]
+        (*self as u16).to_aml_bytes(bytes);
+        #[cfg(target_pointer_width = "32")]
+        (*self as u32).to_aml_bytes(bytes);
+        #[cfg(target_pointer_width = "64")]
+        (*self as u64).to_aml_bytes(bytes);
     }
 }
 
@@ -726,6 +733,20 @@ impl<'a> Scope<'a> {
     pub fn new(path: Path, children: Vec<&'a dyn Aml>) -> Self {
         Scope { path, children }
     }
+
+    /// Create raw bytes representing a Scope from its children in raw bytes
+    pub fn raw(path: Path, mut children: Vec<u8>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        path.to_aml_bytes(&mut bytes);
+        bytes.append(&mut children);
+        let mut pkg_length = create_pkg_length(&bytes, true);
+        pkg_length.reverse();
+        for byte in pkg_length {
+            bytes.insert(0, byte);
+        }
+        bytes.insert(0, SCOPEOP);
+        bytes
+    }
 }
 
 /// Method object with its name, children objects, arguments and serialized character.
@@ -788,7 +809,7 @@ impl<'a> Aml for Return<'a> {
     }
 }
 
-/// FiledAccessType defines the filed accessing types.
+/// FieldAccessType defines the field accessing types.
 #[derive(Clone, Copy)]
 pub enum FieldAccessType {
     Any,
@@ -799,7 +820,14 @@ pub enum FieldAccessType {
     Buffer,
 }
 
-/// FiledUpdateRule defines the rules to update the filed.
+/// FieldLockRule defines the rules whether to use the Global Lock.
+#[derive(Clone, Copy)]
+pub enum FieldLockRule {
+    NoLock = 0,
+    Lock = 1,
+}
+
+/// FieldUpdateRule defines the rules to update the field.
 #[derive(Clone, Copy)]
 pub enum FieldUpdateRule {
     Preserve = 0,
@@ -807,18 +835,19 @@ pub enum FieldUpdateRule {
     WriteAsZeroes = 2,
 }
 
-/// FiledEntry defines the filed entry.
+/// FieldEntry defines the field entry.
 pub enum FieldEntry {
     Named([u8; 4], usize),
     Reserved(usize),
 }
 
-/// Field object with the region name, filed entries, access type and update rules.
+/// Field object with the region name, field entries, access type and update rules.
 pub struct Field {
     path: Path,
 
     fields: Vec<FieldEntry>,
     access_type: FieldAccessType,
+    lock_rule: FieldLockRule,
     update_rule: FieldUpdateRule,
 }
 
@@ -827,12 +856,14 @@ impl Field {
     pub fn new(
         path: Path,
         access_type: FieldAccessType,
+        lock_rule: FieldLockRule,
         update_rule: FieldUpdateRule,
         fields: Vec<FieldEntry>,
     ) -> Self {
         Field {
             path,
             access_type,
+            lock_rule,
             update_rule,
             fields,
         }
@@ -844,7 +875,8 @@ impl Aml for Field {
         let mut bytes = Vec::new();
         self.path.to_aml_bytes(&mut bytes);
 
-        let flags: u8 = self.access_type as u8 | (self.update_rule as u8) << 5;
+        let flags: u8 =
+            self.access_type as u8 | (self.lock_rule as u8) << 4 | (self.update_rule as u8) << 5;
         bytes.push(flags);
 
         for field in self.fields.iter() {
@@ -1714,6 +1746,70 @@ mod tests {
         0xdeca_fbad_deca_fbadu64.to_aml_bytes(&mut aml);
         assert_eq!(aml, [0x0e, 0xad, 0xfb, 0xca, 0xde, 0xad, 0xfb, 0xca, 0xde]);
         aml.clear();
+
+        // u8
+        0x00_u8.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x00]);
+        aml.clear();
+        0x01_u8.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x01]);
+        aml.clear();
+        0x86_u8.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0a, 0x86]);
+        aml.clear();
+
+        // u16
+        0x00_u16.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x00]);
+        aml.clear();
+        0x01_u16.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x01]);
+        aml.clear();
+        0x86_u16.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0a, 0x86]);
+        aml.clear();
+        0xF00D_u16.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0b, 0x0d, 0xf0]);
+        aml.clear();
+
+        // u32
+        0x00_u32.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x00]);
+        aml.clear();
+        0x01_u32.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x01]);
+        aml.clear();
+        0x86_u32.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0a, 0x86]);
+        aml.clear();
+        0xF00D_u32.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0b, 0x0d, 0xf0]);
+        aml.clear();
+        0xDECAF_u32.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0c, 0xaf, 0xec, 0x0d, 0x00]);
+        aml.clear();
+
+        // u64
+        0x00_u64.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x00]);
+        aml.clear();
+        0x01_u64.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x01]);
+        aml.clear();
+        0x86_u64.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0a, 0x86]);
+        aml.clear();
+        0xF00D_u64.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0b, 0x0d, 0xf0]);
+        aml.clear();
+        0xDECAF_u64.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0c, 0xaf, 0xec, 0x0d, 0x00]);
+        aml.clear();
+        0xDECAFC0FFEE_u64.to_aml_bytes(&mut aml);
+        assert_eq!(aml, [0x0e, 0xee, 0xff, 0xc0, 0xaf, 0xec, 0x0d, 0x00, 0x00]);
+        aml.clear();
+
+        // usize
         0x00_usize.to_aml_bytes(&mut aml);
         assert_eq!(aml, [0x00]);
         aml.clear();
@@ -1802,6 +1898,7 @@ mod tests {
         Field::new(
             "PRST".into(),
             FieldAccessType::Byte,
+            FieldLockRule::NoLock,
             FieldUpdateRule::WriteAsZeroes,
             vec![
                 FieldEntry::Reserved(32),
@@ -1817,7 +1914,7 @@ mod tests {
         assert_eq!(aml, &field_data[..]);
 
         /*
-            Field (PRST, DWordAcc, NoLock, Preserve)
+            Field (PRST, DWordAcc, Lock, Preserve)
             {
                 CSEL,   32,
                 Offset (0x08),
@@ -1826,7 +1923,7 @@ mod tests {
         */
 
         let field_data = [
-            0x5Bu8, 0x81, 0x12, 0x50, 0x52, 0x53, 0x54, 0x03, 0x43, 0x53, 0x45, 0x4C, 0x20, 0x00,
+            0x5Bu8, 0x81, 0x12, 0x50, 0x52, 0x53, 0x54, 0x13, 0x43, 0x53, 0x45, 0x4C, 0x20, 0x00,
             0x20, 0x43, 0x44, 0x41, 0x54, 0x20,
         ];
         aml.clear();
@@ -1834,6 +1931,7 @@ mod tests {
         Field::new(
             "PRST".into(),
             FieldAccessType::DWord,
+            FieldLockRule::Lock,
             FieldUpdateRule::Preserve,
             vec![
                 FieldEntry::Named(*b"CSEL", 32),

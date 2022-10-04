@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -183,7 +183,7 @@ pub(in crate::virtio::iommu) async fn handle_translate_request(
     let request_tube = match request_tube {
         Some(r) => r,
         None => {
-            let () = futures::future::pending().await;
+            futures::future::pending::<()>().await;
             return Ok(());
         }
     };

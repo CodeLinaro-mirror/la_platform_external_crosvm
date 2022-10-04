@@ -8,7 +8,9 @@ edition = "2021"
 path = "src/disk.rs"
 
 [features]
+android-sparse = []
 composite-disk = ["crc32fast", "protos", "protobuf", "uuid"]
+qcow = []
 
 [dependencies]
 async-trait = "*"
@@ -22,6 +24,7 @@ protobuf = { version = "2.3", optional = true }
 protos = { path = "../protos", features = ["composite-disk"], optional = true }
 remain = "*"
 serde = { version = "1", features = [ "derive" ] }
+sync = { path = "../common/sync" }
 thiserror = "*"
 tempfile = "3"
 uuid = { version = "0.8.2", features = ["v4"], optional = true }

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::thread;
 use std::u32;
 
+use acpi_tables::aml::Aml;
 #[cfg(feature = "direct")]
 use anyhow::Context;
 use base::debug;
@@ -27,6 +28,7 @@ use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::Event;
 use base::EventToken;
+use base::MemoryMapping;
 use base::Protection;
 use base::RawDescriptor;
 use base::Tube;
@@ -48,6 +50,8 @@ use vm_control::VmMemorySource;
 use vm_control::VmRequest;
 use vm_control::VmResponse;
 
+use crate::pci::acpi::DeviceVcfgRegister;
+use crate::pci::acpi::SHM_OFFSET;
 use crate::pci::msi::MsiConfig;
 use crate::pci::msi::MsiStatus;
 use crate::pci::msi::PCI_MSI_FLAGS;
@@ -68,6 +72,7 @@ use crate::pci::pci_configuration::HEADER_TYPE_REG;
 use crate::pci::pci_device::BarRange;
 use crate::pci::pci_device::Error as PciDeviceError;
 use crate::pci::pci_device::PciDevice;
+use crate::pci::pci_device::PreferredIrq;
 use crate::pci::PciAddress;
 use crate::pci::PciBarConfiguration;
 use crate::pci::PciBarIndex;
@@ -593,6 +598,7 @@ pub struct VfioPciDevice {
     is_intel_lpss: bool,
     #[cfg(feature = "direct")]
     i2c_devs: HashMap<u16, PathBuf>,
+    vcfg_shm_mmap: Option<MemoryMapping>,
     mapped_mmio_bars: BTreeMap<PciBarIndex, (u64, Vec<MemSlot>)>,
 }
 
@@ -803,6 +809,7 @@ impl VfioPciDevice {
             is_intel_lpss,
             #[cfg(feature = "direct")]
             i2c_devs,
+            vcfg_shm_mmap: None,
             mapped_mmio_bars: BTreeMap::new(),
         })
     }
@@ -1704,15 +1711,15 @@ impl PciDevice for VfioPciDevice {
         rds
     }
 
-    fn preferred_irq(&self) -> Option<(PciInterruptPin, u32)> {
+    fn preferred_irq(&self) -> PreferredIrq {
         // Is INTx configured?
         let pin = match self.config.read_config::<u8>(PCI_INTERRUPT_PIN) {
-            1 => Some(PciInterruptPin::IntA),
-            2 => Some(PciInterruptPin::IntB),
-            3 => Some(PciInterruptPin::IntC),
-            4 => Some(PciInterruptPin::IntD),
-            _ => None,
-        }?;
+            1 => PciInterruptPin::IntA,
+            2 => PciInterruptPin::IntB,
+            3 => PciInterruptPin::IntC,
+            4 => PciInterruptPin::IntD,
+            _ => return PreferredIrq::None,
+        };
 
         // TODO: replace sysfs/irq value parsing with vfio interface
         //       reporting host allocated interrupt number and type.
@@ -1723,7 +1730,7 @@ impl PciDevice for VfioPciDevice {
             .map(|v| v.trim().parse::<u32>().unwrap_or(0))
             .unwrap_or(0);
 
-        Some((pin, gsi))
+        PreferredIrq::Fixed { pin, gsi }
     }
 
     fn assign_irq(&mut self, irq_evt: IrqLevelEvent, pin: PciInterruptPin, irq_num: u32) {
@@ -2128,6 +2135,23 @@ impl PciDevice for VfioPciDevice {
 
     fn destroy_device(&mut self) {
         self.close();
+    }
+
+    fn generate_acpi_methods(&mut self) -> (Vec<u8>, Option<(u32, MemoryMapping)>) {
+        let mut amls = Vec::new();
+        let mut shm = None;
+        if let Some(pci_address) = self.pci_address {
+            let vcfg_offset = pci_address.to_config_address(0, 13);
+            if let Ok(vcfg_register) = DeviceVcfgRegister::new(vcfg_offset) {
+                vcfg_register.to_aml_bytes(&mut amls);
+                shm = vcfg_register
+                    .create_shm_mmap()
+                    .map(|shm| (vcfg_offset + SHM_OFFSET, shm));
+                self.vcfg_shm_mmap = vcfg_register.create_shm_mmap();
+            }
+        }
+
+        (amls, shm)
     }
 }
 

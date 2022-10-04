@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,13 +9,11 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::mem::size_of;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 
 use base::Event;
 use cros_fuzz::fuzz_target;
 use devices::virtio::base_features;
-use devices::virtio::Block;
+use devices::virtio::BlockAsync;
 use devices::virtio::Interrupt;
 use devices::virtio::Queue;
 use devices::virtio::VirtioDevice;
@@ -90,12 +88,11 @@ fuzz_target!(|bytes| {
 
     let disk_file = tempfile::tempfile().unwrap();
     let mut block =
-        Block::new(features, Box::new(disk_file), false, true, 512, None, None).unwrap();
+        BlockAsync::new(features, Box::new(disk_file), false, true, 512, None, None).unwrap();
 
     block.activate(
         mem,
         Interrupt::new(
-            Arc::new(AtomicUsize::new(0)),
             IrqLevelEvent::new().unwrap(),
             None,   // msix_config
             0xFFFF, // VIRTIO_MSI_NO_VECTOR

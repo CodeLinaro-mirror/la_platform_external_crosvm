@@ -16,17 +16,19 @@ cfg_if::cfg_if! {
     }
 }
 
-use base::RawDescriptor;
 use std::fs::File;
-use std::io::{IoSlice, IoSliceMut};
+use std::io::IoSlice;
+use std::io::IoSliceMut;
 use std::mem;
 use std::path::Path;
 
+use base::RawDescriptor;
 use data_model::DataInit;
 
-use super::message::*;
-use super::{Error, Result};
 use crate::connection::Req;
+use crate::message::*;
+use crate::Error;
+use crate::Result;
 
 /// Listener for accepting connections.
 pub trait Listener: Sized {
@@ -288,8 +290,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
         &mut self,
         mut bufs: &mut [&mut [u8]],
     ) -> Result<(usize, Option<Vec<File>>)> {
-        let buf_lens: Vec<usize> = bufs.iter().map(|b| b.len()).collect();
-        let data_total: usize = buf_lens.iter().sum();
+        let data_total: usize = bufs.iter().map(|b| b.len()).sum();
         let mut data_read = 0;
         let mut rfds = None;
 

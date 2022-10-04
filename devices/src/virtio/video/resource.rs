@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,7 +29,7 @@ use crate::virtio::video::protocol::virtio_video_mem_entry;
 use crate::virtio::video::protocol::virtio_video_object_entry;
 
 /// Defines how resources for a given queue are represented.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceType {
     /// Resources are backed by guest memory pages.
     GuestPages,

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -569,7 +569,7 @@ impl arch::LinuxArch for X8664arch {
         V: VmX86_64,
         Vcpu: VcpuX86_64,
     {
-        if components.protected_vm != ProtectionType::Unprotected {
+        if components.hv_cfg.protection_type != ProtectionType::Unprotected {
             return Err(Error::UnsupportedProtectionType);
         }
 
@@ -605,6 +605,7 @@ impl arch::LinuxArch for X8664arch {
             }
         }
 
+        let pcie_vcfg_range = Self::get_pcie_vcfg_mmio_range(&mem, &pcie_cfg_mmio_range);
         let mmio_bus = Arc::new(devices::Bus::new());
         let io_bus = Arc::new(devices::Bus::new());
 
@@ -617,7 +618,7 @@ impl arch::LinuxArch for X8664arch {
             .map(|(dev, jail_orig)| (dev.into_pci_device().unwrap(), jail_orig))
             .collect();
 
-        let (pci, pci_irqs, mut pid_debug_label_map) = arch::generate_pci_root(
+        let (pci, pci_irqs, mut pid_debug_label_map, amls) = arch::generate_pci_root(
             pci_devices,
             irq_chip.as_irq_chip_mut(),
             mmio_bus.clone(),
@@ -625,6 +626,7 @@ impl arch::LinuxArch for X8664arch {
             system_allocator,
             &mut vm,
             4, // Share the four pin interrupts (INTx#)
+            Some(pcie_vcfg_range.start),
         )
         .map_err(Error::CreatePciRoot)?;
 
@@ -644,7 +646,6 @@ impl arch::LinuxArch for X8664arch {
             .unwrap();
 
         let pcie_vcfg_mmio = Arc::new(Mutex::new(PciVirtualConfigMmio::new(pci.clone(), 13)));
-        let pcie_vcfg_range = Self::get_pcie_vcfg_mmio_range(&mem, &pcie_cfg_mmio_range);
         mmio_bus
             .insert(
                 pcie_vcfg_mmio,
@@ -687,14 +688,14 @@ impl arch::LinuxArch for X8664arch {
             Self::setup_legacy_cmos_device(&io_bus, components.memory_size)?;
         }
         Self::setup_serial_devices(
-            components.protected_vm,
+            components.hv_cfg.protection_type,
             irq_chip.as_irq_chip_mut(),
             &io_bus,
             serial_parameters,
             serial_jail,
         )?;
         Self::setup_debugcon_devices(
-            components.protected_vm,
+            components.hv_cfg.protection_type,
             &io_bus,
             serial_parameters,
             debugcon_jail,
@@ -723,7 +724,7 @@ impl arch::LinuxArch for X8664arch {
 
         // each bus occupy 1MB mmio for pcie enhanced configuration
         let max_bus = (pcie_cfg_mmio_len / 0x100000 - 1) as u8;
-        let (acpi_dev_resource, bat_control) = Self::setup_acpi_devices(
+        let (mut acpi_dev_resource, bat_control) = Self::setup_acpi_devices(
             pci.clone(),
             &mem,
             &io_bus,
@@ -743,6 +744,12 @@ impl arch::LinuxArch for X8664arch {
             &mut resume_notify_devices,
         )?;
 
+        // Create customized SSDT table
+        let sdt = acpi::create_customize_ssdt(pci.clone(), amls);
+        if let Some(sdt) = sdt {
+            acpi_dev_resource.sdts.push(sdt);
+        }
+
         irq_chip
             .finalize_devices(system_allocator, &io_bus, &mmio_bus)
             .map_err(Error::RegisterIrqfd)?;
@@ -760,7 +767,8 @@ impl arch::LinuxArch for X8664arch {
             mptable::setup_mptable(&mem, vcpu_count as u8, &pci_irqs)
                 .map_err(Error::SetupMptable)?;
         }
-        smbios::setup_smbios(&mem, components.dmi_path).map_err(Error::SetupSmbios)?;
+        smbios::setup_smbios(&mem, components.dmi_path, &components.oem_strings)
+            .map_err(Error::SetupSmbios)?;
 
         let host_cpus = if components.host_cpu_topology {
             components.vcpu_affinity.clone()
@@ -951,9 +959,13 @@ impl arch::LinuxArch for X8664arch {
         )
         .map_err(Error::ConfigurePciDevice)
     }
+}
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    fn debug_read_registers<T: VcpuX86_64>(vcpu: &T) -> Result<X86_64CoreRegs> {
+#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+impl<T: VcpuX86_64> arch::GdbOps<T> for X8664arch {
+    type Error = Error;
+
+    fn read_registers(vcpu: &T) -> Result<X86_64CoreRegs> {
         // General registers: RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP, r8-r15
         let gregs = vcpu.get_regs().map_err(Error::ReadRegs)?;
         let regs = [
@@ -1014,8 +1026,7 @@ impl arch::LinuxArch for X8664arch {
         Ok(regs)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    fn debug_write_registers<T: VcpuX86_64>(vcpu: &T, regs: &X86_64CoreRegs) -> Result<()> {
+    fn write_registers(vcpu: &T, regs: &X86_64CoreRegs) -> Result<()> {
         // General purpose registers (RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP, r8-r15) + RIP + rflags
         let orig_gregs = vcpu.get_regs().map_err(Error::ReadRegs)?;
         let gregs = Regs {
@@ -1075,8 +1086,7 @@ impl arch::LinuxArch for X8664arch {
         Ok(())
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    fn debug_read_memory<T: VcpuX86_64>(
+    fn read_memory(
         vcpu: &T,
         guest_mem: &GuestMemory,
         vaddr: GuestAddress,
@@ -1099,8 +1109,7 @@ impl arch::LinuxArch for X8664arch {
         Ok(buf)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    fn debug_write_memory<T: VcpuX86_64>(
+    fn write_memory(
         vcpu: &T,
         guest_mem: &GuestMemory,
         vaddr: GuestAddress,
@@ -1127,17 +1136,16 @@ impl arch::LinuxArch for X8664arch {
         Ok(())
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    fn debug_enable_singlestep<T: VcpuX86_64>(vcpu: &T) -> Result<()> {
+    fn enable_singlestep(vcpu: &T) -> Result<()> {
         vcpu.set_guest_debug(&[], true /* enable_singlestep */)
             .map_err(Error::EnableSinglestep)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-    fn debug_set_hw_breakpoints<T: VcpuX86_64>(
-        vcpu: &T,
-        breakpoints: &[GuestAddress],
-    ) -> Result<()> {
+    fn get_max_hw_breakpoints(_vcpu: &T) -> Result<usize> {
+        Ok(4usize)
+    }
+
+    fn set_hw_breakpoints(vcpu: &T, breakpoints: &[GuestAddress]) -> Result<()> {
         vcpu.set_guest_debug(breakpoints, false /* enable_singlestep */)
             .map_err(Error::SetHwBreakpoint)
     }
@@ -1780,7 +1788,7 @@ impl X8664arch {
     /// * - `io_bus` the I/O bus to add the devices to
     /// * - `serial_parmaters` - definitions for how the serial devices should be configured
     fn setup_serial_devices(
-        protected_vm: ProtectionType,
+        protection_type: ProtectionType,
         irq_chip: &mut dyn IrqChip,
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
@@ -1790,7 +1798,7 @@ impl X8664arch {
         let com_evt_2_4 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
 
         arch::add_serial_devices(
-            protected_vm,
+            protection_type,
             io_bus,
             com_evt_1_3.get_trigger(),
             com_evt_2_4.get_trigger(),
@@ -1815,7 +1823,7 @@ impl X8664arch {
     }
 
     fn setup_debugcon_devices(
-        protected_vm: ProtectionType,
+        protection_type: ProtectionType,
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         debugcon_jail: Option<Minijail>,
@@ -1828,7 +1836,7 @@ impl X8664arch {
             let mut preserved_fds = Vec::new();
             let con = param
                 .create_serial_device::<Debugcon>(
-                    protected_vm,
+                    protection_type,
                     // Debugcon doesn't use the interrupt event
                     &Event::new().map_err(Error::CreateEvent)?,
                     &mut preserved_fds,

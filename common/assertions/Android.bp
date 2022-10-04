@@ -10,6 +10,22 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
+rust_test {
+    name: "assertions_test_src_lib",
+    defaults: ["crosvm_defaults"],
+    host_supported: true,
+    crate_name: "assertions",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
+    srcs: ["src/lib.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
+    edition: "2021",
+}
+
 rust_library {
     name: "libassertions",
     defaults: ["crosvm_defaults"],

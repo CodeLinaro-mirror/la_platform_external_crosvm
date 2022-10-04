@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -113,7 +113,7 @@ pub(super) fn take_run_handle(vcpu: &HaxmVcpu, signal_num: Option<c_int>) -> Res
     VCPU_THREAD.with(|v| {
         if v.borrow().is_none() {
             *v.borrow_mut() = Some(VcpuThread {
-                tunnel: vcpu.tunnel.as_ptr() as *mut hax_tunnel,
+                tunnel: vcpu.tunnel,
                 signal_num,
             });
             Ok(())

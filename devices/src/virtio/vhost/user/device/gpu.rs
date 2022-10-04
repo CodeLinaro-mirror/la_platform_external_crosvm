@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,6 @@ use base::warn;
 use base::Event;
 use base::FromRawDescriptor;
 use base::SafeDescriptor;
-use base::Timer;
 use base::Tube;
 use base::UnixSeqpacketListener;
 use base::UnlinkUnixSeqpacketListener;
@@ -27,10 +26,6 @@ use cros_async::AsyncWrapper;
 use cros_async::EventAsync;
 use cros_async::Executor;
 use cros_async::IoSourceExt;
-use cros_async::TimerAsync;
-use futures::future::select;
-use futures::future::Either;
-use futures::pin_mut;
 use hypervisor::ProtectionType;
 use sync::Mutex;
 use vm_memory::GuestMemory;
@@ -39,6 +34,7 @@ use vmm_vhost::message::VhostUserVirtioFeatures;
 
 use crate::virtio;
 use crate::virtio::gpu;
+use crate::virtio::gpu::GpuFrontendExt;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
 use crate::virtio::vhost::user::device::listener::sys::VhostUserListener;
@@ -60,7 +56,7 @@ const MAX_VRING_LEN: u16 = gpu::QUEUE_SIZES[0];
 #[derive(Clone)]
 struct SharedReader {
     queue: Arc<Mutex<Queue>>,
-    doorbell: Arc<Mutex<Doorbell>>,
+    doorbell: Doorbell,
 }
 
 impl gpu::QueueReader for SharedReader {
@@ -81,42 +77,16 @@ async fn run_ctrl_queue(
     reader: SharedReader,
     mem: GuestMemory,
     kick_evt: EventAsync,
-    mut timer: TimerAsync,
     state: Rc<RefCell<gpu::Frontend>>,
 ) {
     loop {
-        if state.borrow().has_pending_fences() {
-            if let Err(e) = timer.reset(gpu::FENCE_POLL_INTERVAL, None) {
-                error!("Failed to reset fence timer: {}", e);
-                break;
-            }
-
-            let kick_value = kick_evt.next_val();
-            let timer_value = timer.next_val();
-            pin_mut!(kick_value);
-            pin_mut!(timer_value);
-            match select(kick_value, timer_value).await {
-                Either::Left((res, _)) => {
-                    if let Err(e) = res {
-                        error!("Failed to read kick event for ctrl queue: {}", e);
-                        break;
-                    }
-                }
-                Either::Right((res, _)) => {
-                    if let Err(e) = res {
-                        error!("Failed to read timer for ctrl queue: {}", e);
-                        break;
-                    }
-                }
-            }
-        } else if let Err(e) = kick_evt.next_val().await {
+        if let Err(e) = kick_evt.next_val().await {
             error!("Failed to read kick event for ctrl queue: {}", e);
             break;
         }
 
         let mut state = state.borrow_mut();
         let needs_interrupt = state.process_queue(&mem, &reader);
-        state.fence_poll();
 
         if needs_interrupt {
             reader.signal_used(&mem);
@@ -231,7 +201,7 @@ impl VhostUserBackend for GpuBackend {
         idx: usize,
         queue: Queue,
         mem: GuestMemory,
-        doorbell: Arc<Mutex<Doorbell>>,
+        doorbell: Doorbell,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
         if let Some(task) = self.workers.get_mut(idx).and_then(Option::take) {
@@ -300,12 +270,9 @@ impl VhostUserBackend for GpuBackend {
             self.display_worker = Some(task);
         }
 
-        let timer = Timer::new()
-            .context("failed to create Timer")
-            .and_then(|t| TimerAsync::new(t, &self.ex).context("failed to create TimerAsync"))?;
         let task = self
             .ex
-            .spawn_local(run_ctrl_queue(reader, mem, kick_evt, timer, state));
+            .spawn_local(run_ctrl_queue(reader, mem, kick_evt, state));
 
         self.workers[idx] = Some(task);
         Ok(())
