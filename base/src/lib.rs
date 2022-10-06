@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -117,8 +117,10 @@ cfg_if::cfg_if! {
 
         pub use tube::{
             deserialize_and_recv, serialize_and_send, set_alias_pid, set_duplicate_handle_tube,
-            DuplicateHandleRequest, DuplicateHandleResponse, DuplicateHandleTube,
+            DuplicateHandleRequest, DuplicateHandleResponse, DuplicateHandleTube
         };
+        #[cfg(feature = "kiwi")]
+        pub use tube::ProtoTube;
         pub use platform::{set_audio_thread_priorities, thread};
     } else {
         compile_error!("Unsupported platform");

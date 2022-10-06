@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -309,7 +309,7 @@ impl TestVm {
         let control_socket_path = test_dir.path().join("control");
 
         let mut command = Command::new(find_crosvm_binary());
-        command.args(&["run", "--disable-sandbox"]);
+        command.args(&["run"]);
         TestVm::configure_serial_devices(&mut command, &from_guest_pipe, &to_guest_pipe);
         command.args(&["--socket", control_socket_path.to_str().unwrap()]);
         TestVm::configure_rootfs(&mut command, cfg.o_direct);

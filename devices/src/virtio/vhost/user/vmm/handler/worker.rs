@@ -1,9 +1,6 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-use std::cell::RefCell;
-use std::rc::Rc;
 
 use base::Event;
 use cros_async::select3;
@@ -14,7 +11,7 @@ use vm_memory::GuestMemory;
 
 use crate::virtio::async_utils;
 use crate::virtio::vhost::user::vmm::handler::sys::run_backend_request_handler;
-use crate::virtio::vhost::user::vmm::handler::sys::BackendReqHandler;
+use crate::virtio::vhost::user::vmm::handler::BackendReqHandler;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 
@@ -30,7 +27,6 @@ impl Worker {
     pub fn run(&mut self, interrupt: Interrupt) -> Result<(), String> {
         let ex = Executor::new().expect("failed to create an executor");
 
-        let interrupt = Rc::new(RefCell::new(interrupt));
         let resample = async_utils::handle_irq_resample(&ex, interrupt);
         pin_mut!(resample);
 

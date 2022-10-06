@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -112,4 +112,8 @@ pub fn set_panic_hook() {
         // Abort to trigger the crash reporter so that a minidump is generated.
         abort();
     }));
+
+    // Install the memfd handler last so it will run before the panic hook above that calls abort().
+    #[cfg(feature = "panic-memfd")]
+    base::sys::unix::panic_handler::install_memfd_handler();
 }

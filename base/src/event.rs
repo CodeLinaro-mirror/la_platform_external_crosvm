@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,9 +11,17 @@ use crate::descriptor::AsRawDescriptor;
 use crate::descriptor::FromRawDescriptor;
 use crate::descriptor::IntoRawDescriptor;
 use crate::platform::Event as PlatformEvent;
-pub use crate::platform::EventReadResult;
 use crate::RawDescriptor;
 use crate::Result;
+
+/// Result of reading an Event with a timeout.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EventReadResult {
+    /// Number of times the event has been written to. Always non-negative.
+    Count(u64),
+    /// Timed out before witnessing a write.
+    Timeout,
+}
 
 /// See the [platform-specific Event struct](crate::platform::Event) for struct- and method-level
 /// documentation.

@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,7 @@ impl SerialDevice for Serial {
     ///
     /// The stream `input` should not block, instead returning 0 bytes if are no bytes available.
     fn new(
-        _protected_vm: ProtectionType,
+        _protection_type: ProtectionType,
         interrupt_evt: Event,
         input: Option<Box<dyn SerialInput>>,
         out: Option<Box<dyn io::Write + Send>>,

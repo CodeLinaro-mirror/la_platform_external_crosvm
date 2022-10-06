@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -814,7 +814,6 @@ mod tests {
     use hypervisor::kvm::Kvm;
     use hypervisor::IoapicRedirectionTableEntry;
     use hypervisor::PitRWMode;
-    use hypervisor::ProtectionType;
     use hypervisor::TriggerMode;
     use hypervisor::Vm;
     use hypervisor::VmX86_64;
@@ -833,8 +832,7 @@ mod tests {
     fn get_kernel_chip() -> KvmKernelIrqChip {
         let kvm = Kvm::new().expect("failed to instantiate Kvm");
         let mem = GuestMemory::new(&[]).unwrap();
-        let vm =
-            KvmVm::new(&kvm, mem, ProtectionType::Unprotected).expect("failed tso instantiate vm");
+        let vm = KvmVm::new(&kvm, mem, Default::default()).expect("failed tso instantiate vm");
 
         let mut chip = KvmKernelIrqChip::new(vm.try_clone().expect("failed to clone vm"), 1)
             .expect("failed to instantiate KvmKernelIrqChip");
@@ -850,8 +848,7 @@ mod tests {
     fn get_split_chip() -> KvmSplitIrqChip {
         let kvm = Kvm::new().expect("failed to instantiate Kvm");
         let mem = GuestMemory::new(&[]).unwrap();
-        let vm =
-            KvmVm::new(&kvm, mem, ProtectionType::Unprotected).expect("failed tso instantiate vm");
+        let vm = KvmVm::new(&kvm, mem, Default::default()).expect("failed tso instantiate vm");
 
         let (_, device_tube) = Tube::pair().expect("failed to create irq tube");
 

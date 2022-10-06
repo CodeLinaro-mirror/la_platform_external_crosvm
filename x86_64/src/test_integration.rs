@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -129,7 +129,7 @@ where
 
     let devices = vec![];
 
-    let (pci, pci_irqs, _pid_debug_label_map) = arch::generate_pci_root(
+    let (pci, pci_irqs, _pid_debug_label_map, _amls) = arch::generate_pci_root(
         devices,
         &mut irq_chip,
         mmio_bus.clone(),
@@ -137,6 +137,7 @@ where
         &mut resources,
         &mut vm,
         4,
+        None,
     )
     .unwrap();
     let pci = Arc::new(Mutex::new(pci));
@@ -226,7 +227,7 @@ where
 
     // Note that this puts the mptable at 0x9FC00 in guest physical memory.
     mptable::setup_mptable(&guest_mem, 1, &pci_irqs).expect("failed to setup mptable");
-    smbios::setup_smbios(&guest_mem, None).expect("failed to setup smbios");
+    smbios::setup_smbios(&guest_mem, None, &Vec::new()).expect("failed to setup smbios");
 
     let mut apic_ids = Vec::new();
     acpi::create_acpi_tables(

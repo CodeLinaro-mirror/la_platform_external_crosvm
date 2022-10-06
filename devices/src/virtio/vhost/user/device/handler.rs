@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -58,28 +58,21 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use anyhow::Context;
-use anyhow::Result;
 #[cfg(unix)]
 use base::clear_fd_flags;
 use base::error;
-use base::info;
-use base::AsRawDescriptor;
 use base::Event;
 use base::FromRawDescriptor;
 use base::IntoRawDescriptor;
 use base::Protection;
 use base::SafeDescriptor;
 use base::SharedMemory;
-use cros_async::AsyncWrapper;
-use cros_async::Executor;
-use sync::Mutex;
 use sys::Doorbell;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::MemoryRegion;
 use vmm_vhost::connection::Endpoint;
-use vmm_vhost::message::MasterReq;
 use vmm_vhost::message::SlaveReq;
 use vmm_vhost::message::VhostSharedMemoryRegion;
 use vmm_vhost::message::VhostUserConfigFlags;
@@ -97,9 +90,7 @@ use vmm_vhost::Error as VhostError;
 use vmm_vhost::Protocol;
 use vmm_vhost::Result as VhostResult;
 use vmm_vhost::Slave;
-use vmm_vhost::SlaveReqHandler;
 use vmm_vhost::VhostUserMasterReqHandler;
-use vmm_vhost::VhostUserSlaveReqHandler;
 use vmm_vhost::VhostUserSlaveReqHandlerMut;
 
 use crate::virtio::Queue;
@@ -113,12 +104,13 @@ use crate::virtio::SignalableInterrupt;
 // TODO(b/187487351): To avoid sending unnecessary events, we might want to support interrupt
 // status. For this purpose, we need a mechanism to share interrupt status between the vmm and the
 // device process.
-pub struct CallEvent(Event);
+#[derive(Clone)]
+pub struct CallEvent(Arc<Event>);
 
 impl CallEvent {
     #[cfg_attr(windows, allow(dead_code))]
     pub fn into_inner(self) -> Event {
-        self.0
+        Arc::try_unwrap(self.0).unwrap()
     }
 }
 
@@ -139,7 +131,9 @@ impl SignalableInterrupt for CallEvent {
 impl From<File> for CallEvent {
     fn from(file: File) -> Self {
         // Safe because we own the file.
-        CallEvent(unsafe { Event::from_raw_descriptor(file.into_raw_descriptor()) })
+        CallEvent(Arc::new(unsafe {
+            Event::from_raw_descriptor(file.into_raw_descriptor())
+        }))
     }
 }
 
@@ -201,7 +195,7 @@ pub trait VhostUserBackend {
         idx: usize,
         queue: Queue,
         mem: GuestMemory,
-        doorbell: Arc<Mutex<Doorbell>>,
+        doorbell: Doorbell,
         kick_evt: Event,
     ) -> anyhow::Result<()>;
 
@@ -227,7 +221,7 @@ pub trait VhostUserBackend {
 /// A virtio ring entry.
 struct Vring {
     queue: Queue,
-    doorbell: Option<Arc<Mutex<Doorbell>>>,
+    doorbell: Option<Doorbell>,
     enabled: bool,
 }
 
@@ -244,39 +238,6 @@ impl Vring {
         self.queue.reset();
         self.doorbell = None;
         self.enabled = false;
-    }
-}
-
-/// Performs the run loop for an already-constructed request handler.
-#[cfg_attr(windows, allow(dead_code))]
-pub async fn run_handler<S, E>(mut req_handler: SlaveReqHandler<S, E>, ex: &Executor) -> Result<()>
-where
-    S: VhostUserSlaveReqHandler,
-    E: Endpoint<MasterReq> + AsRawDescriptor,
-{
-    let h = SafeDescriptor::try_from(&req_handler as &dyn AsRawDescriptor)
-        .map(AsyncWrapper::new)
-        .context("failed to get safe descriptor for handler")?;
-    let handler_source = ex
-        .async_from(h)
-        .context("failed to create an async source")?;
-
-    loop {
-        handler_source
-            .wait_readable()
-            .await
-            .context("failed to wait for the handler to become readable")?;
-        match req_handler.handle_request() {
-            Ok(()) => (),
-            Err(VhostError::ClientExit) => {
-                info!("vhost-user connection closed");
-                // Exit as the client closed the connection.
-                return Ok(());
-            }
-            Err(e) => {
-                bail!("failed to handle a vhost-user request: {}", e);
-            }
-        };
     }
 }
 
@@ -609,19 +570,16 @@ impl<O: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for DeviceRequestHandl
         vring.queue.set_ready(true);
 
         let queue = vring.queue.clone();
-        let doorbell = vring
-            .doorbell
-            .as_ref()
-            .ok_or(VhostError::InvalidOperation)?;
+        let doorbell = vring.doorbell.clone().ok_or(VhostError::InvalidOperation)?;
         let mem = self
             .mem
             .as_ref()
             .cloned()
             .ok_or(VhostError::InvalidOperation)?;
 
-        if let Err(e) =
-            self.backend
-                .start_queue(index as usize, queue, mem, Arc::clone(doorbell), kick_evt)
+        if let Err(e) = self
+            .backend
+            .start_queue(index as usize, queue, mem, doorbell, kick_evt)
         {
             error!("Failed to start queue {}: {}", index, e);
             return Err(VhostError::SlaveInternalError);
@@ -636,16 +594,7 @@ impl<O: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for DeviceRequestHandl
         }
 
         let doorbell = self.ops.set_vring_call(index, file)?;
-        match &self.vrings[index as usize].doorbell {
-            None => {
-                self.vrings[index as usize].doorbell = Some(Arc::new(Mutex::new(doorbell)));
-            }
-            Some(cell) => {
-                let mut evt = cell.lock();
-                *evt = doorbell;
-            }
-        }
-
+        self.vrings[index as usize].doorbell = Some(doorbell);
         Ok(())
     }
 
@@ -778,8 +727,7 @@ impl SharedMemoryMapper for VhostShmemMapper {
             }
             _ => bail!("unsupported source"),
         };
-        let flags = VhostUserShmemMapMsgFlags::from_bits(libc::c_int::from(prot) as u8)
-            .context(format!("unsupported protection flags {:?}", prot))?;
+        let flags = VhostUserShmemMapMsgFlags::from(prot);
         let msg = VhostUserShmemMapMsg::new(self.shmid, offset, fd_offset, size, flags);
         self.frontend
             .shmem_map(&msg, &descriptor)
@@ -815,6 +763,9 @@ mod tests {
     use tempfile::Builder;
     #[cfg(unix)]
     use tempfile::TempDir;
+    use vmm_vhost::message::MasterReq;
+    use vmm_vhost::SlaveReqHandler;
+    use vmm_vhost::VhostUserSlaveReqHandler;
 
     use super::*;
     use crate::virtio::vhost::user::vmm::VhostUserHandler;
@@ -907,7 +858,7 @@ mod tests {
             _idx: usize,
             _queue: Queue,
             _mem: GuestMemory,
-            _doorbell: Arc<Mutex<Doorbell>>,
+            _doorbell: Doorbell,
             _kick_evt: Event,
         ) -> anyhow::Result<()> {
             Ok(())

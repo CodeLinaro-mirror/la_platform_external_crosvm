@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -94,7 +94,11 @@ use crate::display::WindowEvent;
 use crate::display::WindowMode;
 use crate::display::WindowVisibility;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-pub use crate::gdb::*;
+pub use crate::gdb::VcpuDebug;
+#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+pub use crate::gdb::VcpuDebugStatus;
+#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+pub use crate::gdb::VcpuDebugStatusMessage;
 
 /// Control the state of a particular VM CPU.
 #[derive(Clone, Debug)]
@@ -944,6 +948,24 @@ pub enum VmRequest {
     },
 }
 
+pub fn handle_disk_command(command: &DiskControlCommand, disk_host_tube: &Tube) -> VmResponse {
+    // Forward the request to the block device process via its control socket.
+    if let Err(e) = disk_host_tube.send(command) {
+        error!("disk socket send failed: {}", e);
+        return VmResponse::Err(SysError::new(EINVAL));
+    }
+
+    // Wait for the disk control command to be processed
+    match disk_host_tube.recv() {
+        Ok(DiskControlResult::Ok) => VmResponse::Ok,
+        Ok(DiskControlResult::Err(e)) => VmResponse::Err(e),
+        Err(e) => {
+            error!("disk socket recv failed: {}", e);
+            VmResponse::Err(SysError::new(EINVAL))
+        }
+    }
+}
+
 /// WARNING: descriptor must be a mapping handle on Windows.
 fn map_descriptor(
     descriptor: &dyn AsRawDescriptor,
@@ -1147,26 +1169,10 @@ impl VmRequest {
             VmRequest::DiskCommand {
                 disk_index,
                 ref command,
-            } => {
-                // Forward the request to the block device process via its control socket.
-                if let Some(sock) = disk_host_tubes.get(disk_index) {
-                    if let Err(e) = sock.send(command) {
-                        error!("disk socket send failed: {}", e);
-                        VmResponse::Err(SysError::new(EINVAL))
-                    } else {
-                        match sock.recv() {
-                            Ok(DiskControlResult::Ok) => VmResponse::Ok,
-                            Ok(DiskControlResult::Err(e)) => VmResponse::Err(e),
-                            Err(e) => {
-                                error!("disk socket recv failed: {}", e);
-                                VmResponse::Err(SysError::new(EINVAL))
-                            }
-                        }
-                    }
-                } else {
-                    VmResponse::Err(SysError::new(ENODEV))
-                }
-            }
+            } => match &disk_host_tubes.get(disk_index) {
+                Some(tube) => handle_disk_command(command, tube),
+                None => VmResponse::Err(SysError::new(ENODEV)),
+            },
             VmRequest::UsbCommand(ref cmd) => {
                 let usb_control_tube = match usb_control_tube {
                     Some(t) => t,

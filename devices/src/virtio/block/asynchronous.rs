@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,7 +36,7 @@ use cros_async::SelectResult;
 use cros_async::TimerAsync;
 use data_model::DataInit;
 use disk::AsyncDisk;
-use disk::ToAsyncDisk;
+use disk::DiskFile;
 use futures::pin_mut;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
@@ -66,7 +66,7 @@ const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES as usize];
 
 #[sorted]
 #[derive(ThisError, Debug)]
-enum ExecuteError {
+pub enum ExecuteError {
     #[error("failed to copy ID string: {0}")]
     CopyId(io::Error),
     #[error("virtio descriptor error: {0}")]
@@ -253,7 +253,7 @@ pub async fn process_one_chain<I: SignalableInterrupt>(
 // There is one async task running `handle_queue` per virtio queue in use.
 // Receives messages from the guest and queues a task to complete the operations with the async
 // executor.
-pub async fn handle_queue<I: SignalableInterrupt + Clone + 'static>(
+pub async fn handle_queue<I: SignalableInterrupt + 'static>(
     ex: Executor,
     mem: GuestMemory,
     disk_state: Rc<AsyncMutex<DiskState>>,
@@ -293,15 +293,30 @@ pub async fn handle_queue<I: SignalableInterrupt + Clone + 'static>(
     }
 }
 
+/// handles the disk control requests from the vhost user backend control server.
+pub async fn handle_vhost_user_command_tube(
+    command_tube: AsyncTube,
+    disk_state: Rc<AsyncMutex<DiskState>>,
+) -> Result<(), ExecuteError> {
+    // Process the commands. Sets |interrupt| to None since vhost user backend
+    // currently does not support sending interrupts to the guest kernel.
+    // TODO(b/191845881): Use backend to frontend vhost user message
+    // CONFIG_CHANGE_MSG to notify the guest kernel once sending such message
+    // is supported.
+    handle_command_tube(&Some(command_tube), None, Rc::clone(&disk_state)).await
+}
+
+// TODO(b/191845881): Update argument |interrupt| from Option to non-Option value
+// once we enable sending vhost-user message from the backend to the frontend.
 async fn handle_command_tube(
     command_tube: &Option<AsyncTube>,
-    interrupt: Rc<RefCell<Interrupt>>,
+    interrupt: Option<Interrupt>,
     disk_state: Rc<AsyncMutex<DiskState>>,
 ) -> Result<(), ExecuteError> {
     let command_tube = match command_tube {
         Some(c) => c,
         None => {
-            let () = futures::future::pending().await;
+            futures::future::pending::<()>().await;
             return Ok(());
         }
     };
@@ -320,7 +335,9 @@ async fn handle_command_tube(
                     .await
                     .map_err(ExecuteError::SendingResponse)?;
                 if let DiskControlResult::Ok = resp {
-                    interrupt.borrow().signal_config_changed();
+                    if let Some(interrupt) = &interrupt {
+                        interrupt.signal_config_changed();
+                    }
                 }
             }
             Err(e) => return Err(ExecuteError::ReceivingCommand(e)),
@@ -405,18 +422,16 @@ fn run_worker(
         return Err("Number of queues and events must match.".to_string());
     }
 
-    let interrupt = Rc::new(RefCell::new(interrupt));
-
     // One flush timer per disk.
     let timer = Timer::new().expect("Failed to create a timer");
     let flush_timer_armed = Rc::new(RefCell::new(false));
 
     // Process any requests to resample the irq value.
-    let resample = async_utils::handle_irq_resample(&ex, Rc::clone(&interrupt));
+    let resample = async_utils::handle_irq_resample(&ex, interrupt.clone());
     pin_mut!(resample);
 
     // Handles control requests.
-    let control = handle_command_tube(control_tube, Rc::clone(&interrupt), disk_state.clone());
+    let control = handle_command_tube(control_tube, Some(interrupt.clone()), disk_state.clone());
     pin_mut!(control);
 
     // Handle all the queues in one sub-select call.
@@ -444,7 +459,7 @@ fn run_worker(
                 Rc::clone(disk_state),
                 Rc::clone(&queue),
                 event,
-                Rc::clone(&interrupt),
+                interrupt.clone(),
                 Rc::clone(&flush_timer),
                 Rc::clone(&flush_timer_armed),
             )
@@ -481,7 +496,7 @@ fn run_worker(
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct BlockAsync {
     // We keep these members crate-public as they are accessed by the vhost-user device.
-    pub(crate) disk_image: Option<Box<dyn ToAsyncDisk>>,
+    pub(crate) disk_image: Option<Box<dyn DiskFile>>,
     pub(crate) disk_size: Arc<AtomicU64>,
     pub(crate) avail_features: u64,
     pub(crate) read_only: bool,
@@ -489,16 +504,16 @@ pub struct BlockAsync {
     pub(crate) seg_max: u32,
     pub(crate) block_size: u32,
     pub(crate) id: Option<BlockId>,
+    pub(crate) control_tube: Option<Tube>,
     kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<(Box<dyn ToAsyncDisk>, Option<Tube>)>>,
-    control_tube: Option<Tube>,
+    worker_thread: Option<thread::JoinHandle<(Box<dyn DiskFile>, Option<Tube>)>>,
 }
 
 impl BlockAsync {
     /// Create a new virtio block device that operates on the given AsyncDisk.
     pub fn new(
         base_features: u64,
-        disk_image: Box<dyn ToAsyncDisk>,
+        disk_image: Box<dyn DiskFile>,
         read_only: bool,
         sparse: bool,
         block_size: u32,

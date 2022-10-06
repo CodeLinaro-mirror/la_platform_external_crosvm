@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -452,9 +452,11 @@ impl DecoderSession for FfmpegDecoderSession {
             event_queue: Arc::downgrade(&self.event_queue),
         };
 
-        let avpacket = AvPacket::new_owned(timestamp as i64, input_buffer)
+        let avbuffer = AvBuffer::new(input_buffer)
             .context("while creating AvPacket")
             .map_err(VideoError::BackendFailure)?;
+
+        let avpacket = AvPacket::new_owned(timestamp as i64, avbuffer);
 
         self.codec_jobs.push_back(CodecJob::Packet(avpacket));
 
@@ -745,7 +747,8 @@ impl DecoderBackend for FfmpegDecoder {
             // TODO we should use a custom `get_buffer` function that renders directly into the
             // target buffer if the output format is directly supported by libavcodec. Right now
             // libavcodec is allocating its own frame buffers, which forces us to perform a copy.
-            .open(None)
+            .build_decoder()
+            .and_then(|b| b.build())
             .context("while creating new session")
             .map_err(VideoError::BackendFailure)?;
         Ok(FfmpegDecoderSession {

@@ -1,17 +1,16 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 mod edid;
 mod parameters;
 mod protocol;
+mod sys;
 mod virtio_gpu;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use std::convert::TryFrom;
-use std::i64;
 use std::io::Read;
 use std::mem;
 use std::mem::size_of;
@@ -19,9 +18,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
-use anyhow::Context;
 use base::debug;
 use base::error;
 use base::warn;
@@ -38,13 +35,19 @@ use base::WaitContext;
 use data_model::*;
 pub use gpu_display::EventDevice;
 use gpu_display::*;
+pub use parameters::DisplayMode as GpuDisplayMode;
 pub use parameters::DisplayParameters as GpuDisplayParameters;
 pub use parameters::GpuParameters;
+pub use parameters::DEFAULT_DISPLAY_HEIGHT;
+pub use parameters::DEFAULT_DISPLAY_WIDTH;
 pub use parameters::DEFAULT_REFRESH_RATE;
 use rutabaga_gfx::*;
 use serde::Deserialize;
 use serde::Serialize;
 use sync::Mutex;
+use sys::ResourceBridges;
+#[cfg(unix)]
+pub use sys::UnixFrontendExt as GpuFrontendExt;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
@@ -61,7 +64,6 @@ use self::protocol::*;
 use self::virtio_gpu::VirtioGpu;
 use super::copy_config;
 pub use super::device_constants::gpu::QUEUE_SIZES;
-use super::resource_bridge::*;
 use super::DescriptorChain;
 use super::DeviceType;
 use super::Interrupt;
@@ -82,8 +84,6 @@ pub enum GpuMode {
     #[serde(rename = "gfxstream")]
     ModeGfxstream,
 }
-
-pub const FENCE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Copy, Clone, Debug)]
 pub struct VirtioScanoutBlobData {
@@ -294,28 +294,6 @@ impl Frontend {
     /// Processes the internal `display` events and returns `true` if any display was closed.
     pub fn process_display(&mut self) -> bool {
         self.virtio_gpu.process_display()
-    }
-
-    /// Processes incoming requests on `resource_bridge`.
-    pub fn process_resource_bridge(&mut self, resource_bridge: &Tube) -> anyhow::Result<()> {
-        let response = match resource_bridge.recv() {
-            Ok(ResourceRequest::GetBuffer { id }) => self.virtio_gpu.export_resource(id),
-            Ok(ResourceRequest::GetFence { seqno }) => {
-                // The seqno originated from self.backend, so
-                // it should fit in a u32.
-                match u32::try_from(seqno) {
-                    Ok(fence_id) => self.virtio_gpu.export_fence(fence_id),
-                    Err(_) => ResourceResponse::Invalid,
-                }
-            }
-            Err(e) => return Err(e).context("Error receiving resource bridge request"),
-        };
-
-        resource_bridge
-            .send(&response)
-            .context("Error sending resource bridge response")?;
-
-        Ok(())
     }
 
     fn process_gpu_command(
@@ -733,17 +711,20 @@ impl Frontend {
         self.return_cursor_descriptors.pop_front()
     }
 
-    pub fn fence_poll(&mut self) {
-        self.virtio_gpu.fence_poll();
-    }
-
-    pub fn has_pending_fences(&self) -> bool {
-        !self.fence_state.lock().descs.is_empty()
-    }
-
     pub fn event_poll(&self) {
         self.virtio_gpu.event_poll();
     }
+}
+
+#[derive(EventToken)]
+enum WorkerToken {
+    CtrlQueue,
+    CursorQueue,
+    Display,
+    InterruptResample,
+    Kill,
+    ResourceBridge { index: usize },
+    VirtioGpuPoll,
 }
 
 struct Worker {
@@ -754,29 +735,18 @@ struct Worker {
     ctrl_evt: Event,
     cursor_queue: LocalQueueReader,
     cursor_evt: Event,
-    resource_bridges: Vec<Tube>,
+    resource_bridges: ResourceBridges,
     kill_evt: Event,
     state: Frontend,
 }
 
 impl Worker {
     fn run(&mut self) {
-        #[derive(EventToken)]
-        enum Token {
-            CtrlQueue,
-            CursorQueue,
-            Display,
-            InterruptResample,
-            Kill,
-            ResourceBridge { index: usize },
-            VirtioGpuPoll,
-        }
-
-        let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
-            (&self.ctrl_evt, Token::CtrlQueue),
-            (&self.cursor_evt, Token::CursorQueue),
-            (&*self.state.display().borrow(), Token::Display),
-            (&self.kill_evt, Token::Kill),
+        let mut wait_ctx: WaitContext<WorkerToken> = match WaitContext::build_with(&[
+            (&self.ctrl_evt, WorkerToken::CtrlQueue),
+            (&self.cursor_evt, WorkerToken::CursorQueue),
+            (&*self.state.display().borrow(), WorkerToken::Display),
+            (&self.kill_evt, WorkerToken::Kill),
         ]) {
             Ok(pc) => pc,
             Err(e) => {
@@ -786,7 +756,7 @@ impl Worker {
         };
         if let Some(resample_evt) = self.interrupt.get_resample_evt() {
             if wait_ctx
-                .add(resample_evt, Token::InterruptResample)
+                .add(resample_evt, WorkerToken::InterruptResample)
                 .is_err()
             {
                 error!("failed creating WaitContext");
@@ -795,17 +765,13 @@ impl Worker {
         }
 
         if let Some(poll_desc) = self.state.virtio_gpu.poll_descriptor() {
-            if let Err(e) = wait_ctx.add(&poll_desc, Token::VirtioGpuPoll) {
+            if let Err(e) = wait_ctx.add(&poll_desc, WorkerToken::VirtioGpuPoll) {
                 error!("failed adding poll eventfd to WaitContext: {}", e);
                 return;
             }
         }
 
-        for (index, bridge) in self.resource_bridges.iter().enumerate() {
-            if let Err(e) = wait_ctx.add(bridge, Token::ResourceBridge { index }) {
-                error!("failed to add resource bridge to WaitContext: {}", e);
-            }
-        }
+        self.resource_bridges.add_to_wait_context(&mut wait_ctx);
 
         // TODO(davidriley): The entire main loop processing is somewhat racey and incorrect with
         // respect to cursor vs control queue processing.  As both currently and originally
@@ -815,18 +781,8 @@ impl Worker {
         // might be handled first instead of the other way around.  In practice, the cursor queue
         // isn't used so this isn't a huge issue.
 
-        // Declare this outside the loop so we don't keep allocating and freeing the vector.
-        let mut process_resource_bridge = Vec::with_capacity(self.resource_bridges.len());
         'wait: loop {
-            // If there are outstanding fences, wake up early to poll them.
-            let duration =
-                if self.state.virtio_gpu.needs_fence_poll() && self.state.has_pending_fences() {
-                    FENCE_POLL_INTERVAL
-                } else {
-                    Duration::new(i64::MAX as u64, 0)
-                };
-
-            let events = match wait_ctx.wait_timeout(duration) {
+            let events = match wait_ctx.wait() {
                 Ok(v) => v,
                 Err(e) => {
                     error!("failed polling for events: {}", e);
@@ -837,14 +793,10 @@ impl Worker {
             let mut signal_used_ctrl = false;
             let mut ctrl_available = false;
 
-            // Clear the old values and re-initialize with false.
-            process_resource_bridge.clear();
-            process_resource_bridge.resize(self.resource_bridges.len(), false);
-
             // This display isn't typically used when the virt-wl device is available and it can
             // lead to hung fds (crbug.com/1027379). Disable if it's hung.
             for event in events.iter().filter(|e| e.is_hungup) {
-                if let Token::Display = event.token {
+                if let WorkerToken::Display = event.token {
                     error!("default display hang-up detected");
                     let _ = wait_ctx.delete(&*self.state.display().borrow());
                 }
@@ -852,34 +804,34 @@ impl Worker {
 
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
-                    Token::CtrlQueue => {
+                    WorkerToken::CtrlQueue => {
                         let _ = self.ctrl_evt.read();
                         // Set flag that control queue is available to be read, but defer reading
                         // until rest of the events are processed.
                         ctrl_available = true;
                     }
-                    Token::CursorQueue => {
+                    WorkerToken::CursorQueue => {
                         let _ = self.cursor_evt.read();
                         if self.state.process_queue(&self.mem, &self.cursor_queue) {
                             signal_used_cursor = true;
                         }
                     }
-                    Token::Display => {
+                    WorkerToken::Display => {
                         let close_requested = self.state.process_display();
                         if close_requested {
                             let _ = self.exit_evt_wrtube.send::<VmEventType>(&VmEventType::Exit);
                         }
                     }
-                    Token::ResourceBridge { index } => {
-                        process_resource_bridge[index] = true;
+                    WorkerToken::ResourceBridge { index } => {
+                        self.resource_bridges.set_should_process(index);
                     }
-                    Token::InterruptResample => {
+                    WorkerToken::InterruptResample => {
                         self.interrupt.interrupt_resample();
                     }
-                    Token::VirtioGpuPoll => {
+                    WorkerToken::VirtioGpuPoll => {
                         self.state.event_poll();
                     }
-                    Token::Kill => {
+                    WorkerToken::Kill => {
                         break 'wait;
                     }
                 }
@@ -895,29 +847,14 @@ impl Worker {
                 signal_used_ctrl = true;
             }
 
-            if self.state.virtio_gpu.needs_fence_poll() {
-                self.state.fence_poll();
-            }
-
             // Process the entire control queue before the resource bridge in case a resource is
             // created or destroyed by the control queue. Processing the resource bridge first may
             // lead to a race condition.
             // TODO(davidriley): This is still inherently racey if both the control queue request
             // and the resource bridge request come in at the same time after the control queue is
             // processed above and before the corresponding bridge is processed below.
-            for (bridge, &should_process) in
-                self.resource_bridges.iter().zip(&process_resource_bridge)
-            {
-                if should_process {
-                    if let Err(e) = self.state.process_resource_bridge(bridge) {
-                        error!("Failed to process resource bridge: {:#}", e);
-                        error!("Removing that resource bridge from the wait context.");
-                        wait_ctx.delete(bridge).unwrap_or_else(|e| {
-                            error!("Failed to remove faulty resource bridge: {:#}", e)
-                        });
-                    }
-                }
-            }
+            self.resource_bridges
+                .process_resource_bridges(&mut self.state, &mut wait_ctx);
 
             if signal_used_ctrl {
                 self.ctrl_queue.signal_used(&self.mem);
@@ -992,6 +929,7 @@ impl Gpu {
         if display_params.is_empty() {
             display_params.push(Default::default());
         }
+        let (display_width, display_height) = display_params[0].get_virtual_display_size();
 
         let mut rutabaga_channels: Vec<RutabagaChannel> = Vec::new();
         for (channel_name, path) in &channels {
@@ -1016,8 +954,8 @@ impl Gpu {
         };
 
         let rutabaga_builder = RutabagaBuilder::new(component, gpu_parameters.context_mask)
-            .set_display_width(display_params[0].width)
-            .set_display_height(display_params[0].height)
+            .set_display_width(display_width)
+            .set_display_height(display_height)
             .set_rutabaga_channels(rutabaga_channels_opt)
             .set_use_egl(gpu_parameters.renderer_use_egl)
             .set_use_gles(gpu_parameters.renderer_use_gles)
@@ -1236,7 +1174,7 @@ impl VirtioDevice for Gpu {
         };
         self.kill_evt = Some(self_kill_evt);
 
-        let resource_bridges = mem::take(&mut self.resource_bridges);
+        let resource_bridges = ResourceBridges::new(mem::take(&mut self.resource_bridges));
 
         let irq = Arc::new(interrupt);
         let ctrl_queue = SharedQueueReader::new(queues.remove(0), &irq);
@@ -1317,4 +1255,22 @@ impl VirtioDevice for Gpu {
     fn set_shared_memory_mapper(&mut self, mapper: Box<dyn SharedMemoryMapper>) {
         self.mapper = Some(mapper);
     }
+}
+
+/// Trait that the platform-specific type `ResourceBridges` needs to implement.
+trait ResourceBridgesTrait {
+    /// Adds all resource bridges to WaitContext.
+    fn add_to_wait_context(&self, _wait_ctx: &mut WaitContext<WorkerToken>);
+
+    /// Marks that the resource bridge at the given index should be processed when
+    /// `process_resource_bridges()` is called.
+    fn set_should_process(&mut self, _index: usize);
+
+    /// Processes all resource bridges that have been marked as should be processed.  The markings
+    /// will be cleared before returning. Faulty resource bridges will be removed from WaitContext.
+    fn process_resource_bridges(
+        &mut self,
+        _state: &mut Frontend,
+        _wait_ctx: &mut WaitContext<WorkerToken>,
+    );
 }

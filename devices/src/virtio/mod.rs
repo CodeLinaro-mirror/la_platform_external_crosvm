@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -191,10 +191,10 @@ pub fn copy_config(dst: &mut [u8], dst_offset: u64, src: &[u8], src_offset: u64)
 }
 
 /// Returns the set of reserved base features common to all virtio devices.
-pub fn base_features(protected_vm: ProtectionType) -> u64 {
+pub fn base_features(protection_type: ProtectionType) -> u64 {
     let mut features: u64 = 1 << VIRTIO_F_VERSION_1 | 1 << VIRTIO_RING_F_EVENT_IDX;
 
-    if protected_vm != ProtectionType::Unprotected {
+    if protection_type != ProtectionType::Unprotected {
         features |= 1 << VIRTIO_F_ACCESS_PLATFORM;
     }
 

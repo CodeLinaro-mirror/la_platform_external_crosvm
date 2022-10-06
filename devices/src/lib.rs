@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -89,6 +89,7 @@ pub use self::pci::PciInterruptPin;
 pub use self::pci::PciRoot;
 pub use self::pci::PciRootCommand;
 pub use self::pci::PciVirtualConfigMmio;
+pub use self::pci::PreferredIrq;
 pub use self::pci::StubPciDevice;
 pub use self::pci::StubPciParameters;
 pub use self::pl030::Pl030;

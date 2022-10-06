@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -72,11 +72,6 @@ pub trait RutabagaComponent {
         Err(RutabagaError::Unsupported)
     }
 
-    /// Implementations must return the last completed fence_id.
-    fn poll(&self) -> u32 {
-        0
-    }
-
     /// Used only by VirglRenderer to poll when its poll_descriptor is signaled.
     fn event_poll(&self) {}
 
@@ -132,6 +127,11 @@ pub trait RutabagaComponent {
         _transfer: Transfer3D,
         _buf: Option<VolatileSlice>,
     ) -> RutabagaResult<()> {
+        Err(RutabagaError::Unsupported)
+    }
+
+    /// Implementations must flush the given resource to the display.
+    fn resource_flush(&self, _resource_id: &mut RutabagaResource) -> RutabagaResult<()> {
         Err(RutabagaError::Unsupported)
     }
 
@@ -199,12 +199,6 @@ pub trait RutabagaContext {
         Err(RutabagaError::Unsupported)
     }
 
-    /// Implementations must return an array of fences that have completed.  This will be used by
-    /// the cross-domain context for asynchronous Tx/Rx.
-    fn context_poll(&mut self) -> Option<Vec<RutabagaFence>> {
-        None
-    }
-
     /// Implementations must return the component type associated with the context.
     fn component_type(&self) -> RutabagaComponentType;
 }
@@ -216,7 +210,7 @@ struct RutabagaCapsetInfo {
     pub name: &'static str,
 }
 
-const RUTABAGA_CAPSETS: [RutabagaCapsetInfo; 7] = [
+const RUTABAGA_CAPSETS: [RutabagaCapsetInfo; 6] = [
     RutabagaCapsetInfo {
         capset_id: RUTABAGA_CAPSET_VIRGL,
         component: RutabagaComponentType::VirglRenderer,
@@ -243,11 +237,6 @@ const RUTABAGA_CAPSETS: [RutabagaCapsetInfo; 7] = [
         name: "cross-domain",
     },
     RutabagaCapsetInfo {
-        capset_id: 30,
-        component: RutabagaComponentType::CrossDomain,
-        name: "minigbm-cross-domain",
-    },
-    RutabagaCapsetInfo {
         capset_id: RUTABAGA_CAPSET_DRM,
         component: RutabagaComponentType::VirglRenderer,
         name: "drm",
@@ -261,13 +250,6 @@ pub fn calculate_context_mask(context_names: Vec<String>) -> u64 {
             context_mask |= 1 << capset.capset_id;
         };
     });
-
-    // TODO remove once
-    // https://android-review.googlesource.com/c/platform/external/minigbm/+/2101455
-    // is picked back to rvc-arc branch:
-    if context_mask & (1 << RUTABAGA_CAPSET_DRM) != 0 {
-        context_mask |= 1 << 30;
-    }
 
     context_mask
 }
@@ -287,7 +269,6 @@ pub struct Rutabaga {
     default_component: RutabagaComponentType,
     capset_info: Vec<RutabagaCapsetInfo>,
     fence_handler: RutabagaFenceHandler,
-    pub use_timer_based_fence_polling: bool,
 }
 
 impl Rutabaga {
@@ -370,34 +351,6 @@ impl Rutabaga {
         }
 
         Ok(())
-    }
-
-    /// Polls all rutabaga components and contexts, and returns a vector of RutabagaFence
-    /// describing which fences have completed.
-    pub fn poll(&mut self) -> Vec<RutabagaFence> {
-        let mut completed_fences: Vec<RutabagaFence> = Vec::new();
-        // Poll the default component -- this the global timeline which does not take into account
-        // `ctx_id` or `ring_idx`.  This path exists for OpenGL legacy reasons and 2D mode.
-        let component = self
-            .components
-            .get_mut(&self.default_component)
-            .ok_or(0)
-            .unwrap();
-
-        let global_fence_id = component.poll();
-        completed_fences.push(RutabagaFence {
-            flags: RUTABAGA_FLAG_FENCE,
-            fence_id: global_fence_id as u64,
-            ctx_id: 0,
-            ring_idx: 0,
-        });
-
-        for ctx in self.contexts.values_mut() {
-            if let Some(ref mut ctx_completed_fences) = ctx.context_poll() {
-                completed_fences.append(ctx_completed_fences);
-            }
-        }
-        completed_fences
     }
 
     /// Polls the default rutabaga component.
@@ -530,6 +483,20 @@ impl Rutabaga {
             .ok_or(RutabagaError::InvalidResourceId)?;
 
         component.transfer_read(ctx_id, resource, transfer, buf)
+    }
+
+    pub fn resource_flush(&mut self, resource_id: u32) -> RutabagaResult<()> {
+        let component = self
+            .components
+            .get(&self.default_component)
+            .ok_or(RutabagaError::Unsupported)?;
+
+        let resource = self
+            .resources
+            .get_mut(&resource_id)
+            .ok_or(RutabagaError::InvalidResourceId)?;
+
+        component.resource_flush(resource)
     }
 
     /// Creates a blob resource with the `ctx_id` and `resource_create_blob` metadata.
@@ -940,22 +907,12 @@ impl RutabagaBuilder {
             ));
         }
 
-        // If any component sets this to true, timer-based wakeup is activated. Async fence
-        // handling will continue to work but worker wakeups will otherwise be avoided if no
-        // components need the timer-based approach.
-        #[allow(unused_mut)]
-        let mut use_timer_based_fence_polling = false;
-
         if self.default_component == RutabagaComponentType::Rutabaga2D {
             let rutabaga_2d = Rutabaga2D::init(fence_handler.clone())?;
             rutabaga_components.insert(RutabagaComponentType::Rutabaga2D, rutabaga_2d);
         } else {
             #[cfg(feature = "virgl_renderer")]
             if self.default_component == RutabagaComponentType::VirglRenderer {
-                if (u32::from(self.virglrenderer_flags) & VIRGLRENDERER_USE_ASYNC_FENCE_CB) == 0 {
-                    use_timer_based_fence_polling = true;
-                }
-
                 let virgl = VirglRenderer::init(
                     self.virglrenderer_flags,
                     fence_handler.clone(),
@@ -987,11 +944,6 @@ impl RutabagaBuilder {
                     fence_handler.clone(),
                 )?;
 
-                if (u32::from(self.gfxstream_flags) & GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB) == 0
-                {
-                    use_timer_based_fence_polling = true;
-                }
-
                 rutabaga_components.insert(RutabagaComponentType::Gfxstream, gfxstream);
 
                 push_capset(RUTABAGA_CAPSET_GFXSTREAM);
@@ -1000,7 +952,6 @@ impl RutabagaBuilder {
             let cross_domain = CrossDomain::init(self.channels)?;
             rutabaga_components.insert(RutabagaComponentType::CrossDomain, cross_domain);
             push_capset(RUTABAGA_CAPSET_CROSS_DOMAIN);
-            push_capset(30);
         }
 
         Ok(Rutabaga {
@@ -1010,7 +961,6 @@ impl RutabagaBuilder {
             default_component: self.default_component,
             capset_info: rutabaga_capsets,
             fence_handler,
-            use_timer_based_fence_polling,
         })
     }
 }

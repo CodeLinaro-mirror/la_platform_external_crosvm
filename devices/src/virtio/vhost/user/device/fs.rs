@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -46,7 +46,7 @@ const MAX_VRING_LEN: u16 = 1024;
 async fn handle_fs_queue(
     mut queue: virtio::Queue,
     mem: GuestMemory,
-    doorbell: Arc<Mutex<Doorbell>>,
+    doorbell: Doorbell,
     kick_evt: EventAsync,
     server: Arc<fuse::Server<PassthroughFs>>,
     tube: Arc<Mutex<Tube>>,
@@ -179,7 +179,7 @@ impl VhostUserBackend for FsBackend {
         idx: usize,
         mut queue: virtio::Queue,
         mem: GuestMemory,
-        doorbell: Arc<Mutex<Doorbell>>,
+        doorbell: Doorbell,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
         if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {

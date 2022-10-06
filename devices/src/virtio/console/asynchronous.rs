@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::sync::Arc;
 use std::thread;
 
 use anyhow::Context;
@@ -25,7 +24,6 @@ use cros_async::IoSourceExt;
 use data_model::DataInit;
 use futures::FutureExt;
 use hypervisor::ProtectionType;
-use sync::Mutex;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserVirtioFeatures;
 
@@ -206,7 +204,7 @@ impl ConsoleDevice {
 
 impl SerialDevice for ConsoleDevice {
     fn new(
-        protected_vm: ProtectionType,
+        protection_type: ProtectionType,
         _evt: Event,
         input: Option<Box<dyn SerialInput>>,
         output: Option<Box<dyn io::Write + Send>>,
@@ -214,8 +212,8 @@ impl SerialDevice for ConsoleDevice {
         _out_timestamp: bool,
         _keep_rds: Vec<RawDescriptor>,
     ) -> ConsoleDevice {
-        let avail_features =
-            virtio::base_features(protected_vm) | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+        let avail_features = virtio::base_features(protection_type)
+            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
         ConsoleDevice {
             input: input.map(AsyncSerialInput).map(AsyncQueueState::Stopped),
             output: AsyncQueueState::Stopped(output.unwrap_or_else(|| Box::new(io::sink()))),
@@ -242,7 +240,7 @@ pub struct AsyncConsole {
 
 impl SerialDevice for AsyncConsole {
     fn new(
-        protected_vm: ProtectionType,
+        protection_type: ProtectionType,
         evt: Event,
         input: Option<Box<dyn SerialInput>>,
         output: Option<Box<dyn io::Write + Send>>,
@@ -252,7 +250,7 @@ impl SerialDevice for AsyncConsole {
     ) -> AsyncConsole {
         AsyncConsole {
             state: VirtioConsoleState::Stopped(ConsoleDevice::new(
-                protected_vm,
+                protection_type,
                 evt,
                 input,
                 output,
@@ -260,7 +258,7 @@ impl SerialDevice for AsyncConsole {
                 out_timestamp,
                 Default::default(),
             )),
-            base_features: base_features(protected_vm),
+            base_features: base_features(protection_type),
             keep_rds,
         }
     }
@@ -344,7 +342,6 @@ impl VirtioDevice for AsyncConsole {
             .name("virtio_console".to_string())
             .spawn(move || {
                 let mut console = console;
-                let interrupt = Arc::new(Mutex::new(interrupt));
 
                 console.start_receive_queue(
                     &ex,

@@ -1,17 +1,25 @@
 // Copyright (C) 2020 Alibaba Cloud. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use base::{AsRawDescriptor, RawDescriptor};
-use data_model::DataInit;
 use std::io;
 use std::mem;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
-use super::connection::{Endpoint, EndpointExt};
-use super::message::*;
-use super::{
-    Error, HandlerResult, Result, SlaveReqEndpoint, SystemStream, VhostUserMasterReqHandler,
-};
+use base::AsRawDescriptor;
+use base::RawDescriptor;
+use data_model::DataInit;
+
+use crate::connection::Endpoint;
+use crate::connection::EndpointExt;
+use crate::message::*;
+use crate::Error;
+use crate::HandlerResult;
+use crate::Result;
+use crate::SlaveReqEndpoint;
+use crate::SystemStream;
+use crate::VhostUserMasterReqHandler;
 
 struct SlaveInternal {
     sock: Box<dyn Endpoint<SlaveReq>>,
@@ -171,7 +179,6 @@ impl VhostUserMasterReqHandler for Slave {
 mod tests {
 
     use super::*;
-
     use crate::SystemStream;
 
     #[test]

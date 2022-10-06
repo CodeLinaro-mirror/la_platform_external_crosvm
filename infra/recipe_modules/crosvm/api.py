@@ -1,4 +1,4 @@
-# Copyright 2022 The Chromium OS Authors. All rights reserved.
+# Copyright 2022 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -266,6 +266,14 @@ class CrosvmApi(recipe_api.RecipeApi):
                         self.source_dir.join("tools/dev_container"),
                         "--verbose",
                         "--stop",
+                    ],
+                )
+                self.m.step(
+                    "Force pull dev_container",
+                    [
+                        "vpython3",
+                        self.source_dir.join("tools/dev_container"),
+                        "--pull",
                     ],
                 )
                 self.m.crosvm.step_in_container("Ensure dev container exists", ["true"])

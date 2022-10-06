@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -375,9 +375,6 @@ pub fn cpu_manufacturer() -> CpuManufacturer {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use hypervisor::ProtectionType;
-
     use super::*;
 
     #[test]
@@ -394,7 +391,7 @@ mod tests {
         let guest_mem =
             vm_memory::GuestMemory::new(&[(vm_memory::GuestAddress(0), 0x10000)]).unwrap();
         let kvm = hypervisor::kvm::Kvm::new().unwrap();
-        let vm = hypervisor::kvm::KvmVm::new(&kvm, guest_mem, ProtectionType::Unprotected).unwrap();
+        let vm = hypervisor::kvm::KvmVm::new(&kvm, guest_mem, Default::default()).unwrap();
         let irq_chip = devices::KvmKernelIrqChip::new(vm, 1).unwrap();
 
         let entries = &mut cpuid.cpu_id_entries;

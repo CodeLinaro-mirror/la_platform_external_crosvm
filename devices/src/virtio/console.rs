@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -370,13 +370,13 @@ pub struct Console {
 
 impl Console {
     fn new(
-        protected_vm: ProtectionType,
+        protection_type: ProtectionType,
         input: Option<ConsoleInput>,
         output: Option<Box<dyn io::Write + Send>>,
         keep_rds: Vec<RawDescriptor>,
     ) -> Console {
         Console {
-            base_features: base_features(protected_vm),
+            base_features: base_features(protection_type),
             in_avail_evt: None,
             kill_evt: None,
             worker_thread: None,

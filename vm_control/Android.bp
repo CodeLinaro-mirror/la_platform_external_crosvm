@@ -44,8 +44,10 @@ rust_library {
         host_linux: {
             features: [
                 "gdb",
+                "gdbstub",
             ],
             rustlibs: [
+                "libgdbstub",
                 "libgdbstub_arch",
             ],
         },
@@ -89,8 +91,10 @@ rust_test {
         host_linux: {
             features: [
                 "gdb",
+                "gdbstub",
             ],
             rustlibs: [
+                "libgdbstub",
                 "libgdbstub_arch",
             ],
         },

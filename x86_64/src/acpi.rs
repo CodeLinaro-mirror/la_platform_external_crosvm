@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@ use std::arch::x86_64::__cpuid_count;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use acpi_tables::aml;
 use acpi_tables::facs::FACS;
 use acpi_tables::rsdp::RSDP;
 use acpi_tables::sdt::SDT;
@@ -18,6 +19,7 @@ use data_model::DataInit;
 use devices::ACPIPMResource;
 use devices::PciAddress;
 use devices::PciInterruptPin;
+use devices::PciRoot;
 use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -181,6 +183,33 @@ const MCFG_REVISION: u8 = 1;
 const MCFG_FIELD_BASE_ADDRESS: usize = 44;
 const MCFG_FIELD_START_BUS_NUMBER: usize = 54;
 const MCFG_FIELD_END_BUS_NUMBER: usize = 55;
+
+const SSDT_REVISION: u8 = 2;
+pub fn create_customize_ssdt(
+    pci_root: Arc<Mutex<PciRoot>>,
+    amls: BTreeMap<PciAddress, Vec<u8>>,
+) -> Option<SDT> {
+    if amls.is_empty() {
+        return None;
+    }
+
+    let mut ssdt = SDT::new(
+        *b"SSDT",
+        acpi_tables::HEADER_LEN,
+        SSDT_REVISION,
+        *b"CROSVM",
+        *b"CROSVMDT",
+        OEM_REVISION,
+    );
+
+    for (address, children) in amls {
+        if let Some(path) = pci_root.lock().acpi_path(&address) {
+            ssdt.append_slice(&aml::Scope::raw((*path).into(), children));
+        }
+    }
+
+    return Some(ssdt);
+}
 
 fn create_dsdt_table(amls: &[u8]) -> SDT {
     let mut dsdt = SDT::new(
