@@ -187,11 +187,10 @@ fn create_virtio_devices(
     #[cfg(feature = "balloon")] init_balloon_size: u64,
     disk_device_tubes: &mut Vec<Tube>,
     pmem_device_tubes: &mut Vec<Tube>,
-    #[cfg_attr(not(feature = "gpu"), allow(unused_variables))] map_request: Arc<
-        Mutex<Option<ExternalMapping>>,
-    >,
     fs_device_tubes: &mut Vec<Tube>,
-    #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
+    #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))] render_server_fd: Option<
+        SafeDescriptor,
+    >,
     vvu_proxy_device_tubes: &mut Vec<Tube>,
     vvu_proxy_max_sibling_mem_size: u64,
 ) -> DeviceResult<Vec<VirtioDeviceStub>> {
@@ -316,9 +315,9 @@ fn create_virtio_devices(
                 // Use the unnamed socket for GPU display screens.
                 cfg.wayland_socket_paths.get(""),
                 cfg.x_display.clone(),
+                #[cfg(feature = "virgl_renderer_next")]
                 render_server_fd,
                 event_devices,
-                map_request,
             )?);
         }
     }
@@ -665,8 +664,9 @@ fn create_devices(
     pmem_device_tubes: &mut Vec<Tube>,
     fs_device_tubes: &mut Vec<Tube>,
     #[cfg(feature = "usb")] usb_provider: HostBackendDeviceProvider,
-    map_request: Arc<Mutex<Option<ExternalMapping>>>,
-    #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
+    #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))] render_server_fd: Option<
+        SafeDescriptor,
+    >,
     vvu_proxy_device_tubes: &mut Vec<Tube>,
     vvu_proxy_max_sibling_mem_size: u64,
     iova_max_addr: &mut Option<u64>,
@@ -809,9 +809,8 @@ fn create_devices(
         init_balloon_size,
         disk_device_tubes,
         pmem_device_tubes,
-        map_request,
         fs_device_tubes,
-        #[cfg(feature = "gpu")]
+        #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
         render_server_fd,
         vvu_proxy_device_tubes,
         vvu_proxy_max_sibling_mem_size,
@@ -1490,8 +1489,6 @@ where
         (cfg.battery_config.as_ref().map(|c| c.type_), None)
     };
 
-    let map_request: Arc<Mutex<Option<ExternalMapping>>> = Arc::new(Mutex::new(None));
-
     let fs_count = cfg
         .shared_dirs
         .iter()
@@ -1537,7 +1534,7 @@ where
 
     create_file_backed_mappings(&cfg, &mut vm, &mut sys_allocator)?;
 
-    #[cfg(feature = "gpu")]
+    #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
     // Hold on to the render server jail so it keeps running until we exit run_vm()
     let (_render_server_jail, render_server_fd) =
         if let Some(parameters) = &cfg.gpu_render_server_parameters {
@@ -1640,8 +1637,7 @@ where
         &mut fs_device_tubes,
         #[cfg(feature = "usb")]
         usb_provider,
-        Arc::clone(&map_request),
-        #[cfg(feature = "gpu")]
+        #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
         render_server_fd,
         &mut vvu_proxy_device_tubes,
         components.memory_size,
@@ -1819,7 +1815,6 @@ where
         vm_evt_rdtube,
         vm_evt_wrtube,
         sigchld_fd,
-        Arc::clone(&map_request),
         gralloc,
         vcpu_ids,
         iommu_host_tube,
@@ -2204,7 +2199,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     vm_evt_rdtube: RecvTube,
     vm_evt_wrtube: SendTube,
     sigchld_fd: SignalFd,
-    map_request: Arc<Mutex<Option<ExternalMapping>>>,
     mut gralloc: RutabagaGralloc,
     vcpu_ids: Vec<usize>,
     iommu_host_tube: Option<Tube>,
@@ -2606,7 +2600,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                         let response = request.execute(
                                             &mut linux.vm,
                                             &mut sys_allocator,
-                                            Arc::clone(&map_request),
                                             &mut gralloc,
                                             &mut iommu_client,
                                         );
@@ -2980,7 +2973,7 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
 
     // Create serial devices.
     for (i, params) in opts.serial.iter().enumerate() {
-        let serial_config = &params.device_params;
+        let serial_config = &params.device;
         add_device(i, serial_config, &params.vhost, &jail, &mut devices_jails)?;
     }
 
@@ -2995,7 +2988,7 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
         } else {
             None
         };
-        let disk_config = DiskConfig::new(&params.device_params, tube);
+        let disk_config = DiskConfig::new(&params.device, tube);
         add_device(i, &disk_config, &params.vhost, &jail, &mut devices_jails)?;
     }
 

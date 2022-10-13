@@ -97,7 +97,7 @@ use crate::Config;
 
 const MAX_DATAGRAM_SIZE: usize = 4096;
 const MAX_VCPU_DATAGRAM_SIZE: usize = 0x40000;
-#[cfg(feature = "gpu")]
+#[cfg(feature = "virgl_renderer_next")]
 const CROSVM_GPU_SERVER_FD_ENV: &str = "CROSVM_GPU_SERVER_FD";
 
 /// An error that occurs when communicating with the plugin process.
@@ -569,7 +569,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
     #[allow(unused_mut)]
     let mut env_fds: Vec<(String, Descriptor)> = Vec::default();
 
-    #[cfg(feature = "gpu")]
+    #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
     // Hold on to the render server jail so it keeps running until we exit run_config()
     let (_render_server_jail, _render_server_fd) = {
         let _default_render_server_params = crate::crosvm::sys::GpuRenderServerParameters {

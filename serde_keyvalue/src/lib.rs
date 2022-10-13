@@ -283,6 +283,21 @@
 //! error if an unknown field is met in the input, and
 //! [`deserialize_with`](https://serde.rs/field-attrs.html#deserialize_with) to use a custom
 //! deserialization function for a specific field.
+//!
+//! Be aware that the use of `flatten` comes with some severe limitations. Because type information
+//! is not available to the deserializer, it will try to determine the type of fields using the
+//! input as its sole hint. For instance, any number will be returned as an integer type, and if the
+//! parsed structure was actually expecting a number as a string, then an error will occur.
+//!
+//! For this reason it is discouraged to use `flatten` except when neither the embedding not the
+//! flattened structs has a member of string type.
+//!
+//! Most of the time, similar functionality can be obtained by implementing a custom deserializer
+//! that parses the embedding struct's member and then the flattened struct in a specific order
+//! using the [`serde_keyvalue::key_values::KeyValueDeserializer`] interface directly.
+//!
+//! Another limitation of using `flatten` that is inherent to serde is that it won't allow
+//! `deny_unknown_fields` to be used in either the embedding or the flattened struct.
 #![deny(missing_docs)]
 
 mod key_values;
@@ -291,6 +306,7 @@ mod key_values;
 pub use argh;
 pub use key_values::from_key_values;
 pub use key_values::ErrorKind;
+pub use key_values::KeyValueDeserializer;
 pub use key_values::ParseError;
 #[cfg(feature = "argh_derive")]
 pub use serde_keyvalue_derive::FromKeyValues;

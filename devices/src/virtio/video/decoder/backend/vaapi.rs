@@ -26,8 +26,6 @@ use libva::PictureSync;
 use libva::Surface;
 use libva::UsageHint;
 
-use crate::virtio::video::decoder::utils::EventQueue;
-use crate::virtio::video::decoder::utils::OutputQueue;
 use crate::virtio::video::decoder::Capability;
 use crate::virtio::video::decoder::DecoderBackend;
 use crate::virtio::video::decoder::DecoderEvent;
@@ -44,6 +42,8 @@ use crate::virtio::video::format::Rect;
 use crate::virtio::video::resource::BufferHandle;
 use crate::virtio::video::resource::GuestResource;
 use crate::virtio::video::resource::GuestResourceHandle;
+use crate::virtio::video::utils::EventQueue;
+use crate::virtio::video::utils::OutputQueue;
 
 mod vp8;
 
@@ -826,6 +826,22 @@ impl VaapiDecoderSession {
 
         action(&out)
     }
+
+    fn try_emit_flush_completed(&mut self) -> Result<()> {
+        let num_remaining = self.ready_queue.len();
+
+        if num_remaining == 0 {
+            self.flushing = false;
+
+            let event_queue = &mut self.event_queue;
+
+            event_queue
+                .queue_event(DecoderEvent::FlushCompleted(Ok(())))
+                .map_err(|e| anyhow!("Can't queue the PictureReady event {}", e))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl DecoderSession for VaapiDecoderSession {
@@ -908,18 +924,15 @@ impl DecoderSession for VaapiDecoderSession {
     fn flush(&mut self) -> VideoResult<()> {
         self.flushing = true;
 
+        // Retrieve ready frames from the codec, if any.
+        let pics = self.codec.flush().map_err(VideoError::BackendFailure)?;
+        self.ready_queue.extend(pics);
+
         self.drain_ready_queue()
             .map_err(VideoError::BackendFailure)?;
-        // TODO(acourbot): Shouldn't we drain *after* we flush the codec?
-        self.codec.flush().map_err(VideoError::BackendFailure)?;
 
-        let event_queue = &mut self.event_queue;
-
-        event_queue
-            .queue_event(DecoderEvent::FlushCompleted(Ok(())))
-            .map_err(|e| {
-                VideoError::BackendFailure(anyhow!("Can't queue the PictureReady event {}", e))
-            })
+        self.try_emit_flush_completed()
+            .map_err(VideoError::BackendFailure)
     }
 
     fn reset(&mut self) -> VideoResult<()> {
@@ -1021,6 +1034,11 @@ impl DecoderSession for VaapiDecoderSession {
             .reuse_buffer(picture_buffer_id as u32)
             .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?;
 
+        if self.flushing {
+            // Try flushing again now that we have a new buffer. This might let
+            // us progress further in the flush operation.
+            self.flush()?;
+        }
         Ok(())
     }
 
@@ -1076,7 +1094,7 @@ pub trait VaapiCodec: downcast_rs::Downcast {
 
     /// Flush the decoder i.e. finish processing all queued decode requests and
     /// emit frames for them.
-    fn flush(&mut self) -> Result<()>;
+    fn flush(&mut self) -> Result<Vec<DecodedFrameHandle>>;
 
     /// Returns the current VA image format
     fn va_image_fmt(&self) -> &Option<libva::VAImageFormat>;

@@ -19,6 +19,10 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     srcs: ["src/libcras.rs"],
     edition: "2021",
+    rustlibs: [
+        "libaudio_streams",
+        "libserde",
+    ],
     apex_available: [
         "//apex_available:platform",
     ],

@@ -27,6 +27,7 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libbase_rust",
+        "libcfg_if",
         "libdata_model",
         "liblibc",
         "liblinux_input_sys",

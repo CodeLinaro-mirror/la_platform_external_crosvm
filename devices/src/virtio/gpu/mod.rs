@@ -12,7 +12,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::Read;
-use std::mem;
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -25,8 +24,8 @@ use base::warn;
 use base::AsRawDescriptor;
 use base::Event;
 use base::EventToken;
-use base::ExternalMapping;
 use base::RawDescriptor;
+#[cfg(feature = "virgl_renderer_next")]
 use base::SafeDescriptor;
 use base::SendTube;
 use base::Tube;
@@ -185,15 +184,19 @@ fn build(
     rutabaga_builder: RutabagaBuilder,
     event_devices: Vec<EventDevice>,
     mapper: Box<dyn SharedMemoryMapper>,
-    map_request: Arc<Mutex<Option<ExternalMapping>>>,
     external_blob: bool,
+    #[cfg(windows)] wndproc_thread: &mut Option<WindowProcedureThread>,
     udmabuf: bool,
     fence_handler: RutabagaFenceHandler,
-    render_server_fd: Option<SafeDescriptor>,
+    #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
+    #[cfg(feature = "kiwi")] gpu_device_service_tube: Tube,
 ) -> Option<VirtioGpu> {
     let mut display_opt = None;
     for display_backend in display_backends {
-        match display_backend.build() {
+        match display_backend.build(
+            #[cfg(windows)]
+            wndproc_thread,
+        ) {
             Ok(c) => {
                 display_opt = Some(c);
                 break;
@@ -216,11 +219,13 @@ fn build(
         rutabaga_builder,
         event_devices,
         mapper,
-        map_request,
         external_blob,
         udmabuf,
         fence_handler,
+        #[cfg(feature = "virgl_renderer_next")]
         render_server_fd,
+        #[cfg(feature = "kiwi")]
+        gpu_device_service_tube,
     )
 }
 
@@ -873,20 +878,42 @@ impl Worker {
 /// to use as fallbacks in case some do not work.
 #[derive(Clone)]
 pub enum DisplayBackend {
+    #[cfg(unix)]
     /// Use the wayland backend with the given socket path if given.
     Wayland(Option<PathBuf>),
+    #[cfg(unix)]
     /// Open a connection to the X server at the given display if given.
     X(Option<String>),
     /// Emulate a display without actually displaying it.
     Stub,
+    #[cfg(windows)]
+    /// Open a window using WinAPI.
+    WinApi(WinDisplayProperties),
 }
 
 impl DisplayBackend {
-    fn build(&self) -> std::result::Result<GpuDisplay, GpuDisplayError> {
+    fn build(
+        &self,
+        #[cfg(windows)] wndproc_thread: &mut Option<WindowProcedureThread>,
+    ) -> std::result::Result<GpuDisplay, GpuDisplayError> {
         match self {
+            #[cfg(unix)]
             DisplayBackend::Wayland(path) => GpuDisplay::open_wayland(path.as_ref()),
+            #[cfg(unix)]
             DisplayBackend::X(display) => GpuDisplay::open_x(display.as_ref()),
             DisplayBackend::Stub => GpuDisplay::open_stub(),
+            #[cfg(windows)]
+            DisplayBackend::WinAPI(display_properties) => match wndproc_thread.take() {
+                Some(wndproc_thread) => GpuDisplay::open_winapi(
+                    wndproc_thread,
+                    /* win_metrics= */ None,
+                    display_properties.clone(),
+                ),
+                None => {
+                    error!("wndproc_thread is none");
+                    Err(GpuDisplayError::Allocate)
+                }
+            },
         }
     }
 }
@@ -894,7 +921,7 @@ impl DisplayBackend {
 pub struct Gpu {
     exit_evt_wrtube: SendTube,
     mapper: Option<Box<dyn SharedMemoryMapper>>,
-    resource_bridges: Vec<Tube>,
+    resource_bridges: Option<ResourceBridges>,
     event_devices: Vec<EventDevice>,
     kill_evt: Option<Event>,
     config_event: bool,
@@ -903,12 +930,16 @@ pub struct Gpu {
     display_params: Vec<GpuDisplayParameters>,
     rutabaga_builder: Option<RutabagaBuilder>,
     pci_bar_size: u64,
-    map_request: Arc<Mutex<Option<ExternalMapping>>>,
     external_blob: bool,
     rutabaga_component: RutabagaComponentType,
+    #[cfg(windows)]
+    wndproc_thread: Option<WindowProcedureThread>,
     base_features: u64,
     udmabuf: bool,
+    #[cfg(feature = "virgl_renderer_next")]
     render_server_fd: Option<SafeDescriptor>,
+    #[cfg(feature = "kiwi")]
+    gpu_device_service_tube: Option<Tube>,
     context_mask: u64,
 }
 
@@ -918,12 +949,13 @@ impl Gpu {
         resource_bridges: Vec<Tube>,
         display_backends: Vec<DisplayBackend>,
         gpu_parameters: &GpuParameters,
-        render_server_fd: Option<SafeDescriptor>,
+        #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
         event_devices: Vec<EventDevice>,
-        map_request: Arc<Mutex<Option<ExternalMapping>>>,
         external_blob: bool,
         base_features: u64,
         channels: BTreeMap<String, PathBuf>,
+        #[cfg(feature = "kiwi")] gpu_device_service_tube: Option<Tube>,
+        #[cfg(windows)] wndproc_thread: WindowProcedureThread,
     ) -> Gpu {
         let mut display_params = gpu_parameters.display_params.clone();
         if display_params.is_empty() {
@@ -953,6 +985,12 @@ impl Gpu {
             GpuMode::ModeGfxstream => RutabagaComponentType::Gfxstream,
         };
 
+        #[cfg(feature = "virgl_renderer_next")]
+        let use_render_server = render_server_fd.is_some();
+
+        #[cfg(not(feature = "virgl_renderer_next"))]
+        let use_render_server = false;
+
         let rutabaga_builder = RutabagaBuilder::new(component, gpu_parameters.context_mask)
             .set_display_width(display_width)
             .set_display_height(display_height)
@@ -963,14 +1001,15 @@ impl Gpu {
             .set_use_surfaceless(gpu_parameters.renderer_use_surfaceless)
             .set_use_vulkan(gpu_parameters.use_vulkan.unwrap_or_default())
             .set_use_guest_angle(gpu_parameters.gfxstream_use_guest_angle.unwrap_or_default())
+            .set_support_gles31(gpu_parameters.gfxstream_support_gles31)
             .set_wsi(gpu_parameters.wsi.as_ref())
             .set_use_external_blob(external_blob)
-            .set_use_render_server(render_server_fd.is_some());
+            .set_use_render_server(use_render_server);
 
         Gpu {
             exit_evt_wrtube,
             mapper: None,
-            resource_bridges,
+            resource_bridges: Some(ResourceBridges::new(resource_bridges)),
             event_devices,
             config_event: false,
             kill_evt: None,
@@ -979,12 +1018,16 @@ impl Gpu {
             display_params,
             rutabaga_builder: Some(rutabaga_builder),
             pci_bar_size: gpu_parameters.pci_bar_size,
-            map_request,
             external_blob,
             rutabaga_component: component,
+            #[cfg(windows)]
+            wndproc_thread: Some(wndproc_thread),
             base_features,
             udmabuf: gpu_parameters.udmabuf,
+            #[cfg(feature = "virgl_renderer_next")]
             render_server_fd,
+            #[cfg(feature = "kiwi")]
+            gpu_device_service_tube,
             context_mask: gpu_parameters.context_mask,
         }
     }
@@ -997,8 +1040,11 @@ impl Gpu {
         mapper: Box<dyn SharedMemoryMapper>,
     ) -> Option<Frontend> {
         let rutabaga_builder = self.rutabaga_builder.take()?;
+        #[cfg(feature = "virgl_renderer_next")]
         let render_server_fd = self.render_server_fd.take();
         let event_devices = self.event_devices.split_off(0);
+        #[cfg(feature = "kiwi")]
+        let gpu_device_service_tube = self.gpu_device_service_tube.take()?;
 
         build(
             &self.display_backends,
@@ -1006,11 +1052,15 @@ impl Gpu {
             rutabaga_builder,
             event_devices,
             mapper,
-            self.map_request.clone(),
             self.external_blob,
+            #[cfg(windows)]
+            &mut self.wndproc_thread,
             self.udmabuf,
             fence_handler,
+            #[cfg(feature = "virgl_renderer_next")]
             render_server_fd,
+            #[cfg(feature = "kiwi")]
+            gpu_device_service_tube,
         )
         .map(|vgpu| Frontend::new(vgpu, fence_state))
     }
@@ -1086,13 +1136,15 @@ impl VirtioDevice for Gpu {
             }
         }
 
+        #[cfg(feature = "virgl_renderer_next")]
         if let Some(ref render_server_fd) = self.render_server_fd {
             keep_rds.push(render_server_fd.as_raw_descriptor());
         }
 
         keep_rds.push(self.exit_evt_wrtube.as_raw_descriptor());
-        for bridge in &self.resource_bridges {
-            keep_rds.push(bridge.as_raw_descriptor());
+
+        if let Some(resource_bridges) = &self.resource_bridges {
+            resource_bridges.append_raw_descriptors(&mut keep_rds);
         }
 
         keep_rds
@@ -1174,7 +1226,13 @@ impl VirtioDevice for Gpu {
         };
         self.kill_evt = Some(self_kill_evt);
 
-        let resource_bridges = ResourceBridges::new(mem::take(&mut self.resource_bridges));
+        let resource_bridges = match self.resource_bridges.take() {
+            Some(bridges) => bridges,
+            None => {
+                error!("resource_bridges is none");
+                return;
+            }
+        };
 
         let irq = Arc::new(interrupt);
         let ctrl_queue = SharedQueueReader::new(queues.remove(0), &irq);
@@ -1184,11 +1242,15 @@ impl VirtioDevice for Gpu {
         let display_backends = self.display_backends.clone();
         let display_params = self.display_params.clone();
         let event_devices = self.event_devices.split_off(0);
-        let map_request = Arc::clone(&self.map_request);
         let external_blob = self.external_blob;
         let udmabuf = self.udmabuf;
         let fence_state = Arc::new(Mutex::new(Default::default()));
+        #[cfg(feature = "virgl_renderer_next")]
         let render_server_fd = self.render_server_fd.take();
+
+        #[cfg(windows)]
+        let mut wndproc_thread = self.wndproc_thread.take();
+
         if let (Some(mapper), Some(rutabaga_builder)) =
             (self.mapper.take(), self.rutabaga_builder.take())
         {
@@ -1208,10 +1270,12 @@ impl VirtioDevice for Gpu {
                             rutabaga_builder,
                             event_devices,
                             mapper,
-                            map_request,
                             external_blob,
+                            #[cfg(windows)]
+                            &mut wndproc_thread,
                             udmabuf,
                             fence_handler,
+                            #[cfg(feature = "virgl_renderer_next")]
                             render_server_fd,
                         ) {
                             Some(backend) => backend,
@@ -1259,6 +1323,9 @@ impl VirtioDevice for Gpu {
 
 /// Trait that the platform-specific type `ResourceBridges` needs to implement.
 trait ResourceBridgesTrait {
+    // Appends raw descriptors of all resource bridges to the given vector.
+    fn append_raw_descriptors(&self, _rds: &mut Vec<RawDescriptor>);
+
     /// Adds all resource bridges to WaitContext.
     fn add_to_wait_context(&self, _wait_ctx: &mut WaitContext<WorkerToken>);
 
@@ -1273,4 +1340,17 @@ trait ResourceBridgesTrait {
         _state: &mut Frontend,
         _wait_ctx: &mut WaitContext<WorkerToken>,
     );
+}
+
+/// This function creates the window procedure thread and windows.
+///
+/// We have seen third-party DLLs hooking into window creation. They may have deep call stack, and
+/// they may not be well tested against late window creation, which may lead to stack overflow.
+/// Hence, this should be called as early as possible when the VM is booting.
+#[cfg(windows)]
+#[inline]
+pub fn start_wndproc_thread(
+    vm_tube: Option<Arc<Mutex<Tube>>>,
+) -> anyhow::Result<WindowProcedureThread> {
+    WindowProcedureThread::start_thread(vm_tube)
 }

@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::str::Utf8Error;
 
 use base::Error as BaseError;
-use base::ExternalMappingError;
 use base::SafeDescriptor;
 use data_model::VolatileMemoryError;
 use remain::sorted;
@@ -79,6 +78,11 @@ pub struct ResourceCreateBlob {
     pub blob_mem: u32,
     pub blob_flags: u32,
     pub blob_id: u64,
+    pub size: u64,
+}
+
+pub struct RutabagaMapping {
+    pub ptr: u64,
     pub size: u64,
 }
 
@@ -221,8 +225,8 @@ pub enum RutabagaError {
     #[error("an input/output error occur: {0}")]
     IoError(IoError),
     /// The mapping failed.
-    #[error("The mapping failed for the following reason: {0}")]
-    MappingFailed(ExternalMappingError),
+    #[error("The mapping failed with library error: {0}")]
+    MappingFailed(i32),
     /// Violation of the Rutabaga spec occured.
     #[error("violation of the rutabaga spec: {0}")]
     SpecViolation(&'static str),
@@ -419,6 +423,7 @@ const GFXSTREAM_RENDERER_FLAGS_USE_GLX: u32 = 1 << 2;
 const GFXSTREAM_RENDERER_FLAGS_USE_SURFACELESS: u32 = 1 << 3;
 const GFXSTREAM_RENDERER_FLAGS_USE_GLES: u32 = 1 << 4;
 const GFXSTREAM_RENDERER_FLAGS_NO_VK_BIT: u32 = 1 << 5;
+const GFXSTREAM_RENDERER_FLAGS_ENABLE_GLES31_BIT: u32 = 1 << 9;
 const GFXSTREAM_RENDERER_FLAGS_GUEST_USES_ANGLE: u32 = 1 << 21;
 const GFXSTREAM_RENDERER_FLAGS_VULKAN_NATIVE_SWAPCHAIN_BIT: u32 = 1 << 22;
 const GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB: u32 = 1 << 23;
@@ -428,7 +433,9 @@ const GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB: u32 = 1 << 23;
 pub struct GfxstreamFlags(u32);
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RutabagaWsi {
+    #[serde(alias = "vk")]
     Vulkan,
 }
 
@@ -479,6 +486,11 @@ impl GfxstreamFlags {
     /// Use async fence completion callback.
     pub fn use_async_fence_cb(self, v: bool) -> GfxstreamFlags {
         self.set_flag(GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB, v)
+    }
+
+    /// Enable GLES 3.1 support.
+    pub fn support_gles31(self, v: bool) -> GfxstreamFlags {
+        self.set_flag(GFXSTREAM_RENDERER_FLAGS_ENABLE_GLES31_BIT, v)
     }
 
     /// Use the Vulkan swapchain to draw on the host window.

@@ -82,7 +82,6 @@ use crate::crosvm::config::JailConfig;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFsOption;
 use crate::crosvm::config::VhostUserOption;
-use crate::crosvm::config::VhostUserWlOption;
 use crate::crosvm::config::VvuOption;
 
 pub enum TaggedControlTube {
@@ -441,6 +440,7 @@ pub fn create_virtio_snd_device(
         Backend::NULL => "snd_null_device",
         #[cfg(feature = "audio_cras")]
         Backend::Sys(virtio::snd::sys::StreamSourceBackend::CRAS) => "snd_cras_device",
+        #[cfg(not(feature = "audio_cras"))]
         _ => unreachable!(),
     };
 
@@ -900,7 +900,7 @@ pub fn create_vhost_user_vsock_device(
 
 pub fn create_vhost_user_wl_device(
     protection_type: ProtectionType,
-    opt: &VhostUserWlOption,
+    opt: &VhostUserOption,
 ) -> DeviceResult {
     // The crosvm wl device expects us to connect the tube before it will accept a vhost-user
     // connection.

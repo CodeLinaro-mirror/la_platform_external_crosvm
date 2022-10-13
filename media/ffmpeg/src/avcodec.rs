@@ -18,6 +18,8 @@ use libc::c_int;
 use libc::c_void;
 use thiserror::Error as ThisError;
 
+use crate::ffi::AVPictureType;
+
 use super::*;
 
 /// An error returned by a low-level libavcodec function.
@@ -38,13 +40,8 @@ impl Display for AvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut buffer = [0u8; 255];
         // Safe because we are passing valid bounds for the buffer.
-        let ret = unsafe {
-            ffi::av_strerror(
-                self.0,
-                buffer.as_mut_ptr() as *mut c_char,
-                buffer.len() as ffi::size_t,
-            )
-        };
+        let ret =
+            unsafe { ffi::av_strerror(self.0, buffer.as_mut_ptr() as *mut c_char, buffer.len()) };
         match ret {
             ret if ret >= 0 => {
                 let end_of_string = buffer.iter().position(|i| *i == 0).unwrap_or(buffer.len());
@@ -69,8 +66,15 @@ pub enum AvCodecOpenError {
     ContextAllocation,
     #[error("failed to open AVContext object")]
     ContextOpen,
-    #[error("DecoderContextBuilder used with a non-decoder")]
-    NotADecoder,
+    #[error("ContextBuilder variant does not match codec type")]
+    UnexpectedCodecType,
+}
+
+/// Dimensions of a frame, used in AvCodecContext and AvFrame.
+#[derive(Copy, Clone, Debug)]
+pub struct Dimensions {
+    pub width: u32,
+    pub height: u32,
 }
 
 impl AvCodec {
@@ -82,7 +86,7 @@ impl AvCodec {
 
     /// Returns whether the codec is an encoder.
     pub fn is_encoder(&self) -> bool {
-        // Safe because `av_codec_is_decoder` is called on a valid static `AVCodec` reference.
+        // Safe because `av_codec_is_encoder` is called on a valid static `AVCodec` reference.
         (unsafe { ffi::av_codec_is_encoder(self.0) } != 0)
     }
 
@@ -112,10 +116,22 @@ impl AvCodec {
         AvPixelFormatIterator(self.0.pix_fmts)
     }
 
+    /// Get a builder for a encoder [`AvCodecContext`] using this codec.
+    pub fn build_encoder(&self) -> Result<EncoderContextBuilder, AvCodecOpenError> {
+        if !self.is_encoder() {
+            return Err(AvCodecOpenError::UnexpectedCodecType);
+        }
+
+        Ok(EncoderContextBuilder {
+            codec: self.0,
+            context: self.alloc_context()?,
+        })
+    }
+
     /// Get a builder for a decoder [`AvCodecContext`] using this codec.
     pub fn build_decoder(&self) -> Result<DecoderContextBuilder, AvCodecOpenError> {
         if !self.is_decoder() {
-            return Err(AvCodecOpenError::NotADecoder);
+            return Err(AvCodecOpenError::UnexpectedCodecType);
         }
 
         Ok(DecoderContextBuilder {
@@ -162,6 +178,41 @@ impl DecoderContextBuilder {
     }
 
     /// Build a decoder AvCodecContext from the configured options.
+    pub fn build(mut self) -> Result<AvCodecContext, AvCodecOpenError> {
+        self.context.init(self.codec)?;
+        Ok(self.context)
+    }
+}
+
+/// A builder to create a [`AvCodecContext`] suitable for encoding.
+// This struct wraps an AvCodecContext directly, but the only way it can be taken out is to call
+// `build()`, which finalizes the context and prevent further modification to the callback, etc.
+pub struct EncoderContextBuilder {
+    codec: *const ffi::AVCodec,
+    context: AvCodecContext,
+}
+
+impl EncoderContextBuilder {
+    /// Set the width of input frames for this encoding context.
+    pub fn set_dimensions(&mut self, dimensions: Dimensions) {
+        let context = unsafe { &mut *(self.context.0) };
+        context.width = dimensions.width as _;
+        context.height = dimensions.height as _;
+    }
+
+    /// Set the time base for this encoding context.
+    pub fn set_time_base(&mut self, time_base: ffi::AVRational) {
+        let context = unsafe { &mut *(self.context.0) };
+        context.time_base = time_base;
+    }
+
+    /// Set the input pixel format for this encoding context.
+    pub fn set_pix_fmt(&mut self, fmt: AvPixelFormat) {
+        let context = unsafe { &mut *(self.context.0) };
+        context.pix_fmt = fmt.pix_fmt();
+    }
+
+    /// Build a encoder AvCodecContext from the configured options.
     pub fn build(mut self) -> Result<AvCodecContext, AvCodecOpenError> {
         self.context.init(self.codec)?;
         Ok(self.context)
@@ -246,6 +297,7 @@ impl Iterator for AvProfileIterator {
     }
 }
 
+#[derive(Clone, Copy)]
 /// Simple wrapper over `AVPixelFormat` that provides helpful methods.
 pub struct AvPixelFormat(ffi::AVPixelFormat);
 
@@ -279,6 +331,22 @@ impl AvPixelFormat {
         // Safe because `avcodec_pix_fmt_to_codec_tag` does not take any pointer as input and
         // handles any value passed as argument.
         unsafe { ffi::avcodec_pix_fmt_to_codec_tag(self.0) }.to_le_bytes()
+    }
+
+    /// Given the width and plane index, returns the line size (data pointer increment per row) in
+    /// bytes.
+    pub fn line_size(&self, width: u32, plane: usize) -> Result<usize, AvError> {
+        av_image_line_size(*self, width, plane)
+    }
+
+    /// Given an iterator of line sizes and height, return the size required for each plane's buffer
+    /// in bytes.
+    pub fn plane_sizes<I: IntoIterator<Item = u32>>(
+        &self,
+        linesizes: I,
+        height: u32,
+    ) -> Result<Vec<usize>, AvError> {
+        av_image_plane_sizes(*self, linesizes, height)
     }
 }
 
@@ -346,7 +414,7 @@ impl AsRef<ffi::AVCodecContext> for AvCodecContext {
     }
 }
 
-pub enum TryReceiveFrameResult {
+pub enum TryReceiveResult {
     Received,
     TryAgain,
     FlushCompleted,
@@ -364,7 +432,7 @@ impl AvCodecContext {
         Ok(())
     }
 
-    /// Send a packet to be decoded to the codec.
+    /// Send a packet to be decoded by the codec.
     ///
     /// Returns `true` if the packet has been accepted and will be decoded, `false` if the codec can
     /// not accept frames at the moment - in this case `try_receive_frame` must be called before
@@ -389,17 +457,54 @@ impl AvCodecContext {
     /// submit more input to decode), or `FlushCompleted` to signal that a previous flush triggered
     /// by calling the `flush` method has completed.
     ///
-    /// Error codes are the same as those returned by `avcodec_receive_frame`.
-    pub fn try_receive_frame(
-        &mut self,
-        frame: &mut AvFrame,
-    ) -> Result<TryReceiveFrameResult, AvError> {
+    /// Error codes are the same as those returned by `avcodec_receive_frame` with the exception of
+    /// EAGAIN and EOF which are handled as `TryAgain` and `FlushCompleted` respectively.
+    pub fn try_receive_frame(&mut self, frame: &mut AvFrame) -> Result<TryReceiveResult, AvError> {
         // Safe because the context is valid through the life of this object, and `avframe` is
         // guaranteed to contain a properly initialized frame.
         match unsafe { ffi::avcodec_receive_frame(self.0, frame.0) } {
-            AVERROR_EAGAIN => Ok(TryReceiveFrameResult::TryAgain),
-            AVERROR_EOF => Ok(TryReceiveFrameResult::FlushCompleted),
-            ret if ret >= 0 => Ok(TryReceiveFrameResult::Received),
+            AVERROR_EAGAIN => Ok(TryReceiveResult::TryAgain),
+            AVERROR_EOF => Ok(TryReceiveResult::FlushCompleted),
+            ret if ret >= 0 => Ok(TryReceiveResult::Received),
+            err => Err(AvError(err)),
+        }
+    }
+
+    /// Send a frame to be encoded by the codec.
+    ///
+    /// Returns `true` if the frame has been accepted and will be encoded, `false` if the codec can
+    /// not accept input at the moment - in this case `try_receive_frame` must be called before
+    /// the frame can be submitted again.
+    ///
+    /// Error codes are the same as those returned by `avcodec_send_frame` with the exception of
+    /// EAGAIN which is converted into `Ok(false)` as it is not actually an error.
+    pub fn try_send_frame(&mut self, frame: &AvFrame) -> Result<bool, AvError> {
+        match unsafe { ffi::avcodec_send_frame(self.0, frame.0 as *const _) } {
+            AVERROR_EAGAIN => Ok(false),
+            ret if ret >= 0 => Ok(true),
+            err => Err(AvError(err)),
+        }
+    }
+
+    /// Attempt to write an encoded frame in `packet` if the codec has enough data to do so.
+    ///
+    /// Returned `Received` if `packet` has been filled with encoded data, `TryAgain` if
+    /// no packet could be returned at that time (in which case `try_send_frame` should be called to
+    /// submit more input to decode), or `FlushCompleted` to signal that a previous flush triggered
+    /// by calling the `flush` method has completed.
+    ///
+    /// Error codes are the same as those returned by `avcodec_receive_packet` with the exception of
+    /// EAGAIN and EOF which are handled as `TryAgain` and `FlushCompleted` respectively.
+    pub fn try_receive_packet(
+        &mut self,
+        packet: &mut AvPacket,
+    ) -> Result<TryReceiveResult, AvError> {
+        // Safe because the context is valid through the life of this object, and `avframe` is
+        // guaranteed to contain a properly initialized frame.
+        match unsafe { ffi::avcodec_receive_packet(self.0, &mut packet.packet) } {
+            AVERROR_EAGAIN => Ok(TryReceiveResult::TryAgain),
+            AVERROR_EOF => Ok(TryReceiveResult::FlushCompleted),
+            ret if ret >= 0 => Ok(TryReceiveResult::Received),
             err => Err(AvError(err)),
         }
     }
@@ -415,9 +520,18 @@ impl AvCodecContext {
     /// frames for them.
     ///
     /// The flush process is complete when `try_receive_frame` returns `FlushCompleted`,
-    pub fn flush(&mut self) -> Result<(), AvError> {
+    pub fn flush_decoder(&mut self) -> Result<(), AvError> {
         // Safe because the context is valid through the life of this object.
         AvError::result(unsafe { ffi::avcodec_send_packet(self.0, std::ptr::null()) })
+    }
+
+    /// Ask the context to start flushing, i.e. to process all pending input frames and produce
+    /// packets for them.
+    ///
+    /// The flush process is complete when `try_receive_packet` returns `FlushCompleted`,
+    pub fn flush_encoder(&mut self) -> Result<(), AvError> {
+        // Safe because the context is valid through the life of this object.
+        AvError::result(unsafe { ffi::avcodec_send_frame(self.0, std::ptr::null()) })
     }
 }
 
@@ -467,7 +581,7 @@ impl AvBuffer {
         Some(Self(unsafe {
             ffi::av_buffer_create(
                 storage.as_mut_ptr(),
-                storage.len() as ffi::size_t,
+                storage.len(),
                 Some(avbuffer_free::<D>),
                 Box::into_raw(storage) as *mut c_void,
                 0,
@@ -567,10 +681,36 @@ impl<'a> AvPacket<'a> {
 /// destination buffer.
 pub struct AvFrame(*mut ffi::AVFrame);
 
+/// A builder for AVFrame that allows specifying buffers and image metadata.
+pub struct AvFrameBuilder(AvFrame);
+
+/// A descriptor describing a subslice of `buffers` in [`AvFrameBuilder::build_owned`] that
+/// represents a plane's image data.
+pub struct PlaneDescriptor {
+    /// The index within `buffers`.
+    pub buffer_index: usize,
+    /// The offset from the start of `buffers[buffer_index]`.
+    pub offset: usize,
+    /// The increment of data pointer in bytes per row of the plane.
+    pub stride: usize,
+}
+
 #[derive(Debug, ThisError)]
 pub enum AvFrameError {
     #[error("failed to allocate AVFrame object")]
     FrameAllocationFailed,
+    #[error("dimension is negative or too large")]
+    DimensionOverflow,
+    #[error("a row does not fit in the specified stride")]
+    InvalidStride,
+    #[error("buffer index out of range")]
+    BufferOutOfRange,
+    #[error("specified dimensions overflow the buffer size")]
+    BufferTooSmall,
+    #[error("plane reference to buffer alias each other")]
+    BufferAlias,
+    #[error("error while calling libavcodec")]
+    AvError(#[from] AvError),
 }
 
 impl AvFrame {
@@ -581,6 +721,161 @@ impl AvFrame {
             // Safe because `av_frame_alloc` does not take any input.
             unsafe { ffi::av_frame_alloc().as_mut() }.ok_or(AvFrameError::FrameAllocationFailed)?,
         ))
+    }
+
+    /// Create a new AvFrame builder that allows setting the frame's parameters and backing memory
+    /// through its methods.
+    pub fn builder() -> Result<AvFrameBuilder, AvFrameError> {
+        AvFrame::new().map(AvFrameBuilder)
+    }
+
+    /// Return the frame's width and height.
+    pub fn dimensions(&self) -> Dimensions {
+        Dimensions {
+            width: self.as_ref().width as _,
+            height: self.as_ref().height as _,
+        }
+    }
+
+    /// Return the frame's pixel format.
+    pub fn format(&self) -> AvPixelFormat {
+        AvPixelFormat(self.as_ref().format)
+    }
+
+    /// Set the picture type (I-frame, P-frame etc.) on this frame.
+    pub fn set_pict_type(&mut self, ty: AVPictureType) {
+        // Safe because self.0 is a valid AVFrame reference.
+        unsafe {
+            (*self.0).pict_type = ty;
+        }
+    }
+
+    /// Set the presentation timestamp (PTS) of this frame.
+    pub fn set_pts(&mut self, ts: i64) {
+        // Safe because self.0 is a valid AVFrame reference.
+        unsafe {
+            (*self.0).pts = ts;
+        }
+    }
+}
+
+impl AvFrameBuilder {
+    /// Set the frame's width and height.
+    ///
+    /// The dimensions must not be greater than `i32::MAX`.
+    pub fn set_dimensions(&mut self, dimensions: Dimensions) -> Result<(), AvFrameError> {
+        // Safe because self.0 is a valid AVFrame instance and width and height are in range.
+        unsafe {
+            (*self.0 .0).width = dimensions
+                .width
+                .try_into()
+                .map_err(|_| AvFrameError::DimensionOverflow)?;
+            (*self.0 .0).height = dimensions
+                .height
+                .try_into()
+                .map_err(|_| AvFrameError::DimensionOverflow)?;
+        }
+        Ok(())
+    }
+
+    /// Set the frame's format.
+    pub fn set_format(&mut self, format: AvPixelFormat) -> Result<(), AvFrameError> {
+        // Safe because self.0 is a valid AVFrame instance and format is a valid pixel format.
+        unsafe {
+            (*self.0 .0).format = format.pix_fmt();
+        }
+        Ok(())
+    }
+
+    /// Build an AvFrame from iterators of [`AvBuffer`]s and subslice of buffers describing the
+    /// planes.
+    ///
+    /// The frame will own the `buffers`.
+    ///
+    /// This function checks that:
+    /// - Each plane fits inside the bounds of the associated buffer.
+    /// - Different planes do not overlap each other's buffer slice.
+    ///   In this check, all planes are assumed to be potentially mutable, regardless of whether
+    ///   the AvFrame is actually used for read or write access. Aliasing reference to the same
+    ///   buffer will be rejected, since it can potentially allow routines to overwrite each
+    //    other's result.
+    ///   An exception to this is when the same buffer is passed multiple times in `buffers`. In
+    ///   this case, each buffer is treated as a different buffer. Since clones have to be made to
+    ///   be passed multiple times in `buffers`, the frame will not be considered [writable]. Hence
+    ///   aliasing is safe in this case, but the caller is required to explicit opt-in to this
+    ///   read-only handling by passing clones of the buffer into `buffers` and have a different
+    ///   buffer index for each plane combination that could overlap in their range.
+    ///
+    /// [writable]: AvFrame::is_writable
+    pub fn build_owned<
+        BI: IntoIterator<Item = AvBuffer>,
+        PI: IntoIterator<Item = PlaneDescriptor>,
+    >(
+        mut self,
+        buffers: BI,
+        planes: PI,
+    ) -> Result<AvFrame, AvFrameError> {
+        let mut buffers: Vec<_> = buffers.into_iter().collect();
+        let planes: Vec<_> = planes.into_iter().collect();
+        let format = self.0.format();
+        let plane_sizes = format.plane_sizes(
+            planes.iter().map(|x| x.stride as u32),
+            self.0.dimensions().height,
+        )?;
+        let mut ranges = vec![];
+
+        for (
+            plane,
+            PlaneDescriptor {
+                buffer_index,
+                offset,
+                stride,
+            },
+        ) in planes.into_iter().enumerate()
+        {
+            if buffer_index > buffers.len() {
+                return Err(AvFrameError::BufferOutOfRange);
+            }
+            let end = offset + plane_sizes[plane];
+            if end > buffers[buffer_index].as_mut_slice().len() {
+                return Err(AvFrameError::BufferTooSmall);
+            }
+            if stride < format.line_size(self.0.dimensions().width, plane)? {
+                return Err(AvFrameError::InvalidStride);
+            }
+            unsafe {
+                (*self.0 .0).data[plane] =
+                    buffers[buffer_index].as_mut_slice()[offset..].as_mut_ptr();
+                (*self.0 .0).linesize[plane] = stride as c_int;
+            }
+            ranges.push((buffer_index, offset, end));
+        }
+
+        // Check for range overlaps.
+        // See function documentation for the exact rule and reasoning.
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            // (buffer_index, start, end)
+            let (b0, _s0, e0) = pair[0];
+            let (b1, s1, _e1) = pair[1];
+
+            if b0 != b1 {
+                continue;
+            }
+            // Note that s0 <= s1 always holds, so we only need to check
+            // that the start of the second range is before the end of the first range.
+            if s1 < e0 {
+                return Err(AvFrameError::BufferAlias);
+            }
+        }
+
+        for (i, buf) in buffers.into_iter().enumerate() {
+            // Safe because self.0 is a valid AVFrame instance and buffers contains valid AvBuffers.
+            unsafe {
+                (*self.0 .0).buf[i] = buf.into_raw();
+            }
+        }
+        Ok(self.0)
     }
 }
 

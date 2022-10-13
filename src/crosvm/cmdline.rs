@@ -88,7 +88,6 @@ use crate::crosvm::config::HypervisorKind;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFsOption;
 use crate::crosvm::config::VhostUserOption;
-use crate::crosvm::config::VhostUserWlOption;
 use crate::crosvm::config::VvuOption;
 
 #[derive(FromArgs)]
@@ -637,14 +636,20 @@ pub struct RunCommand {
     /// (EXPERIMENTAL) Comma separated key=value pairs for setting
     /// up a display on the virtio-gpu device
     /// Possible key values:
-    ///     mode=(borderless_full_screen|windowed) - Whether to show the window on the host in full
-    ///        screen or windowed mode. If not specified, windowed mode is used by default.
-    ///     width=INT - The width of the virtual display connected to the virtio-gpu. Can't be set
-    ///        with the borderless_full_screen display mode.
-    ///     height=INT - The height of the virtual display connected to the virtio-gpu. Can't be set
-    ///        with the borderless_full_screen display mode.
-    ///     hidden[=true|=false] - If the display window is initially hidden.
-    ///     refresh_rate=INT - Force a specific vsync generation rate in hertz on the guest.
+    ///     mode=(borderless_full_screen|windowed) - Whether to show
+    ///        the window on the host in full screen or windowed
+    ///        mode. If not specified, windowed mode is used by
+    ///        default.
+    ///     width=INT - The width of the virtual display connected
+    ///        to the virtio-gpu. Can't be set with the
+    ///        borderless_full_screen display mode.
+    ///     height=INT - The height of the virtual display connected
+    ///        to the virtio-gpu. Can't be set with the
+    ///        borderless_full_screen display mode.
+    ///     hidden[=true|=false] - If the display window is
+    ///        initially hidden (default: false).
+    ///     refresh-rate=INT - Force a specific vsync generation
+    ///        rate in hertz on the guest (default: 60)
     #[cfg(unix)]
     pub gpu_display: Vec<GpuDisplayParameters>,
     #[cfg(feature = "gpu")]
@@ -1204,7 +1209,7 @@ pub struct RunCommand {
     pub vhost_user_vsock: Vec<VhostUserOption>,
     #[argh(option, arg_name = "SOCKET_PATH")]
     /// path to a vhost-user socket for wayland
-    pub vhost_user_wl: Option<VhostUserWlOption>,
+    pub vhost_user_wl: Option<VhostUserOption>,
     #[cfg(unix)]
     #[argh(option, arg_name = "SOCKET_PATH")]
     /// path to the vhost-vsock device. (default /dev/vhost-vsock)
@@ -1620,10 +1625,6 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.initrd_path = cmd.initrd_path;
 
-        if cmd.disable_sandbox {
-            cfg.jail_config = None;
-        }
-
         if let Some(p) = cmd.bios {
             if cfg.executable_path.is_some() {
                 return Err(format!(
@@ -1853,6 +1854,12 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.vfio.extend(cmd.vfio);
             cfg.vfio.extend(cmd.vfio_platform);
             cfg.vfio_isolate_hotplug = cmd.vfio_isolate_hotplug;
+        }
+
+        // `--disable-sandbox` has the effect of disabling sandboxing altogether, so make sure
+        // to handle it after other sandboxing options since they implicitly enable it.
+        if cmd.disable_sandbox {
+            cfg.jail_config = None;
         }
 
         // Now do validation of constructed config

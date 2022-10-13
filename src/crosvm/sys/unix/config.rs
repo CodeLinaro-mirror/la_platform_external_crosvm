@@ -80,28 +80,23 @@ pub fn parse_gpu_render_server_options(
     }
 }
 
-#[cfg(feature = "audio_cras")]
+#[cfg(feature = "audio")]
 pub fn parse_ac97_options(
-    ac97_params: &mut devices::Ac97Parameters,
+    #[allow(unused_variables)] ac97_params: &mut devices::Ac97Parameters,
     key: &str,
     #[allow(unused_variables)] value: &str,
 ) -> Result<(), String> {
     match key {
-        "client_type" => {
-            ac97_params
-                .set_client_type(value)
-                .map_err(|e| crate::crosvm::config::invalid_value_err(value, e))?;
-        }
-        "socket_type" => {
-            ac97_params
-                .set_socket_type(value)
-                .map_err(|e| crate::crosvm::config::invalid_value_err(value, e))?;
-        }
-        _ => {
-            return Err(format!("unknown ac97 parameter {}", key));
-        }
-    };
-    Ok(())
+        #[cfg(feature = "audio_cras")]
+        "client_type" => ac97_params
+            .set_client_type(value)
+            .map_err(|e| crate::crosvm::config::invalid_value_err(value, e)),
+        #[cfg(feature = "audio_cras")]
+        "socket_type" => ac97_params
+            .set_socket_type(value)
+            .map_err(|e| crate::crosvm::config::invalid_value_err(value, e)),
+        _ => Err(format!("unknown ac97 parameter {}", key)),
+    }
 }
 
 #[cfg(feature = "gfxstream")]
@@ -333,6 +328,8 @@ mod tests {
     use devices::virtio::DEFAULT_DISPLAY_HEIGHT;
     #[cfg(feature = "gpu")]
     use devices::virtio::DEFAULT_DISPLAY_WIDTH;
+    #[cfg(feature = "gpu")]
+    use devices::virtio::DEFAULT_REFRESH_RATE;
 
     use super::*;
     use crate::crosvm::config::from_key_values;
@@ -565,6 +562,10 @@ mod tests {
         let gpu_params: GpuParameters = parse_gpu_options("backend=virglrenderer,wsi=vk").unwrap();
         assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
 
+        let gpu_params: GpuParameters =
+            parse_gpu_options("backend=virglrenderer,wsi=vulkan").unwrap();
+        assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
+
         let gpu_params: GpuParameters = parse_gpu_options("wsi=vk,backend=virglrenderer").unwrap();
         assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
 
@@ -621,6 +622,15 @@ mod tests {
                 gpu_params.get_virtual_display_size(),
                 (DEFAULT_DISPLAY_WIDTH, DEFAULT_DISPLAY_HEIGHT)
             );
+            assert_eq!(gpu_params.hidden, false);
+            assert_eq!(gpu_params.refresh_rate, DEFAULT_REFRESH_RATE);
+        }
+        {
+            let gpu_params: GpuDisplayParameters =
+                from_key_values("width=500,height=600,hidden,refresh-rate=100").unwrap();
+            assert_eq!(gpu_params.get_virtual_display_size(), (500, 600));
+            assert_eq!(gpu_params.hidden, true);
+            assert_eq!(gpu_params.refresh_rate, 100);
         }
     }
 

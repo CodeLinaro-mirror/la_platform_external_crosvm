@@ -204,8 +204,8 @@ pub fn adjust_cpuid(entry: &mut CpuIdEntry, ctx: &CpuIdContext) {
             }
         }
         7 => {
-            // b/228795137 Clear X86 FSRM feature. Broken on cuttlefish boot. Will remove once
-            // rootcaused and resolved.
+            // b/228795137 Clear X86 FSRM feature which breaks Bruschetta boot. Remove
+            // once this has been fixed.
             entry.cpuid.edx &= !(1 << EDX_FSRM_SHIFT);
 
             if ctx.cpu_config.host_cpu_topology && entry.index == 0 {

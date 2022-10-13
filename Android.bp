@@ -47,6 +47,7 @@ rust_binary {
         "balloon",
         "qcow",
         "usb",
+        "virgl_renderer_next",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -169,6 +170,7 @@ rust_test {
         "balloon",
         "qcow",
         "usb",
+        "virgl_renderer_next",
     ],
     rustlibs: [
         "libacpi_tables",

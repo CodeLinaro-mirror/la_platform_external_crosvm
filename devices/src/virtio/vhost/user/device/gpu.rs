@@ -412,9 +412,6 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     // These are only used when there is an input device.
     let event_devices = Vec::new();
 
-    // This is only used in single-process mode, even for the regular gpu device.
-    let map_request = Arc::new(Mutex::new(None));
-
     // The regular gpu device sets this to true when sandboxing is enabled. Assume that we
     // are always sandboxed.
     let external_blob = true;
@@ -428,9 +425,10 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
         Vec::new(), // resource_bridges, handled separately by us
         display_backends,
         &gpu_parameters,
+        #[cfg(feature = "virgl_renderer_next")]
+        /* render_server_fd= */
         None,
         event_devices,
-        map_request,
         external_blob,
         base_features,
         channels,
