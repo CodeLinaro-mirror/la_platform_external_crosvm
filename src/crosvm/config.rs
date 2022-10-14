@@ -129,19 +129,6 @@ impl FromStr for VhostUserFsOption {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct VhostUserWlOption {
-    pub socket: PathBuf,
-}
-
-impl FromStr for VhostUserWlOption {
-    type Err = <PathBuf as FromStr>::Err;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self { socket: s.parse()? })
-    }
-}
-
 /// Options for virtio-vhost-user proxy device.
 #[derive(Serialize, Deserialize, Debug, PartialEq, serde_keyvalue::FromKeyValues)]
 pub struct VvuOption {
@@ -896,7 +883,6 @@ pub fn parse_ac97_options(s: &str) -> Result<Ac97Parameters, String> {
                     .map_err(|e| format!("invalid capture option: {}", e))?;
             }
             _ => {
-                #[cfg(feature = "audio_cras")]
                 super::sys::config::parse_ac97_options(&mut ac97_params, k, v)?;
             }
         }
@@ -1325,7 +1311,7 @@ pub struct Config {
     pub vhost_user_snd: Vec<VhostUserOption>,
     pub vhost_user_video_dec: Option<VhostUserOption>,
     pub vhost_user_vsock: Vec<VhostUserOption>,
-    pub vhost_user_wl: Option<VhostUserWlOption>,
+    pub vhost_user_wl: Option<VhostUserOption>,
     #[cfg(unix)]
     pub vhost_vsock_device: Option<PathBuf>,
     #[cfg(feature = "video-decoder")]

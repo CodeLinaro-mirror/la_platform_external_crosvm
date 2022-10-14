@@ -7,7 +7,6 @@
 use std::collections::BTreeMap as Map;
 use std::sync::Arc;
 
-use base::ExternalMapping;
 use base::SafeDescriptor;
 use data_model::VolatileSlice;
 
@@ -150,7 +149,13 @@ pub trait RutabagaComponent {
 
     /// Implementations must map the blob resource on success.  This is typically done by
     /// glMapBufferRange(...) or vkMapMemory.
-    fn map(&self, _resource_id: u32) -> RutabagaResult<ExternalMapping> {
+    fn map(&self, _resource_id: u32) -> RutabagaResult<RutabagaMapping> {
+        Err(RutabagaError::Unsupported)
+    }
+
+    /// Implementations must unmap the blob resource on success.  This is typically done by
+    /// glUnmapBuffer(...) or vkUnmapMemory.
+    fn unmap(&self, _resource_id: u32) -> RutabagaResult<()> {
         Err(RutabagaError::Unsupported)
     }
 
@@ -252,6 +257,14 @@ pub fn calculate_context_mask(context_names: Vec<String>) -> u64 {
     });
 
     context_mask
+}
+
+pub fn calculate_context_types(context_mask: u64) -> Vec<String> {
+    RUTABAGA_CAPSETS
+        .iter()
+        .filter(|capset| context_mask & (1 << capset.capset_id) != 0)
+        .map(|capset| capset.name.to_string())
+        .collect()
 }
 
 /// The global libary handle used to query capability sets, create resources and contexts.
@@ -546,7 +559,7 @@ impl Rutabaga {
     }
 
     /// Returns a memory mapping of the blob resource.
-    pub fn map(&self, resource_id: u32) -> RutabagaResult<ExternalMapping> {
+    pub fn map(&self, resource_id: u32) -> RutabagaResult<RutabagaMapping> {
         let component = self
             .components
             .get(&self.default_component)
@@ -557,6 +570,20 @@ impl Rutabaga {
         }
 
         component.map(resource_id)
+    }
+
+    /// Unmaps the blob resource from the default component
+    pub fn unmap(&self, resource_id: u32) -> RutabagaResult<()> {
+        let component = self
+            .components
+            .get(&self.default_component)
+            .ok_or(RutabagaError::InvalidComponent)?;
+
+        if !self.resources.contains_key(&resource_id) {
+            return Err(RutabagaError::InvalidResourceId);
+        }
+
+        component.unmap(resource_id)
     }
 
     /// Returns the `map_info` of the blob resource. The valid values for `map_info`
@@ -802,6 +829,12 @@ impl RutabagaBuilder {
         self
     }
 
+    /// Set enable GLES 3.1 support in gfxstream
+    pub fn set_support_gles31(mut self, v: bool) -> RutabagaBuilder {
+        self.gfxstream_flags = self.gfxstream_flags.support_gles31(v);
+        self
+    }
+
     /// Sets use external blob in virglrenderer.
     pub fn set_use_external_blob(mut self, v: bool) -> RutabagaBuilder {
         self.virglrenderer_flags = self.virglrenderer_flags.use_external_blob(v);
@@ -837,7 +870,7 @@ impl RutabagaBuilder {
     pub fn build(
         mut self,
         fence_handler: RutabagaFenceHandler,
-        render_server_fd: Option<SafeDescriptor>,
+        #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
     ) -> RutabagaResult<Rutabaga> {
         let mut rutabaga_components: Map<RutabagaComponentType, Box<dyn RutabagaComponent>> =
             Default::default();
@@ -897,13 +930,6 @@ impl RutabagaBuilder {
         if self.default_component == RutabagaComponentType::Gfxstream {
             return Err(RutabagaError::InvalidRutabagaBuild(
                 "gfxstream feature not enabled",
-            ));
-        }
-
-        #[cfg(not(feature = "virgl_renderer_next"))]
-        if render_server_fd.is_some() {
-            return Err(RutabagaError::InvalidRutabagaBuild(
-                "render server FD is not supported with virgl_renderer_next feature",
             ));
         }
 

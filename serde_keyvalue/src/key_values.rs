@@ -210,7 +210,7 @@ fn any_identifier(s: &str) -> IResult<&str, &str> {
 }
 
 /// Serde deserializer for key-values strings.
-struct KeyValueDeserializer<'de> {
+pub struct KeyValueDeserializer<'de> {
     /// Full input originally received for parsing.
     original_input: &'de str,
     /// Input currently remaining to parse.
@@ -243,7 +243,7 @@ impl<'de> From<&'de str> for KeyValueDeserializer<'de> {
 
 impl<'de> KeyValueDeserializer<'de> {
     /// Return an `kind` error for the current position of the input.
-    fn error_here(&self, kind: ErrorKind) -> ParseError {
+    pub fn error_here(&self, kind: ErrorKind) -> ParseError {
         ParseError {
             kind,
             pos: self.original_input.len() - self.input.len(),
@@ -252,25 +252,25 @@ impl<'de> KeyValueDeserializer<'de> {
 
     /// Returns the next char in the input string without consuming it, or None
     /// if we reached the end of input.
-    fn peek_char(&self) -> Option<char> {
+    pub fn peek_char(&self) -> Option<char> {
         self.input.chars().next()
     }
 
     /// Skip the next char in the input string.
-    fn skip_char(&mut self) {
+    pub fn skip_char(&mut self) {
         let _ = self.next_char();
     }
 
     /// Returns the next char in the input string and consume it, or returns
     /// None if we reached the end of input.
-    fn next_char(&mut self) -> Option<char> {
+    pub fn next_char(&mut self) -> Option<char> {
         let c = self.peek_char()?;
         self.input = &self.input[c.len_utf8()..];
         Some(c)
     }
 
     /// Attempts to parse an identifier, either for a key or for the value of an enum type.
-    fn parse_identifier(&mut self) -> Result<&'de str> {
+    pub fn parse_identifier(&mut self) -> Result<&'de str> {
         let (remainder, res) = any_identifier(self.input)
             .finish()
             .map_err(|_| self.error_here(ErrorKind::ExpectedIdentifier))?;
@@ -280,7 +280,7 @@ impl<'de> KeyValueDeserializer<'de> {
     }
 
     /// Attempts to parse a string.
-    fn parse_string(&mut self) -> Result<Cow<'de, str>> {
+    pub fn parse_string(&mut self) -> Result<Cow<'de, str>> {
         let (remainder, res) =
             any_string(self.input)
                 .finish()
@@ -301,7 +301,7 @@ impl<'de> KeyValueDeserializer<'de> {
     }
 
     /// Attempt to parse a boolean.
-    fn parse_bool(&mut self) -> Result<bool> {
+    pub fn parse_bool(&mut self) -> Result<bool> {
         let (remainder, res) =
             any_bool(self.input)
                 .finish()
@@ -315,7 +315,7 @@ impl<'de> KeyValueDeserializer<'de> {
     }
 
     /// Attempt to parse a positive or negative number.
-    fn parse_number<T>(&mut self) -> Result<T>
+    pub fn parse_number<T>(&mut self) -> Result<T>
     where
         T: Num<FromStrRadixErr = ParseIntError>,
     {
@@ -325,6 +325,18 @@ impl<'de> KeyValueDeserializer<'de> {
 
         self.input = remainder;
         Ok(val)
+    }
+
+    /// Consume this deserializer and return a `TrailingCharacters` error if some input was
+    /// remaining.
+    ///
+    /// This is useful to confirm that the whole input has been consumed without any extra elements.
+    pub fn finish(self) -> Result<()> {
+        if self.input.is_empty() {
+            Ok(())
+        } else {
+            Err(self.error_here(ErrorKind::TrailingCharacters))
+        }
     }
 }
 
@@ -372,22 +384,17 @@ impl<'de> de::MapAccess<'de> for KeyValueDeserializer<'de> {
         let val = seed.deserialize(&mut *self)?;
 
         // We must have a comma or end of input after a value.
-        match self.next_char() {
-            Some(',') | None => Ok(val),
+        match self.peek_char() {
+            Some(',') | None => {
+                let _ = self.next_char();
+                Ok(val)
+            }
             Some(_) => Err(self.error_here(ErrorKind::ExpectedComma)),
         }
     }
 }
 
-struct Enum<'a, 'de: 'a>(&'a mut KeyValueDeserializer<'de>);
-
-impl<'a, 'de> Enum<'a, 'de> {
-    fn new(de: &'a mut KeyValueDeserializer<'de>) -> Self {
-        Self(de)
-    }
-}
-
-impl<'a, 'de> de::EnumAccess<'de> for Enum<'a, 'de> {
+impl<'a, 'de> de::EnumAccess<'de> for &'a mut KeyValueDeserializer<'de> {
     type Error = ParseError;
     type Variant = Self;
 
@@ -395,12 +402,12 @@ impl<'a, 'de> de::EnumAccess<'de> for Enum<'a, 'de> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        let val = seed.deserialize(&mut *self.0)?;
+        let val = seed.deserialize(&mut *self)?;
         Ok((val, self))
     }
 }
 
-impl<'a, 'de> de::VariantAccess<'de> for Enum<'a, 'de> {
+impl<'a, 'de> de::VariantAccess<'de> for &'a mut KeyValueDeserializer<'de> {
     type Error = ParseError;
 
     fn unit_variant(self) -> Result<()> {
@@ -436,19 +443,22 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyValueDeserializer<'de> {
     where
         V: serde::de::Visitor<'de>,
     {
+        // If we have no value following, then we are dealing with a boolean flag.
         match self.peek_char() {
-            Some('0'..='9') => self.deserialize_u64(visitor),
-            Some('-') => self.deserialize_i64(visitor),
-            Some('"') => self.deserialize_string(visitor),
-            // Only possible option here is boolean flag.
-            Some(',') | None => self.deserialize_bool(visitor),
-            _ => {
-                // We probably have an unquoted string, but possibly a boolean as well.
-                match any_identifier(self.input) {
-                    Ok((_, "true")) | Ok((_, "false")) => self.deserialize_bool(visitor),
-                    _ => self.deserialize_str(visitor),
-                }
-            }
+            Some(',') | None => return self.deserialize_bool(visitor),
+            _ => (),
+        }
+
+        // This is ambiguous as technically any argument could be an unquoted string. However we
+        // don't have any type information here, so try to guess it on a best-effort basis...
+        if any_number::<i64>(self.input).is_ok() {
+            self.deserialize_i64(visitor)
+        } else if any_number::<u64>(self.input).is_ok() {
+            self.deserialize_u64(visitor)
+        } else if any_bool(self.input).is_ok() {
+            self.deserialize_bool(visitor)
+        } else {
+            self.deserialize_str(visitor)
         }
     }
 
@@ -681,7 +691,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyValueDeserializer<'de> {
     where
         V: serde::de::Visitor<'de>,
     {
-        visitor.visit_enum(Enum::new(self))
+        visitor.visit_enum(self)
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
@@ -710,12 +720,10 @@ where
     T: Deserialize<'a>,
 {
     let mut deserializer = KeyValueDeserializer::from(input);
-    let t = T::deserialize(&mut deserializer)?;
-    if deserializer.input.is_empty() {
-        Ok(t)
-    } else {
-        Err(deserializer.error_here(ErrorKind::TrailingCharacters))
-    }
+    let ret = T::deserialize(&mut deserializer)?;
+    deserializer.finish()?;
+
+    Ok(ret)
 }
 
 #[cfg(test)]
@@ -910,6 +918,16 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_unit() {
+        from_key_values::<SingleStruct<()>>("m").unwrap();
+        from_key_values::<SingleStruct<()>>("m=").unwrap();
+
+        from_key_values::<SingleStruct<()>>("").unwrap_err();
+        from_key_values::<SingleStruct<()>>("p").unwrap_err();
+        from_key_values::<SingleStruct<()>>("m=10").unwrap_err();
+    }
+
+    #[test]
     fn deserialize_bool() {
         let res = from_key_values::<SingleStruct<bool>>("m=true").unwrap();
         assert_eq!(res.m, true);
@@ -1093,6 +1111,35 @@ mod tests {
                 active: false,
             }
         );
+    }
+
+    #[test]
+    fn deserialize_untagged_enum() {
+        #[derive(Deserialize, PartialEq, Debug)]
+        #[serde(untagged)]
+        enum TestEnum {
+            FirstVariant { first: u32 },
+            SecondVariant { second: bool },
+        }
+
+        #[derive(Deserialize, PartialEq, Debug)]
+        struct TestStruct {
+            #[serde(flatten)]
+            variant: TestEnum,
+        }
+
+        let res: TestStruct = from_key_values("first=10").unwrap();
+        assert_eq!(res.variant, TestEnum::FirstVariant { first: 10 });
+
+        let res: TestStruct = from_key_values("second=false").unwrap();
+        assert_eq!(res.variant, TestEnum::SecondVariant { second: false },);
+
+        let res: TestStruct = from_key_values("second").unwrap();
+        assert_eq!(res.variant, TestEnum::SecondVariant { second: true },);
+
+        from_key_values::<TestStruct>("third=10").unwrap_err();
+        from_key_values::<TestStruct>("first=some_string").unwrap_err();
+        from_key_values::<TestStruct>("second=10").unwrap_err();
     }
 
     #[test]

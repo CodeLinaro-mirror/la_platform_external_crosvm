@@ -10,7 +10,6 @@ pub mod descriptor;
 pub mod descriptor_reflection;
 mod errno;
 mod event;
-pub mod external_mapping;
 mod mmap;
 mod notifiers;
 mod shm;
@@ -30,9 +29,7 @@ pub use errno::Error;
 pub use errno::Result;
 pub use event::Event;
 pub use event::EventReadResult;
-pub use external_mapping::Error as ExternalMappingError;
-pub use external_mapping::ExternalMapping;
-pub use external_mapping::Result as ExternalMappingResult;
+pub use mmap::ExternalMapping;
 pub use mmap::MappedRegion;
 pub use mmap::MemoryMapping;
 pub use mmap::MemoryMappingBuilder;
@@ -88,7 +85,7 @@ cfg_if::cfg_if! {
         pub use platform::{
             block_signal, clear_signal, get_blocked_signals, new_pipe_full,
             register_rt_signal_handler, signal, unblock_signal, Killable, SIGRTMIN,
-            AcpiNotifyEvent, NetlinkGenericSocket, SignalFd, Terminal, EventFd,
+            AcpiNotifyEvent, NetlinkGenericSocket, SignalFd, Terminal,
         };
 
         pub use platform::{

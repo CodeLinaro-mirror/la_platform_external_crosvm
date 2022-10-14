@@ -629,10 +629,6 @@ impl<O: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for DeviceRequestHandl
         size: u32,
         _flags: VhostUserConfigFlags,
     ) -> VhostResult<Vec<u8>> {
-        if offset >= size {
-            return Err(VhostError::InvalidParam);
-        }
-
         let mut data = vec![0; size as usize];
         self.backend.read_config(u64::from(offset), &mut data);
         Ok(data)
@@ -908,7 +904,7 @@ mod tests {
 
             println!("read_config");
             let mut buf = vec![0; std::mem::size_of::<FakeConfig>()];
-            vmm_handler.read_config::<FakeConfig>(0, &mut buf).unwrap();
+            vmm_handler.read_config(0, &mut buf).unwrap();
             // Check if the obtained config data is correct.
             let config = FakeConfig::from_slice(&buf).unwrap();
             assert_eq!(*config, FAKE_CONFIG_DATA);
@@ -980,7 +976,7 @@ mod tests {
     pub(super) fn vmm_handler_send_requests(vmm_handler: &mut VhostUserHandler, queues_num: usize) {
         println!("read_config");
         let mut buf = vec![0; std::mem::size_of::<FakeConfig>()];
-        vmm_handler.read_config::<FakeConfig>(0, &mut buf).unwrap();
+        vmm_handler.read_config(0, &mut buf).unwrap();
         // Check if the obtained config data is correct.
         let config = FakeConfig::from_slice(&buf).unwrap();
         assert_eq!(*config, FAKE_CONFIG_DATA);

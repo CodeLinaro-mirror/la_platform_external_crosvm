@@ -5,11 +5,21 @@
 //! Worker that runs in a virtio-video thread.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
+use base::clone_descriptor;
 use base::error;
 use base::info;
 use base::Event;
+use base::FromRawDescriptor;
+use base::SafeDescriptor;
 use base::WaitContext;
+use cros_async::select3;
+use cros_async::AsyncWrapper;
+use cros_async::EventAsync;
+use cros_async::Executor;
+use cros_async::SelectResult;
+use futures::FutureExt;
 use vm_memory::GuestMemory;
 
 use crate::virtio::queue::DescriptorChain;
@@ -30,27 +40,22 @@ use crate::virtio::video::response;
 use crate::virtio::video::response::Response;
 use crate::virtio::video::Error;
 use crate::virtio::video::Result;
-use crate::virtio::Interrupt;
 use crate::virtio::Reader;
 use crate::virtio::SignalableInterrupt;
 use crate::virtio::Writer;
 
 /// Worker that takes care of running the virtio video device.
-pub struct Worker {
-    /// Device-to-driver notification for the command queue and the event queue
-    interrupt: Interrupt,
+pub struct Worker<I: SignalableInterrupt> {
     /// Memory region of the guest VM
     mem: GuestMemory,
     /// VirtIO queue for Command queue
     cmd_queue: Queue,
-    /// Driver-to-device notification for the command queue
-    cmd_evt: Event,
+    /// Device-to-driver notification for command queue
+    cmd_queue_interrupt: I,
     /// VirtIO queue for Event queue
     event_queue: Queue,
-    /// Driver-to-device notification for the event queue
-    event_evt: Event,
-    /// Event to stop the virtio queue handling loop
-    kill_evt: Event,
+    /// Device-to-driver notification for the event queue.
+    event_queue_interrupt: I,
     /// Stores descriptor chains in which responses for asynchronous commands will be written
     desc_map: AsyncCmdDescMap,
 }
@@ -58,24 +63,20 @@ pub struct Worker {
 /// Pair of a descriptor chain and a response to be written.
 type WritableResp = (DescriptorChain, response::CmdResponse);
 
-impl Worker {
+impl<I: SignalableInterrupt> Worker<I> {
     pub fn new(
-        interrupt: Interrupt,
         mem: GuestMemory,
         cmd_queue: Queue,
-        cmd_evt: Event,
+        cmd_queue_interrupt: I,
         event_queue: Queue,
-        event_evt: Event,
-        kill_evt: Event,
+        event_queue_interrupt: I,
     ) -> Self {
         Self {
-            interrupt,
             mem,
             cmd_queue,
-            cmd_evt,
+            cmd_queue_interrupt,
             event_queue,
-            event_evt,
-            kill_evt,
+            event_queue_interrupt,
             desc_map: Default::default(),
         }
     }
@@ -98,7 +99,8 @@ impl Worker {
             self.cmd_queue
                 .add_used(&self.mem, desc_index, writer.bytes_written() as u32);
         }
-        self.cmd_queue.trigger_interrupt(&self.mem, &self.interrupt);
+        self.cmd_queue
+            .trigger_interrupt(&self.mem, &self.cmd_queue_interrupt);
         Ok(())
     }
 
@@ -118,7 +120,7 @@ impl Worker {
         self.event_queue
             .add_used(&self.mem, desc_index, writer.bytes_written() as u32);
         self.event_queue
-            .trigger_interrupt(&self.mem, &self.interrupt);
+            .trigger_interrupt(&self.mem, &self.event_queue_interrupt);
         Ok(())
     }
 
@@ -288,7 +290,6 @@ impl Worker {
         device: &mut dyn Device,
         wait_ctx: &WaitContext<Token>,
     ) -> Result<()> {
-        let _ = self.cmd_evt.read();
         while let Some(desc) = self.cmd_queue.pop(&self.mem) {
             let mut resps = self.handle_command_desc(device, wait_ctx, desc)?;
             self.write_responses(&mut resps)?;
@@ -310,14 +311,29 @@ impl Worker {
     }
 
     /// Runs the video device virtio queues in a blocking way.
-    pub fn run(&mut self, mut device: Box<dyn Device>) -> Result<()> {
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Instance of backend device
+    /// * `cmd_evt` - Driver-to-device kick event for the command queue
+    /// * `event_evt` - Driver-to-device kick event for the event queue
+    /// * `kill_evt` - `Event` notified to make `run` stop and return
+    pub fn run(
+        &mut self,
+        mut device: Box<dyn Device>,
+        cmd_evt: &Event,
+        event_evt: &Event,
+        kill_evt: &Event,
+    ) -> Result<()> {
         let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
-            (&self.cmd_evt, Token::CmdQueue),
-            (&self.event_evt, Token::EventQueue),
-            (&self.kill_evt, Token::Kill),
+            (cmd_evt, Token::CmdQueue),
+            (event_evt, Token::EventQueue),
+            (kill_evt, Token::Kill),
         ])
         .and_then(|wc| {
-            if let Some(resample_evt) = self.interrupt.get_resample_evt() {
+            // resampling event exists per-PCI-INTx basis, so the two queues have the same event.
+            // Thus, checking only cmd_queue_interrupt suffices.
+            if let Some(resample_evt) = self.cmd_queue_interrupt.get_resample_evt() {
                 wc.add(resample_evt, Token::InterruptResample)?;
             }
             Ok(wc)
@@ -330,18 +346,98 @@ impl Worker {
             for wait_event in wait_events.iter().filter(|e| e.is_readable) {
                 match wait_event.token {
                     Token::CmdQueue => {
+                        let _ = cmd_evt.read();
                         self.handle_command_queue(device.as_mut(), &wait_ctx)?;
                     }
                     Token::EventQueue => {
-                        let _ = self.event_evt.read();
+                        let _ = event_evt.read();
                     }
                     Token::Event { id } => {
                         self.handle_event(device.as_mut(), id)?;
                     }
                     Token::InterruptResample => {
-                        self.interrupt.interrupt_resample();
+                        // Clear the event. `expect` is ok since the token fires if and only if
+                        // resample exists. resampling event exists per-PCI-INTx basis, so the
+                        // two queues have the same event.
+                        let _ = self
+                            .cmd_queue_interrupt
+                            .get_resample_evt()
+                            .expect("resample event for the command queue doesn't exist")
+                            .read();
+                        self.cmd_queue_interrupt.do_interrupt_resample();
                     }
                     Token::Kill => return Ok(()),
+                }
+            }
+        }
+    }
+
+    /// Runs the video device virtio queues asynchronously.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Instance of backend device
+    /// * `ex` - Instance of `Executor` of asynchronous operations
+    /// * `cmd_evt` - Driver-to-device kick event for the command queue
+    /// * `event_evt` - Driver-to-device kick event for the event queue
+    pub async fn run_async(
+        mut self,
+        mut device: Box<dyn Device>,
+        ex: Executor,
+        cmd_evt: Event,
+        event_evt: Event,
+    ) -> Result<()> {
+        let cmd_queue_evt =
+            EventAsync::new(cmd_evt, &ex).map_err(Error::EventAsyncCreationFailed)?;
+        let event_queue_evt =
+            EventAsync::new(event_evt, &ex).map_err(Error::EventAsyncCreationFailed)?;
+
+        // WaitContext to wait for the response from the encoder/decoder device.
+        let device_wait_ctx = WaitContext::new().map_err(Error::WaitContextCreationFailed)?;
+        let device_evt = ex
+            .async_from(AsyncWrapper::new(
+                clone_descriptor(&device_wait_ctx)
+                        // Safe because we just created this fd.
+                        .map(|fd| unsafe { SafeDescriptor::from_raw_descriptor(fd) })
+                        .map_err(Error::CloneDescriptorFailed)?,
+            ))
+            .map_err(Error::EventAsyncCreationFailed)?;
+
+        loop {
+            let (
+                cmd_queue_evt,
+                device_evt,
+                // Ignore driver-to-device kicks since the event queue is write-only for a device.
+                _event_queue_evt,
+            ) = select3(
+                cmd_queue_evt.next_val().boxed_local(),
+                device_evt.wait_readable().boxed_local(),
+                event_queue_evt.next_val().boxed_local(),
+            )
+            .await;
+
+            if let SelectResult::Finished(_) = cmd_queue_evt {
+                self.handle_command_queue(device.as_mut(), &device_wait_ctx)?;
+            }
+
+            if let SelectResult::Finished(_) = device_evt {
+                let device_events = match device_wait_ctx.wait_timeout(Duration::from_secs(0)) {
+                    Ok(device_events) => device_events,
+                    Err(_) => {
+                        error!("failed to read a device event");
+                        continue;
+                    }
+                };
+                for device_event in device_events {
+                    // A Device must trigger only Token::Event. See [`Device::process_cmd()`].
+                    if let Token::Event { id } = device_event.token {
+                        self.handle_event(device.as_mut(), id)?;
+                    } else {
+                        error!(
+                            "invalid event is triggered by a device {:?}",
+                            device_event.token
+                        );
+                    }
                 }
             }
         }

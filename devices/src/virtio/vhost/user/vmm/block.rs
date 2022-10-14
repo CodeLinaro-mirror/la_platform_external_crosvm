@@ -6,7 +6,6 @@ mod sys;
 
 use std::cell::RefCell;
 use std::thread;
-use std::u32;
 
 use base::error;
 use base::Event;
@@ -16,20 +15,18 @@ use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
 
-use crate::virtio::block::common::virtio_blk_config;
+use crate::virtio::device_constants::block::VIRTIO_BLK_F_BLK_SIZE;
+use crate::virtio::device_constants::block::VIRTIO_BLK_F_DISCARD;
+use crate::virtio::device_constants::block::VIRTIO_BLK_F_FLUSH;
+use crate::virtio::device_constants::block::VIRTIO_BLK_F_MQ;
+use crate::virtio::device_constants::block::VIRTIO_BLK_F_RO;
+use crate::virtio::device_constants::block::VIRTIO_BLK_F_SEG_MAX;
+use crate::virtio::device_constants::block::VIRTIO_BLK_F_WRITE_ZEROES;
 use crate::virtio::vhost::user::vmm::handler::VhostUserHandler;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::VirtioDevice;
-
-const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
-const VIRTIO_BLK_F_RO: u32 = 5;
-const VIRTIO_BLK_F_BLK_SIZE: u32 = 6;
-const VIRTIO_BLK_F_FLUSH: u32 = 9;
-const VIRTIO_BLK_F_MQ: u32 = 12;
-const VIRTIO_BLK_F_DISCARD: u32 = 13;
-const VIRTIO_BLK_F_WRITE_ZEROES: u32 = 14;
 
 const QUEUE_SIZE: u16 = 256;
 
@@ -99,11 +96,7 @@ impl VirtioDevice for Block {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self
-            .handler
-            .borrow_mut()
-            .read_config::<virtio_blk_config>(offset, data)
-        {
+        if let Err(e) = self.handler.borrow_mut().read_config(offset, data) {
             error!("failed to read config: {}", e);
         }
     }

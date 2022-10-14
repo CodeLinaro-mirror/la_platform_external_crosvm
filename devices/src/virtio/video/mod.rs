@@ -37,7 +37,7 @@ mod command;
 mod control;
 #[cfg(feature = "video-decoder")]
 mod decoder;
-mod device;
+pub mod device;
 #[cfg(feature = "video-encoder")]
 mod encoder;
 mod error;
@@ -47,7 +47,8 @@ mod params;
 mod protocol;
 mod resource;
 mod response;
-mod worker;
+mod utils;
+pub mod worker;
 
 #[cfg(all(
     feature = "video-decoder",
@@ -75,6 +76,9 @@ use super::device_constants::video::QUEUE_SIZES;
 #[sorted]
 #[derive(Error, Debug)]
 pub enum Error {
+    /// Cloning a descriptor failed
+    #[error("failed to clone a descriptor: {0}")]
+    CloneDescriptorFailed(SysError),
     /// No available descriptor in which an event is written to.
     #[error("no available descriptor in which an event is written to")]
     DescriptorNotAvailable,
@@ -82,6 +86,9 @@ pub enum Error {
     #[cfg(feature = "video-decoder")]
     #[error("failed to create a video device: {0}")]
     DeviceCreationFailed(String),
+    /// Making an EventAsync failed.
+    #[error("failed to create an EventAsync: {0}")]
+    EventAsyncCreationFailed(cros_async::AsyncError),
     /// A DescriptorChain contains invalid data.
     #[error("DescriptorChain contains invalid data: {0}")]
     InvalidDescriptorChain(DescriptorError),
@@ -234,14 +241,13 @@ impl VirtioDevice for VideoDevice {
             }
         };
         let mut worker = Worker::new(
-            interrupt,
             mem.clone(),
             cmd_queue,
-            cmd_evt,
+            interrupt.clone(),
             event_queue,
-            event_evt,
-            kill_evt,
+            interrupt,
         );
+
         let worker_result = match &self.device_type {
             #[cfg(feature = "video-decoder")]
             VideoDeviceType::Decoder => thread::Builder::new()
@@ -256,7 +262,7 @@ impl VirtioDevice for VideoDevice {
                             }
                         };
 
-                    if let Err(e) = worker.run(device) {
+                    if let Err(e) = worker.run(device, &cmd_evt, &event_evt, &kill_evt) {
                         error!("Failed to start decoder worker: {}", e);
                     };
                     // Don't return any information since the return value is never checked.
@@ -301,7 +307,7 @@ impl VirtioDevice for VideoDevice {
                         }
                     };
 
-                    if let Err(e) = worker.run(device) {
+                    if let Err(e) = worker.run(device, &cmd_evt, &event_evt, &kill_evt) {
                         error!("Failed to start encoder worker: {}", e);
                     }
                 }),

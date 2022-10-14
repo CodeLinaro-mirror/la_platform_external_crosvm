@@ -7,10 +7,8 @@ use std::collections::BTreeMap as Map;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::result::Result;
-use std::sync::Arc;
 
 use base::error;
-use base::ExternalMapping;
 use base::Protection;
 use base::SafeDescriptor;
 use data_model::VolatileSlice;
@@ -26,9 +24,10 @@ use rutabaga_gfx::RutabagaHandle;
 use rutabaga_gfx::RutabagaIovec;
 use rutabaga_gfx::Transfer3D;
 use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_DMABUF;
-use sync::Mutex;
+use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD;
 use vm_control::VmMemorySource;
 use vm_memory::udmabuf::UdmabufDriver;
+use vm_memory::udmabuf::UdmabufDriverTrait;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
@@ -56,6 +55,7 @@ struct VirtioGpuResource {
     shmem_offset: Option<u64>,
     scanout_data: Option<VirtioScanoutBlobData>,
     display_import: Option<u32>,
+    rutabaga_external_mapping: bool,
 }
 
 impl VirtioGpuResource {
@@ -70,6 +70,7 @@ impl VirtioGpuResource {
             shmem_offset: None,
             scanout_data: None,
             display_import: None,
+            rutabaga_external_mapping: false,
         }
     }
 }
@@ -272,12 +273,13 @@ pub struct VirtioGpu {
     // Maps event devices to scanout number.
     event_devices: Map<u32, u32>,
     mapper: Box<dyn SharedMemoryMapper>,
-    map_request: Arc<Mutex<Option<ExternalMapping>>>,
     rutabaga: Rutabaga,
     resources: Map<u32, VirtioGpuResource>,
     external_blob: bool,
     refresh_rate: u32,
     udmabuf_driver: Option<UdmabufDriver>,
+    #[cfg(feature = "kiwi")]
+    gpu_device_service_tube: Tube,
 }
 
 fn sglist_to_rutabaga_iovecs(
@@ -310,14 +312,18 @@ impl VirtioGpu {
         rutabaga_builder: RutabagaBuilder,
         event_devices: Vec<EventDevice>,
         mapper: Box<dyn SharedMemoryMapper>,
-        map_request: Arc<Mutex<Option<ExternalMapping>>>,
         external_blob: bool,
         udmabuf: bool,
         fence_handler: RutabagaFenceHandler,
-        render_server_fd: Option<SafeDescriptor>,
+        #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
+        #[cfg(feature = "kiwi")] gpu_device_service_tube: Tube,
     ) -> Option<VirtioGpu> {
         let rutabaga = rutabaga_builder
-            .build(fence_handler, render_server_fd)
+            .build(
+                fence_handler,
+                #[cfg(feature = "virgl_renderer_next")]
+                render_server_fd,
+            )
             .map_err(|e| error!("failed to build rutabaga {}", e))
             .ok()?;
 
@@ -346,12 +352,13 @@ impl VirtioGpu {
             cursor_scanout,
             event_devices: Default::default(),
             mapper,
-            map_request,
             rutabaga,
             resources: Default::default(),
             external_blob,
             refresh_rate: display_params[0].refresh_rate,
             udmabuf_driver,
+            #[cfg(feature = "kiwi")]
+            gpu_device_service_tube,
         };
 
         for event_device in event_devices {
@@ -500,8 +507,8 @@ impl VirtioGpu {
 
     /// If supported, export the resource with the given `resource_id` to a file.
     pub fn export_resource(&mut self, resource_id: u32) -> ResourceResponse {
-        let file = match self.rutabaga.export_blob(resource_id) {
-            Ok(handle) => handle.os_handle.into(),
+        let handle = match self.rutabaga.export_blob(resource_id) {
+            Ok(handle) => handle.os_handle,
             Err(_) => return ResourceResponse::Invalid,
         };
 
@@ -511,7 +518,7 @@ impl VirtioGpu {
         };
 
         ResourceResponse::Resource(ResourceInfo::Buffer(BufferInfo {
-            file,
+            handle,
             planes: [
                 PlaneInfo {
                     offset: q.offsets[0],
@@ -538,7 +545,7 @@ impl VirtioGpu {
     pub fn export_fence(&self, fence_id: u32) -> ResourceResponse {
         match self.rutabaga.export_fence(fence_id) {
             Ok(handle) => ResourceResponse::Resource(ResourceInfo::Fence {
-                file: handle.os_handle.into(),
+                handle: handle.os_handle,
             }),
             Err(_) => ResourceResponse::Invalid,
         }
@@ -626,9 +633,14 @@ impl VirtioGpu {
 
     /// Releases guest kernel reference on the resource.
     pub fn unref_resource(&mut self, resource_id: u32) -> VirtioGpuResult {
-        self.resources
+        let resource = self
+            .resources
             .remove(&resource_id)
             .ok_or(ErrInvalidResourceId)?;
+
+        if resource.rutabaga_external_mapping {
+            self.rutabaga.unmap(resource_id)?;
+        }
 
         self.rutabaga.unref_resource(resource_id)?;
         Ok(OkNoData)
@@ -704,6 +716,11 @@ impl VirtioGpu {
     }
 
     /// Uses the hypervisor to map the rutabaga blob resource.
+    ///
+    /// When sandboxing is disabled, external_blob is unset and opaque fds are mapped by
+    /// rutabaga as ExternalMapping.
+    /// When sandboxing is enabled, external_blob is set and opaque fds must be mapped in the
+    /// hypervisor process by Vulkano using metadata provided by Rutabaga::vulkan_info().
     pub fn resource_map_blob(&mut self, resource_id: u32, offset: u64) -> VirtioGpuResult {
         let resource = self
             .resources
@@ -711,45 +728,44 @@ impl VirtioGpu {
             .ok_or(ErrInvalidResourceId)?;
 
         let map_info = self.rutabaga.map_info(resource_id).map_err(|_| ErrUnspec)?;
-        let vulkan_info_opt = self.rutabaga.vulkan_info(resource_id).ok();
 
-        let source = if let Ok(export) = self.rutabaga.export_blob(resource_id) {
-            match vulkan_info_opt {
-                Some(vulkan_info) => VmMemorySource::Vulkan {
+        let mut source: Option<VmMemorySource> = None;
+        if let Ok(export) = self.rutabaga.export_blob(resource_id) {
+            if let Ok(vulkan_info) = self.rutabaga.vulkan_info(resource_id) {
+                source = Some(VmMemorySource::Vulkan {
                     descriptor: export.os_handle,
                     handle_type: export.handle_type,
                     memory_idx: vulkan_info.memory_idx,
                     physical_device_idx: vulkan_info.physical_device_idx,
                     size: resource.size,
-                },
-                None => VmMemorySource::Descriptor {
+                });
+            } else if export.handle_type != RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD {
+                source = Some(VmMemorySource::Descriptor {
                     descriptor: export.os_handle,
                     offset: 0,
                     size: resource.size,
                     gpu_blob: true,
-                },
+                });
             }
-        } else {
+        }
+
+        // fallback to ExternalMapping via rutabaga if sandboxing (hence external_blob) is disabled.
+        if source.is_none() {
             if self.external_blob {
                 return Err(ErrUnspec);
             }
 
             let mapping = self.rutabaga.map(resource_id)?;
-            // Scope for lock
-            {
-                let mut map_req = self.map_request.lock();
-                if map_req.is_some() {
-                    return Err(ErrUnspec);
-                }
-                *map_req = Some(mapping);
-            }
-            VmMemorySource::ExternalMapping {
-                size: resource.size,
-            }
+            // resources mapped via rutabaga must also be marked for unmap via rutabaga.
+            resource.rutabaga_external_mapping = true;
+            source = Some(VmMemorySource::ExternalMapping {
+                ptr: mapping.ptr,
+                size: mapping.size,
+            });
         };
 
         self.mapper
-            .add_mapping(source, offset, Protection::read_write())
+            .add_mapping(source.unwrap(), offset, Protection::read_write())
             .map_err(|_| ErrUnspec)?;
 
         resource.shmem_offset = Some(offset);
@@ -768,6 +784,12 @@ impl VirtioGpu {
             .remove_mapping(shmem_offset)
             .map_err(|_| ErrUnspec)?;
         resource.shmem_offset = None;
+
+        if resource.rutabaga_external_mapping {
+            self.rutabaga.unmap(resource_id)?;
+            resource.rutabaga_external_mapping = false;
+        }
+
         Ok(OkNoData)
     }
 

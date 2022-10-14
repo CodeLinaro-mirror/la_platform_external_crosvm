@@ -2,23 +2,16 @@ diff --git a/base/Android.bp b/base/Android.bp
 index d3544ede..faea7809 100644
 --- a/base/Android.bp
 +++ b/base/Android.bp
-@@ -13,7 +13,6 @@ package {
+@@ -13,7 +13,7 @@ package {
  rust_test {
      name: "base_test_src_lib",
      defaults: ["crosvm_defaults"],
+     // has rustc warnings
++    host_supported: false, // Can't seem to access syslog in TH host tests.
 -    host_supported: true,
      crate_name: "base",
      cargo_env_compat: true,
      cargo_pkg_version: "0.1.0",
-@@ -21,7 +20,7 @@ rust_test {
-     test_suites: ["general-tests"],
-     auto_gen_config: true,
-     test_options: {
--        unit_test: false,
-+        unit_test: true,
-     },
-     edition: "2021",
-     rustlibs: [
 @@ -45,6 +44,25 @@ rust_test {
          "libbase_event_token_derive",
          "libremain",

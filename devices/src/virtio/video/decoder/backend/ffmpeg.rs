@@ -32,9 +32,6 @@ use base::MappedRegion;
 use base::MemoryMappingArena;
 use thiserror::Error as ThisError;
 
-use crate::virtio::video::decoder::backend::utils::EventQueue;
-use crate::virtio::video::decoder::backend::utils::OutputQueue;
-use crate::virtio::video::decoder::backend::utils::SyncEventQueue;
 use crate::virtio::video::decoder::backend::*;
 use crate::virtio::video::format::FormatDesc;
 use crate::virtio::video::format::FormatRange;
@@ -44,6 +41,9 @@ use crate::virtio::video::format::Profile;
 use crate::virtio::video::resource::BufferHandle;
 use crate::virtio::video::resource::GuestResource;
 use crate::virtio::video::resource::GuestResourceHandle;
+use crate::virtio::video::utils::EventQueue;
+use crate::virtio::video::utils::OutputQueue;
+use crate::virtio::video::utils::SyncEventQueue;
 
 /// Structure maintaining a mapping for an encoded input buffer that can be used as a libavcodec
 /// buffer source. It also sends a `NotifyEndOfBitstreamBuffer` event when dropped.
@@ -287,7 +287,7 @@ impl FfmpegDecoderSession {
         };
 
         match self.context.try_receive_frame(&mut avframe) {
-            Ok(TryReceiveFrameResult::Received) => {
+            Ok(TryReceiveResult::Received) => {
                 // Now check whether the resolution of the stream has changed.
                 let new_visible_res = (avframe.width as usize, avframe.height as usize);
                 if new_visible_res != self.current_visible_res {
@@ -298,12 +298,12 @@ impl FfmpegDecoderSession {
 
                 Ok(true)
             }
-            Ok(TryReceiveFrameResult::TryAgain) => {
+            Ok(TryReceiveResult::TryAgain) => {
                 if self.is_flushing {
                     // Start flushing. `try_receive_frame` will return `FlushCompleted` when the
                     // flush is completed. `TryAgain` will not be returned again until the flush is
                     // completed.
-                    match self.context.flush() {
+                    match self.context.flush_decoder() {
                         // Call ourselves again so we can process the flush.
                         Ok(()) => self.try_receive_frame(),
                         Err(err) => {
@@ -319,7 +319,7 @@ impl FfmpegDecoderSession {
                     Ok(false)
                 }
             }
-            Ok(TryReceiveFrameResult::FlushCompleted) => {
+            Ok(TryReceiveResult::FlushCompleted) => {
                 self.is_flushing = false;
                 self.queue_event(DecoderEvent::FlushCompleted(Ok(())))?;
                 self.context.reset();
