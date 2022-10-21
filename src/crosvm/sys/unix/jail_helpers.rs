@@ -17,7 +17,7 @@ use once_cell::sync::Lazy;
 
 use crate::crosvm::config::JailConfig;
 
-static EMBEDDED_BPFS: Lazy<std::collections::HashMap<&str, Vec<u8>>> = Lazy::new(|| {
+pub static EMBEDDED_BPFS: Lazy<std::collections::HashMap<&str, Vec<u8>>> = Lazy::new(|| {
     {
         std::collections::HashMap::<&str, Vec<u8>>::new()
     }

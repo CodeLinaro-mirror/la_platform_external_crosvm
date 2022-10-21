@@ -60,8 +60,10 @@ use devices::ProxyDevice;
 use devices::SerialHardware;
 use devices::SerialParameters;
 use devices::VirtioMmioDevice;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 use gdbstub::arch::Arch;
+#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+use gdbstub_arch::aarch64::AArch64 as GdbArch;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::X86_64_SSE as GdbArch;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -149,7 +151,7 @@ pub struct VmComponents {
     pub extra_kernel_params: Vec<String>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub force_s2idle: bool,
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     pub gdb: Option<(u32, Tube)>, // port and control tube.
     pub host_cpu_topology: bool,
     pub hugepages: bool,
@@ -184,7 +186,7 @@ pub struct VmComponents {
 pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub bat_control: Option<BatControl>,
     pub delay_rt: bool,
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     pub gdb: Option<(u32, Tube)>,
     pub has_bios: bool,
     pub hotplug_bus: BTreeMap<u8, Arc<Mutex<dyn HotPlugBus>>>,
@@ -314,7 +316,7 @@ pub trait LinuxArch {
     ) -> Result<PciAddress, Self::Error>;
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 pub trait GdbOps<T: VcpuArch> {
     type Error: StdError;
 
@@ -338,6 +340,16 @@ pub trait GdbOps<T: VcpuArch> {
         guest_mem: &GuestMemory,
         vaddr: GuestAddress,
         buf: &[u8],
+    ) -> Result<(), Self::Error>;
+
+    /// Reads bytes from the guest register.
+    fn read_register(vcpu: &T, reg_id: <GdbArch as Arch>::RegId) -> Result<Vec<u8>, Self::Error>;
+
+    /// Writes bytes to the specified guest register.
+    fn write_register(
+        vcpu: &T,
+        reg_id: <GdbArch as Arch>::RegId,
+        data: &[u8],
     ) -> Result<(), Self::Error>;
 
     /// Make the next vCPU's run single-step.

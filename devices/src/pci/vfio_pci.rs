@@ -1140,7 +1140,6 @@ impl VfioPciDevice {
                             descriptor,
                             offset,
                             size: mmap_size,
-                            gpu_blob: false,
                         },
                         dest: VmMemoryDestination::GuestPhysicalAddress(guest_map_start),
                         prot: Protection::read_write(),
@@ -2027,12 +2026,24 @@ impl PciDevice for VfioPciDevice {
         0
     }
 
-    fn write_virtual_config_register(&mut self, reg_idx: usize, _value: u32) {
-        warn!(
-            "{} write unsupported register {}",
-            self.debug_label(),
-            reg_idx
-        )
+    fn write_virtual_config_register(&mut self, reg_idx: usize, value: u32) {
+        match reg_idx {
+            0 => {
+                match value {
+                    0 => {
+                        let _ = self.device.pm_low_power_enter();
+                    }
+                    _ => {
+                        let _ = self.device.pm_low_power_exit();
+                    }
+                };
+            }
+            _ => warn!(
+                "{} write unsupported register {}",
+                self.debug_label(),
+                reg_idx
+            ),
+        };
     }
 
     fn read_bar(&mut self, addr: u64, data: &mut [u8]) {

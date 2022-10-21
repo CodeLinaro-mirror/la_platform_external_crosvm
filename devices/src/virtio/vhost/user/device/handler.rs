@@ -76,6 +76,7 @@ use vmm_vhost::connection::Endpoint;
 use vmm_vhost::message::SlaveReq;
 use vmm_vhost::message::VhostSharedMemoryRegion;
 use vmm_vhost::message::VhostUserConfigFlags;
+use vmm_vhost::message::VhostUserGpuMapMsg;
 use vmm_vhost::message::VhostUserInflight;
 use vmm_vhost::message::VhostUserMemoryRegion;
 use vmm_vhost::message::VhostUserProtocolFeatures;
@@ -210,12 +211,14 @@ pub trait VhostUserBackend {
         None
     }
 
-    /// Accepts the trait object used to map files into the device's shared
-    /// memory region.
+    /// Accepts `VhostBackendReqConnection` to conduct Vhost backend to frontend message
+    /// handling.
     ///
-    /// If `get_shared_memory_region` returns `Some`, then this will be called
-    /// before `start_queue`.
-    fn set_shared_memory_mapper(&mut self, _mapper: Box<dyn SharedMemoryMapper>) {}
+    /// This method will be called when `VhostUserProtocolFeatures::SLAVE_REQ` is
+    /// negotiated.
+    fn set_backend_req_connection(&mut self, _conn: VhostBackendReqConnection) {
+        error!("set_backend_req_connection is not implemented");
+    }
 }
 
 /// A virtio ring entry.
@@ -645,14 +648,8 @@ impl<O: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for DeviceRequestHandl
     }
 
     fn set_slave_req_fd(&mut self, ep: Box<dyn Endpoint<SlaveReq>>) {
-        let shmid = self.shmid.expect("unexpected slave_req_fd");
-        let frontend = Slave::new(ep);
-        self.backend
-            .set_shared_memory_mapper(Box::new(VhostShmemMapper {
-                frontend,
-                shmid,
-                mapped_regions: BTreeMap::new(),
-            }));
+        let conn = VhostBackendReqConnection::new(Slave::new(ep), self.shmid);
+        self.backend.set_backend_req_connection(conn);
     }
 
     fn get_inflight_fd(
@@ -695,10 +692,60 @@ impl<O: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for DeviceRequestHandl
     }
 }
 
-struct VhostShmemMapper {
-    frontend: Slave,
+/// Indicates the state of backend request connection
+pub enum VhostBackendReqConnectionState {
+    /// A backend request connection (`VhostBackendReqConnection`) is established
+    Connected(VhostBackendReqConnection),
+    /// No backend request connection has been established yet
+    NoConnection,
+}
+
+/// Keeps track of Vhost user backend request connection.
+pub struct VhostBackendReqConnection {
+    conn: Slave,
+    shmem_info: Option<ShmemInfo>,
+}
+
+#[derive(Clone)]
+struct ShmemInfo {
     shmid: u8,
     mapped_regions: BTreeMap<u64 /* offset */, u64 /* size */>,
+}
+
+impl VhostBackendReqConnection {
+    pub fn new(conn: Slave, shmid: Option<u8>) -> Self {
+        let shmem_info = shmid.map(|shmid| ShmemInfo {
+            shmid,
+            mapped_regions: BTreeMap::new(),
+        });
+        Self { conn, shmem_info }
+    }
+
+    /// Send `VHOST_USER_CONFIG_CHANGE_MSG` to the frontend
+    pub fn send_config_changed(&self) -> anyhow::Result<()> {
+        self.conn
+            .handle_config_change()
+            .context("Could not send config change message")?;
+        Ok(())
+    }
+
+    /// Create a SharedMemoryMapper trait object from the ShmemInfo.
+    pub fn take_shmem_mapper(&mut self) -> anyhow::Result<Box<dyn SharedMemoryMapper>> {
+        let shmem_info = self
+            .shmem_info
+            .take()
+            .context("could not take shared memory mapper information")?;
+
+        Ok(Box::new(VhostShmemMapper {
+            conn: self.conn.clone(),
+            shmem_info,
+        }))
+    }
+}
+
+struct VhostShmemMapper {
+    conn: Slave,
+    shmem_info: ShmemInfo,
 }
 
 impl SharedMemoryMapper for VhostShmemMapper {
@@ -708,37 +755,71 @@ impl SharedMemoryMapper for VhostShmemMapper {
         offset: u64,
         prot: Protection,
     ) -> anyhow::Result<()> {
-        let (descriptor, fd_offset, size) = match source {
-            VmMemorySource::Descriptor {
-                descriptor,
-                offset,
-                size,
-                gpu_blob: false,
-            } => (descriptor, offset, size),
-            VmMemorySource::SharedMemory(shmem) => {
-                let size = shmem.size();
-                let descriptor =
-                    unsafe { SafeDescriptor::from_raw_descriptor(shmem.into_raw_descriptor()) };
-                (descriptor, 0, size)
+        // True if we should send gpu_map instead of shmem_map.
+        let is_gpu = matches!(&source, &VmMemorySource::Vulkan { .. });
+
+        let size = if is_gpu {
+            match source {
+                VmMemorySource::Vulkan {
+                    descriptor,
+                    handle_type,
+                    memory_idx,
+                    device_id,
+                    size,
+                } => {
+                    let msg = VhostUserGpuMapMsg::new(
+                        self.shmem_info.shmid,
+                        offset,
+                        size,
+                        memory_idx,
+                        handle_type,
+                        device_id.device_uuid,
+                        device_id.driver_uuid,
+                    );
+                    self.conn
+                        .gpu_map(&msg, &descriptor)
+                        .context("failed to map memory")?;
+                    size
+                }
+                _ => unreachable!("inconsistent pattern match"),
             }
-            _ => bail!("unsupported source"),
+        } else {
+            let (descriptor, fd_offset, size) = match source {
+                VmMemorySource::Descriptor {
+                    descriptor,
+                    offset,
+                    size,
+                } => (descriptor, offset, size),
+                VmMemorySource::SharedMemory(shmem) => {
+                    let size = shmem.size();
+                    // Safe because we own shmem.
+                    let descriptor =
+                        unsafe { SafeDescriptor::from_raw_descriptor(shmem.into_raw_descriptor()) };
+                    (descriptor, 0, size)
+                }
+                _ => bail!("unsupported source"),
+            };
+            let flags = VhostUserShmemMapMsgFlags::from(prot);
+            let msg =
+                VhostUserShmemMapMsg::new(self.shmem_info.shmid, offset, fd_offset, size, flags);
+            self.conn
+                .shmem_map(&msg, &descriptor)
+                .context("failed to map memory")?;
+            size
         };
-        let flags = VhostUserShmemMapMsgFlags::from(prot);
-        let msg = VhostUserShmemMapMsg::new(self.shmid, offset, fd_offset, size, flags);
-        self.frontend
-            .shmem_map(&msg, &descriptor)
-            .context("failed to map memory")?;
-        self.mapped_regions.insert(offset, size);
+
+        self.shmem_info.mapped_regions.insert(offset, size);
         Ok(())
     }
 
     fn remove_mapping(&mut self, offset: u64) -> anyhow::Result<()> {
         let size = self
+            .shmem_info
             .mapped_regions
             .remove(&offset)
             .context("unknown offset")?;
-        let msg = VhostUserShmemUnmapMsg::new(self.shmid, offset, size);
-        self.frontend
+        let msg = VhostUserShmemUnmapMsg::new(self.shmem_info.shmid, offset, size);
+        self.conn
             .shmem_unmap(&msg)
             .context("failed to map memory")
             .map(|_| ())
@@ -871,6 +952,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_vhost_user_activate() {
+        use std::os::unix::net::UnixStream;
+
         use vmm_vhost::connection::socket::Listener as SocketListener;
         use vmm_vhost::SlaveListener;
 
@@ -893,8 +976,9 @@ mod tests {
             let allow_features = VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
             let init_features = VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
             let allow_protocol_features = VhostUserProtocolFeatures::CONFIG;
-            let mut vmm_handler = VhostUserHandler::new_from_path(
-                &path,
+            let connection = UnixStream::connect(&path).unwrap();
+            let mut vmm_handler = VhostUserHandler::new_from_connection(
+                connection,
                 QUEUES_NUM as u64,
                 allow_features,
                 init_features,

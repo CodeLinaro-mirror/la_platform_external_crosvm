@@ -12,8 +12,6 @@ use base::Event;
 use sync::Mutex;
 use thiserror::Error as ThisError;
 
-#[cfg(feature = "ffmpeg")]
-use crate::virtio::video::resource::BufferHandle;
 use crate::virtio::video::resource::GuestResource;
 
 /// Manages a pollable queue of events to be sent to the decoder or encoder.
@@ -132,25 +130,6 @@ impl<T> AsRawDescriptor for SyncEventQueue<T> {
     }
 }
 
-#[cfg(feature = "ffmpeg")]
-impl ffmpeg::swscale::SwConverterTarget for GuestResource {
-    fn stride(&self) -> Option<usize> {
-        self.planes.get(0).map(|p| p.stride)
-    }
-
-    fn num_planes(&self) -> usize {
-        self.planes.len()
-    }
-
-    fn get_mapping(
-        &mut self,
-        plane: usize,
-        required_size: usize,
-    ) -> Result<base::MemoryMappingArena, base::MmapError> {
-        self.handle.get_mapping(plane, required_size)
-    }
-}
-
 /// Queue of all the output buffers provided by crosvm.
 pub struct OutputQueue {
     // Max number of output buffers that can be imported into this queue.
@@ -263,6 +242,7 @@ mod tests {
     /// without depending on the "video-decoder" feature.
     #[derive(Debug)]
     pub enum TestEvent {
+        #[allow(dead_code)]
         ProvidePictureBuffers {
             min_num_buffers: u32,
             width: i32,
@@ -275,8 +255,11 @@ mod tests {
             visible_rect: Rect,
         },
         NotifyEndOfBitstreamBuffer(u32),
+        #[allow(dead_code)]
         NotifyError(VideoError),
+        #[allow(dead_code)]
         FlushCompleted(VideoResult<()>),
+        #[allow(dead_code)]
         ResetCompleted(VideoResult<()>),
     }
 

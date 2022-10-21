@@ -170,9 +170,9 @@ use crate::crosvm::config::HypervisorKind;
 use crate::crosvm::config::JailConfig;
 use crate::crosvm::config::SharedDir;
 use crate::crosvm::config::SharedDirKind;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 use crate::crosvm::gdb::gdb_thread;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 use crate::crosvm::gdb::GdbStub;
 use crate::crosvm::sys::cmdline::DevicesCommand;
 use crate::crosvm::sys::config::VfioType;
@@ -376,7 +376,7 @@ fn create_virtio_devices(
         }
     }
 
-    #[cfg(all(feature = "tpm", feature = "chromeos", target_arch = "x86_64"))]
+    #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     {
         if cfg.vtpm_proxy {
             devs.push(create_vtpm_proxy_device(
@@ -768,7 +768,10 @@ fn create_devices(
                     .context("failed to get vfio container")?;
             let (coiommu_host_tube, coiommu_device_tube) =
                 Tube::pair().context("failed to create coiommu tube")?;
-            control_tubes.push(TaggedControlTube::VmMemory(coiommu_host_tube));
+            control_tubes.push(TaggedControlTube::VmMemory {
+                tube: coiommu_host_tube,
+                expose_with_viommu: false,
+            });
             let vcpu_count = cfg.vcpu_count.unwrap_or(1) as u64;
             #[cfg(feature = "balloon")]
             match Tube::pair() {
@@ -826,7 +829,10 @@ fn create_devices(
                 let shared_memory_tube = if stub.dev.get_shared_memory_region().is_some() {
                     let (host_tube, device_tube) =
                         Tube::pair().context("failed to create VVU proxy tube")?;
-                    control_tubes.push(TaggedControlTube::VmMemory(host_tube));
+                    control_tubes.push(TaggedControlTube::VmMemory {
+                        tube: host_tube,
+                        expose_with_viommu: stub.dev.expose_shmem_descriptors_with_viommu(),
+                    });
                     Some(device_tube)
                 } else {
                     None
@@ -1177,7 +1183,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .collect::<Result<Vec<SDT>>>()?,
         rt_cpus: cfg.rt_cpus.clone(),
         delay_rt: cfg.delay_rt,
-        #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+        #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
         gdb: None,
         dmi_path: cfg.dmi_path.clone(),
         no_i8042: cfg.no_i8042,
@@ -1397,7 +1403,7 @@ where
 
     let mut control_tubes = Vec::new();
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     if let Some(port) = cfg.gdb {
         // GDB needs a control socket to interrupt vcpus.
         let (gdb_host_tube, gdb_control_tube) = Tube::pair().context("failed to create tube")?;
@@ -1505,7 +1511,10 @@ where
     for _ in 0..cfg.vvu_proxy.len() {
         let (vvu_proxy_host_tube, vvu_proxy_device_tube) =
             Tube::pair().context("failed to create VVU proxy tube")?;
-        control_tubes.push(TaggedControlTube::VmMemory(vvu_proxy_host_tube));
+        control_tubes.push(TaggedControlTube::VmMemory {
+            tube: vvu_proxy_host_tube,
+            expose_with_viommu: false,
+        });
         vvu_proxy_device_tubes.push(vvu_proxy_device_tube);
     }
 
@@ -2265,7 +2274,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         drop_capabilities().context("failed to drop process capabilities")?;
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     // Create a channel for GDB thread.
     let (to_gdb_channel, from_vcpu_channel) = if linux.gdb.is_some() {
         let (s, r) = mpsc::channel();
@@ -2364,7 +2373,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             linux.vm.check_capability(VmCap::PvClockSuspend),
             from_main_channel,
             use_hypervisor_signals,
-            #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+            #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
             to_gdb_channel.clone(),
             cfg.per_vm_core_scheduling,
             cpu_config,
@@ -2382,7 +2391,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         vcpu_handles.push((handle, to_vcpu_channel));
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     // Spawn GDB thread.
     if let Some((gdb_port_num, gdb_control_tube)) = linux.gdb.take() {
         let to_vcpu_channels = vcpu_handles
@@ -2594,28 +2603,33 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                     }
                                 }
                             },
-                            TaggedControlTube::VmMemory(tube) => {
-                                match tube.recv::<VmMemoryRequest>() {
-                                    Ok(request) => {
-                                        let response = request.execute(
-                                            &mut linux.vm,
-                                            &mut sys_allocator,
-                                            &mut gralloc,
-                                            &mut iommu_client,
-                                        );
-                                        if let Err(e) = tube.send(&response) {
-                                            error!("failed to send VmMemoryControlResponse: {}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        if let TubeError::Disconnected = e {
-                                            vm_control_indices_to_remove.push(index);
+                            TaggedControlTube::VmMemory {
+                                tube,
+                                expose_with_viommu,
+                            } => match tube.recv::<VmMemoryRequest>() {
+                                Ok(request) => {
+                                    let response = request.execute(
+                                        &mut linux.vm,
+                                        &mut sys_allocator,
+                                        &mut gralloc,
+                                        if *expose_with_viommu {
+                                            iommu_client.as_mut()
                                         } else {
-                                            error!("failed to recv VmMemoryControlRequest: {}", e);
-                                        }
+                                            None
+                                        },
+                                    );
+                                    if let Err(e) = tube.send(&response) {
+                                        error!("failed to send VmMemoryControlResponse: {}", e);
                                     }
                                 }
-                            }
+                                Err(e) => {
+                                    if let TubeError::Disconnected = e {
+                                        vm_control_indices_to_remove.push(index);
+                                    } else {
+                                        error!("failed to recv VmMemoryControlRequest: {}", e);
+                                    }
+                                }
+                            },
                             TaggedControlTube::VmIrq(tube) => match tube.recv::<VmIrqRequest>() {
                                 Ok(request) => {
                                     let response = {
@@ -3031,6 +3045,19 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
     info!("all device processes have exited");
 
     Ok(())
+}
+
+/// Setup crash reporting for a process. Each process MUST provide a unique `product_type` to avoid
+/// making crash reports incomprehensible.
+#[cfg(feature = "crash-report")]
+pub fn setup_emulator_crash_reporting(_cfg: &Config) -> anyhow::Result<String> {
+    crash_report::setup_crash_reporting(crash_report::CrashReportAttributes {
+        product_type: "emulator".to_owned(),
+        pipe_name: None,
+        report_uuid: None,
+        product_name: None,
+        product_version: None,
+    })
 }
 
 #[cfg(test)]

@@ -2,4 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// This space intentionally left blank.
+pub mod UserDataAuth;
+pub mod auth_factor;
+pub mod fido;
+pub mod key;
+pub mod rpc;
+pub mod vtpm_interface;

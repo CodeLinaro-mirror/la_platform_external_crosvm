@@ -24,13 +24,13 @@ use vulkano::image::ImageCreationError;
 #[cfg(feature = "vulkano")]
 use vulkano::instance::InstanceCreationError;
 #[cfg(feature = "vulkano")]
-use vulkano::memory::DeviceMemoryAllocationError;
-#[cfg(feature = "vulkano")]
-use vulkano::memory::DeviceMemoryExportError;
+use vulkano::memory::DeviceMemoryError;
 #[cfg(feature = "vulkano")]
 use vulkano::memory::MemoryMapError;
 #[cfg(feature = "vulkano")]
 use vulkano::LoadingError;
+#[cfg(feature = "vulkano")]
+use vulkano::VulkanError;
 
 /// Represents a buffer.  `base` contains the address of a buffer, while `len` contains the length
 /// of the buffer.
@@ -97,11 +97,20 @@ pub struct Resource3DInfo {
     pub modifier: u64,
 }
 
-/// Memory index and physical device index of the associated VkDeviceMemory.
+/// A unique identifier for a device.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize,
+)]
+pub struct DeviceId {
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
+}
+
+/// Memory index and physical device id of the associated VkDeviceMemory.
 #[derive(Copy, Clone, Default)]
 pub struct VulkanInfo {
     pub memory_idx: u32,
-    pub physical_device_idx: u32,
+    pub device_id: DeviceId,
 }
 
 /// Rutabaga context init capset id mask.
@@ -243,14 +252,14 @@ pub enum RutabagaError {
     #[cfg(feature = "vulkano")]
     #[error("vulkano device creation failure {0}")]
     VkDeviceCreationError(DeviceCreationError),
-    /// Device memory allocation error
+    /// Device memory error
     #[cfg(feature = "vulkano")]
-    #[error("vulkano device memory allocation failure {0}")]
-    VkDeviceMemoryAllocationError(DeviceMemoryAllocationError),
-    /// Device memory export error
+    #[error("vulkano device memory failure {0}")]
+    VkDeviceMemoryError(DeviceMemoryError),
+    /// General Vulkan error
     #[cfg(feature = "vulkano")]
-    #[error("vulkano device memory export failure {0}")]
-    VkDeviceMemoryExportError(DeviceMemoryExportError),
+    #[error("vulkano failure {0}")]
+    VkError(VulkanError),
     /// Image creation error
     #[cfg(feature = "vulkano")]
     #[error("vulkano image creation failure {0}")]
@@ -579,11 +588,11 @@ pub enum RutabagaComponentType {
 /// Rutabaga handle types (memory and sync in same namespace)
 pub const RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD: u32 = 0x0001;
 pub const RUTABAGA_MEM_HANDLE_TYPE_DMABUF: u32 = 0x0002;
-pub const RUTABAGE_MEM_HANDLE_TYPE_OPAQUE_WIN32: u32 = 0x0003;
+pub const RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_WIN32: u32 = 0x0003;
 pub const RUTABAGA_MEM_HANDLE_TYPE_SHM: u32 = 0x0004;
 pub const RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_FD: u32 = 0x0010;
 pub const RUTABAGA_FENCE_HANDLE_TYPE_SYNC_FD: u32 = 0x0011;
-pub const RUTABAGE_FENCE_HANDLE_TYPE_OPAQUE_WIN32: u32 = 0x0012;
+pub const RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_WIN32: u32 = 0x0012;
 
 /// Handle to OS-specific memory or synchronization objects.
 pub struct RutabagaHandle {

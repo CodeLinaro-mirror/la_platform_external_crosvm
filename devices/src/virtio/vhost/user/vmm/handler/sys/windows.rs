@@ -2,13 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::Context;
-use futures::pin_mut;
-use futures::select;
-use futures::FutureExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::Context;
 use anyhow::Result;
 use base::info;
 use base::CloseNotifier;
@@ -16,6 +13,9 @@ use base::ReadNotifier;
 use base::Tube;
 use cros_async::EventAsync;
 use cros_async::Executor;
+use futures::pin_mut;
+use futures::select;
+use futures::FutureExt;
 use vmm_vhost::connection::TubeEndpoint;
 use vmm_vhost::message::MasterReq;
 use vmm_vhost::message::VhostUserProtocolFeatures;
@@ -26,6 +26,7 @@ use vmm_vhost::VhostUserMaster;
 use crate::virtio::vhost::user::vmm::handler::BackendReqHandler;
 use crate::virtio::vhost::user::vmm::handler::BackendReqHandlerImpl;
 use crate::virtio::vhost::user::vmm::handler::VhostUserHandler;
+use crate::virtio::vhost::user::vmm::Connection;
 use crate::virtio::vhost::user::vmm::Error;
 use crate::virtio::vhost::user::vmm::Result as VhostResult;
 
@@ -35,37 +36,34 @@ pub(in crate::virtio::vhost::user::vmm::handler) type SocketMaster =
     Master<TubeEndpoint<MasterReq>>;
 
 impl VhostUserHandler {
-    /// Creates a `VhostUserHandler` instance attached to the provided Tube
+    /// Creates a `VhostUserHandler` instance attached to the provided Connection
     /// with features and protocol features initialized.
-    pub fn new_from_tube(
-        tube: Tube,
+    pub fn new_from_connection(
+        connection: Connection,
         max_queue_num: u64,
         allow_features: u64,
         init_features: u64,
         allow_protocol_features: VhostUserProtocolFeatures,
     ) -> VhostResult<Self> {
-        let backend_pid = tube.target_pid();
+        let backend_pid = connection.target_pid();
         Self::new(
-            SocketMaster::from_stream(tube, max_queue_num),
+            SocketMaster::from_stream(connection, max_queue_num),
             allow_features,
             init_features,
             allow_protocol_features,
             backend_pid,
         )
     }
+}
 
-    pub fn initialize_backend_req_handler(&mut self, h: BackendReqHandlerImpl) -> VhostResult<()> {
-        let backend_pid = self
-            .backend_pid
-            .expect("tube needs target pid for backend requests");
-        let mut handler = MasterReqHandler::with_tube(Arc::new(Mutex::new(h)), backend_pid)
-            .map_err(Error::CreateShmemMapperError)?;
-        self.vu
-            .set_slave_request_fd(&handler.take_tx_descriptor())
-            .map_err(Error::SetDeviceRequestChannel)?;
-        self.backend_req_handler = Some(handler);
-        Ok(())
-    }
+pub fn create_backend_req_handler(
+    h: BackendReqHandlerImpl,
+    backend_pid: Option<u32>,
+) -> VhostResult<BackendReqHandler> {
+    let backend_pid = backend_pid.expect("tube needs target pid for backend requests");
+    let mut handler = MasterReqHandler::with_tube(Arc::new(Mutex::new(h)), backend_pid)
+        .map_err(Error::CreateBackendReqHandler)?;
+    Ok(handler)
 }
 
 pub async fn run_backend_request_handler(

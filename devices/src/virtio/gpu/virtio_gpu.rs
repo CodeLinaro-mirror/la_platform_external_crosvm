@@ -612,7 +612,7 @@ impl VirtioGpu {
     }
 
     /// Attaches backing memory to the given resource, represented by a `Vec` of `(address, size)`
-    /// tuples in the guest's physical address space. Converts to RutabageIovec from the memory
+    /// tuples in the guest's physical address space. Converts to RutabagaIovec from the memory
     /// mapping.
     pub fn attach_backing(
         &mut self,
@@ -736,7 +736,7 @@ impl VirtioGpu {
                     descriptor: export.os_handle,
                     handle_type: export.handle_type,
                     memory_idx: vulkan_info.memory_idx,
-                    physical_device_idx: vulkan_info.physical_device_idx,
+                    device_id: vulkan_info.device_id,
                     size: resource.size,
                 });
             } else if export.handle_type != RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD {
@@ -744,7 +744,6 @@ impl VirtioGpu {
                     descriptor: export.os_handle,
                     offset: 0,
                     size: resource.size,
-                    gpu_blob: true,
                 });
             }
         }
@@ -793,11 +792,15 @@ impl VirtioGpu {
         Ok(OkNoData)
     }
 
-    /// Gets the EDID for the specified scanout ID. We return a virtual EDID that is identical
-    /// for all scanouts.
-    pub fn get_edid(&self, _scanout_id: u32) -> VirtioGpuResult {
-        let (width, height) = self.display_info()[0];
-        EdidBytes::new(&DisplayInfo::new(width, height, self.refresh_rate))
+    /// Gets the EDID for the specified scanout ID.
+    pub fn get_edid(&self, scanout_id: u32) -> VirtioGpuResult {
+        let display_infos = self.display_info();
+
+        let (width, height) = display_infos
+            .get(scanout_id as usize)
+            .ok_or(ErrEdid(format!("Invalid scanout id: {}", scanout_id)))?;
+
+        EdidBytes::new(&DisplayInfo::new(*width, *height, self.refresh_rate))
     }
 
     /// Creates a rutabaga context.
