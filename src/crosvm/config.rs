@@ -441,7 +441,7 @@ impl FromStr for SharedDir {
                 }
                 "uidmap" => shared_dir.uid_map = value.into(),
                 "gidmap" => shared_dir.gid_map = value.into(),
-                #[cfg(feature = "chromeos")]
+                #[cfg(feature = "arc_quota")]
                 "privileged_quota_uids" => {
                     shared_dir.fs_cfg.privileged_quota_uids =
                         value.split(' ').map(|s| s.parse().unwrap()).collect();
@@ -521,7 +521,10 @@ fn jail_config_default_pivot_root() -> PathBuf {
 
 #[cfg(unix)]
 fn jail_config_default_seccomp_policy_dir() -> Option<PathBuf> {
-    if cfg!(feature = "chromeos") {
+    // If we do not have embedded seccomp policies, fall back to loading policies from
+    // disk by default.
+    // TODO(b/250956589): Remove once ChromeOS uses embedded policies.
+    if super::sys::unix::jail_helpers::EMBEDDED_BPFS.is_empty() {
         Some(PathBuf::from("/usr/share/policy/crosvm"))
     } else {
         None
@@ -1328,7 +1331,7 @@ pub struct Config {
     pub virtio_snds: Vec<SndParameters>,
     pub virtio_switches: Vec<PathBuf>,
     pub virtio_trackpad: Vec<TouchDeviceOption>,
-    #[cfg(all(feature = "tpm", feature = "chromeos", target_arch = "x86_64"))]
+    #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     pub vtpm_proxy: bool,
     pub vvu_proxy: Vec<VvuOption>,
     pub wayland_socket_paths: BTreeMap<String, PathBuf>,
@@ -1527,7 +1530,7 @@ impl Default for Config {
             virtio_snds: Vec::new(),
             virtio_switches: Vec::new(),
             virtio_trackpad: Vec::new(),
-            #[cfg(all(feature = "tpm", feature = "chromeos", target_arch = "x86_64"))]
+            #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
             vtpm_proxy: false,
             vvu_proxy: Vec::new(),
             wayland_socket_paths: BTreeMap::new(),
@@ -2162,10 +2165,8 @@ mod tests {
             config,
             JailConfig {
                 pivot_root: jail_config_default_pivot_root(),
-                #[cfg(feature = "chromeos")]
-                seccomp_policy_dir: Some(PathBuf::from("/usr/share/policy/crosvm")),
-                #[cfg(all(unix, not(feature = "chromeos")))]
-                seccomp_policy_dir: None,
+                #[cfg(unix)]
+                seccomp_policy_dir: jail_config_default_seccomp_policy_dir(),
                 seccomp_log_failures: false,
             }
         );

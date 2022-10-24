@@ -2,6 +2,7 @@
   "add-module-block": "cargo2android_gdb.bp.patch",
   "add_workspace": true,
   "device": true,
+  "features": "gdb",
   "global_defaults": "crosvm_defaults",
   "run": true,
   "tests": true

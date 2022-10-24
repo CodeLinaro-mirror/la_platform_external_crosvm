@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 use gdbstub::arch::Arch;
+#[cfg(target_arch = "aarch64")]
+use gdbstub_arch::aarch64::AArch64 as GdbArch;
 #[cfg(target_arch = "x86_64")]
 use gdbstub_arch::x86::X86_64_SSE as GdbArch;
 use vm_memory::GuestAddress;
@@ -12,7 +14,9 @@ use vm_memory::GuestAddress;
 pub enum VcpuDebug {
     ReadMem(GuestAddress, usize),
     ReadRegs,
+    ReadReg(<GdbArch as Arch>::RegId),
     WriteRegs(Box<<GdbArch as Arch>::Registers>),
+    WriteReg(<GdbArch as Arch>::RegId, Vec<u8>),
     WriteMem(GuestAddress, Vec<u8>),
     EnableSinglestep,
     GetHwBreakPointCount,
@@ -24,6 +28,7 @@ pub enum VcpuDebug {
 #[derive(Debug)]
 pub enum VcpuDebugStatus {
     RegValues(<GdbArch as Arch>::Registers),
+    RegValue(Vec<u8>),
     MemoryRegion(Vec<u8>),
     CommandComplete,
     HwBreakPointCount(usize),

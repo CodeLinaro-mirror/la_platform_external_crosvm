@@ -2,6 +2,8 @@
 
 set -ex
 
+function usage() { echo "merge-setup.sh [-s]" && exit 1; }
+
 sync=""
 while getopts 's' FLAG; do
   case ${FLAG} in
@@ -9,12 +11,17 @@ while getopts 's' FLAG; do
       sync="sync"
       ;;
     ?)
-      "unknown argument."
-      exit 1
+      echo "unknown flag."
+      usage
       ;;
   esac
 done
 
+shift $((OPTIND-1))
+if [ $# != 0 ]; then
+    echo "unknown positional argument."
+    usage
+fi
 
 if [ "$sync" = "sync" ]
 then
@@ -35,7 +42,7 @@ fi
 rustup update
 if [ "$sync" = "sync" ]
 then
-  repo sync . -c -j96
+  repo sync -c -j96
   git fetch --all --prune
 fi
 

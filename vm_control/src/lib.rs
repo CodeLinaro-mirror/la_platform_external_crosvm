@@ -10,7 +10,7 @@
 //! The wire message format is a little-endian C-struct of fixed size, along with a file descriptor
 //! if the request type expects one.
 
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 pub mod gdb;
 
 #[cfg(unix)]
@@ -69,6 +69,7 @@ use libc::ERANGE;
 use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
+use rutabaga_gfx::DeviceId;
 use rutabaga_gfx::RutabagaGralloc;
 use rutabaga_gfx::RutabagaHandle;
 use rutabaga_gfx::VulkanInfo;
@@ -93,17 +94,17 @@ use crate::display::MouseMode;
 use crate::display::WindowEvent;
 use crate::display::WindowMode;
 use crate::display::WindowVisibility;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 pub use crate::gdb::VcpuDebug;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 pub use crate::gdb::VcpuDebugStatus;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 pub use crate::gdb::VcpuDebugStatusMessage;
 
 /// Control the state of a particular VM CPU.
 #[derive(Clone, Debug)]
 pub enum VcpuControl {
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     Debug(VcpuDebug),
     RunState(VmRunMode),
     MakeRT,
@@ -275,14 +276,13 @@ pub enum VmMemorySource {
         offset: u64,
         /// Size of the mapping in bytes.
         size: u64,
-        gpu_blob: bool,
     },
     /// Register memory mapped by Vulkano.
     Vulkan {
         descriptor: SafeDescriptor,
         handle_type: u32,
         memory_idx: u32,
-        physical_device_idx: u32,
+        device_id: DeviceId,
         size: u64,
     },
     /// Register the current rutabaga external mapping.
@@ -301,11 +301,10 @@ impl VmMemorySource {
                 descriptor,
                 offset,
                 size,
-                gpu_blob,
             } => (
                 map_descriptor(&descriptor, offset, size, prot)?,
                 size,
-                if gpu_blob { Some(descriptor) } else { None },
+                Some(descriptor),
             ),
 
             VmMemorySource::SharedMemory(shm) => {
@@ -315,7 +314,7 @@ impl VmMemorySource {
                 descriptor,
                 handle_type,
                 memory_idx,
-                physical_device_idx,
+                device_id,
                 size,
             } => {
                 let mapped_region = match gralloc.import_and_map(
@@ -325,7 +324,7 @@ impl VmMemorySource {
                     },
                     VulkanInfo {
                         memory_idx,
-                        physical_device_idx,
+                        device_id,
                     },
                     size,
                 ) {
@@ -435,7 +434,7 @@ impl VmMemoryRequest {
         vm: &mut impl Vm,
         sys_allocator: &mut SystemAllocator,
         gralloc: &mut RutabagaGralloc,
-        iommu_client: &mut Option<VmMemoryRequestIommuClient>,
+        iommu_client: Option<&mut VmMemoryRequestIommuClient>,
     ) -> VmMemoryResponse {
         use self::VmMemoryRequest::*;
         match self {

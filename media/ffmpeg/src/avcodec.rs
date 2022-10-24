@@ -18,9 +18,8 @@ use libc::c_int;
 use libc::c_void;
 use thiserror::Error as ThisError;
 
-use crate::ffi::AVPictureType;
-
 use super::*;
+use crate::ffi::AVPictureType;
 
 /// An error returned by a low-level libavcodec function.
 #[derive(Debug, ThisError)]
@@ -71,7 +70,7 @@ pub enum AvCodecOpenError {
 }
 
 /// Dimensions of a frame, used in AvCodecContext and AvFrame.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Dimensions {
     pub width: u32,
     pub height: u32,
@@ -350,6 +349,21 @@ impl AvPixelFormat {
     }
 }
 
+#[derive(Debug)]
+pub struct FromAVPixelFormatError(());
+
+impl TryFrom<ffi::AVPixelFormat> for AvPixelFormat {
+    type Error = FromAVPixelFormatError;
+
+    fn try_from(value: ffi::AVPixelFormat) -> Result<Self, Self::Error> {
+        if value > ffi::AVPixelFormat_AV_PIX_FMT_NONE && value < ffi::AVPixelFormat_AV_PIX_FMT_NB {
+            Ok(AvPixelFormat(value))
+        } else {
+            Err(FromAVPixelFormatError(()))
+        }
+    }
+}
+
 impl Display for AvPixelFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
@@ -533,6 +547,24 @@ impl AvCodecContext {
         // Safe because the context is valid through the life of this object.
         AvError::result(unsafe { ffi::avcodec_send_frame(self.0, std::ptr::null()) })
     }
+
+    /// Set the time base for this context.
+    pub fn set_time_base(&mut self, time_base: AVRational) {
+        let context = unsafe { &mut *(self.0) };
+        context.time_base = time_base;
+    }
+
+    /// Set the bit rate for this context.
+    pub fn set_bit_rate(&mut self, bit_rate: u64) {
+        let context = unsafe { &mut *(self.0) };
+        context.bit_rate = bit_rate as _;
+    }
+
+    /// Set the max bit rate (rc_max_rate) for this context.
+    pub fn set_max_bit_rate(&mut self, bit_rate: u64) {
+        let context = unsafe { &mut *(self.0) };
+        context.rc_max_rate = bit_rate as _;
+    }
 }
 
 /// Trait for types that can be used as data provider for a `AVBuffer`.
@@ -629,7 +661,30 @@ impl<'a> Drop for AvPacket<'a> {
     }
 }
 
+impl<'a> AsRef<ffi::AVPacket> for AvPacket<'a> {
+    fn as_ref(&self) -> &ffi::AVPacket {
+        &self.packet
+    }
+}
+
 impl<'a> AvPacket<'a> {
+    /// Create an empty AvPacket without buffers.
+    ///
+    /// This packet should be only used with an encoder; in which case the encoder will
+    /// automatically allocate a buffer of appropriate size and store it inside this `AvPacket`.
+    pub fn empty() -> Self {
+        Self {
+            packet: ffi::AVPacket {
+                pts: AV_NOPTS_VALUE as i64,
+                dts: AV_NOPTS_VALUE as i64,
+                pos: -1,
+                // Safe because all the other elements of this struct can be zeroed.
+                ..unsafe { std::mem::zeroed() }
+            },
+            _buffer_data: PhantomData,
+        }
+    }
+
     /// Create a new AvPacket that borrows the `input_data`.
     ///
     /// The returned `AvPacket` will hold a reference to `input_data`, meaning that libavcodec might
@@ -756,6 +811,21 @@ impl AvFrame {
         unsafe {
             (*self.0).pts = ts;
         }
+    }
+
+    /// Query if this AvFrame is writable, i.e. it is refcounted and the refcounts are 1.
+    pub fn is_writable(&self) -> bool {
+        // Safe because self.0 is a valid AVFrame reference.
+        unsafe { ffi::av_frame_is_writable(self.0) != 0 }
+    }
+
+    /// If the frame is not writable already (see [`is_writable`]), make a copy of its buffer to
+    /// make it writable.
+    ///
+    /// [`is_writable`]: AvFrame::is_writable
+    pub fn make_writable(&mut self) -> Result<(), AvFrameError> {
+        // Safe because self.0 is a valid AVFrame reference.
+        AvError::result(unsafe { ffi::av_frame_make_writable(self.0) }).map_err(Into::into)
     }
 }
 

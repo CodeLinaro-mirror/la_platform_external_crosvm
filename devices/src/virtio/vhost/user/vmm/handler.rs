@@ -9,13 +9,16 @@ use std::sync::Mutex;
 use std::thread;
 
 use base::error;
+use base::info;
 use base::AsRawDescriptor;
 use base::Event;
 use base::Protection;
 use base::SafeDescriptor;
+use rutabaga_gfx::DeviceId;
 use vm_control::VmMemorySource;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserConfigFlags;
+use vmm_vhost::message::VhostUserGpuMapMsg;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserShmemMapMsg;
 use vmm_vhost::message::VhostUserShmemUnmapMsg;
@@ -28,6 +31,7 @@ use vmm_vhost::VhostUserMasterReqHandlerMut;
 use vmm_vhost::VhostUserMemoryRegionInfo;
 use vmm_vhost::VringConfigData;
 
+use crate::virtio::vhost::user::vmm::handler::sys::create_backend_req_handler;
 use crate::virtio::vhost::user::vmm::handler::sys::SocketMaster;
 use crate::virtio::vhost::user::vmm::Error;
 use crate::virtio::vhost::user::vmm::Result;
@@ -35,6 +39,7 @@ use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
+use crate::virtio::SignalableInterrupt;
 
 type BackendReqHandler = MasterReqHandler<Mutex<BackendReqHandlerImpl>>;
 
@@ -81,12 +86,30 @@ impl VhostUserHandler {
                 .map_err(Error::SetProtocolFeatures)?;
         }
 
+        // if protocol feature `VhostUserProtocolFeatures::SLAVE_REQ` is negotiated.
+        let backend_req_handler =
+            if protocol_features.contains(VhostUserProtocolFeatures::SLAVE_REQ) {
+                let mut handler = create_backend_req_handler(
+                    BackendReqHandlerImpl {
+                        interrupt: None,
+                        shared_mapper_state: None,
+                    },
+                    #[cfg(windows)]
+                    backend_pid,
+                )?;
+                vu.set_slave_request_fd(&handler.take_tx_descriptor())
+                    .map_err(Error::SetDeviceRequestChannel)?;
+                Some(handler)
+            } else {
+                None
+            };
+
         Ok(VhostUserHandler {
             vu,
             avail_features,
             acked_features,
             protocol_features,
-            backend_req_handler: None,
+            backend_req_handler,
             shmem_region: None,
             #[cfg(windows)]
             backend_pid,
@@ -253,7 +276,17 @@ impl VhostUserHandler {
         let label = format!("vhost_user_virtio_{}", label);
         let kill_evt = Event::new().map_err(Error::CreateEvent)?;
         let self_kill_evt = kill_evt.try_clone().map_err(Error::CreateEvent)?;
+
         let backend_req_handler = self.backend_req_handler.take();
+        if let Some(handler) = &backend_req_handler {
+            // Using unwrap here to get the mutex protected value
+            handler
+                .backend()
+                .lock()
+                .unwrap()
+                .set_interrupt(interrupt.clone());
+        }
+
         thread::Builder::new()
             .name(label.clone())
             .spawn(move || {
@@ -307,6 +340,15 @@ impl VhostUserHandler {
     }
 
     pub fn set_shared_memory_mapper(&mut self, mapper: Box<dyn SharedMemoryMapper>) -> Result<()> {
+        // Return error if backend request handler is not available. This indicates
+        // that `VhostUserProtocolFeatures::SLAVE_REQ` is not negotiated.
+        let backend_req_handler =
+            self.backend_req_handler
+                .as_mut()
+                .ok_or(Error::ProtocolFeatureNotNegoiated(
+                    VhostUserProtocolFeatures::SLAVE_REQ,
+                ))?;
+
         // The virtio framework will only call this if get_shared_memory_region returned a region
         let shmid = self
             .shmem_region
@@ -314,13 +356,34 @@ impl VhostUserHandler {
             .flatten()
             .expect("missing shmid")
             .id;
-        self.initialize_backend_req_handler(BackendReqHandlerImpl { mapper, shmid })
+
+        backend_req_handler
+            .backend()
+            .lock()
+            .unwrap()
+            .set_shared_mapper_state(SharedMapperState { mapper, shmid });
+        Ok(())
     }
 }
 
-pub struct BackendReqHandlerImpl {
+struct SharedMapperState {
     mapper: Box<dyn SharedMemoryMapper>,
     shmid: u8,
+}
+
+pub struct BackendReqHandlerImpl {
+    interrupt: Option<Interrupt>,
+    shared_mapper_state: Option<SharedMapperState>,
+}
+
+impl BackendReqHandlerImpl {
+    fn set_interrupt(&mut self, interrupt: Interrupt) {
+        self.interrupt = Some(interrupt);
+    }
+
+    fn set_shared_mapper_state(&mut self, shared_mapper_state: SharedMapperState) {
+        self.shared_mapper_state = Some(shared_mapper_state);
+    }
 }
 
 impl VhostUserMasterReqHandlerMut for BackendReqHandlerImpl {
@@ -329,17 +392,23 @@ impl VhostUserMasterReqHandlerMut for BackendReqHandlerImpl {
         req: &VhostUserShmemMapMsg,
         fd: &dyn AsRawDescriptor,
     ) -> HandlerResult<u64> {
-        if req.shmid != self.shmid {
-            error!("bad shmid {}, expected {}", req.shmid, self.shmid);
+        let shared_mapper_state = self
+            .shared_mapper_state
+            .as_mut()
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        if req.shmid != shared_mapper_state.shmid {
+            error!(
+                "bad shmid {}, expected {}",
+                req.shmid, shared_mapper_state.shmid
+            );
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
-        match self.mapper.add_mapping(
+        match shared_mapper_state.mapper.add_mapping(
             VmMemorySource::Descriptor {
                 descriptor: SafeDescriptor::try_from(fd)
                     .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?,
                 offset: req.fd_offset,
                 size: req.len,
-                gpu_blob: false,
             },
             req.shm_offset,
             Protection::from(req.flags),
@@ -353,15 +422,75 @@ impl VhostUserMasterReqHandlerMut for BackendReqHandlerImpl {
     }
 
     fn shmem_unmap(&mut self, req: &VhostUserShmemUnmapMsg) -> HandlerResult<u64> {
-        if req.shmid != self.shmid {
-            error!("bad shmid {}, expected {}", req.shmid, self.shmid);
+        let shared_mapper_state = self
+            .shared_mapper_state
+            .as_mut()
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        if req.shmid != shared_mapper_state.shmid {
+            error!(
+                "bad shmid {}, expected {}",
+                req.shmid, shared_mapper_state.shmid
+            );
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
-        match self.mapper.remove_mapping(req.shm_offset) {
+        match shared_mapper_state.mapper.remove_mapping(req.shm_offset) {
             Ok(()) => Ok(0),
             Err(e) => {
                 error!("failed to remove mapping {:?}", e);
                 Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+            }
+        }
+    }
+
+    fn gpu_map(
+        &mut self,
+        req: &VhostUserGpuMapMsg,
+        descriptor: &dyn AsRawDescriptor,
+    ) -> HandlerResult<u64> {
+        let shared_mapper_state = self
+            .shared_mapper_state
+            .as_mut()
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        if req.shmid != shared_mapper_state.shmid {
+            error!(
+                "bad shmid {}, expected {}",
+                req.shmid, shared_mapper_state.shmid
+            );
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        match shared_mapper_state.mapper.add_mapping(
+            VmMemorySource::Vulkan {
+                descriptor: SafeDescriptor::try_from(descriptor)
+                    .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?,
+                handle_type: req.handle_type,
+                memory_idx: req.memory_idx,
+                device_id: DeviceId {
+                    device_uuid: req.device_uuid,
+                    driver_uuid: req.driver_uuid,
+                },
+                size: req.len,
+            },
+            req.shm_offset,
+            Protection::read_write(),
+        ) {
+            Ok(()) => Ok(0),
+            Err(e) => {
+                error!("failed to create mapping {:?}", e);
+                Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+            }
+        }
+    }
+
+    fn handle_config_change(&mut self) -> HandlerResult<u64> {
+        info!("Handle Config Change called");
+        match &self.interrupt {
+            Some(interrupt) => {
+                interrupt.signal_config_changed();
+                Ok(0)
+            }
+            None => {
+                error!("cannot send interrupt");
+                Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
             }
         }
     }

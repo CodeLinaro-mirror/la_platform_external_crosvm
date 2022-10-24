@@ -91,6 +91,15 @@ pub trait VhostUserMasterReqHandler {
 
     // fn handle_iotlb_msg(&mut self, iotlb: VhostUserIotlb);
     // fn handle_vring_host_notifier(&mut self, area: VhostUserVringArea, fd: &dyn AsRawDescriptor);
+
+    /// Handle GPU shared memory region mapping requests.
+    fn gpu_map(
+        &self,
+        _req: &VhostUserGpuMapMsg,
+        _descriptor: &dyn AsRawDescriptor,
+    ) -> HandlerResult<u64> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+    }
 }
 
 /// A helper trait mirroring [VhostUserMasterReqHandler] but without interior mutability.
@@ -146,6 +155,15 @@ pub trait VhostUserMasterReqHandlerMut {
 
     // fn handle_iotlb_msg(&mut self, iotlb: VhostUserIotlb);
     // fn handle_vring_host_notifier(&mut self, area: VhostUserVringArea, fd: RawDescriptor);
+
+    /// Handle GPU shared memory region mapping requests.
+    fn gpu_map(
+        &mut self,
+        _req: &VhostUserGpuMapMsg,
+        _descriptor: &dyn AsRawDescriptor,
+    ) -> HandlerResult<u64> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+    }
 }
 
 impl<S: VhostUserMasterReqHandlerMut> VhostUserMasterReqHandler for Mutex<S> {
@@ -188,6 +206,14 @@ impl<S: VhostUserMasterReqHandlerMut> VhostUserMasterReqHandler for Mutex<S> {
     ) -> HandlerResult<u64> {
         self.lock().unwrap().fs_slave_io(fs, fd)
     }
+
+    fn gpu_map(
+        &self,
+        req: &VhostUserGpuMapMsg,
+        descriptor: &dyn AsRawDescriptor,
+    ) -> HandlerResult<u64> {
+        self.lock().unwrap().gpu_map(req, descriptor)
+    }
 }
 
 /// The [MasterReqHandler] acts as a server on the master side, to handle service requests from
@@ -206,10 +232,9 @@ pub struct MasterReqHandler<S: VhostUserMasterReqHandler> {
     serialize_tx: Box<dyn Fn(SystemStream) -> SafeDescriptor + Send>,
     // Protocol feature VHOST_USER_PROTOCOL_F_REPLY_ACK has been negotiated.
     reply_ack_negotiated: bool,
-    // the VirtIO backend device object
+
+    /// the VirtIO backend device object
     backend: Arc<S>,
-    // whether the endpoint has encountered any failure
-    error: Option<i32>,
 }
 
 impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
@@ -233,7 +258,6 @@ impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
             serialize_tx,
             reply_ack_negotiated: false,
             backend,
-            error: None,
         })
     }
 
@@ -256,13 +280,9 @@ impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
         self.reply_ack_negotiated = enable;
     }
 
-    /// Mark endpoint as failed or in normal state.
-    pub fn set_failed(&mut self, error: i32) {
-        if error == 0 {
-            self.error = None;
-        } else {
-            self.error = Some(error);
-        }
+    /// Get the underlying backend device
+    pub fn backend(&self) -> Arc<S> {
+        Arc::clone(&self.backend)
     }
 
     /// Main entrance to server slave request from the slave communication channel.
@@ -272,9 +292,6 @@ impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
     /// - decide what to do when errer happens
     /// - optional recover from failure
     pub fn handle_request(&mut self) -> Result<u64> {
-        // Return error if the endpoint is already in failed state.
-        self.check_state()?;
-
         // The underlying communication channel is a Unix domain socket in
         // stream mode, and recvmsg() is a little tricky here. To successfully
         // receive attached file descriptors, we need to receive messages and
@@ -347,19 +364,19 @@ impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
                     .fs_slave_io(&msg, &files.unwrap()[0])
                     .map_err(Error::ReqHandlerError)
             }
+            SlaveReq::GPU_MAP => {
+                let msg = self.extract_msg_body::<VhostUserGpuMapMsg>(&hdr, size, &buf)?;
+                // check_attached_files() has validated files
+                self.backend
+                    .gpu_map(&msg, &files.unwrap()[0])
+                    .map_err(Error::ReqHandlerError)
+            }
             _ => Err(Error::InvalidMessage),
         };
 
         self.send_reply(&hdr, &res)?;
 
         res
-    }
-
-    fn check_state(&self) -> Result<()> {
-        match self.error {
-            Some(e) => Err(Error::SocketBroken(std::io::Error::from_raw_os_error(e))),
-            None => Ok(()),
-        }
     }
 
     fn check_msg_size(
@@ -384,7 +401,7 @@ impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
         files: &Option<Vec<File>>,
     ) -> Result<()> {
         match hdr.get_code() {
-            SlaveReq::SHMEM_MAP | SlaveReq::FS_MAP | SlaveReq::FS_IO => {
+            SlaveReq::SHMEM_MAP | SlaveReq::FS_MAP | SlaveReq::FS_IO | SlaveReq::GPU_MAP => {
                 // Expect a single file is passed.
                 match files {
                     Some(files) if files.len() == 1 => Ok(()),
@@ -417,7 +434,6 @@ impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
         if mem::size_of::<T>() > MAX_MSG_SIZE {
             return Err(Error::InvalidParam);
         }
-        self.check_state()?;
         Ok(VhostUserMsgHeader::new(
             req.get_code(),
             VhostUserHeaderFlag::REPLY.bits(),
@@ -428,6 +444,7 @@ impl<S: VhostUserMasterReqHandler> MasterReqHandler<S> {
     fn send_reply(&mut self, req: &VhostUserMsgHeader<SlaveReq>, res: &Result<u64>) -> Result<()> {
         if req.get_code() == SlaveReq::SHMEM_MAP
             || req.get_code() == SlaveReq::SHMEM_UNMAP
+            || req.get_code() == SlaveReq::GPU_MAP
             || (self.reply_ack_negotiated && req.is_need_reply())
         {
             let hdr = self.new_reply_header::<VhostUserU64>(req)?;

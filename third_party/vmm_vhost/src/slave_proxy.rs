@@ -32,13 +32,6 @@ struct SlaveInternal {
 }
 
 impl SlaveInternal {
-    fn check_state(&self) -> Result<u64> {
-        match self.error {
-            Some(e) => Err(Error::SocketBroken(std::io::Error::from_raw_os_error(e))),
-            None => Ok(0),
-        }
-    }
-
     fn send_message<T>(
         &mut self,
         request: SlaveReq,
@@ -48,8 +41,6 @@ impl SlaveInternal {
     where
         T: DataInit,
     {
-        self.check_state()?;
-
         let len = mem::size_of::<T>();
         let mut hdr = VhostUserMsgHeader::new(request, 0, len as u32);
         if self.reply_ack_negotiated {
@@ -61,9 +52,9 @@ impl SlaveInternal {
     }
 
     fn wait_for_reply(&mut self, hdr: &VhostUserMsgHeader<SlaveReq>) -> Result<u64> {
-        self.check_state()?;
         if hdr.get_code() != SlaveReq::SHMEM_MAP
             && hdr.get_code() != SlaveReq::SHMEM_UNMAP
+            && hdr.get_code() != SlaveReq::GPU_MAP
             && !self.reply_ack_negotiated
         {
             return Ok(0);
@@ -160,6 +151,15 @@ impl VhostUserMasterReqHandler for Slave {
         self.send_message(SlaveReq::SHMEM_UNMAP, req, None)
     }
 
+    /// Handle config change requests.
+    fn handle_config_change(&self) -> HandlerResult<u64> {
+        self.send_message(
+            SlaveReq::CONFIG_CHANGE_MSG,
+            &VhostUserEmptyMessage::default(),
+            None,
+        )
+    }
+
     /// Forward vhost-user-fs map file requests to the slave.
     fn fs_slave_map(
         &self,
@@ -172,6 +172,19 @@ impl VhostUserMasterReqHandler for Slave {
     /// Forward vhost-user-fs unmap file requests to the master.
     fn fs_slave_unmap(&self, fs: &VhostUserFSSlaveMsg) -> HandlerResult<u64> {
         self.send_message(SlaveReq::FS_UNMAP, fs, None)
+    }
+
+    /// Handle GPU shared memory region mapping requests.
+    fn gpu_map(
+        &self,
+        req: &VhostUserGpuMapMsg,
+        descriptor: &dyn AsRawDescriptor,
+    ) -> HandlerResult<u64> {
+        self.send_message(
+            SlaveReq::GPU_MAP,
+            req,
+            Some(&[descriptor.as_raw_descriptor()]),
+        )
     }
 }
 
@@ -189,21 +202,6 @@ mod tests {
         assert!(fs_cache.node().error.is_none());
         fs_cache.set_failed(libc::EAGAIN);
         assert_eq!(fs_cache.node().error, Some(libc::EAGAIN));
-    }
-
-    #[test]
-    fn test_slave_send_failure() {
-        let (p1, p2) = SystemStream::pair().unwrap();
-        let fs_cache = Slave::from_stream(p1);
-
-        fs_cache.set_failed(libc::ECONNRESET);
-        fs_cache
-            .fs_slave_map(&VhostUserFSSlaveMsg::default(), &p2)
-            .unwrap_err();
-        fs_cache
-            .fs_slave_unmap(&VhostUserFSSlaveMsg::default())
-            .unwrap_err();
-        fs_cache.node().error = None;
     }
 
     #[test]

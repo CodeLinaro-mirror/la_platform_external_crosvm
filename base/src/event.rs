@@ -11,7 +11,7 @@ use crate::descriptor::AsRawDescriptor;
 use crate::descriptor::FromRawDescriptor;
 use crate::descriptor::IntoRawDescriptor;
 use crate::descriptor::SafeDescriptor;
-use crate::platform::Event as PlatformEvent;
+use crate::platform::PlatformEvent;
 use crate::RawDescriptor;
 use crate::Result;
 
@@ -24,9 +24,6 @@ pub enum EventReadResult {
     Timeout,
 }
 
-/// See the [platform-specific Event struct](crate::platform::Event) for struct- and method-level
-/// documentation.
-// TODO(b:231344063) Move/update documentation.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Event(pub(crate) PlatformEvent);

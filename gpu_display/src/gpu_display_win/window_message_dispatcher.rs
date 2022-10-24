@@ -47,16 +47,16 @@ impl DisplayEventDispatcher {
     }
 
     pub fn dispatch(&self, events: &[virtio_input_event], device_type: EventDeviceKind) {
-        let _ = self
+        for event_device in self
             .event_devices
             .borrow_mut()
-            .iter_mut()
-            .filter(|(_, event_device)| event_device.kind() == device_type)
-            .map(|(_, event_device)| {
-                if let Err(e) = event_device.send_report(events.iter().cloned()) {
-                    error!("Failed to send events to event device: {}", e);
-                }
-            });
+            .values_mut()
+            .filter(|event_device| event_device.kind() == device_type)
+        {
+            if let Err(e) = event_device.send_report(events.iter().cloned()) {
+                error!("Failed to send events to event device: {}", e);
+            }
+        }
     }
 
     fn import_event_device(&mut self, event_device_id: ObjectId, event_device: EventDevice) {
@@ -64,11 +64,6 @@ impl DisplayEventDispatcher {
         self.event_devices
             .borrow_mut()
             .insert(event_device_id, event_device);
-    }
-
-    fn release_event_device(&mut self, event_device_id: &ObjectId) {
-        info!("Releasing event device (ID: {:?})", event_device_id);
-        self.event_devices.borrow_mut().remove(event_device_id);
     }
 }
 
@@ -88,7 +83,7 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
     /// This function should only be called once from the WndProc thread. It will take the ownership
     /// of the `Window` object, and drop it before the underlying window is completely gone.
     /// TODO(b/238680252): This should be good enough for supporting multi-windowing, but we should
-    /// revisit it if we also want to manage some child windows of the CrosVM window.
+    /// revisit it if we also want to manage some child windows of the crosvm window.
     pub fn create(window: Window) -> Result<Pin<Box<Self>>> {
         let mut dispatcher = Box::pin(Self {
             message_processor: Default::default(),
@@ -187,7 +182,7 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
                 }
                 None => debug!("No window to destroy on WndProc thread drop"),
             },
-            // Safe because we are processing a message tageting this thread.
+            // Safe because we are processing a message targeting this thread.
             _ => unsafe {
                 DefWindowProcA(null_mut(), msg, w_param, l_param);
             },
@@ -205,10 +200,6 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
             } => {
                 self.display_event_dispatcher
                     .import_event_device(event_device_id, event_device);
-            }
-            DisplaySendToWndProc::ReleaseEventDevice(event_device_id) => {
-                self.display_event_dispatcher
-                    .release_event_device(&event_device_id);
             }
         }
     }
