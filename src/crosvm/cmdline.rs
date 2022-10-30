@@ -8,7 +8,7 @@ cfg_if::cfg_if! {
 
         use base::RawDescriptor;
         #[cfg(feature = "gpu")]
-        use devices::virtio::GpuDisplayParameters;
+        use vm_control::gpu::DisplayParameters as GpuDisplayParameters;
         use devices::virtio::vhost::user::device::parse_wayland_sock;
 
         use super::sys::config::{
@@ -129,6 +129,8 @@ pub enum CrossPlatformCommands {
     CreateQcow2(CreateQcow2Command),
     Device(DeviceCommand),
     Disk(DiskCommand),
+    #[cfg(feature = "gpu")]
+    Gpu(GpuCommand),
     MakeRT(MakeRTCommand),
     Resume(ResumeCommand),
     Run(RunCommand),
@@ -323,6 +325,15 @@ pub struct UsbCommand {
     pub command: UsbSubCommand,
 }
 
+#[cfg(feature = "gpu")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "gpu")]
+/// Manage attached virtual GPU device.
+pub struct GpuCommand {
+    #[argh(subcommand)]
+    pub command: GpuSubCommand,
+}
+
 #[derive(FromArgs)]
 #[argh(subcommand, name = "version")]
 /// Show package version.
@@ -388,6 +399,52 @@ pub enum CrossPlatformDevicesCommands {
 pub enum DeviceSubcommand {
     CrossPlatform(CrossPlatformDevicesCommands),
     Sys(super::sys::cmdline::DeviceSubcommand),
+}
+
+#[cfg(feature = "gpu")]
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum GpuSubCommand {
+    AddDisplays(GpuAddDisplaysCommand),
+    ListDisplays(GpuListDisplaysCommand),
+    RemoveDisplays(GpuRemoveDisplaysCommand),
+}
+
+#[cfg(feature = "gpu")]
+#[derive(FromArgs)]
+/// Attach a new display to the GPU device.
+#[argh(subcommand, name = "add-displays")]
+pub struct GpuAddDisplaysCommand {
+    #[argh(option)]
+    /// displays
+    pub gpu_display: Vec<vm_control::gpu::DisplayParameters>,
+
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "gpu")]
+#[derive(FromArgs)]
+/// List the displays currently attached to the GPU device.
+#[argh(subcommand, name = "list-displays")]
+pub struct GpuListDisplaysCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "gpu")]
+#[derive(FromArgs)]
+/// Detach an existing display from the GPU device.
+#[argh(subcommand, name = "remove-displays")]
+pub struct GpuRemoveDisplaysCommand {
+    #[argh(option)]
+    /// display id
+    pub display_id: Vec<u32>,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
 }
 
 #[derive(FromArgs)]
@@ -890,6 +947,9 @@ pub struct RunCommand {
     #[argh(switch)]
     /// prevent host access to guest memory
     pub protected_vm: bool,
+    #[argh(option, long = "protected-vm-with-firmware", arg_name = "PATH")]
+    /// (EXPERIMENTAL/FOR DEBUGGING) Use custom VM firmware to run in protected mode
+    pub protected_vm_with_firmware: Option<PathBuf>,
     #[argh(switch)]
     /// (EXPERIMENTAL) prevent host access to guest memory, but don't use protected VM firmware
     protected_vm_without_firmware: bool,
@@ -1725,6 +1785,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         let protection_flags = [
             cmd.protected_vm,
+            cmd.protected_vm_with_firmware.is_some(),
             cmd.protected_vm_without_firmware,
             cmd.unprotected_vm_with_firmware.is_some(),
         ];
@@ -1737,6 +1798,14 @@ impl TryFrom<RunCommand> for super::config::Config {
             ProtectionType::Protected
         } else if cmd.protected_vm_without_firmware {
             ProtectionType::ProtectedWithoutFirmware
+        } else if let Some(p) = cmd.protected_vm_with_firmware {
+            if !p.exists() || !p.is_file() {
+                return Err(
+                    "protected-vm-with-firmware path should be an existing file".to_string()
+                );
+            }
+            cfg.pvm_fw = Some(p);
+            ProtectionType::ProtectedWithCustomFirmware
         } else if let Some(p) = cmd.unprotected_vm_with_firmware {
             if !p.exists() || !p.is_file() {
                 return Err(

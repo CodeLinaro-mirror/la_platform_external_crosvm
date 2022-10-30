@@ -66,11 +66,10 @@ impl Kvm {
             ret if ret < 0 => 0,
             ipa => ipa as u32,
         };
-        let protection_flag = match protection_type {
-            ProtectionType::Unprotected | ProtectionType::UnprotectedWithFirmware => 0,
-            ProtectionType::Protected | ProtectionType::ProtectedWithoutFirmware => {
-                KVM_VM_TYPE_ARM_PROTECTED
-            }
+        let protection_flag = if protection_type.isolates_memory() {
+            KVM_VM_TYPE_ARM_PROTECTED
+        } else {
+            0
         };
         // Use the lower 8 bits representing the IPA space as the machine type
         Ok((ipa_size & KVM_VM_TYPE_ARM_IPA_SIZE_MASK) | protection_flag)
@@ -190,15 +189,6 @@ impl VmAArch64 for KvmVm {
             if info.firmware_size > fw_max_size {
                 return Err(Error::new(ENOMEM));
             }
-            let mem = MemoryMappingBuilder::new(info.firmware_size as usize)
-                .build()
-                .map_err(|_| Error::new(EINVAL))?;
-            self.add_memory_region(fw_addr, Box::new(mem), false, false)?;
-            // TODO(b/244553205): Allocate the region here as a temporary fix.
-            let mem = MemoryMappingBuilder::new(2 << 20)
-                .build()
-                .map_err(|_| Error::new(EINVAL))?;
-            self.add_memory_region(GuestAddress(0x7fe00000), Box::new(mem), false, false)?;
             self.set_protected_vm_firmware_ipa(fw_addr)
         }
     }

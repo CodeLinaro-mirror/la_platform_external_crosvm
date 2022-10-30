@@ -98,7 +98,7 @@ trait DeviceExt {
 
 impl DeviceExt for Device {
     fn get_id(&self) -> DeviceId {
-        let properties = self.physical_device().properties;
+        let properties = self.physical_device().properties();
         DeviceId {
             device_uuid: properties.device_uuid.expect("Vulkan should support uuid"),
             driver_uuid: properties.driver_uuid.expect("Vulkan should support uuid"),
@@ -152,7 +152,6 @@ impl VulkanoGralloc {
             if let Ok((device, mut _queues)) = Device::new(
                 physical.clone(),
                 DeviceCreateInfo {
-                    enabled_features: physical.supported_features().clone(),
                     enabled_extensions: intersection,
                     queue_create_infos: vec![QueueCreateInfo {
                         queue_family_index: queue_family_index as u32,

@@ -1,5 +1,5 @@
 {
-  "add-module-block": "cargo2android_gdb.bp.patch",
+  "add-module-block": "cargo2android.bp.patch",
   "add_workspace": true,
   "device": true,
   "features": "balloon,gdb",

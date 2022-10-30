@@ -20,7 +20,7 @@ use anyhow::Result;
 #[cfg(feature = "virgl_renderer")]
 const MINIGBM_SRC: &str = "../third_party/minigbm";
 #[cfg(feature = "virgl_renderer")]
-const VIRGLRENDERER_SRC: &str = "../../virglrenderer";
+const VIRGLRENDERER_SRC: &str = "../third_party/virglrenderer";
 
 #[cfg(feature = "virgl_renderer")]
 fn is_native_build() -> bool {
