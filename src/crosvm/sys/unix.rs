@@ -188,6 +188,7 @@ fn create_virtio_devices(
     disk_device_tubes: &mut Vec<Tube>,
     pmem_device_tubes: &mut Vec<Tube>,
     fs_device_tubes: &mut Vec<Tube>,
+    #[cfg(feature = "gpu")] gpu_control_tube: Tube,
     #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))] render_server_fd: Option<
         SafeDescriptor,
     >,
@@ -311,6 +312,7 @@ fn create_virtio_devices(
             devs.push(create_gpu_device(
                 cfg,
                 vm_evt_wrtube,
+                gpu_control_tube,
                 resource_bridges,
                 // Use the unnamed socket for GPU display screens.
                 cfg.wayland_socket_paths.get(""),
@@ -664,6 +666,7 @@ fn create_devices(
     pmem_device_tubes: &mut Vec<Tube>,
     fs_device_tubes: &mut Vec<Tube>,
     #[cfg(feature = "usb")] usb_provider: HostBackendDeviceProvider,
+    #[cfg(feature = "gpu")] gpu_control_tube: Tube,
     #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))] render_server_fd: Option<
         SafeDescriptor,
     >,
@@ -813,6 +816,8 @@ fn create_devices(
         disk_device_tubes,
         pmem_device_tubes,
         fs_device_tubes,
+        #[cfg(feature = "gpu")]
+        gpu_control_tube,
         #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
         render_server_fd,
         vvu_proxy_device_tubes,
@@ -1110,13 +1115,10 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             size.checked_mul(1024 * 1024)
                 .ok_or_else(|| anyhow!("requested swiotlb size too large"))?,
         )
+    } else if matches!(cfg.protection_type, ProtectionType::Unprotected) {
+        None
     } else {
-        match cfg.protection_type {
-            ProtectionType::Protected | ProtectionType::ProtectedWithoutFirmware => {
-                Some(64 * 1024 * 1024)
-            }
-            ProtectionType::Unprotected | ProtectionType::UnprotectedWithFirmware => None,
-        }
+        Some(64 * 1024 * 1024)
     };
 
     let (pflash_image, pflash_block_size) = if let Some(pflash_parameters) = &cfg.pflash_parameters
@@ -1208,6 +1210,7 @@ pub enum ExitState {
     Stop,
     Crash,
     GuestPanic,
+    WatchdogReset,
 }
 // Remove ranges in `guest_mem_layout` that overlap with ranges in `file_backed_mappings`.
 // Returns the updated guest memory layout.
@@ -1279,11 +1282,7 @@ fn run_kvm(cfg: Config, components: VmComponents, guest_mem: GuestMemory) -> Res
     }
 
     // Check that the VM was actually created in protected mode as expected.
-    if matches!(
-        cfg.protection_type,
-        ProtectionType::Protected | ProtectionType::ProtectedWithoutFirmware
-    ) && !vm.check_capability(VmCap::Protected)
-    {
+    if cfg.protection_type.isolates_memory() && !vm.check_capability(VmCap::Protected) {
         bail!("Failed to create protected VM");
     }
     let vm_clone = vm.try_clone().context("failed to clone vm")?;
@@ -1384,6 +1383,10 @@ where
         // access to those files will not be possible.
         info!("crosvm entering multiprocess mode");
     }
+
+    #[cfg(feature = "gpu")]
+    let (gpu_control_host_tube, gpu_control_device_tube) =
+        Tube::pair().context("failed to create gpu tube")?;
 
     #[cfg(feature = "usb")]
     let (usb_control_tube, usb_provider) =
@@ -1646,6 +1649,8 @@ where
         &mut fs_device_tubes,
         #[cfg(feature = "usb")]
         usb_provider,
+        #[cfg(feature = "gpu")]
+        gpu_control_device_tube,
         #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
         render_server_fd,
         &mut vvu_proxy_device_tubes,
@@ -1819,6 +1824,8 @@ where
         #[cfg(feature = "balloon")]
         balloon_host_tube,
         &disk_host_tubes,
+        #[cfg(feature = "gpu")]
+        gpu_control_host_tube,
         #[cfg(feature = "usb")]
         usb_control_tube,
         vm_evt_rdtube,
@@ -2204,6 +2211,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     mut control_tubes: Vec<TaggedControlTube>,
     #[cfg(feature = "balloon")] balloon_host_tube: Option<Tube>,
     disk_host_tubes: &[Tube],
+    #[cfg(feature = "gpu")] gpu_control_tube: Tube,
     #[cfg(feature = "usb")] usb_control_tube: Tube,
     vm_evt_rdtube: RecvTube,
     vm_evt_wrtube: SendTube,
@@ -2451,6 +2459,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 info!("Guest reported panic [Code: {}]", pvpanic_code);
                                 break_to_wait = false;
                             }
+                            VmEventType::WatchdogReset => {
+                                info!("vcpu stall detected");
+                                exit_state = ExitState::WatchdogReset;
+                            }
                         },
                         Err(e) => {
                             warn!("failed to recv VmEvent: {}", e);
@@ -2560,6 +2572,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                             &mut balloon_stats_id,
                                             disk_host_tubes,
                                             &mut linux.pm,
+                                            #[cfg(feature = "gpu")]
+                                            &gpu_control_tube,
                                             #[cfg(feature = "usb")]
                                             Some(&usb_control_tube),
                                             #[cfg(not(feature = "usb"))]

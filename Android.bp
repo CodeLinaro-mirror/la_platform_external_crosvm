@@ -50,7 +50,6 @@ rust_binary {
         "gdbstub_arch",
         "qcow",
         "usb",
-        "virgl_renderer_next",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -112,6 +111,7 @@ rust_binary {
             features: [
                 "gfxstream",
                 "gpu",
+                "virgl_renderer_next",
             ],
         },
         android: {
@@ -178,7 +178,6 @@ rust_test {
         "gdbstub_arch",
         "qcow",
         "usb",
-        "virgl_renderer_next",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -241,6 +240,7 @@ rust_test {
             features: [
                 "gfxstream",
                 "gpu",
+                "virgl_renderer_next",
             ],
         },
         android: {

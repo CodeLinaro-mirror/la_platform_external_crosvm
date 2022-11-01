@@ -233,6 +233,7 @@ pub enum ExitState {
     Crash,
     #[allow(dead_code)]
     GuestPanic,
+    WatchdogReset,
 }
 
 type DeviceResult<T = VirtioDeviceStub> = Result<T>;
@@ -966,6 +967,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             VmEventType::Panic(_) => {
                                 error!("got pvpanic event. this event is not expected on Windows.");
                             }
+                            VmEventType::WatchdogReset => {
+                                info!("vcpu stall detected");
+                                exit_state = ExitState::WatchdogReset;
+                            }
                         }
                         break 'poll;
                     }
@@ -1553,13 +1558,10 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             size.checked_mul(1024 * 1024)
                 .ok_or_else(|| anyhow!("requested swiotlb size too large"))?,
         )
+    } else if matches!(cfg.protection_type, ProtectionType::Unprotected) {
+        None
     } else {
-        match cfg.protection_type {
-            ProtectionType::Protected | ProtectionType::ProtectedWithoutFirmware => {
-                Some(64 * 1024 * 1024)
-            }
-            ProtectionType::Unprotected | ProtectionType::UnprotectedWithFirmware => None,
-        }
+        Some(64 * 1024 * 1024)
     };
 
     let (pflash_image, pflash_block_size) = if let Some(pflash_parameters) = &cfg.pflash_parameters

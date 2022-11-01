@@ -1,8 +1,8 @@
 {
-  "add-module-block": "cargo2android_libs.bp",
+  "add-module-block": "cargo2android_libs.bp.patch",
   "add_workspace": true,
   "device": true,
-  "features": "audio,balloon,usb,virgl_renderer_next",
+  "features": "audio,balloon,usb",
   "global_defaults": "crosvm_defaults",
   "no_presubmit": true,
   "run": true,

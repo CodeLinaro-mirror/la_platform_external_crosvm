@@ -39,6 +39,7 @@ rust_library {
         "librutabaga_gfx",
         "libserde",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libthiserror",
         "libvm_memory",
@@ -50,6 +51,7 @@ rust_library {
     target: {
         host_linux: {
             features: [
+                "gpu",
                 "gdb",
                 "gdbstub",
             ],
@@ -96,6 +98,7 @@ rust_test {
         "librutabaga_gfx",
         "libserde",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libthiserror",
         "libvm_memory",
@@ -104,6 +107,7 @@ rust_test {
     target: {
         host_linux: {
             features: [
+                "gpu",
                 "gdb",
                 "gdbstub",
             ],

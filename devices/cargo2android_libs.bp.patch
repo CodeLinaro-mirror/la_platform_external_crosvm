@@ -3,6 +3,8 @@ target: {
         features: [
             "gfxstream",
             "gpu",
+            "gpu_display",
+            "virgl_renderer_next",
         ],
         rustlibs: [
             "libgpu_display",

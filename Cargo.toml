@@ -104,6 +104,7 @@ exclude = [
     "common/io_uring",
     "common/p9",
     "common/sync",
+    "sandbox",
     "tube_transporter",
     "win_util",
     "tools/examples/baremetal",
@@ -114,6 +115,8 @@ exclude = [
 all-linux = [
     # TODO(b/203105868): Enable remaining features on linux builds.
     "arc_quota",
+    "chromeos",
+    "panic-memfd",
     "audio_cras",
     "composite-disk",
     "crash-report",
@@ -130,7 +133,7 @@ all-linux = [
     "wl-dmabuf",
     "x",
     ]
-win64 = [ "balloon", "crash_report", "haxm", "stats" ]
+win64 = [ "balloon", "crash_report", "haxm", "slirp", "stats" ]
 arc_quota = ["devices/arc_quota"]
 audio = ["devices/audio"]
 audio_cras = ["devices/audio_cras"]
@@ -151,7 +154,7 @@ gdb = [
     "x86_64/gdb",
 ]
 gfxstream = ["devices/gfxstream"]
-gpu = ["devices/gpu", "gpu_display"]
+gpu = ["devices/gpu", "gpu_display", "vm_control/gpu"]
 haxm = ["hypervisor/haxm"]
 whpx = ["devices/whpx", "hypervisor/whpx"]
 vaapi = ["devices/vaapi"]
@@ -162,14 +165,14 @@ linux-armhf = [
     "gdb",
     "tpm",
     ]
-linux-x86_64 = ["all-linux", "plugin"]
+linux-x86_64 = ["all-linux", "plugin", "scudo"]
 linux-aarch64 = ["all-linux"]
 panic-memfd = []
 plugin = ["protos/plugin", "crosvm_plugin", "kvm", "kvm_sys", "protobuf"]
 plugin-render-server = []
 power-monitor-powerd = ["arch/power-monitor-powerd"]
 qcow = ["disk/qcow"]
-slirp = ["devices/slirp"]
+slirp = ["devices/slirp", "net_util/slirp"]
 stats = ["devices/stats"]
 tpm = ["devices/tpm"]
 usb = ["devices/usb"]
@@ -249,6 +252,7 @@ ctrlc = "*"
 futures = "0.3"
 gpu_display = { path = "gpu_display", optional = true }
 rand = "0.8"
+sandbox = { path = "sandbox" }
 tracing = { path = "tracing" }
 tube_transporter = { path = "tube_transporter" }
 winapi = "*"

@@ -11,6 +11,7 @@ target: {
         features: [
             "gfxstream",
             "gpu",
+            "virgl_renderer_next",
         ],
     },
     android: {
