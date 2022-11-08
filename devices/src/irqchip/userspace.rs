@@ -76,6 +76,7 @@ use crate::IrqEventSource;
 use crate::IrqLevelEvent;
 use crate::Pit;
 use crate::PitError;
+use crate::Suspendable;
 
 /// PIT channel 0 timer is connected to IRQ 0
 const PIT_CHANNEL0_IRQ: u32 = 0;
@@ -339,7 +340,7 @@ impl<V: VcpuX86_64 + 'static> UserspaceIrqChip<V> {
 impl Drop for Dropper {
     fn drop(&mut self) {
         for evt in self.kill_evts.split_off(0).into_iter() {
-            if let Err(e) = evt.write(1) {
+            if let Err(e) = evt.signal() {
                 error!("Failed to kill UserspaceIrqChip worker thread: {}", e);
                 return;
             }
@@ -500,7 +501,7 @@ impl<V: VcpuX86_64 + 'static> IrqChip for UserspaceIrqChip<V> {
         } else {
             return Ok(());
         };
-        evt.event.read()?;
+        evt.event.wait()?;
 
         for route in self.routes.lock()[evt.gsi as usize].iter() {
             match *route {
@@ -534,7 +535,7 @@ impl<V: VcpuX86_64 + 'static> IrqChip for UserspaceIrqChip<V> {
                     } else {
                         let mut delayed_events = self.delayed_ioapic_irq_events.lock();
                         delayed_events.events.push(event_index);
-                        delayed_events.trigger.write(1).unwrap();
+                        delayed_events.trigger.signal().unwrap();
                     }
                 }
                 IrqSource::Msi { address, data } => self.send_msi(address as u32, data),
@@ -832,7 +833,7 @@ impl<V: VcpuX86_64 + 'static> IrqChip for UserspaceIrqChip<V> {
         });
 
         if delayed_events.events.is_empty() {
-            delayed_events.trigger.read()?;
+            delayed_events.trigger.wait()?;
         }
         Ok(())
     }
@@ -859,6 +860,8 @@ impl<V: VcpuX86_64 + 'static> BusDevice for UserspaceIrqChip<V> {
         CrosvmDeviceId::UserspaceIrqChip.into()
     }
 }
+
+impl<V: VcpuX86_64 + 'static> Suspendable for UserspaceIrqChip<V> {}
 
 impl<V: VcpuX86_64 + 'static> BusDeviceSync for UserspaceIrqChip<V> {
     fn read(&self, info: BusAccessInfo, data: &mut [u8]) {
@@ -1032,7 +1035,7 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
-    use base::EventReadResult;
+    use base::EventWaitResult;
     use hypervisor::CpuId;
     use hypervisor::CpuIdEntry;
     use hypervisor::DebugRegs;
@@ -1291,9 +1294,9 @@ mod tests {
 
         assert_eq!(
             evt.get_resample()
-                .read_timeout(std::time::Duration::from_secs(1))
+                .wait_timeout(std::time::Duration::from_secs(1))
                 .expect("failed to read_timeout"),
-            EventReadResult::Count(1)
+            EventWaitResult::Signaled
         );
 
         // Setup a ioapic redirection table entry 14.
@@ -1522,9 +1525,9 @@ mod tests {
         // resample event should not be written to
         assert_eq!(
             evt.get_resample()
-                .read_timeout(std::time::Duration::from_millis(10))
+                .wait_timeout(std::time::Duration::from_millis(10))
                 .expect("failed to read_timeout"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
 
         // irq line 1 should be asserted
@@ -1541,9 +1544,9 @@ mod tests {
         // resample event should be written to by ioapic
         assert_eq!(
             evt.get_resample()
-                .read_timeout(std::time::Duration::from_millis(10))
+                .wait_timeout(std::time::Duration::from_millis(10))
                 .expect("failed to read_timeout"),
-            EventReadResult::Count(1)
+            EventWaitResult::Signaled
         );
     }
 

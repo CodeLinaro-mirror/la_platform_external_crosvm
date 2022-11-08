@@ -83,6 +83,7 @@ pub enum GpuMode {
     Mode2D,
     #[serde(rename = "virglrenderer", alias = "3d", alias = "3D")]
     ModeVirglRenderer,
+    #[cfg(feature = "gfxstream")]
     #[serde(rename = "gfxstream")]
     ModeGfxstream,
 }
@@ -908,13 +909,13 @@ impl Worker {
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     WorkerToken::CtrlQueue => {
-                        let _ = self.ctrl_evt.read();
+                        let _ = self.ctrl_evt.wait();
                         // Set flag that control queue is available to be read, but defer reading
                         // until rest of the events are processed.
                         ctrl_available = true;
                     }
                     WorkerToken::CursorQueue => {
-                        let _ = self.cursor_evt.read();
+                        let _ = self.cursor_evt.wait();
                         if self.state.process_queue(&self.mem, &self.cursor_queue) {
                             signal_used_cursor = true;
                         }
@@ -1108,6 +1109,7 @@ impl Gpu {
         let component = match gpu_parameters.mode {
             GpuMode::Mode2D => RutabagaComponentType::Rutabaga2D,
             GpuMode::ModeVirglRenderer => RutabagaComponentType::VirglRenderer,
+            #[cfg(feature = "gfxstream")]
             GpuMode::ModeGfxstream => RutabagaComponentType::Gfxstream,
         };
 
@@ -1126,11 +1128,14 @@ impl Gpu {
             .set_use_glx(gpu_parameters.renderer_use_glx)
             .set_use_surfaceless(gpu_parameters.renderer_use_surfaceless)
             .set_use_vulkan(gpu_parameters.use_vulkan.unwrap_or_default())
-            .set_use_guest_angle(gpu_parameters.gfxstream_use_guest_angle.unwrap_or_default())
-            .set_support_gles31(gpu_parameters.gfxstream_support_gles31)
             .set_wsi(gpu_parameters.wsi.as_ref())
             .set_use_external_blob(external_blob)
             .set_use_render_server(use_render_server);
+
+        #[cfg(feature = "gfxstream")]
+        let rutabaga_builder = rutabaga_builder
+            .set_use_guest_angle(gpu_parameters.gfxstream_use_guest_angle.unwrap_or_default())
+            .set_support_gles31(gpu_parameters.gfxstream_support_gles31);
 
         Gpu {
             exit_evt_wrtube,
@@ -1241,7 +1246,7 @@ impl Drop for Gpu {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
+            let _ = kill_evt.signal();
         }
 
         if let Some(worker_thread) = self.worker_thread.take() {
@@ -1299,27 +1304,24 @@ impl VirtioDevice for Gpu {
     }
 
     fn features(&self) -> u64 {
-        let rutabaga_features = match self.rutabaga_component {
-            RutabagaComponentType::Rutabaga2D => 1 << VIRTIO_GPU_F_EDID,
-            _ => {
-                let mut features_3d = 0;
+        let mut virtio_gpu_features = 1 << VIRTIO_GPU_F_EDID;
 
-                features_3d |= 1 << VIRTIO_GPU_F_VIRGL
-                    | 1 << VIRTIO_GPU_F_RESOURCE_UUID
-                    | 1 << VIRTIO_GPU_F_RESOURCE_BLOB
-                    | 1 << VIRTIO_GPU_F_CONTEXT_INIT
-                    | 1 << VIRTIO_GPU_F_EDID
-                    | 1 << VIRTIO_GPU_F_RESOURCE_SYNC;
+        // If a non-2D component is specified, enable 3D features.  It is possible to run display
+        // contexts without 3D backend (i.e, gfxstream / virglrender), so check for that too.
+        if self.rutabaga_component != RutabagaComponentType::Rutabaga2D || self.context_mask != 0 {
+            virtio_gpu_features |= 1 << VIRTIO_GPU_F_VIRGL
+                | 1 << VIRTIO_GPU_F_RESOURCE_UUID
+                | 1 << VIRTIO_GPU_F_RESOURCE_BLOB
+                | 1 << VIRTIO_GPU_F_CONTEXT_INIT
+                | 1 << VIRTIO_GPU_F_EDID
+                | 1 << VIRTIO_GPU_F_RESOURCE_SYNC;
 
-                if self.udmabuf {
-                    features_3d |= 1 << VIRTIO_GPU_F_CREATE_GUEST_HANDLE;
-                }
-
-                features_3d
+            if self.udmabuf {
+                virtio_gpu_features |= 1 << VIRTIO_GPU_F_CREATE_GUEST_HANDLE;
             }
-        };
+        }
 
-        self.base_features | rutabaga_features
+        self.base_features | virtio_gpu_features
     }
 
     fn ack_features(&mut self, value: u64) {

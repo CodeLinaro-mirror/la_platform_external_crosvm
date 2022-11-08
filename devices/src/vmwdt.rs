@@ -35,6 +35,7 @@ use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::DeviceId;
+use crate::Suspendable;
 
 // Registers offsets
 const VMWDT_REG_STATUS: u32 = 0x00;
@@ -235,7 +236,7 @@ impl Vmwdt {
 
 impl Drop for Vmwdt {
     fn drop(&mut self) {
-        if let Err(e) = self.kill_evt.write(1) {
+        if let Err(e) = self.kill_evt.signal() {
             error!("Failed to stop the bg thread: {}", e);
             return;
         }
@@ -339,6 +340,9 @@ impl BusDevice for Vmwdt {
         }
     }
 }
+
+impl Suspendable for Vmwdt {}
+
 #[cfg(test)]
 mod tests {
     use std::thread::sleep;

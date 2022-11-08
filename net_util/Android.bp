@@ -59,6 +59,7 @@ rust_test {
         "liblibc",
         "libnet_sys",
         "libserde",
+        "libserde_json",
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",

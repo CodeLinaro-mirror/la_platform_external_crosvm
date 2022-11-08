@@ -251,6 +251,8 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
                 self.disk.block_size,
                 self.disk.id,
                 disk_device_tube,
+                None,
+                None,
             )
             .context("failed to create block device")?,
         ))
@@ -279,6 +281,8 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
                 disk.block_size,
                 disk.id,
                 disk_device_tube,
+                None,
+                None,
             )
             .context("failed to create block device")?,
         );

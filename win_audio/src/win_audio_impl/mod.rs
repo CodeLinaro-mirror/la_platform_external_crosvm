@@ -29,7 +29,7 @@ use base::AsRawDescriptor;
 use base::Error;
 use base::Event;
 use base::EventExt;
-use base::EventReadResult;
+use base::EventWaitResult;
 use completion_handler::WinAudioActivateAudioInterfaceCompletionHandler;
 use completion_handler::ACTIVATE_AUDIO_INTERFACE_COMPLETION_EVENT;
 use metrics::event_details_proto::RecordDetails;
@@ -265,7 +265,7 @@ impl DeviceRenderer {
             "Audio Client Initialize() failed."
         )?;
 
-        let ready_to_read_event = Event::new_with_manual_reset(false).unwrap();
+        let ready_to_read_event = Event::new_auto_reset().unwrap();
         // Safe because `ready_to_read_event` will be initialized and also it has the same
         // lifetime as `audio_client` because they are owned by DeviceRenderer on return
         let hr = unsafe { audio_client.SetEventHandle(ready_to_read_event.as_raw_descriptor()) };
@@ -629,8 +629,8 @@ impl DeviceRenderer {
             .read_timeout(ACTIVATE_AUDIO_EVENT_TIMEOUT)
         {
             Ok(event_result) => match event_result {
-                EventReadResult::Count(_) => {}
-                EventReadResult::Timeout => {
+                EventWaitResult::Signaled => {}
+                EventWaitResult::TimedOut => {
                     return Err(RenderError::ActivateAudioEventTimeoutError);
                 }
             },

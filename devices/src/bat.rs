@@ -28,6 +28,7 @@ use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::DeviceId;
 use crate::IrqLevelEvent;
+use crate::Suspendable;
 
 /// Errors for battery devices.
 #[sorted]
@@ -369,7 +370,7 @@ impl Drop for GoldfishBattery {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do with a failure.
-            let _ = kill_evt.write(1);
+            let _ = kill_evt.signal();
         }
         if let Some(thread) = self.monitor_thread.take() {
             let _ = thread.join();
@@ -472,3 +473,5 @@ impl Aml for GoldfishBattery {
         .to_aml_bytes(bytes);
     }
 }
+
+impl Suspendable for GoldfishBattery {}
