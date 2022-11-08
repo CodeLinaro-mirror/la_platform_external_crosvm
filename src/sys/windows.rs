@@ -72,6 +72,9 @@ use base::VmEventType;
 use base::WaitContext;
 use broker_ipc::common_child_setup;
 use broker_ipc::CommonChildStartupArgs;
+use crosvm_cli::sys::windows::exit::Exit;
+use crosvm_cli::sys::windows::exit::ExitContext;
+use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
 use devices::tsc::get_tsc_sync_mitigations;
@@ -206,9 +209,6 @@ use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::sys::config::HypervisorKind;
 #[cfg(any(feature = "gvm", feature = "whpx"))]
 use crate::crosvm::sys::config::IrqChipKind;
-use crate::crosvm::sys::windows::exit::Exit;
-use crate::crosvm::sys::windows::exit::ExitContext;
-use crate::crosvm::sys::windows::exit::ExitContextAnyhow;
 #[cfg(feature = "stats")]
 use crate::crosvm::sys::windows::stats::StatisticsCollector;
 use crate::sys::windows::metrics::log_descriptor;
@@ -263,6 +263,8 @@ fn create_block_device(cfg: &Config, disk: &DiskOption, disk_device_tube: Tube) 
         disk.block_size,
         disk.id,
         Some(disk_device_tube),
+        None,
+        None,
     )
     .exit_context(Exit::BlockDeviceNew, "failed to create block device")?;
 
@@ -1322,7 +1324,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     let mut res = Ok(exit_state);
     guest_os.irq_chip.kick_halted_vcpus();
-    let _ = exit_evt.write(1);
+    let _ = exit_evt.signal();
     // Ensure any child threads have ended by sending the Exit vm event (possibly again) to ensure
     // their run loops are aborted.
     let _ = vm_evt_wrtube.send::<VmEventType>(&VmEventType::Exit);
@@ -1742,7 +1744,7 @@ fn set_tsc_clock_snapshot() {
             // The host builtin clock ids are all offset from the guest ids by
             // HOST_GUEST_CLOCK_ID_OFFSET when the traces are merged. Because this snapshot
             // contains both a guest and host clock, we need to offset it before merge.
-            perfetto::BuiltinClock::Tsc as u32 + tracing::HOST_GUEST_CLOCK_ID_OFFSET,
+            perfetto::BuiltinClock::Tsc as u32 + cros_tracing::HOST_GUEST_CLOCK_ID_OFFSET,
             host_tsc,
         )
         .set_multiplier(freq as u64),
@@ -1809,9 +1811,9 @@ fn run_config_inner(cfg: Config) -> Result<ExitState> {
         );
     }
 
-    tracing::init();
+    cros_tracing::init();
     #[cfg(feature = "cperfetto")]
-    tracing::add_per_trace_callback(set_tsc_clock_snapshot);
+    cros_tracing::add_per_trace_callback(set_tsc_clock_snapshot);
 
     let components: VmComponents = setup_vm_components(&cfg)?;
 

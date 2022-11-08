@@ -27,6 +27,7 @@ rust_library {
     rustlibs: [
         "libarch",
         "libbase_rust",
+        "libcros_fdt",
         "libdata_model",
         "libdevices",
         "libgdbstub",

@@ -38,7 +38,7 @@ use crate::descriptor::FromRawDescriptor;
 use crate::descriptor::IntoRawDescriptor;
 use crate::descriptor::SafeDescriptor;
 use crate::Event;
-use crate::EventReadResult;
+use crate::EventWaitResult;
 
 /// A safe wrapper around Windows synchapi methods used to mimic Linux eventfd (man 2 eventfd).
 /// Since the eventfd isn't using "EFD_SEMAPHORE", we don't need to keep count so we can just use
@@ -50,24 +50,14 @@ pub(crate) struct PlatformEvent {
 }
 
 pub trait EventExt {
-    fn reset(&self) -> Result<()>;
-    fn new_with_manual_reset(manual_reset: bool) -> Result<Event>;
     fn new_auto_reset() -> Result<Event>;
     fn open(name: &str) -> Result<Event>;
     fn create_event_with_name(name: &str) -> Result<Event>;
 }
 
 impl EventExt for Event {
-    fn reset(&self) -> Result<()> {
-        self.0.reset()
-    }
-
-    fn new_with_manual_reset(manual_reset: bool) -> Result<Event> {
-        PlatformEvent::new_with_manual_reset(manual_reset).map(Event)
-    }
-
     fn new_auto_reset() -> Result<Event> {
-        Event::new_with_manual_reset(false)
+        PlatformEvent::new_with_manual_reset(false).map(Event)
     }
 
     fn open(name: &str) -> Result<Event> {
@@ -143,7 +133,8 @@ impl PlatformEvent {
         PlatformEvent::new_with_manual_reset(false)
     }
 
-    pub fn write(&self, _v: u64) -> Result<()> {
+    /// See `Event::signal`.
+    pub fn signal(&self) -> Result<()> {
         let event_result = unsafe { SetEvent(self.event_handle.as_raw_descriptor()) };
         if event_result == 0 {
             return errno_result();
@@ -151,11 +142,12 @@ impl PlatformEvent {
         Ok(())
     }
 
-    pub fn read(&self) -> Result<u64> {
-        let read_result = self.read_timeout(Duration::new(std::i64::MAX as u64, 0));
+    /// See `Event::wait`.
+    pub fn wait(&self) -> Result<()> {
+        let read_result = self.wait_timeout(Duration::new(std::i64::MAX as u64, 0));
         match read_result {
-            Ok(EventReadResult::Count(c)) => Ok(c),
-            Ok(EventReadResult::Timeout) => Err(Error::new(WAIT_TIMEOUT)),
+            Ok(EventWaitResult::Signaled) => Ok(()),
+            Ok(EventWaitResult::TimedOut) => Err(Error::new(WAIT_TIMEOUT)),
             Err(e) => Err(e),
         }
     }
@@ -169,11 +161,8 @@ impl PlatformEvent {
         }
     }
 
-    /// Blocks for a maximum of `timeout` duration until the the event is signaled. If
-    /// a timeout does not occur then the count is returned as a EventReadResult::Count(1),
-    /// and the event resets. If a timeout does occur then this function will return
-    /// EventReadResult::Timeout.
-    pub fn read_timeout(&self, timeout: Duration) -> Result<EventReadResult> {
+    /// See `Event::wait_timeout`.
+    pub fn wait_timeout(&self, timeout: Duration) -> Result<EventWaitResult> {
         let wait_result = unsafe {
             WaitForSingleObject(
                 self.event_handle.as_raw_descriptor(),
@@ -184,13 +173,13 @@ impl PlatformEvent {
         // We are using an infinite timeout so we can ignore WAIT_ABANDONED
         match wait_result {
             WAIT_FAILED => errno_result(),
-            WAIT_TIMEOUT => Ok(EventReadResult::Timeout),
+            WAIT_TIMEOUT => Ok(EventWaitResult::TimedOut),
             _ => {
                 // Safe because self manages the handle and we know it was valid as it
                 // was just successfully waited upon. It is safe to reset a non manual reset event as well.
                 match unsafe { ResetEvent(self.event_handle.as_raw_descriptor()) } {
                     0 => errno_result(),
-                    _ => Ok(EventReadResult::Count(1)),
+                    _ => Ok(EventWaitResult::Signaled),
                 }
             }
         }
@@ -270,14 +259,14 @@ mod tests {
     #[test]
     fn read_write() {
         let evt = PlatformEvent::new().unwrap();
-        evt.write(55).unwrap();
-        assert_eq!(evt.read(), Ok(1));
+        evt.signal().unwrap();
+        assert_eq!(evt.wait(), Ok(()));
     }
 
     #[test]
     fn read_write_auto_reset() {
         let evt = PlatformEvent::new_auto_reset().unwrap();
-        evt.write(55).unwrap();
+        evt.signal().unwrap();
 
         // Wait for the notification.
         let result = unsafe { WaitForSingleObject(evt.as_raw_descriptor(), INFINITE) };
@@ -291,7 +280,7 @@ mod tests {
     #[test]
     fn read_write_notifies_until_read() {
         let evt = PlatformEvent::new().unwrap();
-        evt.write(55).unwrap();
+        evt.signal().unwrap();
 
         // Wait for the notification.
         let result = unsafe { WaitForSingleObject(evt.as_raw_descriptor(), INFINITE) };
@@ -302,7 +291,7 @@ mod tests {
         assert_eq!(result, WAIT_OBJECT_0);
 
         // Read and ensure the notification has cleared.
-        evt.read().expect("Failed to read event.");
+        evt.wait().expect("Failed to read event.");
         let result = unsafe { WaitForSingleObject(evt.as_raw_descriptor(), 0) };
         assert_eq!(result, WAIT_TIMEOUT);
     }
@@ -311,17 +300,17 @@ mod tests {
     fn clone() {
         let evt = PlatformEvent::new().unwrap();
         let evt_clone = evt.try_clone().unwrap();
-        evt.write(923).unwrap();
-        assert_eq!(evt_clone.read(), Ok(1));
+        evt.signal().unwrap();
+        assert_eq!(evt_clone.wait(), Ok(()));
     }
 
     #[test]
     fn timeout() {
         let evt = PlatformEvent::new().expect("failed to create event");
         assert_eq!(
-            evt.read_timeout(Duration::from_millis(1))
+            evt.wait_timeout(Duration::from_millis(1))
                 .expect("failed to read from event with timeout"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
     }
 }

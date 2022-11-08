@@ -13,6 +13,7 @@ package {
 rust_test {
     name: "devices_test_src_lib",
     defaults: ["crosvm_defaults"],
+    // has rustc warnings
     host_supported: true,
     crate_name: "devices",
     cargo_env_compat: true,
@@ -43,6 +44,8 @@ rust_test {
         "libchrono",
         "libcrc32fast",
         "libcros_async",
+        "libcros_tracing",
+        "libcrosvm_cli",
         "libdata_model",
         "libdisk",
         "libfuse_rust",
@@ -69,7 +72,6 @@ rust_test {
         "libsync_rust",
         "libtempfile",
         "libthiserror",
-        "libtracing",
         "libusb_util",
         "libuuid",
         "libvfio_sys",
@@ -104,6 +106,7 @@ rust_test {
 rust_library {
     name: "libdevices",
     defaults: ["crosvm_defaults"],
+    // has rustc warnings
     host_supported: true,
     crate_name: "devices",
     cargo_env_compat: true,
@@ -127,6 +130,8 @@ rust_library {
         "libcfg_if",
         "libchrono",
         "libcros_async",
+        "libcros_tracing",
+        "libcrosvm_cli",
         "libdata_model",
         "libdisk",
         "libfuse_rust",
@@ -152,7 +157,6 @@ rust_library {
         "libsmallvec",
         "libsync_rust",
         "libthiserror",
-        "libtracing",
         "libusb_util",
         "libuuid",
         "libvfio_sys",

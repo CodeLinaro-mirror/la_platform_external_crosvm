@@ -25,7 +25,7 @@ use anyhow::Result;
 use base::error;
 use base::AsRawDescriptor;
 use base::Event;
-use base::EventReadResult;
+use base::EventWaitResult;
 use base::RawDescriptor;
 #[cfg(feature = "kiwi")]
 use base::Tube;
@@ -36,6 +36,8 @@ use metrics::Metrics;
 pub use surface::NoopSurface as Surface;
 #[cfg(feature = "kiwi")]
 use sync::Mutex;
+use vm_control::gpu::DisplayMode;
+use vm_control::gpu::DisplayParameters;
 use window_message_processor::DisplaySendToWndProc;
 pub use window_procedure_thread::WindowProcedureThread;
 
@@ -60,6 +62,20 @@ pub struct DisplayProperties {
     pub window_height: u32,
     #[cfg(feature = "kiwi")]
     pub gpu_main_display_tube: Option<Arc<Mutex<Tube>>>,
+}
+
+impl From<&DisplayParameters> for DisplayProperties {
+    fn from(params: &DisplayParameters) -> Self {
+        let is_fullscreen = matches!(params.mode, DisplayMode::BorderlessFullScreen(_));
+        let (window_width, window_height) = params.get_window_size();
+
+        Self {
+            start_hidden: params.hidden,
+            is_fullscreen,
+            window_width,
+            window_height,
+        }
+    }
 }
 
 pub struct DisplayWin {
@@ -230,10 +246,10 @@ impl GpuDisplaySurface for SurfaceWin {
     fn close_requested(&self) -> bool {
         match self
             .display_closed_event
-            .read_timeout(Duration::from_secs(0))
+            .wait_timeout(Duration::from_secs(0))
         {
-            Ok(EventReadResult::Count(_)) => true,
-            Ok(EventReadResult::Timeout) => false,
+            Ok(EventWaitResult::Signaled) => true,
+            Ok(EventWaitResult::TimedOut) => false,
             Err(e) => {
                 error!("Failed to read whether display is closed: {}", e);
                 false

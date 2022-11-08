@@ -10,7 +10,7 @@ cfg_if::cfg_if! {
         use base::Tube;
         use std::thread;
         use metrics_crate::MetricsController;
-        use crate::crosvm::sys::windows::exit::{Exit, ExitContext, ExitContextAnyhow};
+        use crosvm_cli::sys::windows::exit::{Exit, ExitContext, ExitContextAnyhow};
         use crate::sys::windows::main::set_bootstrap_arguments;
         use tube_transporter::{TubeToken, TubeTransporterReader};
         use base::FromRawDescriptor;
@@ -68,7 +68,7 @@ pub(crate) fn run_metrics(#[allow(unused_variables)] args: RunMetricsCommand) ->
 
         let metrics_tubes = bootstrap_tube.recv::<Vec<Tube>>().unwrap();
 
-        tracing::init();
+        cros_tracing::init();
         crate::sys::sandbox_lower_token()?;
 
         let mut metrics_controller = MetricsController::new(metrics_tubes);
