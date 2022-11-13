@@ -95,6 +95,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -142,6 +145,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -193,6 +199,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -240,6 +249,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -291,6 +303,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -324,6 +339,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -375,6 +393,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -408,6 +429,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -459,6 +483,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -506,6 +533,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -557,6 +587,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -590,6 +623,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -641,6 +677,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -690,6 +729,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -723,6 +765,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -774,6 +819,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -807,6 +855,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -858,6 +909,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -905,6 +959,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -956,6 +1013,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -1005,6 +1065,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -1038,6 +1101,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -1089,6 +1155,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -1136,6 +1205,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -1187,6 +1259,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -1220,6 +1295,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -1271,6 +1349,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -1304,6 +1385,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -1355,6 +1439,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -1402,6 +1489,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
@@ -1453,6 +1543,9 @@ prebuilt_etc {
         android_x86: {
             enabled: false,
         },
+        android_riscv64: {
+            enabled: false,
+        },
     },
 }
 
@@ -1500,6 +1593,9 @@ prebuilt_etc {
             enabled: false,
         },
         android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
             enabled: false,
         },
     },
