@@ -3,21 +3,27 @@
 // found in the LICENSE file.
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use anyhow::Context;
+use anyhow::Result;
+use resources::SystemAllocator;
 use sync::Mutex;
+use vm_control::GpeNotify;
 
-use crate::bus::{HostHotPlugKey, HotPlugBus};
+use crate::bus::HostHotPlugKey;
+use crate::bus::HotPlugBus;
 use crate::pci::pci_configuration::PciCapabilityID;
-use crate::pci::{MsiConfig, PciAddress, PciCapability, PciDeviceError};
-
 use crate::pci::pcie::pci_bridge::PciBridgeBusRange;
-use crate::pci::pcie::pcie_device::{PciPmcCap, PcieCap, PcieDevice};
+use crate::pci::pcie::pcie_device::PciPmcCap;
+use crate::pci::pcie::pcie_device::PcieCap;
+use crate::pci::pcie::pcie_device::PcieDevice;
 use crate::pci::pcie::pcie_host::PcieHostPort;
 use crate::pci::pcie::pcie_port::PciePort;
 use crate::pci::pcie::*;
-
-use anyhow::Result;
-use resources::SystemAllocator;
-use vm_control::GpeNotify;
+use crate::pci::MsiConfig;
+use crate::pci::PciAddress;
+use crate::pci::PciCapability;
+use crate::pci::PciDeviceError;
 
 const PCIE_RP_DID: u16 = 0x3420;
 pub struct PcieRootPort {
@@ -37,6 +43,7 @@ impl PcieRootPort {
                 0,
                 secondary_bus_num,
                 slot_implemented,
+                true,
             ),
             downstream_devices: BTreeMap::new(),
             hotplug_out_begin: false,
@@ -47,7 +54,8 @@ impl PcieRootPort {
     /// Constructs a new PCIE root port which associated with the host physical pcie RP
     pub fn new_from_host(pcie_host: PcieHostPort, slot_implemented: bool) -> Result<Self> {
         Ok(PcieRootPort {
-            pcie_port: PciePort::new_from_host(pcie_host, slot_implemented),
+            pcie_port: PciePort::new_from_host(pcie_host, slot_implemented, true)
+                .context("PciePort::new_from_host failed")?,
             downstream_devices: BTreeMap::new(),
             hotplug_out_begin: false,
             removed_downstream: Vec::new(),
@@ -62,6 +70,10 @@ impl PcieDevice for PcieRootPort {
 
     fn debug_label(&self) -> String {
         self.pcie_port.debug_label()
+    }
+
+    fn preferred_address(&self) -> Option<PciAddress> {
+        self.pcie_port.preferred_address()
     }
 
     fn allocate_address(
@@ -130,7 +142,7 @@ impl HotPlugBus for PcieRootPort {
         }
 
         self.pcie_port
-            .set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_PDC | PCIE_SLTSTA_ABP);
+            .set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP);
         self.pcie_port.trigger_hp_or_pme_interrupt();
     }
 
@@ -147,8 +159,7 @@ impl HotPlugBus for PcieRootPort {
                 self.removed_downstream.push(*guest_pci_addr);
             }
 
-            self.pcie_port
-                .set_slot_status(PCIE_SLTSTA_PDC | PCIE_SLTSTA_ABP);
+            self.pcie_port.set_slot_status(PCIE_SLTSTA_ABP);
             self.pcie_port.trigger_hp_or_pme_interrupt();
 
             if self.pcie_port.is_host() {
@@ -180,20 +191,18 @@ impl HotPlugBus for PcieRootPort {
 
     fn get_hotplug_device(&self, host_key: HostHotPlugKey) -> Option<PciAddress> {
         for (guest_address, host_info) in self.downstream_devices.iter() {
-            match host_info {
-                HostHotPlugKey::Vfio { host_addr } => {
-                    let saved_addr = *host_addr;
-                    match host_key {
-                        HostHotPlugKey::Vfio { host_addr } => {
-                            if host_addr == saved_addr {
-                                return Some(*guest_address);
-                            }
-                        }
-                    }
-                }
+            if host_key == *host_info {
+                return Some(*guest_address);
             }
         }
+        None
+    }
 
+    fn is_empty(&self) -> bool {
+        self.downstream_devices.is_empty()
+    }
+
+    fn get_hotplug_key(&self) -> Option<HostHotPlugKey> {
         None
     }
 }

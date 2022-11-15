@@ -6,22 +6,33 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::os::windows::fs::OpenOptionsExt;
 
-use anyhow::{bail, Context};
+use anyhow::bail;
+use anyhow::Context;
 use argh::FromArgs;
-use base::{enable_high_res_timers, info, Event, RawDescriptor};
-use broker_ipc::{common_child_setup, CommonChildStartupArgs};
+use base::enable_high_res_timers;
+use base::info;
+use base::Event;
+use base::RawDescriptor;
+use broker_ipc::common_child_setup;
+use broker_ipc::CommonChildStartupArgs;
 use cros_async::Executor;
-use disk::{async_ok, AsyncDisk, SingleFileDisk};
+use disk::async_ok;
+use disk::AsyncDisk;
+use disk::SingleFileDisk;
 use hypervisor::ProtectionType;
 use tracing;
 use tube_transporter::TubeToken;
-use winapi::um::winnt::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+use winapi::um::winnt::FILE_SHARE_READ;
+use winapi::um::winnt::FILE_SHARE_WRITE;
 
 use crate::virtio::base_features;
 use crate::virtio::block::block::DiskOption;
 use crate::virtio::vhost::user::device::block::BlockBackend;
-use crate::virtio::vhost::user::device::handler::read_from_tube_transporter;
+use crate::virtio::vhost::user::device::handler::sys::windows::read_from_tube_transporter;
 use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
+use crate::virtio::vhost::user::device::VhostUserDevice;
+use crate::virtio::vhost::user::VhostUserBackend;
+use crate::virtio::BlockAsync;
 
 impl BlockBackend {
     pub(in crate::virtio::vhost::user::device::block) fn new_from_files(
@@ -31,10 +42,19 @@ impl BlockBackend {
         read_only: bool,
         sparse: bool,
         block_size: u32,
-    ) -> anyhow::Result<BlockBackend> {
+    ) -> anyhow::Result<Box<dyn VhostUserBackend>> {
         // Safe because the executor is initialized in main() below.
-        let disk = Box::new(SingleFileDisk::new_from_files(files, ex)?) as Box<dyn AsyncDisk>;
-        Self::new_from_async_disk(ex, disk, base_features, read_only, sparse, block_size)
+        let disk = Box::new(SingleFileDisk::new_from_files(files, ex)?).into_inner();
+        Box::new(BlockAsync::new(
+            base_features,
+            disk,
+            read_only,
+            sparse,
+            block_size,
+            None,
+            None,
+        )?)
+        .into_backend(ex)
     }
 }
 
@@ -53,9 +73,9 @@ fn open_disk_file(disk_option: &DiskOption, take_write_lock: bool) -> anyhow::Re
         .context("Failed to open disk file")
 }
 
-#[derive(FromArgs)]
-#[argh(description = "")]
-struct Options {
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "block", description = "")]
+pub struct Options {
     #[argh(
         option,
         description = "pipe handle end for Tube Transporter",
@@ -64,22 +84,7 @@ struct Options {
     bootstrap: usize,
 }
 
-pub(in crate::virtio::vhost::user::device::block) fn start_device(
-    program_name: &str,
-    args: &[&str],
-) -> anyhow::Result<()> {
-    let opts = match Options::from_args(&[program_name], args) {
-        Ok(opts) => opts,
-        Err(e) => {
-            if e.status.is_err() {
-                bail!(e.output);
-            } else {
-                println!("{}", e.output);
-            }
-            return Ok(());
-        }
-    };
-
+pub fn start_device(opts: Options) -> anyhow::Result<()> {
     tracing::init();
 
     let raw_transport_tube = opts.bootstrap as RawDescriptor;
@@ -129,16 +134,18 @@ pub(in crate::virtio::vhost::user::device::block) fn start_device(
         disk_option.block_size,
     )?;
 
-    if sandbox::is_sandbox_target() {
-        sandbox::TargetServices::get()
-            .expect("failed to get target services")
-            .unwrap()
-            .lower_token();
-    }
+    // TODO(b/213170185): Uncomment once sandbox is upstreamed.
+    //     if sandbox::is_sandbox_target() {
+    //         sandbox::TargetServices::get()
+    //             .expect("failed to get target services")
+    //             .unwrap()
+    //             .lower_token();
+    //     }
 
     // This is basically the event loop.
-    let handler = DeviceRequestHandler::new(Box::new(block));
+    let handler = DeviceRequestHandler::new(block);
 
+    info!("vhost-user disk device ready, starting run loop...");
     if let Err(e) = ex.run_until(handler.run(vhost_user_tube, exit_event, &ex)) {
         bail!("error occurred: {}", e);
     }

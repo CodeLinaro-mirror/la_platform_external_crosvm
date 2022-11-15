@@ -7,24 +7,33 @@ use std::io::Error as IoError;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
-use base::{error, warn, Error as SysError, Event, EventToken, WaitContext};
+use base::error;
+use base::warn;
+use base::Error as SysError;
+use base::Event;
+use base::EventToken;
+use base::WaitContext;
 use bit_field::BitField1;
 use bit_field::*;
-use hypervisor::{PitChannelState, PitRWMode, PitRWState, PitState};
+use hypervisor::PitChannelState;
+use hypervisor::PitRWMode;
+use hypervisor::PitRWState;
+use hypervisor::PitState;
 use remain::sorted;
 use sync::Mutex;
 use thiserror::Error;
 
-#[cfg(not(test))]
-use base::Clock;
-#[cfg(test)]
-use base::FakeClock as Clock;
-
-#[cfg(test)]
-use base::FakeTimer as Timer;
-#[cfg(not(test))]
-use base::Timer;
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        use base::FakeClock as Clock;
+        use base::FakeTimer as Timer;
+    } else {
+        use base::Clock;
+        use base::Timer;
+    }
+}
 
 use crate::bus::BusAccessInfo;
 use crate::pci::CrosvmDeviceId;
@@ -386,11 +395,11 @@ struct PitCounter {
     status: u8,
     // Stores time of starting timer. Used for calculating remaining count, if an alarm is
     // scheduled.
-    start: Option<Clock>,
+    start: Option<Instant>,
     // Current time.
     clock: Arc<Mutex<Clock>>,
     // Time when object was created. Used for a 15us counter.
-    creation_time: Clock,
+    creation_time: Instant,
     // The number of the counter. The behavior for each counter is slightly different.
     // Note that once a PitCounter is created, this value should never change.
     counter_id: usize,
@@ -419,7 +428,7 @@ impl Drop for PitCounter {
             // This should not fail - timer.clear() only fails if timerfd_settime fails, which
             // only happens due to invalid arguments or bad file descriptors. The arguments to
             // timerfd_settime are constant, so its arguments won't be invalid, and it manages
-            // the file descriptor safely (we don't use the unsafe FromRawFd) so its file
+            // the file descriptor safely (we don't use the unsafe FromRawDescriptor) so its file
             // descriptor will be valid.
             self.timer.clear().unwrap();
         }
@@ -432,21 +441,6 @@ fn adjust_count(count: u32) -> u32 {
         MAX_TIMER_FREQ
     } else {
         count
-    }
-}
-
-/// Get the current monotonic time of host in nanoseconds
-fn get_monotonic_time() -> u64 {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // Safe because time struct is local to this function and we check the returncode
-    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
-    if ret != 0 {
-        0
-    } else {
-        time.tv_sec as u64 * 1_000_000_000u64 + time.tv_nsec as u64
     }
 }
 
@@ -485,11 +479,8 @@ impl PitCounter {
     }
 
     fn get_channel_state(&self) -> PitChannelState {
-        // Crosvm Pit stores start as an Instant. We do our best to convert to the host's
-        // monotonic clock by taking the current monotonic time and subtracting the elapsed
-        // time since self.start.
         let load_time = match &self.start {
-            Some(t) => get_monotonic_time() - t.elapsed().as_nanos() as u64,
+            Some(t) => t.saturating_duration_since(self.creation_time).as_nanos() as u64,
             None => 0,
         };
 
@@ -566,16 +557,9 @@ impl PitCounter {
         self.read_low_byte = state.read_state == PitRWState::Word1;
         self.wrote_low_byte = state.write_state == PitRWState::Word1;
 
-        // To convert the count_load_time to an instant we have to convert it to a
-        // duration by comparing it to get_monotonic_time.  Then subtract that duration from
-        // a "now" instant.
         self.start = self
-            .clock
-            .lock()
-            .now()
-            .checked_sub(std::time::Duration::from_nanos(
-                get_monotonic_time() - state.count_load_time,
-            ));
+            .creation_time
+            .checked_add(Duration::from_nanos(state.count_load_time));
     }
 
     fn get_access_mode(&self) -> Option<CommandAccess> {
@@ -675,7 +659,7 @@ impl PitCounter {
             .clock
             .lock()
             .now()
-            .duration_since(&self.creation_time)
+            .duration_since(self.creation_time)
             .subsec_micros();
         let refresh_clock = us % 15 == 0;
         let mut speaker = SpeakerPortFields::new();
@@ -729,9 +713,9 @@ impl PitCounter {
             Some(CommandMode::CommandInterrupt)
             | Some(CommandMode::CommandHWOneShot)
             | Some(CommandMode::CommandSWStrobe)
-            | Some(CommandMode::CommandHWStrobe) => Duration::new(0, 0),
+            | Some(CommandMode::CommandHWStrobe) => None,
             Some(CommandMode::CommandRateGen) | Some(CommandMode::CommandSquareWaveGen) => {
-                timer_len
+                Some(timer_len)
             }
             // Don't arm timer if invalid mode.
             None => {
@@ -839,18 +823,18 @@ impl PitCounter {
         }
     }
 
-    fn safe_arm_timer(&mut self, mut due: Duration, period: Duration) {
+    fn safe_arm_timer(&mut self, mut due: Duration, period: Option<Duration>) {
         if due == Duration::new(0, 0) {
             due = Duration::from_nanos(1);
         }
 
-        if let Err(e) = self.timer.reset(due, Some(period)) {
+        if let Err(e) = self.timer.reset(due, period) {
             error!("failed to reset timer: {}", e);
         }
     }
 
     fn get_ticks_passed(&self) -> u64 {
-        match &self.start {
+        match self.start {
             None => 0,
             Some(t) => {
                 let dur = self.clock.lock().now().duration_since(t);

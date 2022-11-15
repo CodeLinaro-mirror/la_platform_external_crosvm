@@ -41,22 +41,30 @@
 //! ```
 pub mod async_api;
 
-use async_trait::async_trait;
 use std::cmp::min;
 use std::error;
-use std::fmt::{self, Display};
-use std::io::{self, Read, Write};
+use std::fmt;
+use std::fmt::Display;
+use std::io;
+use std::io::Read;
+use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::io::RawFd;
+use std::os::unix::io::RawFd as RawDescriptor;
+#[cfg(windows)]
+use std::os::windows::io::RawHandle as RawDescriptor;
 use std::result::Result;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
-pub use async_api::{AsyncStream, AudioStreamsExecutor};
+pub use async_api::AsyncStream;
+pub use async_api::AudioStreamsExecutor;
+use async_trait::async_trait;
 use remain::sorted;
+use serde::Serialize;
 use thiserror::Error;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize)]
 pub enum SampleFormat {
     U8,
     S16LE,
@@ -86,6 +94,27 @@ impl Display for SampleFormat {
             S32LE => write!(f, "Signed 32 bit Little Endian"),
         }
     }
+}
+
+impl FromStr for SampleFormat {
+    type Err = SampleFormatError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "U8" => Ok(SampleFormat::U8),
+            "S16_LE" => Ok(SampleFormat::S16LE),
+            "S24_LE" => Ok(SampleFormat::S24LE),
+            "S32_LE" => Ok(SampleFormat::S32LE),
+            _ => Err(SampleFormatError::InvalidSampleFormat),
+        }
+    }
+}
+
+/// Errors that are possible from a `SampleFormat`.
+#[sorted]
+#[derive(Error, Debug)]
+pub enum SampleFormatError {
+    #[error("Must be in [U8, S16_LE, S24_LE, S32_LE]")]
+    InvalidSampleFormat,
 }
 
 /// Valid directions of an audio stream.
@@ -137,6 +166,12 @@ impl FromStr for StreamEffect {
 pub enum Error {
     #[error("Unimplemented")]
     Unimplemented,
+}
+
+/// `StreamSourceGenerator` is a trait used to abstract types that create [`StreamSource`].
+/// It can be used when multiple types of `StreamSource` are needed.
+pub trait StreamSourceGenerator: Sync + Send {
+    fn generate(&self) -> Result<Box<dyn StreamSource>, BoxError>;
 }
 
 /// `StreamSource` creates streams for playback or capture of audio.
@@ -227,8 +262,7 @@ pub trait StreamSource: Send {
 
     /// Returns any open file descriptors needed by the implementor. The FD list helps users of the
     /// StreamSource enter Linux jails making sure not to close needed FDs.
-    #[cfg(unix)]
-    fn keep_fds(&self) -> Option<Vec<RawFd>> {
+    fn keep_rds(&self) -> Option<Vec<RawDescriptor>> {
         None
     }
 }
@@ -325,6 +359,8 @@ pub trait AsyncBufferCommit {
 pub enum PlaybackBufferError {
     #[error("Invalid buffer length")]
     InvalidLength,
+    #[error("Slicing of playback buffer out of bounds")]
+    SliceOutOfBounds,
 }
 
 /// `AudioBuffer` is one buffer that holds buffer_size audio frames.
@@ -443,6 +479,26 @@ impl<'a> PlaybackBuffer<'a> {
     pub fn commit(&mut self) {
         self.drop
             .commit(self.buffer.offset / self.buffer.frame_size);
+    }
+
+    /// Writes up to `size` bytes directly to this buffer inside of the given callback function
+    /// with a buffer size error check.
+    ///
+    /// TODO(b/238933737): Investigate removing this method for Windows when
+    /// switching from Ac97 to Virtio-Snd
+    pub fn copy_cb_with_checks<F: FnOnce(&mut [u8])>(
+        &mut self,
+        size: usize,
+        cb: F,
+    ) -> Result<(), PlaybackBufferError> {
+        // only write complete frames.
+        let len = size / self.buffer.frame_size * self.buffer.frame_size;
+        if self.buffer.offset + len > self.buffer.buffer.len() {
+            return Err(PlaybackBufferError::SliceOutOfBounds);
+        }
+        cb(&mut self.buffer.buffer[self.buffer.offset..(self.buffer.offset + len)]);
+        self.buffer.offset += len;
+        Ok(())
     }
 
     /// Writes up to `size` bytes directly to this buffer inside of the given callback function.
@@ -684,12 +740,29 @@ impl StreamSource for NoopStreamSource {
     }
 }
 
+/// `NoopStreamSourceGenerator` is a struct that implements [`StreamSourceGenerator`]
+/// to generate [`NoopStreamSource`].
+pub struct NoopStreamSourceGenerator;
+
+impl NoopStreamSourceGenerator {
+    pub fn new() -> Self {
+        NoopStreamSourceGenerator {}
+    }
+}
+
+impl StreamSourceGenerator for NoopStreamSourceGenerator {
+    fn generate(&self) -> Result<Box<dyn StreamSource>, BoxError> {
+        Ok(Box::new(NoopStreamSource))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use futures::FutureExt;
+    use io::Write;
+
     use super::async_api::test::TestExecutor;
     use super::*;
-    use futures::FutureExt;
-    use io::{self, Write};
 
     #[test]
     fn invalid_buffer_length() {
@@ -915,5 +988,13 @@ mod tests {
 
         let ex = TestExecutor {};
         this_test(&ex).now_or_never();
+    }
+
+    #[test]
+    fn generate_noop_stream_source() {
+        let generator: Box<dyn StreamSourceGenerator> = Box::new(NoopStreamSourceGenerator::new());
+        generator
+            .generate()
+            .expect("failed to generate stream source");
     }
 }

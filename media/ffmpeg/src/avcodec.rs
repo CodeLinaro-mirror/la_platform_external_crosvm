@@ -6,10 +6,16 @@
 //! designed to concentrate all calls to unsafe methods in one place, while providing the same
 //! low-level access as the libavcodec functions do.
 
-use std::{ffi::CStr, fmt::Display, marker::PhantomData, ops::Deref};
+use std::ffi::CStr;
+use std::fmt::Debug;
+use std::fmt::Display;
+use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
+use std::ops::Deref;
 
-use base::MappedRegion;
-use libc::{c_char, c_int};
+use libc::c_char;
+use libc::c_int;
+use libc::c_void;
 use thiserror::Error as ThisError;
 
 use super::*;
@@ -17,6 +23,16 @@ use super::*;
 /// An error returned by a low-level libavcodec function.
 #[derive(Debug, ThisError)]
 pub struct AvError(pub libc::c_int);
+
+impl AvError {
+    pub fn result(ret: c_int) -> Result<(), Self> {
+        if ret >= 0 {
+            Ok(())
+        } else {
+            Err(AvError(ret))
+        }
+    }
+}
 
 impl Display for AvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,19 +72,24 @@ pub enum AvCodecOpenError {
 }
 
 impl AvCodec {
-    /// Returns whether the codec is a decoder codec.
+    /// Returns whether the codec is a decoder.
     pub fn is_decoder(&self) -> bool {
         // Safe because `av_codec_is_decoder` is called on a valid static `AVCodec` reference.
         (unsafe { ffi::av_codec_is_decoder(self.0) } != 0)
     }
 
+    /// Returns whether the codec is an encoder.
+    pub fn is_encoder(&self) -> bool {
+        // Safe because `av_codec_is_decoder` is called on a valid static `AVCodec` reference.
+        (unsafe { ffi::av_codec_is_encoder(self.0) } != 0)
+    }
+
     /// Returns the name of the codec.
-    pub fn name(&self) -> Option<&'static str> {
+    pub fn name(&self) -> &'static str {
+        const INVALID_CODEC_STR: &str = "invalid codec";
+
         // Safe because `CStr::from_ptr` is called on a valid zero-terminated C string.
-        match unsafe { CStr::from_ptr(self.0.name).to_str() } {
-            Ok(name) => Some(name),
-            Err(_) => None,
-        }
+        unsafe { CStr::from_ptr(self.0.name).to_str() }.unwrap_or(INVALID_CODEC_STR)
     }
 
     /// Returns the capabilities of the codec, as a mask of AV_CODEC_CAP_* bits.
@@ -79,6 +100,14 @@ impl AvCodec {
     /// Returns an iterator over the profiles supported by this codec.
     pub fn profile_iter(&self) -> AvProfileIterator {
         AvProfileIterator(self.0.profiles)
+    }
+
+    /// Returns an iterator over the pixel formats supported by this codec.
+    ///
+    /// For a decoder, the returned array will likely be empty. This means that ffmpeg's native
+    /// pixel format (YUV420) will be used.
+    pub fn pixel_format_iter(&self) -> AvPixelFormatIterator {
+        AvPixelFormatIterator(self.0.pix_fmts)
     }
 
     /// Obtain a context that can be used to decode using this codec.
@@ -136,11 +165,41 @@ impl Iterator for AvCodecIterator {
     }
 }
 
+/// Simple wrapper over `AVProfile` that provides helpful methods.
+pub struct AvProfile(&'static ffi::AVProfile);
+
+impl AvProfile {
+    /// Return the profile id, which can be matched against FF_PROFILE_*.
+    pub fn profile(&self) -> u32 {
+        self.0.profile as u32
+    }
+
+    /// Return the name of this profile.
+    pub fn name(&self) -> &'static str {
+        const INVALID_PROFILE_STR: &str = "invalid profile";
+
+        // Safe because `CStr::from_ptr` is called on a valid zero-terminated C string.
+        unsafe { CStr::from_ptr(self.0.name).to_str() }.unwrap_or(INVALID_PROFILE_STR)
+    }
+}
+
+impl Display for AvProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl Debug for AvProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
 /// Lightweight abstraction over the array of supported profiles for a given codec.
 pub struct AvProfileIterator(*const ffi::AVProfile);
 
 impl Iterator for AvProfileIterator {
-    type Item = &'static ffi::AVProfile;
+    type Item = AvProfile;
 
     fn next(&mut self) -> Option<Self::Item> {
         // Safe because the contract of `new` stipulates we have received a valid `AVCodec`
@@ -155,7 +214,87 @@ impl Iterator for AvProfileIterator {
                         // Safe because we have been initialized to a static, valid profiles array
                         // which is terminated by FF_PROFILE_UNKNOWN.
                         self.0 = unsafe { self.0.offset(1) };
-                        Some(profile)
+                        Some(AvProfile(profile))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Simple wrapper over `AVPixelFormat` that provides helpful methods.
+pub struct AvPixelFormat(ffi::AVPixelFormat);
+
+impl AvPixelFormat {
+    /// Return the name of this pixel format.
+    pub fn name(&self) -> &'static str {
+        const INVALID_FORMAT_STR: &str = "invalid pixel format";
+
+        // Safe because `av_get_pix_fmt_name` returns either NULL or a valid C string.
+        let pix_fmt_name = unsafe { ffi::av_get_pix_fmt_name(self.0) };
+        // Safe because `pix_fmt_name` is a valid pointer to a C string.
+        match unsafe {
+            pix_fmt_name
+                .as_ref()
+                .and_then(|s| CStr::from_ptr(s).to_str().ok())
+        } {
+            None => INVALID_FORMAT_STR,
+            Some(string) => string,
+        }
+    }
+
+    /// Return the avcodec profile id, which can be matched against AV_PIX_FMT_*.
+    ///
+    /// Note that this is **not** the same as a fourcc.
+    pub fn pix_fmt(&self) -> ffi::AVPixelFormat {
+        self.0
+    }
+
+    /// Return the fourcc of the pixel format, or a series of zeros if its fourcc is unknown.
+    pub fn fourcc(&self) -> [u8; 4] {
+        // Safe because `avcodec_pix_fmt_to_codec_tag` does not take any pointer as input and
+        // handles any value passed as argument.
+        unsafe { ffi::avcodec_pix_fmt_to_codec_tag(self.0) }.to_le_bytes()
+    }
+}
+
+impl Display for AvPixelFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl Debug for AvPixelFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fourcc = self.fourcc();
+        f.write_fmt(format_args!(
+            "{}{}{}{}",
+            fourcc[0] as char, fourcc[1] as char, fourcc[2] as char, fourcc[3] as char
+        ))
+    }
+}
+
+/// Lightweight abstraction over the array of supported pixel formats for a given codec.
+pub struct AvPixelFormatIterator(*const ffi::AVPixelFormat);
+
+impl Iterator for AvPixelFormatIterator {
+    type Item = AvPixelFormat;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Safe because the contract of `AvCodec::new` and `AvCodec::pixel_format_iter` guarantees
+        // that we have been built from a valid `AVCodec` reference, which `pix_fmts` pointer
+        // must either be NULL or point to a valid array or `VAPixelFormat`s.
+        match unsafe { self.0.as_ref() } {
+            None => None,
+            Some(&pixfmt) => {
+                match pixfmt {
+                    // Array of pixel formats is terminated by AV_PIX_FMT_NONE.
+                    ffi::AVPixelFormat_AV_PIX_FMT_NONE => None,
+                    _ => {
+                        // Safe because we have been initialized to a static, valid profiles array
+                        // which is terminated by AV_PIX_FMT_NONE.
+                        self.0 = unsafe { self.0.offset(1) };
+                        Some(AvPixelFormat(pixfmt))
                     }
                 }
             }
@@ -196,10 +335,7 @@ impl AvCodecContext {
     ///
     /// Error codes are the same as those returned by `avcodec_send_packet` with the exception of
     /// EAGAIN which is converted into `Ok(false)` as it is not actually an error.
-    pub fn try_send_packet<'a, T: MappedRegion>(
-        &mut self,
-        packet: &AvPacket<'a, T>,
-    ) -> Result<bool, AvError> {
+    pub fn try_send_packet<'a>(&mut self, packet: &AvPacket<'a>) -> Result<bool, AvError> {
         // Safe because the context is valid through the life of this object, and `packet`'s
         // lifetime properties ensures its memory area is readable.
         match unsafe { ffi::avcodec_send_packet(self.0, &packet.packet) } {
@@ -223,7 +359,7 @@ impl AvCodecContext {
     ) -> Result<TryReceiveFrameResult, AvError> {
         // Safe because the context is valid through the life of this object, and `avframe` is
         // guaranteed to contain a properly initialized frame.
-        match unsafe { ffi::avcodec_receive_frame(self.0, frame.as_mut()) } {
+        match unsafe { ffi::avcodec_receive_frame(self.0, frame.0) } {
             AVERROR_EAGAIN => Ok(TryReceiveFrameResult::TryAgain),
             AVERROR_EOF => Ok(TryReceiveFrameResult::FlushCompleted),
             ret if ret >= 0 => Ok(TryReceiveFrameResult::Received),
@@ -244,39 +380,159 @@ impl AvCodecContext {
     /// The flush process is complete when `try_receive_frame` returns `FlushCompleted`,
     pub fn flush(&mut self) -> Result<(), AvError> {
         // Safe because the context is valid through the life of this object.
-        match unsafe { ffi::avcodec_send_packet(self.0, std::ptr::null()) } {
-            ret if ret >= 0 => Ok(()),
-            err => Err(AvError(err)),
+        AvError::result(unsafe { ffi::avcodec_send_packet(self.0, std::ptr::null()) })
+    }
+}
+
+/// Trait for types that can be used as data provider for a `AVBuffer`.
+///
+/// `AVBuffer` is an owned buffer type, so all the type needs to do is being able to provide a
+/// stable pointer to its own data as well as its length. Implementors need to be sendable across
+/// threads because avcodec is allowed to use threads in its codec implementations.
+pub trait AvBufferSource: Send {
+    fn as_ptr(&self) -> *const u8;
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.as_ptr() as *mut u8
+    }
+    fn len(&self) -> usize;
+}
+
+/// Wrapper around `AVBuffer` and `AVBufferRef`.
+///
+/// libavcodec can manage its own memory for input and output data. Doing so implies a transparent
+/// copy of user-provided data (packets or frames) from and to this memory, which is wasteful.
+///
+/// This copy can be avoided by explicitly providing our own buffers to libavcodec using
+/// `AVBufferRef`. Doing so means that the lifetime of these buffers becomes managed by avcodec.
+/// This struct helps make this process safe by taking full ownership of an `AvBufferSource` and
+/// dropping it when libavcodec is done with it.
+struct AvBuffer(*mut ffi::AVBufferRef);
+
+impl AvBuffer {
+    /// Create a new `AvBuffer` from an `AvBufferSource`.
+    ///
+    /// Ownership of `source` is transferred to libavcodec, which will drop it when the number of
+    /// references to this buffer reaches zero.
+    ///
+    /// Returns `None` if the buffer could not be created due to an error in libavcodec.
+    fn new<D: AvBufferSource>(source: D) -> Option<Self> {
+        // Move storage to the heap so we find it at the same place in `avbuffer_free`
+        let mut storage = Box::new(source);
+
+        extern "C" fn avbuffer_free<D>(opaque: *mut c_void, _data: *mut u8) {
+            // Safe because `opaque` has been created from `Box::into_raw`. `storage` will be
+            // dropped immediately which will release any resources held by the storage.
+            let _ = unsafe { Box::from_raw(opaque as *mut D) };
         }
+
+        // Safe because storage points to valid data and we are checking the return value against
+        // NULL, which signals an error.
+        Some(Self(unsafe {
+            ffi::av_buffer_create(
+                storage.as_mut_ptr(),
+                storage.len() as c_int,
+                Some(avbuffer_free::<D>),
+                Box::into_raw(storage) as *mut c_void,
+                0,
+            )
+            .as_mut()?
+        }))
+    }
+
+    /// Return a slice to the data contained in this buffer.
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // Safe because the data has been initialized from valid storage in the constructor.
+        unsafe { std::slice::from_raw_parts_mut((*self.0).data, (*self.0).size as usize) }
+    }
+
+    /// Consumes the `AVBuffer`, returning a `AVBufferRef` that can be used in `AVFrame`, `AVPacket`
+    /// and others.
+    ///
+    /// After calling, the caller is responsible for unref-ing the returned AVBufferRef, either
+    /// directly or through one of the automatic management facilities in `AVFrame`, `AVPacket` or
+    /// others.
+    fn into_raw(self) -> *mut ffi::AVBufferRef {
+        ManuallyDrop::new(self).0
+    }
+}
+
+impl Drop for AvBuffer {
+    fn drop(&mut self) {
+        // Safe because `self.0` is a valid pointer to an AVBufferRef.
+        unsafe { ffi::av_buffer_unref(&mut self.0) };
     }
 }
 
 /// An encoded input packet that can be submitted to `AvCodecContext::try_send_packet`.
-pub struct AvPacket<'a, T: MappedRegion> {
+pub struct AvPacket<'a> {
     packet: ffi::AVPacket,
-    _phantom: PhantomData<&'a T>,
+    _buffer_data: PhantomData<&'a ()>,
 }
 
-impl<'a, T: MappedRegion> AvPacket<'a, T> {
-    /// Create a new AvPacket.
+impl<'a> Drop for AvPacket<'a> {
+    fn drop(&mut self) {
+        // Safe because `self.packet` is a valid `AVPacket` instance.
+        unsafe {
+            ffi::av_free_packet(&mut self.packet);
+        }
+    }
+}
+
+#[derive(Debug, ThisError)]
+pub enum AvPacketError {
+    #[error("failed to create an AvBuffer from the input buffer")]
+    AvBufferCreationError,
+}
+
+impl<'a> AvPacket<'a> {
+    /// Create a new AvPacket that borrows the `input_data`.
     ///
-    /// `input_data` is the encoded data we want to send to the codec for decoding. The data is not
-    /// copied by the AvPacket itself, however a copy may happen when the packet is submitted.
-    pub fn new(pts: i64, input_data: &'a T) -> Self {
+    /// The returned `AvPacket` will hold a reference to `input_data`, meaning that libavcodec might
+    /// perform a copy from/to it.
+    pub fn new<T: AvBufferSource>(pts: i64, input_data: &'a mut T) -> Self {
         Self {
             packet: ffi::AVPacket {
                 buf: std::ptr::null_mut(),
                 pts,
                 dts: AV_NOPTS_VALUE as i64,
-                data: input_data.as_ptr(),
-                size: input_data.size() as c_int,
+                data: input_data.as_mut_ptr(),
+                size: input_data.len() as c_int,
                 side_data: std::ptr::null_mut(),
                 pos: -1,
                 // Safe because all the other elements of this struct can be zeroed.
                 ..unsafe { std::mem::zeroed() }
             },
-            _phantom: PhantomData,
+            _buffer_data: PhantomData,
         }
+    }
+
+    /// Create a new AvPacket that owns the `input_data`.
+    ///
+    /// The returned `AvPacket` will have a `'static` lifetime and will keep `input_data` alive for
+    /// as long as libavcodec needs it.
+    pub fn new_owned<T: AvBufferSource>(pts: i64, input_data: T) -> Result<Self, AvPacketError> {
+        let mut av_buffer =
+            AvBuffer::new(input_data).ok_or(AvPacketError::AvBufferCreationError)?;
+        let data_slice = av_buffer.as_mut_slice();
+        let data = data_slice.as_mut_ptr();
+        let size = data_slice.len() as i32;
+
+        let ret = Self {
+            packet: ffi::AVPacket {
+                buf: av_buffer.into_raw(),
+                pts,
+                dts: AV_NOPTS_VALUE as i64,
+                data,
+                size,
+                side_data: std::ptr::null_mut(),
+                pos: -1,
+                // Safe because all the other elements of this struct can be zeroed.
+                ..unsafe { std::mem::zeroed() }
+            },
+            _buffer_data: PhantomData,
+        };
+
+        Ok(ret)
     }
 }
 
@@ -308,13 +564,6 @@ impl AsRef<ffi::AVFrame> for AvFrame {
     }
 }
 
-impl AsMut<ffi::AVFrame> for AvFrame {
-    fn as_mut(&mut self) -> &mut ffi::AVFrame {
-        // Safe because the AVFrame has been properly initialized during construction.
-        unsafe { &mut *self.0 }
-    }
-}
-
 impl Deref for AvFrame {
     type Target = ffi::AVFrame;
 
@@ -333,6 +582,11 @@ impl Drop for AvFrame {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -350,5 +604,40 @@ mod tests {
         let averror = AvError(10);
         let msg = format!("{}", averror);
         assert_eq!(msg, "Unknown avcodec error 10");
+    }
+
+    // Test that the AVPacket wrapper frees the owned AVBuffer on drop.
+    #[test]
+    fn test_avpacket_drop() {
+        struct DropTestBufferSource {
+            dropped: Arc<AtomicBool>,
+        }
+        impl Drop for DropTestBufferSource {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        impl AvBufferSource for DropTestBufferSource {
+            fn as_ptr(&self) -> *const u8 {
+                ptr::null()
+            }
+
+            fn len(&self) -> usize {
+                0
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        let pkt = AvPacket::new_owned(
+            0,
+            DropTestBufferSource {
+                dropped: dropped.clone(),
+            },
+        )
+        .unwrap();
+        assert!(!dropped.load(Ordering::SeqCst));
+        drop(pkt);
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

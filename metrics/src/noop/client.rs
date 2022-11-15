@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{event_details_proto::RecordDetails, MetricEventType, MetricsClientDestructor};
 use base::Tube;
+
+use crate::event_details_proto::RecordDetails;
+use crate::MetricEventType;
+use crate::MetricsClientDestructor;
 
 /// This interface exists to be used and re-implemented by downstream forks. Updates shouldn't be
 /// done without ensuring they won't cause breakages in dependent codebases.
@@ -12,6 +15,9 @@ pub fn initialize(_: Tube) {}
 pub fn force_initialize(_: Tube) {}
 pub fn get_destructor() -> MetricsClientDestructor {
     MetricsClientDestructor::new(|| {})
+}
+pub fn is_initialized() -> bool {
+    false
 }
 pub fn set_auth_token(_: &str) {}
 pub fn set_graphics_api(_: &str) {}

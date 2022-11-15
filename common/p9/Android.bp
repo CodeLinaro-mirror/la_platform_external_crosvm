@@ -21,6 +21,7 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "liblibc",
+        "libserde",
     ],
     proc_macros: ["libwire_format_derive"],
     apex_available: [
@@ -44,6 +45,7 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "liblibc",
+        "libserde",
     ],
     proc_macros: ["libwire_format_derive"],
 }

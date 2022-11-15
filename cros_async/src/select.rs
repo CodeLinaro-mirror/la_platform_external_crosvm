@@ -5,13 +5,14 @@
 // Need non-snake case so the macro can re-use type names for variables.
 #![allow(non_snake_case)]
 
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Poll;
 
-use futures::future::{maybe_done, FutureExt, MaybeDone};
+use futures::future::maybe_done;
+use futures::future::FutureExt;
+use futures::future::MaybeDone;
 
 pub enum SelectResult<F: Future> {
     Pending(F),
@@ -88,4 +89,7 @@ generate! {
 
     /// _Future for the [`select7`] function.
     (Select7, <_Fut1, _Fut2, _Fut3, _Fut4, _Fut5, _Fut6, _Fut7>),
+
+    /// _Future for the [`select8`] function.
+    (Select8, <_Fut1, _Fut2, _Fut3, _Fut4, _Fut5, _Fut6, _Fut7, _Fut8>),
 }

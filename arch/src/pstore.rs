@@ -4,12 +4,17 @@
 
 use std::fs::OpenOptions;
 
-use crate::Pstore;
-use anyhow::{bail, Context, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use base::MemoryMappingBuilder;
 use hypervisor::Vm;
 use resources::AddressRange;
 use vm_memory::GuestAddress;
+
+use crate::Pstore;
+
+mod sys;
 
 pub struct RamoopsRegion {
     pub address: u64,
@@ -27,10 +32,11 @@ pub fn create_memory_region(
         bail!("insufficient space for pstore {} {}", region, pstore.size);
     }
 
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
+    let mut open_opts = OpenOptions::new();
+    open_opts.read(true).write(true).create(true);
+    sys::set_extra_open_opts(&mut open_opts);
+
+    let file = open_opts
         .open(&pstore.path)
         .context("failed to open pstore")?;
     file.set_len(pstore.size as u64)

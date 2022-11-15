@@ -2,13 +2,47 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::sync::Arc;
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
-use base::{Event, RawDescriptor};
+use anyhow::Result;
+use base::Event;
+use base::Protection;
+use base::RawDescriptor;
+use sync::Mutex;
+use vm_control::VmMemorySource;
+use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
 use super::*;
-use crate::pci::{MsixStatus, PciAddress, PciBarConfiguration, PciBarIndex, PciCapability};
+use crate::pci::MsixStatus;
+use crate::pci::PciAddress;
+use crate::pci::PciBarConfiguration;
+use crate::pci::PciBarIndex;
+use crate::pci::PciCapability;
+use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
+
+#[derive(Clone)]
+pub struct SharedMemoryRegion {
+    /// The id of the shared memory region. A device may have multiple regions, but each
+    /// must have a unique id. The meaning of a particular region is device-specific.
+    pub id: u8,
+    pub length: u64,
+}
+
+/// Trait for mapping memory into the device's shared memory region.
+pub trait SharedMemoryMapper: Send {
+    /// Maps the given |source| into the shared memory region at |offset|.
+    fn add_mapping(&mut self, source: VmMemorySource, offset: u64, prot: Protection) -> Result<()>;
+
+    /// Removes the mapping beginning at |offset|.
+    fn remove_mapping(&mut self, offset: u64) -> Result<()>;
+
+    fn as_raw_descriptor(&self) -> Option<RawDescriptor> {
+        None
+    }
+}
 
 /// Trait for virtio devices to be driven by a virtio transport.
 ///
@@ -63,6 +97,12 @@ pub trait VirtioDevice: Send {
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         let _ = offset;
         let _ = data;
+    }
+
+    /// If the device is translated by an IOMMU, called before
+    /// |activate| with the IOMMU's mapper.
+    fn set_iommu(&mut self, iommu: &Arc<Mutex<IpcMemoryMapper>>) {
+        let _ = iommu;
     }
 
     /// Activates this device for real usage.
@@ -121,4 +161,24 @@ pub trait VirtioDevice: Send {
     fn pci_address(&self) -> Option<PciAddress> {
         None
     }
+
+    /// Returns the device's shared memory region if present.
+    fn get_shared_memory_region(&self) -> Option<SharedMemoryRegion> {
+        None
+    }
+
+    /// Provides the trait object used to map files into the device's shared
+    /// memory region.
+    ///
+    /// If `get_shared_memory_region` returns `Some`, then this will be called
+    /// before `activate`.
+    fn set_shared_memory_mapper(&mut self, _mapper: Box<dyn SharedMemoryMapper>) {}
+
+    /// Provides the base address of the shared memory region, if one is present. Will
+    /// be called before `activate`.
+    ///
+    /// NOTE: Mappings in shared memory regions should be accessed via offset, rather
+    /// than via raw guest physical address. This function is only provided so
+    /// devices can remain backwards compatible with older drivers.
+    fn set_shared_memory_region_base(&mut self, _addr: GuestAddress) {}
 }

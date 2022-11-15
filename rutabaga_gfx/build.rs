@@ -2,10 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::Result;
-
-#[cfg(feature = "virgl_renderer")]
-use anyhow::bail;
 #[cfg(feature = "virgl_renderer")]
 use std::env;
 #[cfg(feature = "virgl_renderer")]
@@ -18,7 +14,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[cfg(feature = "virgl_renderer")]
-const MINIGBM_SRC: &str = "../../minigbm";
+use anyhow::bail;
+use anyhow::Result;
+
+#[cfg(feature = "virgl_renderer")]
+const MINIGBM_SRC: &str = "../third_party/minigbm";
 #[cfg(feature = "virgl_renderer")]
 const VIRGLRENDERER_SRC: &str = "../../virglrenderer";
 

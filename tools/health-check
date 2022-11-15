@@ -3,57 +3,258 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import doctest
-import importlib
-import argh  # type: ignore
+import os
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
-from impl.common import CROSVM_ROOT, run_main, cmd, chdir, parallel, find_scripts
+from typing import List
+
 from impl.check_code_hygiene import has_crlf_line_endings
-
-mypy = cmd("mypy --pretty --color-output").env("MYPY_FORCE_COLOR", "1").env("MYPYPATH", "tools")
-
-
-def check_python():
-    print("Running python doctests")
-    for source in Path("tools/impl").glob("*.py"):
-        lib = importlib.import_module(f"impl.{source.stem}")
-        result = doctest.testmod(lib, optionflags=doctest.ELLIPSIS)
-        if result.failed:
-            sys.exit(1)
-    print("Type-checking python")
-    parallel(
-        mypy("tools/impl"),
-        *mypy.foreach(find_scripts(Path("tools"), "/usr/bin/env python3")),
-    ).fg()
+from impl.common import CROSVM_ROOT, argh, chdir, cmd, cwd_context, parallel, run_main
+from impl.health_check import Check, CheckContext, run_checks
 
 
-def check_crlf_line_endings():
+def check_python_tests(context: CheckContext):
+    "Run all non-main python files to execute their unit tests."
+    parallel(*cmd("python3").foreach(context.all_files)).fg()
+
+
+def check_python_types(context: CheckContext):
+    "Run mypy on all python files to type-check."
+    mypy = cmd("mypy --pretty --color-output").env("MYPY_FORCE_COLOR", "1")
+    parallel(*mypy.foreach(context.all_files)).fg()
+
+
+def check_python_format(context: CheckContext):
+    black = cmd("black", "--check" if not context.fix else "")
+    parallel(*black.foreach(context.modified_files)).fg()
+
+
+def check_crlf_line_endings(_: CheckContext):
+    "Checks for crlf line endingings."
     crlf_endings = has_crlf_line_endings()
     if crlf_endings:
         print("Error: Following files have crlf(dos) line encodings")
         print(*crlf_endings)
-        sys.exit(-1)
+        raise Exception("Files with crlf line endings.")
 
 
-@argh.arg("checks", choices=["python", "misc", "fmt", "clippy", "all", []])
-def main(*checks: str):
+def check_markdown_format(context: CheckContext):
+    "Runs mdformat on all markdown files."
+    mdformat = cmd("mdformat --wrap 100", "--check" if not context.fix else "")
+    parallel(*mdformat.foreach(context.modified_files)).fg()
+
+
+def check_rust_clippy(_: CheckContext):
+    "Runs clippy on the whole project, no matter which rs files were touched."
+    cmd("./tools/clippy --locked").fg()
+
+
+def check_rust_format(context: CheckContext):
+    "Runs rustfmt on all modified files."
+    if context.nightly:
+        rustfmt = cmd(
+            cmd("rustup +nightly which rustfmt"),
+            "--config imports_granularity=item,group_imports=StdExternalCrate",
+        )
+    else:
+        rustfmt = cmd(cmd("rustup which rustfmt"))
+    parallel(*rustfmt("--check" if not context.fix else "").foreach(context.modified_files)).fg(
+        quiet=True
+    )
+
+
+def check_rust_lockfiles(_: CheckContext):
+    "Verifies that none of the Cargo.lock files require updates."
+    lockfiles = [Path("Cargo.lock"), *Path("common").glob("*/Cargo.lock")]
+    for path in lockfiles:
+        with cwd_context(path.parent):
+            if not cmd("cargo update --workspace --locked").success():
+                print(f"{path} is not up-to-date.")
+                print()
+                print("You may need to rebase your changes and run `cargo update --workspace`")
+                print("(or ./tools/run_tests) to ensure the Cargo.lock file is current.")
+                raise Exception("Cargo.lock out of date")
+
+
+LICENSE_HEADER_RE = (
+    # Line 1 - copyright.
+    r".*Copyright(?P<copyright> \(c\))? (?P<year>20[0-9]{2})(?:-20[0-9]{2})? "
+    r"The Chromium(?P<chromium_space_os> )?OS Authors\."
+    r"(?P<rights_reserved> All rights reserved\.)?\n"
+    # Line 2 - License.
+    r".*Use of this source code is governed by a BSD-style license that can "
+    r"be\n"
+    # Line 3 - License continuation.
+    r".*found in the LICENSE file\.\n"
+)
+
+NEW_LICENSE_HEADER = [
+    f"Copyright {datetime.now().year} The ChromiumOS Authors.",
+    "Use of this source code is governed by a BSD-style license that can be",
+    "found in the LICENSE file.",
+]
+
+
+def new_licence_header(file_suffix: str):
+    if file_suffix == ".py" or file_suffix == "":
+        prefix = "#"
+    else:
+        prefix = "//"
+    return "\n".join(f"{prefix} {line}" for line in NEW_LICENSE_HEADER) + "\n\n"
+
+
+def check_copyright_header(context: CheckContext):
+    "Checks copyright header on new files only. Can 'fix' them if needed."
+    license_re = re.compile(LICENSE_HEADER_RE, re.MULTILINE)
+    for file in context.new_files:
+        header = file.open("r").read(256)
+        license_match = license_re.search(header)
+        if license_match:
+            continue
+        if context.fix:
+            contents = file.read_text()
+            file.write_text(new_licence_header(file.suffix) + contents)
+        else:
+            raise Exception(f"Bad copyright header: {file}")
+
+
+def check_infra_configs(context: CheckContext):
+    "Validate luci configs by sending them to luci-config."
+    lucicfg = cmd("third_party/depot_tools/lucicfg")
+    for file in context.modified_files:
+        if context.fix:
+            lucicfg("fmt", file).fg()
+            lucicfg("generate", file).fg()
+        lucicfg("fmt --dry-run", file).fg(quiet=True)
+        # TODO: Validate config files. Requires authentication with luci inside docker.
+
+
+def check_infra_tests(context: CheckContext):
+    "Run recipe.py tests, all of them, regardless of which files were modified."
+    recipes = cmd("infra/recipes.py").add_path("third_party/depot_tools")
+    if context.fix:
+        recipes("test train --py3-only").fg()
+    recipes("test run --py3-only").fg(quiet=True)
+
+
+def check_file_ends_with_newline(context: CheckContext):
+    "Checks if files end with a newline."
+    for file_path in context.modified_files:
+        with file_path.open("rb") as file:
+            # Skip empty files
+            file.seek(0, os.SEEK_END)
+            if file.tell() == 0:
+                continue
+            # Check last byte of the file
+            file.seek(-1, os.SEEK_END)
+            file_end = file.read(1)
+            if file_end.decode("utf-8") != "\n":
+                if context.fix:
+                    file_path.write_text(file_path.read_text() + "\n")
+                else:
+                    raise Exception(f"File does not end with a newline {file_path}")
+
+
+# List of all checks and on which files they should run.
+CHECKS: List[Check] = [
+    Check(
+        check_copyright_header,
+        files=["**.rs", "**.py"],
+        python_tools=True,
+    ),
+    Check(
+        check_rust_format,
+        files=["**.rs"],
+        can_fix=True,
+    ),
+    Check(
+        check_rust_lockfiles,
+        files=["**Cargo.toml"],
+    ),
+    Check(
+        check_rust_clippy,
+        files=["**.rs", "**Cargo.toml"],
+    ),
+    Check(
+        check_python_tests,
+        files=["tools/impl/common.py"],
+    ),
+    Check(
+        check_python_types,
+        files=["tools/**.py"],
+        exclude=["tools/windows/*"],
+        python_tools=True,
+    ),
+    Check(
+        check_python_format,
+        files=["**.py"],
+        python_tools=True,
+        exclude=["infra/recipes.py"],
+        can_fix=True,
+    ),
+    Check(
+        check_infra_configs,
+        files=["infra/config/**.star"],
+        can_fix=True,
+    ),
+    Check(
+        check_infra_tests,
+        files=["infra/**.py"],
+        can_fix=True,
+    ),
+    Check(
+        check_markdown_format,
+        files=["**.md"],
+        exclude=[
+            "infra/README.recipes.md",
+            "docs/book/src/appendix/memory_layout.md",
+        ],
+        can_fix=True,
+    ),
+    Check(
+        check_file_ends_with_newline,
+        exclude=["**.h264", "**.vp8", "**.bin", "**.png", "**.min.js", "infra/**.json"],
+    ),
+    Check(check_crlf_line_endings),
+]
+
+CHECKS_DICT = dict((c.name, c) for c in CHECKS)
+
+
+@argh.arg("--list-checks", default=False, help="List names of available checks and exit.")
+@argh.arg("--fix", default=False, help="Asks checks to fix problems where possible.")
+@argh.arg("--all", default=False, help="Run on all files instead of just modified files.")
+@argh.arg(
+    "checks",
+    choices=[*CHECKS_DICT.keys(), []],
+    help="Optional list of checks to run. Defaults to run all checks.",
+)
+def main(
+    list_checks: bool = False,
+    fix: bool = False,
+    all: bool = False,
+    nightly: bool = False,
+    *checks: str,
+):
+    """
+    Run health checks on crosvm. This includes formatting, linters and other various checks.
+    """
     chdir(CROSVM_ROOT)
 
     if not checks:
-        checks = ("all",)
+        checks_list = [*CHECKS_DICT.values()]
+    else:
+        checks_list = [CHECKS_DICT[check] for check in checks]
 
-    def should_check(name: str):
-        return "all" in checks or name in checks
+    if list_checks:
+        for check in checks_list:
+            print(check.name)
+        return
+    success = run_checks(checks_list, fix=fix, run_on_all_files=all, nightly=nightly)
 
-    if should_check("python"):
-        check_python()
-    if should_check("misc"):
-        check_crlf_line_endings()
-    if should_check("fmt"):
-        cmd("./tools/fmt --check").fg()
-    if should_check("clippy"):
-        cmd("./tools/clippy").fg()
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":

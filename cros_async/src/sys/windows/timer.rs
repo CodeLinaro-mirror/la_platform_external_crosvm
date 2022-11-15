@@ -4,8 +4,11 @@
 
 #[cfg(test)]
 mod test {
-    use crate::{Executor, TimerAsync};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use crate::Executor;
+    use crate::TimerAsync;
 
     #[test]
     fn timer() {
@@ -14,7 +17,7 @@ mod test {
             // guaranteed to sleep for *at least* the supplied duration, so here
             // we permit early wakeups.
             let dur = Duration::from_millis(200);
-            let min_duration = Duration::from_millis(190);
+            let min_duration = Duration::from_millis(150);
 
             let now = Instant::now();
             TimerAsync::sleep(ex, dur).await.expect("unable to sleep");

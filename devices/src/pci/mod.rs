@@ -35,29 +35,65 @@ use libc::EINVAL;
 
 // TODO(b:236297362): build it on windows as weil.
 #[cfg(all(unix, feature = "audio"))]
-pub use self::ac97::{Ac97Backend, Ac97Dev, Ac97Parameters};
+pub use self::ac97::Ac97Backend;
+#[cfg(all(unix, feature = "audio"))]
+pub use self::ac97::Ac97Dev;
+#[cfg(all(unix, feature = "audio"))]
+pub use self::ac97::Ac97Parameters;
 #[cfg(unix)]
-pub use self::coiommu::{CoIommuDev, CoIommuParameters, CoIommuUnpinPolicy};
+pub use self::coiommu::CoIommuDev;
+#[cfg(unix)]
+pub use self::coiommu::CoIommuParameters;
+#[cfg(unix)]
+pub use self::coiommu::CoIommuUnpinPolicy;
 pub use self::msi::MsiConfig;
-pub use self::msix::{MsixCap, MsixConfig, MsixStatus};
+pub use self::msix::MsixCap;
+pub use self::msix::MsixConfig;
+pub use self::msix::MsixStatus;
 pub use self::pci_address::Error as PciAddressError;
 pub use self::pci_address::PciAddress;
-pub use self::pci_configuration::{
-    PciBarConfiguration, PciBarIndex, PciBarPrefetchable, PciBarRegionType, PciCapability,
-    PciCapabilityID, PciClassCode, PciConfiguration, PciDisplaySubclass, PciHeaderType,
-    PciProgrammingInterface, PciSerialBusSubClass, PciSubclass, CAPABILITY_LIST_HEAD_OFFSET,
-};
-pub use self::pci_device::{BarRange, Error as PciDeviceError, PciBus, PciDevice};
-pub use self::pci_root::{PciConfigIo, PciConfigMmio, PciRoot, PciVirtualConfigMmio};
+pub use self::pci_configuration::PciBarConfiguration;
+pub use self::pci_configuration::PciBarIndex;
+pub use self::pci_configuration::PciBarPrefetchable;
+pub use self::pci_configuration::PciBarRegionType;
+pub use self::pci_configuration::PciCapability;
+pub use self::pci_configuration::PciCapabilityID;
+pub use self::pci_configuration::PciClassCode;
+pub use self::pci_configuration::PciConfiguration;
+pub use self::pci_configuration::PciDisplaySubclass;
+pub use self::pci_configuration::PciHeaderType;
+pub use self::pci_configuration::PciProgrammingInterface;
+pub use self::pci_configuration::PciSerialBusSubClass;
+pub use self::pci_configuration::PciSubclass;
+pub use self::pci_configuration::CAPABILITY_LIST_HEAD_OFFSET;
+pub use self::pci_device::BarRange;
+pub use self::pci_device::Error as PciDeviceError;
+pub use self::pci_device::PciBus;
+pub use self::pci_device::PciDevice;
+pub use self::pci_root::PciConfigIo;
+pub use self::pci_root::PciConfigMmio;
+pub use self::pci_root::PciRoot;
+pub use self::pci_root::PciRootCommand;
+pub use self::pci_root::PciVirtualConfigMmio;
 #[cfg(unix)]
-pub use self::pcie::{PciBridge, PcieHostPort, PcieRootPort};
-pub use self::pvpanic::{PvPanicCode, PvPanicPciDevice};
-pub use self::stub::{StubPciDevice, StubPciParameters};
+pub use self::pcie::PciBridge;
+#[cfg(unix)]
+pub use self::pcie::PcieDownstreamPort;
+#[cfg(unix)]
+pub use self::pcie::PcieHostPort;
+#[cfg(unix)]
+pub use self::pcie::PcieRootPort;
+#[cfg(unix)]
+pub use self::pcie::PcieUpstreamPort;
+pub use self::pvpanic::PvPanicCode;
+pub use self::pvpanic::PvPanicPciDevice;
+pub use self::stub::StubPciDevice;
+pub use self::stub::StubPciParameters;
 #[cfg(unix)]
 pub use self::vfio_pci::VfioPciDevice;
 
 /// PCI has four interrupt pins A->D.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Ord, PartialOrd, PartialEq, Eq)]
 pub enum PciInterruptPin {
     IntA,
     IntB,
@@ -75,7 +111,7 @@ pub const PCI_VENDOR_ID_INTEL: u16 = 0x8086;
 pub const PCI_VENDOR_ID_REDHAT: u16 = 0x1b36;
 
 #[repr(u16)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CrosvmDeviceId {
     Pit = 1,
     Pic = 2,
@@ -93,6 +129,8 @@ pub enum CrosvmDeviceId {
     DirectIo = 14,
     DirectMmio = 15,
     UserspaceIrqChip = 16,
+    VmWatchdog = 17,
+    Pflash = 18,
 }
 
 impl TryFrom<u16> for CrosvmDeviceId {
@@ -116,6 +154,8 @@ impl TryFrom<u16> for CrosvmDeviceId {
             14 => Ok(CrosvmDeviceId::DirectMmio),
             15 => Ok(CrosvmDeviceId::DirectIo),
             16 => Ok(CrosvmDeviceId::UserspaceIrqChip),
+            17 => Ok(CrosvmDeviceId::VmWatchdog),
+            18 => Ok(CrosvmDeviceId::Pflash),
             _ => Err(base::Error::new(EINVAL)),
         }
     }

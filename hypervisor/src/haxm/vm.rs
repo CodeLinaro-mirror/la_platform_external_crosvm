@@ -3,27 +3,55 @@
 // found in the LICENSE file.
 
 use core::ffi::c_void;
-use fnv::FnvHashMap;
-use libc::{E2BIG, EEXIST, EFAULT, EINVAL, EIO, ENOENT, ENOSPC, ENOTSUP, EOVERFLOW};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
-use crate::{
-    host_phys_addr_bits, ClockState, Datamatch, DeviceKind, Hypervisor, IoEventAddress, MemSlot,
-    VcpuX86_64, Vm, VmCap, VmX86_64,
-};
-use base::{
-    errno_result, error, ioctl_with_mut_ref, ioctl_with_ref, warn, AsRawDescriptor, Error, Event,
-    MappedRegion, MemoryMapping, MmapError, Protection, RawDescriptor, Result, SafeDescriptor,
-};
+use base::errno_result;
+use base::error;
+use base::ioctl_with_mut_ref;
+use base::ioctl_with_ref;
+use base::warn;
+use base::AsRawDescriptor;
+use base::Error;
+use base::Event;
+use base::MappedRegion;
+use base::MemoryMapping;
+use base::MmapError;
+use base::Protection;
+use base::RawDescriptor;
+use base::Result;
+use base::SafeDescriptor;
+use fnv::FnvHashMap;
+use libc::E2BIG;
+use libc::EEXIST;
+use libc::EFAULT;
+use libc::EINVAL;
+use libc::EIO;
+use libc::ENOENT;
+use libc::ENOSPC;
+use libc::ENOTSUP;
+use libc::EOVERFLOW;
 use sync::Mutex;
-use vm_memory::{GuestAddress, GuestMemory};
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
 #[cfg(windows)]
 use win_util::win32_wide_string;
 
 use super::*;
+use crate::host_phys_addr_bits;
+use crate::ClockState;
+use crate::Datamatch;
+use crate::DeviceKind;
+use crate::Hypervisor;
+use crate::IoEventAddress;
+use crate::MemSlot;
+use crate::VcpuX86_64;
+use crate::Vm;
+use crate::VmCap;
+use crate::VmX86_64;
 
 /// A wrapper around creating and using a HAXM VM.
 pub struct HaxmVm {
@@ -97,7 +125,7 @@ impl HaxmVm {
     pub fn register_log_file(&self, path: &str) -> Result<()> {
         // The IOCTL here is only avilable on internal fork of HAXM and only works on Windows.
         #[cfg(windows)]
-        if USE_GHAXM.load(Ordering::Relaxed) {
+        if get_use_ghaxm() {
             let mut log_file = hax_log_file::default();
 
             // Although it would be more efficient to do this check prior to allocating the log_file
@@ -182,13 +210,8 @@ impl Vm for HaxmVm {
         })
     }
 
-    fn check_capability(&self, c: VmCap) -> bool {
-        match c {
-            // under haxm, guests rely on this leaf to calibrate their
-            // clocksource.
-            VmCap::CalibratedTscLeafRequired => true,
-            _ => false,
-        }
+    fn check_capability(&self, _c: VmCap) -> bool {
+        false
     }
 
     fn get_memory(&self) -> &GuestMemory {
@@ -460,11 +483,17 @@ impl VmX86_64 for HaxmVm {
     }
 }
 
+// TODO(b:241252288): Enable tests disabled with dummy feature flag - enable_haxm_tests.
 #[cfg(test)]
+#[cfg(feature = "enable_haxm_tests")]
 mod tests {
-    use super::*;
-    use base::{EventReadResult, MemoryMappingBuilder, SharedMemory};
     use std::time::Duration;
+
+    use base::EventReadResult;
+    use base::MemoryMappingBuilder;
+    use base::SharedMemory;
+
+    use super::*;
 
     #[test]
     fn create_vm() {

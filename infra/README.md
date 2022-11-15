@@ -1,9 +1,7 @@
-# WIP Luci Infrastructure
+# Luci Infrastructure
 
 This directory contains the configuration and build recipes run by our luci infrastructure for CI
-and presubmit testing. This is currently a work in progress.
-
-See [Kokoro](../ci/kokoro) configs for the actively used presubmit system.
+and presubmit testing.
 
 Note: Luci applies config and recipes changes asynchronously. Do not submit changes to this
 directory in the same commit as changes to other crosvm source.
@@ -22,6 +20,11 @@ Luci also provides a
 [User Guide](https://chromium.googlesource.com/infra/luci/recipes-py/+/master/doc/user_guide.md) and
 [Walkthrough](https://chromium.googlesource.com/infra/luci/recipes-py/+/refs/heads/main/doc/walkthrough.md)
 for getting started with recipes.
+
+For writing tests, documentation can be found in the
+[Recipe test API](https://chromium.googlesource.com/infra/luci/recipes-py/+/HEAD/recipe_engine/recipe_test_api.py)
+and
+[Post Process API](https://chromium.googlesource.com/infra/luci/recipes-py/+/HEAD/recipe_engine/post_process.py)
 
 ### Running recipe tests
 

@@ -2,31 +2,47 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
 use anyhow::bail;
-use base::{error, Event, RawDescriptor};
+use base::error;
+use base::Event;
+use base::RawDescriptor;
 use hypervisor::Datamatch;
 use remain::sorted;
-use resources::{Error as SystemAllocatorFaliure, SystemAllocator};
+use resources::Error as SystemAllocatorFaliure;
+use resources::SystemAllocator;
 use sync::Mutex;
 use thiserror::Error;
 
-use crate::bus::{BusDeviceObj, BusRange, BusType, ConfigWriteResult};
-use crate::pci::pci_configuration::{
-    self, PciBarConfiguration, BAR0_REG, COMMAND_REG, COMMAND_REG_IO_SPACE_MASK,
-    COMMAND_REG_MEMORY_SPACE_MASK, NUM_BAR_REGS, PCI_ID_REG, ROM_BAR_REG,
-};
-use crate::pci::{PciAddress, PciAddressError, PciInterruptPin};
+use super::PciId;
+use crate::bus::BusDeviceObj;
+use crate::bus::BusRange;
+use crate::bus::BusType;
+use crate::bus::ConfigWriteResult;
+use crate::pci::pci_configuration;
+use crate::pci::pci_configuration::PciBarConfiguration;
+use crate::pci::pci_configuration::BAR0_REG;
+use crate::pci::pci_configuration::COMMAND_REG;
+use crate::pci::pci_configuration::COMMAND_REG_IO_SPACE_MASK;
+use crate::pci::pci_configuration::COMMAND_REG_MEMORY_SPACE_MASK;
+use crate::pci::pci_configuration::NUM_BAR_REGS;
+use crate::pci::pci_configuration::PCI_ID_REG;
+use crate::pci::pci_configuration::ROM_BAR_REG;
+use crate::pci::PciAddress;
+use crate::pci::PciAddressError;
+use crate::pci::PciInterruptPin;
 use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
 #[cfg(all(unix, feature = "audio"))]
 use crate::virtio::snd::vios_backend::Error as VioSError;
-use crate::{BusAccessInfo, BusDevice, DeviceId, IrqLevelEvent};
-
-use super::PciId;
+use crate::BusAccessInfo;
+use crate::BusDevice;
+use crate::DeviceId;
+use crate::IrqLevelEvent;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -87,6 +103,9 @@ pub enum Error {
     /// PCI Address allocation failure.
     #[error("failed to allocate PCI address")]
     PciAllocationFailed,
+    /// PCI Bus window allocation failure.
+    #[error("failed to allocate window for PCI bus: {0}")]
+    PciBusWindowAllocationFailure(String),
     /// Size of zero encountered
     #[error("Size of zero detected")]
     SizeZero,
@@ -268,23 +287,34 @@ impl PciBus {
 pub trait PciDevice: Send {
     /// Returns a label suitable for debug output.
     fn debug_label(&self) -> String;
+
+    /// Preferred PCI address for this device, if any.
+    fn preferred_address(&self) -> Option<PciAddress> {
+        None
+    }
+
     /// Allocate and return an unique bus, device and function number for this device.
+    /// May be called multiple times; on subsequent calls, the device should return the same
+    /// address it returned from the first call.
     fn allocate_address(&mut self, resources: &mut SystemAllocator) -> Result<PciAddress>;
+
     /// A vector of device-specific file descriptors that must be kept open
     /// after jailing. Must be called before the process is jailed.
     fn keep_rds(&self) -> Vec<RawDescriptor>;
+
+    /// Preferred IRQ for this device.
+    /// The device may request a specific pin and IRQ number by returning a non-`None` value.
+    /// Otherwise, an appropriate IRQ will be allocated automatically.
+    /// The device's `assign_irq` function will be called with its assigned IRQ either way.
+    fn preferred_irq(&self) -> Option<(PciInterruptPin, u32)> {
+        None
+    }
+
     /// Assign a legacy PCI IRQ to this device.
     /// The device may write to `irq_evt` to trigger an interrupt.
     /// When `irq_resample_evt` is signaled, the device should re-assert `irq_evt` if necessary.
-    /// Optional irq_num can be used for default INTx allocation, device can overwrite it.
-    /// If legacy INTx is used, function shall return requested IRQ number and PCI INTx pin.
-    fn assign_irq(
-        &mut self,
-        _irq_evt: &IrqLevelEvent,
-        _irq_num: Option<u32>,
-    ) -> Option<(u32, PciInterruptPin)> {
-        None
-    }
+    fn assign_irq(&mut self, _irq_evt: IrqLevelEvent, _pin: PciInterruptPin, _irq_num: u32) {}
+
     /// Allocates the needed IO BAR space using the `allocate` function which takes a size and
     /// returns an address. Returns a Vec of BarRange{addr, size, prefetchable}.
     fn allocate_io_bars(&mut self, _resources: &mut SystemAllocator) -> Result<Vec<BarRange>> {
@@ -545,6 +575,10 @@ impl<T: PciDevice> BusDevice for T {
     fn destroy_device(&mut self) {
         self.destroy_device()
     }
+
+    fn is_bridge(&self) -> Option<u8> {
+        self.get_new_pci_bus().map(|bus| bus.lock().get_bus_num())
+    }
 }
 
 impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
@@ -552,18 +586,20 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
     fn debug_label(&self) -> String {
         (**self).debug_label()
     }
+    fn preferred_address(&self) -> Option<PciAddress> {
+        (**self).preferred_address()
+    }
     fn allocate_address(&mut self, resources: &mut SystemAllocator) -> Result<PciAddress> {
         (**self).allocate_address(resources)
     }
     fn keep_rds(&self) -> Vec<RawDescriptor> {
         (**self).keep_rds()
     }
-    fn assign_irq(
-        &mut self,
-        irq_evt: &IrqLevelEvent,
-        irq_num: Option<u32>,
-    ) -> Option<(u32, PciInterruptPin)> {
-        (**self).assign_irq(irq_evt, irq_num)
+    fn preferred_irq(&self) -> Option<(PciInterruptPin, u32)> {
+        (**self).preferred_irq()
+    }
+    fn assign_irq(&mut self, irq_evt: IrqLevelEvent, pin: PciInterruptPin, irq_num: u32) {
+        (**self).assign_irq(irq_evt, pin, irq_num)
     }
     fn allocate_io_bars(&mut self, resources: &mut SystemAllocator) -> Result<Vec<BarRange>> {
         (**self).allocate_io_bars(resources)
@@ -641,11 +677,14 @@ impl<T: 'static + PciDevice> BusDeviceObj for T {
 
 #[cfg(test)]
 mod tests {
+    use pci_configuration::PciBarPrefetchable;
+    use pci_configuration::PciBarRegionType;
+    use pci_configuration::PciClassCode;
+    use pci_configuration::PciConfiguration;
+    use pci_configuration::PciHeaderType;
+    use pci_configuration::PciMultimediaSubclass;
+
     use super::*;
-    use pci_configuration::{
-        PciBarPrefetchable, PciBarRegionType, PciClassCode, PciConfiguration, PciHeaderType,
-        PciMultimediaSubclass,
-    };
 
     const BAR0_SIZE: u64 = 0x1000;
     const BAR2_SIZE: u64 = 0x20;

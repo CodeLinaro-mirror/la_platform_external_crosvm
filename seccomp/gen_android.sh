@@ -59,6 +59,9 @@ function scan_policy_name() {
        --hide=common_device.frequency \
        --hide=gpu_common.policy \
        --hide=serial.policy \
+       --hide=block.policy \
+       --hide=vvu.policy \
+       --hide=vhost_user.policy \
        -1
     popd > /dev/null 2>&1
   )
@@ -101,12 +104,15 @@ package {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "\$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) \$(location x86_64/serial.policy) < \$(in) > \$(out)",
+    cmd: "\$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) \$(location x86_64/serial.policy) \$(location x86_64/block.policy) \$(location x86_64/vvu.policy) \$(location x86_64/vhost_user.policy) < \$(in) > \$(out)",
     tool_files: [
         "policy-inliner.sh",
         "x86_64/common_device.policy",
         "x86_64/gpu_common.policy",
         "x86_64/serial.policy",
+        "x86_64/block.policy",
+        "x86_64/vvu.policy",
+        "x86_64/vhost_user.policy",
     ],
 }
 

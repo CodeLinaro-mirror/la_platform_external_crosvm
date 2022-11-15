@@ -68,6 +68,9 @@ pub trait VhostUserMaster: VhostBackend {
 
     /// Remove a guest memory mapping from vhost.
     fn remove_mem_region(&mut self, region: &VhostUserMemoryRegionInfo) -> Result<()>;
+
+    /// Gets the shared memory regions used by the device.
+    fn get_shared_memory_regions(&self) -> Result<Vec<VhostSharedMemoryRegion>>;
 }
 
 /// Struct for the vhost-user master endpoint.
@@ -555,6 +558,27 @@ impl<E: Endpoint<MasterReq>> VhostUserMaster for Master<E> {
         let hdr = node.send_request_with_body(MasterReq::REM_MEM_REG, &body, None)?;
         node.wait_for_ack(&hdr)
     }
+
+    fn get_shared_memory_regions(&self) -> Result<Vec<VhostSharedMemoryRegion>> {
+        let mut node = self.node();
+        let hdr = node.send_request_header(MasterReq::GET_SHARED_MEMORY_REGIONS, None)?;
+        let (body_reply, buf_reply, rfds) = node.recv_reply_with_payload::<VhostUserU64>(&hdr)?;
+        let struct_size = mem::size_of::<VhostSharedMemoryRegion>();
+        if rfds.is_some() || buf_reply.len() != body_reply.value as usize * struct_size {
+            return Err(VhostUserError::InvalidMessage);
+        }
+        let mut regions = Vec::new();
+        let mut offset = 0;
+        for _ in 0..body_reply.value {
+            regions.push(
+                // Can't fail because the input is the correct size.
+                VhostSharedMemoryRegion::from_reader(&buf_reply[offset..(offset + struct_size)])
+                    .unwrap(),
+            );
+            offset += struct_size;
+        }
+        Ok(regions)
+    }
 }
 
 impl<E: Endpoint<MasterReq> + AsRawDescriptor> AsRawDescriptor for Master<E> {
@@ -718,23 +742,13 @@ impl<E: Endpoint<MasterReq>> MasterInternal<E> {
         &mut self,
         hdr: &VhostUserMsgHeader<MasterReq>,
     ) -> VhostUserResult<(T, Vec<u8>, Option<Vec<File>>)> {
-        if mem::size_of::<T>() > MAX_MSG_SIZE
-            || hdr.get_size() as usize <= mem::size_of::<T>()
-            || hdr.get_size() as usize > MAX_MSG_SIZE
-            || hdr.is_reply()
-        {
+        if mem::size_of::<T>() > MAX_MSG_SIZE || hdr.is_reply() {
             return Err(VhostUserError::InvalidParam);
         }
         self.check_state()?;
 
-        let mut buf: Vec<u8> = vec![0; hdr.get_size() as usize - mem::size_of::<T>()];
-        let (reply, body, bytes, files) = self.main_sock.recv_payload_into_buf::<T>(&mut buf)?;
-        if !reply.is_reply_for(hdr)
-            || reply.get_size() as usize != mem::size_of::<T>() + bytes
-            || files.is_some()
-            || !body.is_valid()
-            || bytes != buf.len()
-        {
+        let (reply, body, buf, files) = self.main_sock.recv_payload_into_buf::<T>()?;
+        if !reply.is_reply_for(hdr) || files.is_some() || !body.is_valid() {
             return Err(VhostUserError::InvalidMessage);
         }
 

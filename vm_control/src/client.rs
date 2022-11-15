@@ -3,13 +3,15 @@
 // found in the LICENSE file.
 
 use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
-use base::{info, open_file};
+use base::open_file;
 use remain::sorted;
 use thiserror::Error;
 
-pub use crate::{sys::handle_request, *};
+pub use crate::sys::handle_request;
+pub use crate::*;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -39,8 +41,7 @@ pub fn vms_request<T: AsRef<Path> + std::fmt::Debug>(
     request: &VmRequest,
     socket_path: T,
 ) -> VmsRequestResult {
-    let response = handle_request(request, socket_path)?;
-    info!("request response was {}", response);
+    handle_request(request, socket_path)?;
     Ok(())
 }
 

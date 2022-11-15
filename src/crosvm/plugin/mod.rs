@@ -6,43 +6,98 @@ mod process;
 mod vcpu;
 
 use std::fs::File;
+use std::io;
 use std::io::Read;
-use std::io::{self, Write};
+use std::io::Write;
 use std::os::unix::net::UnixDatagram;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Barrier;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
-use libc::{
-    c_int, c_ulong, fcntl, ioctl, socketpair, AF_UNIX, EAGAIN, EBADF, EDEADLK, EEXIST, EINTR,
-    EINVAL, ENOENT, EOVERFLOW, EPERM, FIOCLEX, F_SETPIPE_SZ, MS_NODEV, MS_NOEXEC, MS_NOSUID,
-    MS_RDONLY, O_NONBLOCK, SIGCHLD, SOCK_SEQPACKET,
-};
-
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
+use base::add_fd_flags;
+use base::block_signal;
+use base::clear_signal;
+use base::drop_capabilities;
+use base::enable_core_scheduling;
+use base::error;
+use base::getegid;
+use base::geteuid;
+use base::info;
+use base::pipe;
+use base::register_rt_signal_handler;
+use base::validate_raw_descriptor;
+use base::warn;
+use base::AsRawDescriptor;
+use base::Descriptor;
+use base::Error as SysError;
+use base::Event;
+use base::EventToken;
+use base::FromRawDescriptor;
+use base::Killable;
+use base::MmapError;
+use base::RawDescriptor;
+use base::Result as SysResult;
+use base::SignalFd;
+use base::WaitContext;
+use base::SIGRTMIN;
+use kvm::Cap;
+use kvm::Datamatch;
+use kvm::IoeventAddress;
+use kvm::Kvm;
+use kvm::Vcpu;
+use kvm::VcpuExit;
+use kvm::Vm;
+use libc::c_int;
+use libc::c_ulong;
+use libc::fcntl;
+use libc::ioctl;
+use libc::socketpair;
+use libc::AF_UNIX;
+use libc::EAGAIN;
+use libc::EBADF;
+use libc::EDEADLK;
+use libc::EEXIST;
+use libc::EINTR;
+use libc::EINVAL;
+use libc::ENOENT;
+use libc::EOVERFLOW;
+use libc::EPERM;
+use libc::FIOCLEX;
+use libc::F_SETPIPE_SZ;
+use libc::MS_NODEV;
+use libc::MS_NOEXEC;
+use libc::MS_NOSUID;
+use libc::MS_RDONLY;
+use libc::O_NONBLOCK;
+use libc::SIGCHLD;
+use libc::SOCK_SEQPACKET;
+use minijail;
+use minijail::Minijail;
+use net_util::sys::unix::Tap;
+use net_util::TapTCommon;
 use protobuf::ProtobufError;
 use remain::sorted;
 use thiserror::Error;
-
-use base::{
-    add_fd_flags, block_signal, clear_signal, drop_capabilities, enable_core_scheduling, error,
-    getegid, geteuid, info, pipe, register_rt_signal_handler, validate_raw_descriptor, warn,
-    AsRawDescriptor, Descriptor, Error as SysError, Event, EventToken, FromRawDescriptor, Killable,
-    MmapError, RawDescriptor, Result as SysResult, SignalFd, WaitContext, SIGRTMIN,
-};
-use kvm::{Cap, Datamatch, IoeventAddress, Kvm, Vcpu, VcpuExit, Vm};
-use minijail::{self, Minijail};
-use net_util::{sys::unix::Tap, TapTCommon};
-use vm_memory::{GuestMemory, MemoryPolicy};
+use vm_memory::GuestMemory;
+use vm_memory::MemoryPolicy;
 
 use self::process::*;
 use self::vcpu::*;
-use crate::{crosvm::config::Executable, Config};
+use crate::crosvm::config::Executable;
+use crate::Config;
 
 const MAX_DATAGRAM_SIZE: usize = 4096;
 const MAX_VCPU_DATAGRAM_SIZE: usize = 0x40000;
+#[cfg(feature = "gpu")]
 const CROSVM_GPU_SERVER_FD_ENV: &str = "CROSVM_GPU_SERVER_FD";
 
 /// An error that occurs when communicating with the plugin process.
@@ -144,7 +199,11 @@ fn mmap_to_sys_err(e: MmapError) -> SysError {
     }
 }
 
-fn create_plugin_jail(root: &Path, log_failures: bool, seccomp_policy: &Path) -> Result<Minijail> {
+fn create_plugin_jail(
+    root: &Path,
+    log_failures: bool,
+    seccomp_policy: Option<&Path>,
+) -> Result<Minijail> {
     // All child jails run in a new user namespace without any users mapped,
     // they run as nobody unless otherwise configured.
     let mut j = Minijail::new().context("failed to create jail")?;
@@ -171,7 +230,7 @@ fn create_plugin_jail(root: &Path, log_failures: bool, seccomp_policy: &Path) ->
     // command-line parameter for an explanation about why the |log_failures|
     // flag forces the use of .policy files (and the build-time alternative to
     // this run-time flag).
-    let bpf_policy_file = seccomp_policy.with_extension("bpf");
+    let bpf_policy_file = seccomp_policy.unwrap().with_extension("bpf");
     if bpf_policy_file.exists() && !log_failures {
         j.parse_seccomp_program(&bpf_policy_file)
             .context("failed to parse jail seccomp BPF program")?;
@@ -183,7 +242,7 @@ fn create_plugin_jail(root: &Path, log_failures: bool, seccomp_policy: &Path) ->
         if log_failures {
             j.log_seccomp_filter_failures();
         }
-        j.parse_seccomp_filters(&seccomp_policy.with_extension("policy"))
+        j.parse_seccomp_filters(&seccomp_policy.unwrap().with_extension("policy"))
             .context("failed to parse jail seccomp filter")?;
     }
     j.use_seccomp_filter();
@@ -510,37 +569,38 @@ pub fn run_config(cfg: Config) -> Result<()> {
     #[allow(unused_mut)]
     let mut env_fds: Vec<(String, Descriptor)> = Vec::default();
 
-    let _default_render_server_params = crate::platform::GpuRenderServerParameters {
-        path: std::path::PathBuf::from("/usr/libexec/virgl_render_server"),
-        cache_path: None,
-        cache_size: None,
-    };
-
-    #[cfg(feature = "gpu")]
-    let gpu_render_server_parameters = if let Some(parameters) = &cfg.gpu_render_server_parameters {
-        Some(parameters)
-    } else if cfg!(feature = "plugin-render-server") {
-        Some(&_default_render_server_params)
-    } else {
-        None
-    };
-
     #[cfg(feature = "gpu")]
     // Hold on to the render server jail so it keeps running until we exit run_config()
-    let (_render_server_jail, _render_server_fd) =
-        if let Some(parameters) = &gpu_render_server_parameters {
-            let (jail, fd) = crate::platform::gpu::start_gpu_render_server(&cfg, parameters)?;
+    let (_render_server_jail, _render_server_fd) = {
+        let _default_render_server_params = crate::crosvm::sys::GpuRenderServerParameters {
+            path: std::path::PathBuf::from("/usr/libexec/virgl_render_server"),
+            cache_path: None,
+            cache_size: None,
+        };
+
+        let gpu_render_server_parameters =
+            if let Some(parameters) = &cfg.gpu_render_server_parameters {
+                Some(parameters)
+            } else if cfg!(feature = "plugin-render-server") {
+                Some(&_default_render_server_params)
+            } else {
+                None
+            };
+
+        if let Some(parameters) = gpu_render_server_parameters {
+            let (jail, fd) = crate::crosvm::sys::start_gpu_render_server(&cfg, parameters)?;
             env_fds.push((
                 CROSVM_GPU_SERVER_FD_ENV.to_string(),
                 Descriptor(fd.as_raw_descriptor()),
             ));
             (
-                Some(crate::platform::jail_helpers::ScopedMinijail(jail)),
+                Some(crate::crosvm::sys::jail_helpers::ScopedMinijail(jail)),
                 Some(fd),
             )
         } else {
             (None, None)
-        };
+        }
+    };
 
     let jail = if let Some(jail_config) = &cfg.jail_config {
         // An empty directory for jailed plugin pivot root.
@@ -561,9 +621,15 @@ pub fn run_config(cfg: Config) -> Result<()> {
             bail!("specified root directory is not a directory");
         }
 
-        let policy_path = jail_config.seccomp_policy_dir.join("plugin");
-        let mut jail =
-            create_plugin_jail(root_path, jail_config.seccomp_log_failures, &policy_path)?;
+        let policy_path = jail_config
+            .seccomp_policy_dir
+            .as_ref()
+            .map(|dir| dir.join("plugin"));
+        let mut jail = create_plugin_jail(
+            root_path,
+            jail_config.seccomp_log_failures,
+            policy_path.as_deref(),
+        )?;
 
         // Update gid map of the jail if caller provided supplemental groups.
         if !cfg.plugin_gid_maps.is_empty() {

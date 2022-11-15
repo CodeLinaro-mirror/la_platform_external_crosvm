@@ -7,7 +7,14 @@ use std::collections::HashMap;
 use once_cell::sync::Lazy;
 
 use super::whpx_sys::*;
-use crate::{CpuIdEntry, DebugRegs, DescriptorTable, Fpu, LapicState, Regs, Segment, Sregs};
+use crate::CpuIdEntry;
+use crate::DebugRegs;
+use crate::DescriptorTable;
+use crate::Fpu;
+use crate::LapicState;
+use crate::Regs;
+use crate::Segment;
+use crate::Sregs;
 
 #[derive(Default)]
 pub(super) struct WhpxRegs {
@@ -168,12 +175,12 @@ impl From<&WHV_X64_TABLE_REGISTER> for DescriptorTable {
 
 #[derive(Default)]
 pub(super) struct WhpxSregs {
-    register_values: [WHV_REGISTER_VALUE; 17],
+    register_values: [WHV_REGISTER_VALUE; 16],
 }
 
 impl WhpxSregs {
-    pub(super) fn get_register_names() -> &'static [WHV_REGISTER_NAME; 17] {
-        const REG_NAMES: [WHV_REGISTER_NAME; 17] = [
+    pub(super) fn get_register_names() -> &'static [WHV_REGISTER_NAME; 16] {
+        const REG_NAMES: [WHV_REGISTER_NAME; 16] = [
             WHV_REGISTER_NAME_WHvX64RegisterCs,
             WHV_REGISTER_NAME_WHvX64RegisterDs,
             WHV_REGISTER_NAME_WHvX64RegisterEs,
@@ -190,7 +197,6 @@ impl WhpxSregs {
             WHV_REGISTER_NAME_WHvX64RegisterCr4,
             WHV_REGISTER_NAME_WHvX64RegisterCr8,
             WHV_REGISTER_NAME_WHvX64RegisterEfer, // this is actually an msr
-            WHV_REGISTER_NAME_WHvX64RegisterApicBase, // this is actually an msr
         ];
         &REG_NAMES
     }
@@ -242,9 +248,6 @@ impl From<&Sregs> for WhpxSregs {
                 WHV_REGISTER_VALUE { Reg64: sregs.cr4 },
                 WHV_REGISTER_VALUE { Reg64: sregs.cr8 },
                 WHV_REGISTER_VALUE { Reg64: sregs.efer },
-                WHV_REGISTER_VALUE {
-                    Reg64: sregs.apic_base,
-                },
             ],
         }
     }
@@ -270,8 +273,6 @@ impl From<&WhpxSregs> for Sregs {
                 cr4: whpx_regs.register_values[13].Reg64,
                 cr8: whpx_regs.register_values[14].Reg64,
                 efer: whpx_regs.register_values[15].Reg64,
-                apic_base: whpx_regs.register_values[16].Reg64,
-                interrupt_bitmap: [0; 4],
             }
         }
     }

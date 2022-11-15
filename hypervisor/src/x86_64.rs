@@ -4,16 +4,24 @@
 
 use std::arch::x86_64::CpuidResult;
 #[cfg(any(unix, feature = "haxm", feature = "whpx"))]
-use std::arch::x86_64::{__cpuid, _rdtsc};
+use std::arch::x86_64::__cpuid;
+#[cfg(any(unix, feature = "haxm", feature = "whpx"))]
+use std::arch::x86_64::_rdtsc;
 
-use serde::{Deserialize, Serialize};
-
-use base::{error, Result};
+use base::error;
+use base::Result;
 use bit_field::*;
 use downcast_rs::impl_downcast;
-
-use crate::{Hypervisor, IrqRoute, IrqSource, IrqSourceChip, Vcpu, Vm};
+use serde::Deserialize;
+use serde::Serialize;
 use vm_memory::GuestAddress;
+
+use crate::Hypervisor;
+use crate::IrqRoute;
+use crate::IrqSource;
+use crate::IrqSourceChip;
+use crate::Vcpu;
+use crate::Vm;
 
 /// A trait for managing cpuids for an x86_64 hypervisor and for checking its capabilities.
 pub trait HypervisorX86_64: Hypervisor {
@@ -172,10 +180,61 @@ pub(crate) fn host_phys_addr_bits() -> u8 {
 }
 
 /// Initial state for x86_64 VCPUs.
-#[derive(Copy, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct VcpuInitX86_64 {
     /// General-purpose registers.
     pub regs: Regs,
+
+    /// Special registers.
+    pub sregs: Sregs,
+
+    /// Floating-point registers.
+    pub fpu: Fpu,
+
+    /// Machine-specific registers.
+    pub msrs: Vec<Register>,
+}
+
+/// Hold the CPU feature configurations that are needed to setup a vCPU.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpuConfigX86_64 {
+    /// whether to force using a calibrated TSC leaf (0x15).
+    pub force_calibrated_tsc_leaf: bool,
+
+    /// whether enabling host cpu topology.
+    pub host_cpu_topology: bool,
+
+    /// whether expose HWP feature to the guest.
+    pub enable_hwp: bool,
+
+    /// whether enabling host cpu topology.
+    pub enable_pnp_data: bool,
+
+    /// Wheter diabling SMT (Simultaneous Multithreading).
+    pub no_smt: bool,
+
+    /// whether enabling ITMT scheduler
+    pub itmt: bool,
+}
+
+impl CpuConfigX86_64 {
+    pub fn new(
+        force_calibrated_tsc_leaf: bool,
+        host_cpu_topology: bool,
+        enable_hwp: bool,
+        enable_pnp_data: bool,
+        no_smt: bool,
+        itmt: bool,
+    ) -> Self {
+        CpuConfigX86_64 {
+            force_calibrated_tsc_leaf,
+            host_cpu_topology,
+            enable_hwp,
+            enable_pnp_data,
+            no_smt,
+            itmt,
+        }
+    }
 }
 
 /// A CpuId Entry contains supported feature information for the given processor.
@@ -591,7 +650,7 @@ impl Default for Regs {
             r13: 0,
             r14: 0,
             r15: 0,
-            rip: 0,
+            rip: 0xfff0, // Reset vector.
             rflags: 0x2, // Bit 1 (0x2) is always 1.
         }
     }
@@ -624,7 +683,7 @@ pub struct DescriptorTable {
 
 /// State of a VCPU's special registers.
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct Sregs {
     pub cs: Segment,
     pub ds: Segment,
@@ -642,16 +701,106 @@ pub struct Sregs {
     pub cr4: u64,
     pub cr8: u64,
     pub efer: u64,
-    pub apic_base: u64,
+}
 
-    /// A bitmap of pending external interrupts.  At most one bit may be set.  This interrupt has
-    /// been acknowledged by the APIC but not yet injected into the cpu core.
-    pub interrupt_bitmap: [u64; 4usize],
+impl Default for Sregs {
+    fn default() -> Self {
+        // Intel SDM Vol. 3A, 3.4.5.1 ("Code- and Data-Segment Descriptor Types")
+        const SEG_TYPE_DATA: u8 = 0b0000;
+        const SEG_TYPE_DATA_WRITABLE: u8 = 0b0010;
+
+        const SEG_TYPE_CODE: u8 = 0b1000;
+        const SEG_TYPE_CODE_READABLE: u8 = 0b0010;
+
+        const SEG_TYPE_ACCESSED: u8 = 0b0001;
+
+        // Intel SDM Vol. 3A, 3.4.5 ("Segment Descriptors")
+        const SEG_S_SYSTEM: u8 = 0; // System segment.
+        const SEG_S_CODE_OR_DATA: u8 = 1; // Data/code segment.
+
+        // 16-bit real-mode code segment (reset vector).
+        let code_seg = Segment {
+            base: 0xffff0000,
+            limit: 0xffff,
+            selector: 0xf000,
+            type_: SEG_TYPE_CODE | SEG_TYPE_CODE_READABLE | SEG_TYPE_ACCESSED, // 11
+            present: 1,
+            s: SEG_S_CODE_OR_DATA,
+            ..Default::default()
+        };
+
+        // 16-bit real-mode data segment.
+        let data_seg = Segment {
+            base: 0,
+            limit: 0xffff,
+            selector: 0,
+            type_: SEG_TYPE_DATA | SEG_TYPE_DATA_WRITABLE | SEG_TYPE_ACCESSED, // 3
+            present: 1,
+            s: SEG_S_CODE_OR_DATA,
+            ..Default::default()
+        };
+
+        // 16-bit TSS segment.
+        let task_seg = Segment {
+            base: 0,
+            limit: 0xffff,
+            selector: 0,
+            type_: SEG_TYPE_CODE | SEG_TYPE_CODE_READABLE | SEG_TYPE_ACCESSED, // 11
+            present: 1,
+            s: SEG_S_SYSTEM,
+            ..Default::default()
+        };
+
+        // Local descriptor table.
+        let ldt = Segment {
+            base: 0,
+            limit: 0xffff,
+            selector: 0,
+            type_: SEG_TYPE_DATA | SEG_TYPE_DATA_WRITABLE, // 2
+            present: 1,
+            s: SEG_S_SYSTEM,
+            ..Default::default()
+        };
+
+        // Global descriptor table.
+        let gdt = DescriptorTable {
+            base: 0,
+            limit: 0xffff,
+        };
+
+        // Interrupt descriptor table.
+        let idt = DescriptorTable {
+            base: 0,
+            limit: 0xffff,
+        };
+
+        let cr0 = (1 << 4) // CR0.ET (reserved, always 1)
+                | (1 << 30); // CR0.CD (cache disable)
+
+        Sregs {
+            cs: code_seg,
+            ds: data_seg,
+            es: data_seg,
+            fs: data_seg,
+            gs: data_seg,
+            ss: data_seg,
+            tr: task_seg,
+            ldt,
+            gdt,
+            idt,
+            cr0,
+            cr2: 0,
+            cr3: 0,
+            cr4: 0,
+            cr8: 0,
+            efer: 0,
+        }
+    }
 }
 
 /// State of a VCPU's floating point unit.
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct Fpu {
     pub fpr: [[u8; 16usize]; 8usize],
     pub fcw: u16,
@@ -662,6 +811,22 @@ pub struct Fpu {
     pub last_dp: u64,
     pub xmm: [[u8; 16usize]; 16usize],
     pub mxcsr: u32,
+}
+
+impl Default for Fpu {
+    fn default() -> Self {
+        Fpu {
+            fpr: Default::default(),
+            fcw: 0x37f, // Intel SDM Vol. 1, 13.6
+            fsw: 0,
+            ftwx: 0,
+            last_opcode: 0,
+            last_ip: 0,
+            last_dp: 0,
+            xmm: Default::default(),
+            mxcsr: 0x1f80, // Intel SDM Vol. 1, 11.6.4
+        }
+    }
 }
 
 /// State of a VCPU's debug registers.

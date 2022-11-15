@@ -4,11 +4,12 @@
 
 #![no_main]
 
-use cros_fuzz::fuzz_target;
-use vm_memory::{GuestAddress, GuestMemory};
-
 use std::fs::File;
 use std::io::Write;
+
+use cros_fuzz::fuzz_target;
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
 
 const MEM_SIZE: u64 = 256 * 1024 * 1024;
 
@@ -23,5 +24,6 @@ fn make_elf_bin(elf_bytes: &[u8]) -> File {
 fuzz_target!(|bytes| {
     let mut kimage = make_elf_bin(bytes);
     let mem = GuestMemory::new(&[(GuestAddress(0), MEM_SIZE)]).unwrap();
-    let _ = kernel_loader::load_kernel(&mem, GuestAddress(0), &mut kimage);
+    let _ = kernel_loader::load_elf32(&mem, GuestAddress(0), &mut kimage);
+    let _ = kernel_loader::load_elf64(&mem, GuestAddress(0), &mut kimage);
 });

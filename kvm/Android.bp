@@ -72,6 +72,16 @@ rust_test {
     },
 }
 
+rust_test {
+    name: "kvm_test_tests_real_run_adder",
+    defaults: ["kvm_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/real_run_adder.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
 rust_library {
     name: "libkvm",
     defaults: ["crosvm_defaults"],

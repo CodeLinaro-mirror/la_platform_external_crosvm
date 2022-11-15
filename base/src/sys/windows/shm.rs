@@ -2,12 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::{MemoryMapping, RawDescriptor, Result};
-use crate::descriptor::{AsRawDescriptor, IntoRawDescriptor, SafeDescriptor};
-use serde::{ser, Deserialize, Serialize, Serializer};
-use std::io::{
-    Error, ErrorKind, Read, Seek, SeekFrom, Write, {self},
-};
+use std::io;
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::io::Write;
+
+use serde::ser;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::Serializer;
+
+use super::RawDescriptor;
+use super::Result;
+use crate::descriptor::AsRawDescriptor;
+use crate::descriptor::IntoRawDescriptor;
+use crate::descriptor::SafeDescriptor;
+use crate::MemoryMapping;
 
 /// A shared memory file descriptor and its size.
 #[derive(Debug, Deserialize)]
@@ -154,8 +167,9 @@ impl Seek for SharedMemory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::ffi::CString;
+
+    use super::*;
 
     #[test]
     fn new() {

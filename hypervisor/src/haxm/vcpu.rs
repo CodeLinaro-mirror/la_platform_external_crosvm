@@ -3,29 +3,54 @@
 // found in the LICENSE file.
 
 use core::ffi::c_void;
-use libc::{EINVAL, ENOENT, ENOSPC, ENXIO};
 use std::arch::x86_64::CpuidResult;
 use std::cmp::min;
 use std::intrinsics::copy_nonoverlapping;
-use std::mem::{size_of, ManuallyDrop};
+use std::mem::size_of;
+use std::mem::ManuallyDrop;
 use std::os::raw::c_int;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use base::{
-    errno_result, ioctl, ioctl_with_mut_ref, ioctl_with_ptr_sized, ioctl_with_ref, warn,
-    AsRawDescriptor, Error, MappedRegion, MemoryMapping, RawDescriptor, Result, SafeDescriptor,
-};
+use base::errno_result;
+use base::ioctl;
+use base::ioctl_with_mut_ref;
+use base::ioctl_with_ptr_sized;
+use base::ioctl_with_ref;
+use base::warn;
+use base::AsRawDescriptor;
+use base::Error;
+use base::MappedRegion;
+use base::MemoryMapping;
+use base::RawDescriptor;
+use base::Result;
+use base::SafeDescriptor;
 use data_model::vec_with_array_field;
+use libc::EINVAL;
+use libc::ENOENT;
+use libc::ENOSPC;
+use libc::ENXIO;
 use vm_memory::GuestAddress;
 
 use super::*;
-
-use crate::{
-    get_tsc_offset_from_msr, set_tsc_offset_via_msr, CpuId, CpuIdEntry, DebugRegs, DescriptorTable,
-    Fpu, HypervHypercall, IoOperation, IoParams, Register, Regs, Segment, Sregs, Vcpu, VcpuExit,
-    VcpuRunHandle, VcpuX86_64,
-};
+use crate::get_tsc_offset_from_msr;
+use crate::set_tsc_offset_via_msr;
+use crate::CpuId;
+use crate::CpuIdEntry;
+use crate::DebugRegs;
+use crate::DescriptorTable;
+use crate::Fpu;
+use crate::HypervHypercall;
+use crate::IoOperation;
+use crate::IoParams;
+use crate::Register;
+use crate::Regs;
+use crate::Segment;
+use crate::Sregs;
+use crate::Vcpu;
+use crate::VcpuExit;
+use crate::VcpuRunHandle;
+use crate::VcpuX86_64;
 
 // from HAXM code's IOS_MAX_BUFFER
 pub(crate) const HAXM_IO_BUFFER_SIZE: usize = 64;
@@ -506,8 +531,8 @@ impl VcpuX86_64 for HaxmVcpu {
             }
 
             // copy values we got from kernel
-            for i in 0..chunk_size {
-                chunk[i].value = msr_data.entries[i].value;
+            for (i, item) in chunk.iter_mut().enumerate().take(chunk_size) {
+                item.value = msr_data.entries[i].value;
             }
         }
 
@@ -737,11 +762,6 @@ impl VcpuState {
             // HAXM does not support setting cr8
             cr8: 0,
             efer: self.state._efer as u64,
-            // apic_base is part of haxm_tunnel structure
-            apic_base: 0,
-            // interrupt bitmap is really part of the APIC state, which can be gotten via
-            // get_lapic_state.  TODO: remove from Sregs?
-            interrupt_bitmap: [0; 4],
         }
     }
 
@@ -978,11 +998,15 @@ impl From<&Register> for vmx_msr {
     }
 }
 
+// TODO(b:241252288): Enable tests disabled with dummy feature flag - enable_haxm_tests.
 #[cfg(test)]
+#[cfg(feature = "enable_haxm_tests")]
 mod tests {
+    use vm_memory::GuestAddress;
+    use vm_memory::GuestMemory;
+
     use super::*;
     use crate::VmX86_64;
-    use vm_memory::{GuestAddress, GuestMemory};
 
     // EFER Bits
     const EFER_SCE: u64 = 0x00000001;
@@ -1067,8 +1091,8 @@ mod tests {
         for entry in &mut cpuid.cpu_id_entries {
             if entry.function == 1 {
                 // Disable XSAVE and OSXSAVE
-                entry.ecx &= !(1 << 26);
-                entry.ecx &= !(1 << 27);
+                entry.cpuid.ecx &= !(1 << 26);
+                entry.cpuid.ecx &= !(1 << 27);
             }
         }
 

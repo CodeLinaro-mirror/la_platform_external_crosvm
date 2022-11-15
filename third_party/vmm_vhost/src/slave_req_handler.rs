@@ -76,12 +76,13 @@ pub trait VhostUserSlaveReqHandler {
     fn set_vring_enable(&self, index: u32, enable: bool) -> Result<()>;
     fn get_config(&self, offset: u32, size: u32, flags: VhostUserConfigFlags) -> Result<Vec<u8>>;
     fn set_config(&self, offset: u32, buf: &[u8], flags: VhostUserConfigFlags) -> Result<()>;
-    fn set_slave_req_fd(&self, _vu_req: File) {}
+    fn set_slave_req_fd(&self, _vu_req: Box<dyn Endpoint<SlaveReq>>) {}
     fn get_inflight_fd(&self, inflight: &VhostUserInflight) -> Result<(VhostUserInflight, File)>;
     fn set_inflight_fd(&self, inflight: &VhostUserInflight, file: File) -> Result<()>;
     fn get_max_mem_slots(&self) -> Result<u64>;
     fn add_mem_region(&self, region: &VhostUserSingleMemoryRegion, fd: File) -> Result<()>;
     fn remove_mem_region(&self, region: &VhostUserSingleMemoryRegion) -> Result<()>;
+    fn get_shared_memory_regions(&self) -> Result<Vec<VhostSharedMemoryRegion>>;
 }
 
 /// Services provided to the master by the slave without interior mutability.
@@ -124,7 +125,7 @@ pub trait VhostUserSlaveReqHandlerMut {
         flags: VhostUserConfigFlags,
     ) -> Result<Vec<u8>>;
     fn set_config(&mut self, offset: u32, buf: &[u8], flags: VhostUserConfigFlags) -> Result<()>;
-    fn set_slave_req_fd(&mut self, _vu_req: File) {}
+    fn set_slave_req_fd(&mut self, _vu_req: Box<dyn Endpoint<SlaveReq>>) {}
     fn get_inflight_fd(
         &mut self,
         inflight: &VhostUserInflight,
@@ -133,6 +134,7 @@ pub trait VhostUserSlaveReqHandlerMut {
     fn get_max_mem_slots(&mut self) -> Result<u64>;
     fn add_mem_region(&mut self, region: &VhostUserSingleMemoryRegion, fd: File) -> Result<()>;
     fn remove_mem_region(&mut self, region: &VhostUserSingleMemoryRegion) -> Result<()>;
+    fn get_shared_memory_regions(&mut self) -> Result<Vec<VhostSharedMemoryRegion>>;
 }
 
 impl<T: VhostUserSlaveReqHandlerMut> VhostUserSlaveReqHandler for Mutex<T> {
@@ -222,7 +224,7 @@ impl<T: VhostUserSlaveReqHandlerMut> VhostUserSlaveReqHandler for Mutex<T> {
         self.lock().unwrap().set_config(offset, buf, flags)
     }
 
-    fn set_slave_req_fd(&self, vu_req: File) {
+    fn set_slave_req_fd(&self, vu_req: Box<dyn Endpoint<SlaveReq>>) {
         self.lock().unwrap().set_slave_req_fd(vu_req)
     }
 
@@ -244,6 +246,10 @@ impl<T: VhostUserSlaveReqHandlerMut> VhostUserSlaveReqHandler for Mutex<T> {
 
     fn remove_mem_region(&self, region: &VhostUserSingleMemoryRegion) -> Result<()> {
         self.lock().unwrap().remove_mem_region(region)
+    }
+
+    fn get_shared_memory_regions(&self) -> Result<Vec<VhostSharedMemoryRegion>> {
+        self.lock().unwrap().get_shared_memory_regions()
     }
 }
 
@@ -421,7 +427,7 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> AsRef<S> for SlaveReqH
 
 impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> {
     /// Create a vhost-user slave endpoint.
-    pub(super) fn new(endpoint: E, backend: S) -> Self {
+    pub fn new(endpoint: E, backend: S) -> Self {
         SlaveReqHandler {
             slave_req_helper: SlaveReqHelper::new(endpoint, backend.protocol()),
             backend,
@@ -728,6 +734,16 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> 
                 self.slave_req_helper.send_ack_message(&hdr, res.is_ok())?;
                 res?;
             }
+            MasterReq::GET_SHARED_MEMORY_REGIONS => {
+                let regions = self.backend.get_shared_memory_regions()?;
+                let mut buf = Vec::new();
+                let msg = VhostUserU64::new(regions.len() as u64);
+                for r in regions {
+                    buf.extend_from_slice(r.as_slice())
+                }
+                self.slave_req_helper
+                    .send_reply_with_payload(&hdr, &msg, buf.as_slice())?;
+            }
             _ => {
                 return Err(Error::InvalidMessage);
             }
@@ -844,13 +860,12 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> 
     }
 
     fn set_slave_req_fd(&mut self, files: Option<Vec<File>>) -> Result<()> {
-        if cfg!(windows) {
-            unimplemented!();
-        } else {
-            let file = take_single_file(files).ok_or(Error::InvalidMessage)?;
-            self.backend.set_slave_req_fd(file);
-            Ok(())
-        }
+        let ep = self
+            .slave_req_helper
+            .endpoint
+            .create_slave_request_endpoint(files)?;
+        self.backend.set_slave_req_fd(ep);
+        Ok(())
     }
 
     fn handle_vring_fd_request(

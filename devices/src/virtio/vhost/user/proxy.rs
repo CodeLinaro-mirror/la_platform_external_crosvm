@@ -10,47 +10,93 @@
 //! implementation (referred to as `device backend` in this module) in the
 //! device VM.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
+use std::io::IoSlice;
+use std::io::Read;
 use std::io::Write;
 use std::os::unix::net::UnixListener;
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::thread;
 
-use anyhow::{anyhow, bail, Context};
-use base::{
-    error, info, AsRawDescriptor, Event, EventToken, EventType, FromRawDescriptor,
-    IntoRawDescriptor, Protection, RawDescriptor, SafeDescriptor, Tube, WaitContext,
-};
-use data_model::{DataInit, Le32};
-use libc::{recv, MSG_DONTWAIT, MSG_PEEK};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Context;
+use base::error;
+use base::info;
+use base::warn;
+use base::AsRawDescriptor;
+use base::Event;
+use base::EventToken;
+use base::EventType;
+use base::FromRawDescriptor;
+use base::IntoRawDescriptor;
+use base::Protection;
+use base::RawDescriptor;
+use base::SafeDescriptor;
+use base::ScmSocket;
+use base::Tube;
+use base::WaitContext;
+use data_model::DataInit;
+use data_model::Le32;
+use hypervisor::Datamatch;
+use libc::recv;
+use libc::MSG_DONTWAIT;
+use libc::MSG_PEEK;
 use resources::Alloc;
 use sync::Mutex;
 use uuid::Uuid;
-use vm_control::{MemSlot, VmMemoryDestination, VmMemoryRequest, VmMemoryResponse, VmMemorySource};
+use vm_control::MemSlot;
+use vm_control::VmMemoryDestination;
+use vm_control::VmMemoryRequest;
+use vm_control::VmMemoryResponse;
+use vm_control::VmMemorySource;
+use vm_memory::udmabuf::UdmabufDriver;
+use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
-use vmm_vhost::{
-    connection::socket::Endpoint as SocketEndpoint,
-    connection::EndpointExt,
-    message::{
-        MasterReq, VhostUserMemory, VhostUserMemoryRegion, VhostUserMsgHeader,
-        VhostUserMsgValidator, VhostUserU64,
-    },
-    Protocol, SlaveReqHelper,
-};
+use vmm_vhost::connection::socket::Endpoint as SocketEndpoint;
+use vmm_vhost::connection::EndpointExt;
+use vmm_vhost::message::MasterReq;
+use vmm_vhost::message::Req;
+use vmm_vhost::message::SlaveReq;
+use vmm_vhost::message::VhostUserMemory;
+use vmm_vhost::message::VhostUserMemoryRegion;
+use vmm_vhost::message::VhostUserMsgHeader;
+use vmm_vhost::message::VhostUserMsgValidator;
+use vmm_vhost::message::VhostUserShmemMapMsg;
+use vmm_vhost::message::VhostUserShmemMapMsgFlags;
+use vmm_vhost::message::VhostUserShmemUnmapMsg;
+use vmm_vhost::message::VhostUserU64;
+use vmm_vhost::Error as VhostError;
+use vmm_vhost::Protocol;
+use vmm_vhost::Result as VhostResult;
+use vmm_vhost::SlaveReqHelper;
 
-use crate::virtio::{
-    copy_config, DescriptorChain, DeviceType, Interrupt, PciCapabilityType, Queue, Reader,
-    SignalableInterrupt, VirtioDevice, VirtioPciCap, Writer,
-};
+use crate::pci::PciBarConfiguration;
+use crate::pci::PciBarIndex;
+use crate::pci::PciBarPrefetchable;
+use crate::pci::PciBarRegionType;
+use crate::pci::PciCapability;
+use crate::pci::PciCapabilityID;
+use crate::virtio::copy_config;
+use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
+use crate::virtio::vhost::vhost_body_from_message_bytes;
+use crate::virtio::vhost::vhost_header_from_bytes;
+use crate::virtio::DescriptorChain;
+use crate::virtio::DeviceType;
+use crate::virtio::Interrupt;
+use crate::virtio::PciCapabilityType;
+use crate::virtio::Queue;
+use crate::virtio::Reader;
+use crate::virtio::SignalableInterrupt;
+use crate::virtio::VirtioDevice;
+use crate::virtio::VirtioPciCap;
+use crate::virtio::Writer;
+use crate::virtio::VIRTIO_F_ACCESS_PLATFORM;
+use crate::virtio::VIRTIO_MSI_NO_VECTOR;
 use crate::PciAddress;
-use crate::{
-    pci::{
-        PciBarConfiguration, PciBarIndex, PciBarPrefetchable, PciBarRegionType, PciCapability,
-        PciCapabilityID,
-    },
-    virtio::{VIRTIO_F_ACCESS_PLATFORM, VIRTIO_MSI_NO_VECTOR},
-};
 
 // Note: There are two sets of queues that will be mentioned here. 1st set is
 // for this Virtio PCI device itself. 2nd set is the actual device backends
@@ -69,20 +115,17 @@ const CONFIG_UUID_SIZE: usize = 16;
 // https://stefanha.github.io/virtio/vhost-user-slave.html#x1-2870004.
 const VIRTIO_VHOST_USER_STATUS_SLAVE_UP: u8 = 0;
 
-const BAR_INDEX: u8 = 2;
+const IO_BAR_INDEX: u8 = 2;
+const SHMEM_BAR_INDEX: u8 = 4;
 
 // Bar configuration.
-// All offsets are from the starting of bar `BAR_INDEX`.
+// All offsets are from the starting of bar `IO_BAR_INDEX`.
 const DOORBELL_OFFSET: u64 = 0;
 // TODO(abhishekbh): Copied from lspci in qemu with VVU support.
 const DOORBELL_SIZE: u64 = 0x2000;
 const NOTIFICATIONS_OFFSET: u64 = DOORBELL_OFFSET + DOORBELL_SIZE;
 const NOTIFICATIONS_SIZE: u64 = 0x1000;
-const SHARED_MEMORY_OFFSET: u64 = NOTIFICATIONS_OFFSET + NOTIFICATIONS_SIZE;
-// TODO(abhishekbh): Copied from qemu with VVU support. This should be same as
-// VirtioVhostUser.device_bar_size, but it's significantly  lower than the
-// memory allocated to a sibling VM. Figure out how these two are related.
-const SHARED_MEMORY_SIZE: u64 = 0x1000;
+const NOTIFICATIONS_END: u64 = NOTIFICATIONS_OFFSET + NOTIFICATIONS_SIZE;
 
 // Notifications region related constants.
 const NOTIFICATIONS_VRING_SELECT_OFFSET: u64 = 0;
@@ -179,14 +222,6 @@ fn check_attached_files(
     }
 }
 
-// Check if `hdr` is valid.
-fn is_header_valid(hdr: &VhostUserMsgHeader<MasterReq>) -> bool {
-    if hdr.is_reply() || hdr.get_version() != 0x1 {
-        return false;
-    }
-    true
-}
-
 // Payload sent by the sibling in a |SET_VRING_KICK| message.
 #[derive(Default)]
 struct KickData {
@@ -202,6 +237,10 @@ struct KickData {
 #[derive(Default)]
 struct Vring {
     kick_data: KickData,
+    // The call event is registered with KVM_IOEVENTFD so that the kernel signals it
+    // directly. Although the proxy device doesn't write to it, we need to keep a reference
+    // because unregistering the eventfd requires passing the it back to KVM_IOEVENTFD
+    // with a deassign flag.
     call_evt: Option<Event>,
 }
 
@@ -216,12 +255,15 @@ struct Worker {
     // To communicate with the main process.
     main_process_tube: Tube,
 
-    // The bar representing the doorbell, notification and shared memory regions.
-    pci_bar: Alloc,
+    // The bar representing the doorbell and notification.
+    io_pci_bar: Alloc,
 
-    // Offset at which to allocate the next shared memory region, corresponding
-    // to the |SET_MEM_TABLE| sibling message.
-    mem_offset: usize,
+    // The bar representing the shared memory regions.
+    shmem_pci_bar: Alloc,
+
+    // Offset within `shmem_pci_bar`at which to allocate the next shared memory region,
+    // corresponding to the |SET_MEM_TABLE| sibling message.
+    shmem_pci_bar_mem_offset: usize,
 
     // Vring related data sent through |SET_VRING_KICK| and |SET_VRING_CALL|
     // messages.
@@ -232,12 +274,32 @@ struct Worker {
 
     // Stores memory regions that the worker has asked the main thread to register.
     registered_memory: Vec<MemSlot>,
+
+    // Channel for backend mesages.
+    slave_req_fd: Option<SocketEndpoint<SlaveReq>>,
+
+    // Driver for exporting memory as udmabufs for shared memory regions.
+    udmabuf_driver: Option<UdmabufDriver>,
+
+    // Iommu to translate IOVAs into GPAs for shared memory regions.
+    iommu: Arc<Mutex<IpcMemoryMapper>>,
+
+    // Exported regions mapped via shared memory regions.
+    exported_regions:
+        BTreeMap<u64 /* shmem_offset */, (u8, u64, u64) /* shmid, iova, size */>,
+
+    // The currently pending unmap operation. Becomes `Some` when the proxy
+    // receives a SHMEM_UNMAP message from the guest, and becomes `None` when
+    // the proxy receives the corresponding SHMEM_UNMAP reply from the frontend.
+    pending_unmap: Option<u64 /* shmem_offset */>,
 }
 
-#[derive(EventToken, Debug, Clone)]
+#[derive(EventToken, Debug, Clone, PartialEq)]
 enum Token {
     // Data is available on the Vhost-user sibling socket.
     SiblingSocket,
+    // Data is available on the vhost-user backend socket.
+    BackendSocket,
     // The device backend has made a read buffer available.
     RxQueue,
     // The device backend has sent a buffer to the |Worker::tx_queue|.
@@ -246,8 +308,8 @@ enum Token {
     SiblingKick { index: usize },
     // crosvm has requested the device to shut down.
     Kill,
-    // Message from the main thread.
-    MainThread,
+    // An iommu fault occured. Generally means the device process died.
+    IommuFault,
 }
 
 /// Represents the status of connection to the sibling.
@@ -269,8 +331,106 @@ enum RxqStatus {
 
 /// Reason for a worker's successful exit.
 enum ExitReason {
+    IommuFault,
     Killed,
     Disconnected,
+}
+
+// Trait used to process an incoming vhost-user message
+trait RxAction: Req {
+    // Checks whether the header is valid
+    fn is_header_valid(hdr: &VhostUserMsgHeader<Self>) -> bool;
+
+    // Process a message before forwarding it on to the virtqueue
+    fn process_message(
+        worker: &mut Worker,
+        wait_ctx: &mut WaitContext<Token>,
+        hdr: &VhostUserMsgHeader<Self>,
+        payload: &[u8],
+        files: Option<Vec<File>>,
+    ) -> Result<()>;
+
+    // Get the endpoint from which to read messages
+    fn get_ep(worker: &mut Worker) -> &mut SocketEndpoint<Self>;
+
+    // Handle a failure processing a message
+    fn handle_failure(worker: &mut Worker, hdr: &VhostUserMsgHeader<Self>) -> Result<()>;
+}
+
+impl RxAction for MasterReq {
+    fn is_header_valid(hdr: &VhostUserMsgHeader<MasterReq>) -> bool {
+        if hdr.is_reply() || hdr.get_version() != 0x1 {
+            return false;
+        }
+        true
+    }
+
+    fn process_message(
+        worker: &mut Worker,
+        wait_ctx: &mut WaitContext<Token>,
+        hdr: &VhostUserMsgHeader<MasterReq>,
+        payload: &[u8],
+        files: Option<Vec<File>>,
+    ) -> Result<()> {
+        check_attached_files(hdr, &files)?;
+        if !is_action_request(hdr) {
+            return Ok(());
+        }
+        match hdr.get_code() {
+            MasterReq::SET_MEM_TABLE => worker.set_mem_table(payload, files),
+            MasterReq::SET_VRING_CALL => worker.set_vring_call(payload, files),
+            MasterReq::SET_VRING_KICK => worker.set_vring_kick(wait_ctx, payload, files),
+            MasterReq::SET_SLAVE_REQ_FD => worker.set_slave_req_fd(wait_ctx, files),
+            _ => unimplemented!("unimplemented action message: {:?}", hdr.get_code()),
+        }
+    }
+
+    fn get_ep(worker: &mut Worker) -> &mut SocketEndpoint<MasterReq> {
+        worker.slave_req_helper.as_mut()
+    }
+
+    fn handle_failure(worker: &mut Worker, hdr: &VhostUserMsgHeader<MasterReq>) -> Result<()> {
+        worker
+            .slave_req_helper
+            .send_ack_message(hdr, false)
+            .context("failed to send ack")
+    }
+}
+
+impl RxAction for SlaveReq {
+    fn is_header_valid(hdr: &VhostUserMsgHeader<SlaveReq>) -> bool {
+        if !hdr.is_reply() || hdr.get_version() != 0x1 {
+            return false;
+        }
+        true
+    }
+
+    fn process_message(
+        worker: &mut Worker,
+        _wait_ctx: &mut WaitContext<Token>,
+        hdr: &VhostUserMsgHeader<SlaveReq>,
+        payload: &[u8],
+        files: Option<Vec<File>>,
+    ) -> Result<()> {
+        if files.is_some() {
+            bail!("unexpected fd for {:?}", hdr.get_code());
+        }
+        match hdr.get_code() {
+            SlaveReq::SHMEM_UNMAP => worker.handle_unmap_reply(payload),
+            _ => Ok(()),
+        }
+    }
+
+    fn get_ep(worker: &mut Worker) -> &mut SocketEndpoint<SlaveReq> {
+        // We can only be here if we slave_req_fd became readable, so it must exist.
+        worker.slave_req_fd.as_mut().unwrap()
+    }
+
+    fn handle_failure(_worker: &mut Worker, hdr: &VhostUserMsgHeader<SlaveReq>) -> Result<()> {
+        // There's nothing we can do to directly handle this failure here.
+        error!("failed to process reply to backend {:?}", hdr.get_code());
+        Ok(())
+    }
 }
 
 impl Worker {
@@ -283,16 +443,30 @@ impl Worker {
         &mut self,
         rx_queue_evt: Event,
         tx_queue_evt: Event,
-        main_thread_tube: Tube,
         kill_evt: Event,
     ) -> Result<ExitReason> {
+        let fault_event = self
+            .iommu
+            .lock()
+            .start_export_session()
+            .context("failed to prepare for exporting")?;
+
+        // Now that an export session has been started, we can export the virtqueues to
+        // fetch the GuestAddresses corresponding to their IOVA-based config.
+        self.rx_queue
+            .export_memory(&self.mem)
+            .context("failed to export rx_queue")?;
+        self.tx_queue
+            .export_memory(&self.mem)
+            .context("failed to export tx_queue")?;
+
         // TODO(abhishekbh): Should interrupt.signal_config_changed be called here ?.
         let mut wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
             (&self.slave_req_helper, Token::SiblingSocket),
             (&rx_queue_evt, Token::RxQueue),
             (&tx_queue_evt, Token::TxQueue),
-            (&main_thread_tube, Token::MainThread),
             (&kill_evt, Token::Kill),
+            (&fault_event, Token::IommuFault),
         ])
         .context("failed to create a wait context object")?;
 
@@ -303,20 +477,19 @@ impl Worker {
             let events = wait_ctx.wait().context("failed to wait for events")?;
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
-                    Token::SiblingSocket => {
-                        match self.process_rx(&mut wait_ctx) {
+                    Token::SiblingSocket | Token::BackendSocket => {
+                        let res = if event.token == Token::SiblingSocket {
+                            self.process_rx::<MasterReq>(&mut wait_ctx)
+                        } else {
+                            self.process_rx::<SlaveReq>(&mut wait_ctx)
+                        };
+                        match res {
                             Ok(RxqStatus::Processed) => (),
                             Ok(RxqStatus::DescriptorsExhausted) => {
                                 // If the driver has no Rx buffers left, then no
                                 // point monitoring the Vhost-user sibling for data. There
                                 // would be no way to send it to the device backend.
-                                wait_ctx
-                                    .modify(
-                                        &self.slave_req_helper,
-                                        EventType::None,
-                                        Token::SiblingSocket,
-                                    )
-                                    .context("failed to disable EPOLLIN on sibling VM socket fd")?;
+                                self.set_rx_polling_state(&mut wait_ctx, EventType::None)?;
                                 sibling_socket_polling_enabled = false;
                             }
                             Ok(RxqStatus::Disconnected) => {
@@ -333,13 +506,7 @@ impl Worker {
                         // Rx buffers are available, now we should monitor the
                         // Vhost-user sibling connection for data.
                         if !sibling_socket_polling_enabled {
-                            wait_ctx
-                                .modify(
-                                    &self.slave_req_helper,
-                                    EventType::Read,
-                                    Token::SiblingSocket,
-                                )
-                                .context("failed to add kick event to the epoll set")?;
+                            self.set_rx_polling_state(&mut wait_ctx, EventType::Read)?;
                             sibling_socket_polling_enabled = true;
                         }
                     }
@@ -347,7 +514,11 @@ impl Worker {
                         if let Err(e) = tx_queue_evt.read() {
                             bail!("error reading tx queue event: {}", e);
                         }
-                        self.process_tx();
+                        self.process_tx()
+                            .context("error processing tx queue event")?;
+                    }
+                    Token::IommuFault => {
+                        return Ok(ExitReason::IommuFault);
                     }
                     Token::SiblingKick { index } => {
                         if let Err(e) = self.process_sibling_kick(index) {
@@ -356,11 +527,6 @@ impl Worker {
                                 index,
                                 e
                             );
-                        }
-                    }
-                    Token::MainThread => {
-                        if let Err(e) = self.process_doorbell_message(&main_thread_tube) {
-                            bail!("error processing doorbell message: {}", e);
                         }
                     }
                     Token::Kill => {
@@ -372,8 +538,32 @@ impl Worker {
         }
     }
 
+    // Set the target event to poll for on rx descriptors.
+    fn set_rx_polling_state(
+        &mut self,
+        wait_ctx: &mut WaitContext<Token>,
+        target_event: EventType,
+    ) -> Result<()> {
+        let fds = std::iter::once((
+            &self.slave_req_helper as &dyn AsRawDescriptor,
+            Token::SiblingSocket,
+        ))
+        .chain(
+            self.slave_req_fd
+                .as_ref()
+                .map(|fd| (fd as &dyn AsRawDescriptor, Token::BackendSocket))
+                .into_iter(),
+        );
+        for (fd, token) in fds {
+            wait_ctx
+                .modify(fd, target_event, token)
+                .context("failed to set EPOLLIN on socket fd")?;
+        }
+        Ok(())
+    }
+
     // Processes data from the Vhost-user sibling and forwards to the driver via Rx buffers.
-    fn process_rx(&mut self, wait_ctx: &mut WaitContext<Token>) -> Result<RxqStatus> {
+    fn process_rx<R: RxAction>(&mut self, wait_ctx: &mut WaitContext<Token>) -> Result<RxqStatus> {
         // Keep looping until -
         // - No more Rx buffers are available on the Rx queue. OR
         // - No more data is available on the Vhost-user sibling socket (checked via a
@@ -388,7 +578,7 @@ impl Worker {
         // Peek if any data is left on the Vhost-user sibling socket. If no, then
         // nothing to forwad to the device backend.
         loop {
-            let is_connected = match self.check_sibling_connection() {
+            let is_connected = match self.check_sibling_connection::<R>() {
                 ConnStatus::DataAvailable => true,
                 ConnStatus::Disconnected => false,
                 ConnStatus::NoDataAvailable => return Ok(RxqStatus::Processed),
@@ -422,48 +612,26 @@ impl Worker {
             // - receive optional message body and payload according size field
             //   in message header.
             // - forward it to the device backend.
-            let (hdr, files) = self
-                .slave_req_helper
-                .as_mut()
+            let (hdr, files) = R::get_ep(self)
                 .recv_header()
                 .context("failed to read Vhost-user sibling message header")?;
-            check_attached_files(&hdr, &files)?;
-            let buf = self.get_sibling_msg_data(&hdr)?;
+            let buf = self.get_sibling_msg_data::<R>(&hdr)?;
 
             let index = desc.index;
             let bytes_written = {
-                if is_action_request(&hdr) {
-                    // TODO(abhishekbh): Implement action messages.
-                    let res = match hdr.get_code() {
-                        MasterReq::SET_MEM_TABLE => {
-                            // Map the sibling memory in this process and forward the
-                            // sibling memory info to the slave. Only if the mapping
-                            // succeeds send info along to the slave, else send a failed
-                            // Ack back to the master.
-                            self.set_mem_table(&hdr, &buf, files)
-                        }
-                        MasterReq::SET_VRING_CALL => self.set_vring_call(&hdr, &buf, files),
-                        MasterReq::SET_VRING_KICK => {
-                            self.set_vring_kick(wait_ctx, &hdr, &buf, files)
-                        }
-                        _ => {
-                            unimplemented!("unimplemented action message:{:?}", hdr.get_code());
-                        }
-                    };
-
-                    // If the "action" in response to the action messages
-                    // failed then no bytes have been written to the virt
-                    // queue. Else, the action is done. Now forward the
-                    // message to the virt queue and return how many bytes
-                    // were written.
-                    match res {
-                        Ok(()) => self.forward_msg_to_device(desc, &hdr, &buf),
-                        Err(e) => Err(e),
-                    }
+                let res = if !R::is_header_valid(&hdr) {
+                    Err(anyhow!("invalid header for {:?}", hdr.get_code()))
                 } else {
-                    // If no special processing required. Forward this message as is
-                    // to the device backend.
-                    self.forward_msg_to_device(desc, &hdr, &buf)
+                    R::process_message(self, wait_ctx, &hdr, &buf, files)
+                };
+                // If the "action" in response to the action messages
+                // failed then no bytes have been written to the virt
+                // queue. Else, the action is done. Now forward the
+                // message to the virt queue and return how many bytes
+                // were written.
+                match res {
+                    Ok(()) => self.forward_msg_to_device(desc, &hdr, &buf),
+                    Err(e) => Err(e),
                 }
             };
 
@@ -484,20 +652,18 @@ impl Worker {
                 }
                 Err(e) => {
                     error!("failed to forward message to the device: {}", e);
-                    self.slave_req_helper
-                        .send_ack_message(&hdr, false)
-                        .context("failed to send ack")?;
+                    R::handle_failure(self, &hdr)?
                 }
             }
         }
     }
 
     // Returns the sibling connection status.
-    fn check_sibling_connection(&self) -> ConnStatus {
+    fn check_sibling_connection<R: RxAction>(&mut self) -> ConnStatus {
         // Peek if any data is left on the Vhost-user sibling socket. If no, then
         // nothing to forwad to the device backend.
         let mut peek_buf = [0; 1];
-        let raw_fd = self.slave_req_helper.as_raw_descriptor();
+        let raw_fd = R::get_ep(self).as_raw_descriptor();
         // Safe because `raw_fd` and `peek_buf` are owned by this struct.
         let peek_ret = unsafe {
             recv(
@@ -521,19 +687,18 @@ impl Worker {
     }
 
     // Returns any data attached to a Vhost-user sibling message.
-    fn get_sibling_msg_data(&mut self, hdr: &VhostUserMsgHeader<MasterReq>) -> Result<Vec<u8>> {
+    fn get_sibling_msg_data<R: RxAction>(
+        &mut self,
+        hdr: &VhostUserMsgHeader<R>,
+    ) -> Result<Vec<u8>> {
         let buf = match hdr.get_size() {
             0 => vec![0u8; 0],
             len => {
-                let rbuf = self
-                    .slave_req_helper
-                    .as_mut()
+                let rbuf = R::get_ep(self)
                     .recv_data(len as usize)
                     .context("failed to read Vhost-user sibling message payload")?;
                 if rbuf.len() != len as usize {
-                    self.slave_req_helper
-                        .send_ack_message(hdr, false)
-                        .context("failed to send ack")?;
+                    R::handle_failure(self, hdr)?;
                     bail!(
                         "unexpected message length for {:?}: expected={}, got={}",
                         hdr.get_code(),
@@ -549,16 +714,16 @@ impl Worker {
 
     // Forwards |hdr, buf| to the device backend via |desc_chain| in the virtio
     // queue. Returns the number of bytes written to the virt queue.
-    fn forward_msg_to_device(
+    fn forward_msg_to_device<R: Req>(
         &mut self,
         desc_chain: DescriptorChain,
-        hdr: &VhostUserMsgHeader<MasterReq>,
+        hdr: &VhostUserMsgHeader<R>,
         buf: &[u8],
     ) -> Result<u32> {
         let bytes_written = match Writer::new(self.mem.clone(), desc_chain) {
             Ok(mut writer) => {
                 if writer.available_bytes()
-                    < buf.len() + std::mem::size_of::<VhostUserMsgHeader<MasterReq>>()
+                    < buf.len() + std::mem::size_of::<VhostUserMsgHeader<R>>()
                 {
                     bail!("rx buffer too small to accomodate server data");
                 }
@@ -582,16 +747,7 @@ impl Worker {
     // this function both this VMM and the sibling have two regions of
     // virtual memory pointing to the same physical page. These regions will be
     // accessed by the device VM and the silbing VM.
-    fn set_mem_table(
-        &mut self,
-        hdr: &VhostUserMsgHeader<MasterReq>,
-        payload: &[u8],
-        files: Option<Vec<File>>,
-    ) -> Result<()> {
-        if !is_header_valid(hdr) {
-            bail!("invalid header for SET_MEM_TABLE");
-        }
-
+    fn set_mem_table(&mut self, payload: &[u8], files: Option<Vec<File>>) -> Result<()> {
         // `hdr` is followed by a `payload`. `payload` consists of metadata about the number of
         // memory regions and then memory regions themeselves. The memory regions structs consist of
         // metadata about actual device related memory passed from the sibling. Ensure that the size
@@ -654,18 +810,28 @@ impl Worker {
             );
         }
 
+        let sibling_memory_size: u64 = contexts.iter().map(|region| region.memory_size).sum();
+        if self.mem.memory_size() - self.shmem_pci_bar_mem_offset as u64 <= sibling_memory_size {
+            bail!(
+                "Memory size of Sibling VM ({}) must be smaller than the current memory size ({})",
+                sibling_memory_size,
+                self.mem.memory_size()
+            );
+        }
+
         for (region, file) in contexts.iter().zip(files.into_iter()) {
             let source = VmMemorySource::Descriptor {
                 descriptor: SafeDescriptor::from(file),
                 offset: region.mmap_offset,
                 size: region.memory_size,
+                gpu_blob: false,
             };
             let dest = VmMemoryDestination::ExistingAllocation {
-                allocation: self.pci_bar,
-                offset: self.mem_offset as u64,
+                allocation: self.shmem_pci_bar,
+                offset: self.shmem_pci_bar_mem_offset as u64,
             };
             self.register_memory(source, dest)?;
-            self.mem_offset += region.memory_size as usize;
+            self.shmem_pci_bar_mem_offset += region.memory_size as usize;
         }
         Ok(())
     }
@@ -702,23 +868,11 @@ impl Worker {
             VmMemoryResponse::Err(e) => {
                 bail!("memory mapping failed: {}", e);
             }
-            _ => {
-                bail!("unexpected response: {:?}", response);
-            }
         }
     }
 
     // Handles |SET_VRING_CALL|.
-    fn set_vring_call(
-        &mut self,
-        hdr: &VhostUserMsgHeader<MasterReq>,
-        payload: &[u8],
-        files: Option<Vec<File>>,
-    ) -> Result<()> {
-        if !is_header_valid(hdr) {
-            bail!("invalid header for SET_VRING_CALL");
-        }
-
+    fn set_vring_call(&mut self, payload: &[u8], files: Option<Vec<File>>) -> Result<()> {
         let payload_size = payload.len();
         if payload_size != std::mem::size_of::<VhostUserU64>() {
             bail!("wrong payload size {} for SET_VRING_CALL", payload_size);
@@ -736,9 +890,19 @@ impl Worker {
         let file = file.ok_or_else(|| anyhow!("no file found for SET_VRING_CALL"))?;
 
         // Safe because we own the file.
-        self.vrings[index as usize].call_evt =
-            unsafe { Some(Event::from_raw_descriptor(file.into_raw_descriptor())) };
+        let evt = unsafe { Event::from_raw_descriptor(file.into_raw_descriptor()) };
 
+        self.send_memory_request(&VmMemoryRequest::IoEvent {
+            evt: evt.try_clone().context("failed to dup event")?,
+            allocation: self.io_pci_bar,
+            offset: DOORBELL_OFFSET + DOORBELL_OFFSET_MULTIPLIER as u64 * index as u64,
+            datamatch: Datamatch::AnyLength,
+            register: true,
+        })
+        .context("failed to register IoEvent")?;
+
+        // Save the eventfd because we will need to supply it to KVM to unregister the eventfd.
+        self.vrings[index as usize].call_evt = Some(evt);
         Ok(())
     }
 
@@ -747,14 +911,9 @@ impl Worker {
     fn set_vring_kick(
         &mut self,
         wait_ctx: &mut WaitContext<Token>,
-        hdr: &VhostUserMsgHeader<MasterReq>,
         payload: &[u8],
         files: Option<Vec<File>>,
     ) -> Result<()> {
-        if !is_header_valid(hdr) {
-            bail!("invalid header for SET_VRING_KICK");
-        }
-
         let payload_size = payload.len();
         if payload_size != std::mem::size_of::<VhostUserU64>() {
             bail!("wrong payload size {} for SET_VRING_KICK", payload_size);
@@ -788,23 +947,183 @@ impl Worker {
         Ok(())
     }
 
+    // Handles |SET_SLAVE_REQ_FD|. Prepares the proxy to handle backend messages by
+    // proxying messages/replies to/from the slave_req_fd.
+    fn set_slave_req_fd(
+        &mut self,
+        wait_ctx: &mut WaitContext<Token>,
+        files: Option<Vec<File>>,
+    ) -> Result<()> {
+        // Validated by check_attached_files
+        let mut files = files.expect("missing files");
+        let file = files.pop().context("missing file for set_slave_req_fd")?;
+        if !files.is_empty() {
+            bail!("invalid file count for SET_SLAVE_REQ_FD {}", files.len());
+        }
+
+        self.udmabuf_driver = Some(UdmabufDriver::new().context("failed to get udmabuf driver")?);
+        // Safe because we own the file.
+        let socket = unsafe { UnixStream::from_raw_descriptor(file.into_raw_descriptor()) };
+
+        wait_ctx
+            .add(&socket, Token::BackendSocket)
+            .context("failed to set EPOLLIN on socket fd")?;
+
+        self.slave_req_fd = Some(SocketEndpoint::from(socket));
+        Ok(())
+    }
+
+    // Exports the udmabuf necessary to fulfil the |msg| mapping request.
+    fn handle_map_message(
+        &mut self,
+        msg: &VhostUserShmemMapMsg,
+    ) -> Result<Box<dyn AsRawDescriptor>> {
+        let regions = self
+            .iommu
+            .lock()
+            .export(msg.fd_offset, msg.len)
+            .context("failed to export")?;
+
+        let prot = match (
+            msg.flags.contains(VhostUserShmemMapMsgFlags::MAP_R),
+            msg.flags.contains(VhostUserShmemMapMsgFlags::MAP_W),
+        ) {
+            (true, true) => Protection::read_write(),
+            (true, false) => Protection::read(),
+            (false, true) => Protection::write(),
+            (false, false) => bail!("unsupported protection"),
+        };
+        let regions = regions
+            .iter()
+            .map(|r| {
+                if !r.prot.allows(&prot) {
+                    Err(anyhow!("invalid permissions"))
+                } else {
+                    Ok((r.gpa, r.len as usize))
+                }
+            })
+            .collect::<Result<Vec<(GuestAddress, usize)>>>()?;
+
+        // udmabuf_driver is set at the same time as slave_req_fd, so if we've
+        // received a message on slave_req_fd, udmabuf_driver must be present.
+        let udmabuf = self
+            .udmabuf_driver
+            .as_ref()
+            .expect("missing udmabuf driver")
+            .create_udmabuf(&self.mem, &regions)
+            .context("failed to create udmabuf")?;
+
+        self.exported_regions
+            .insert(msg.shm_offset, (msg.shmid, msg.fd_offset, msg.len));
+
+        Ok(Box::new(udmabuf))
+    }
+
+    fn handle_unmap_message(&mut self, msg: &VhostUserShmemUnmapMsg) -> Result<()> {
+        if self.pending_unmap.is_some() {
+            bail!("simultanious unmaps not supported");
+        }
+        let shm_offset = msg.shm_offset;
+        self.exported_regions
+            .get(&shm_offset)
+            .context("unknown shmid")?;
+        self.pending_unmap = Some(shm_offset);
+        Ok(())
+    }
+
+    fn handle_unmap_reply(&mut self, payload: &[u8]) -> Result<()> {
+        let ack = VhostUserU64::from_slice(payload)
+            .context("failed to parse ack")?
+            .value;
+        if ack != 0 {
+            bail!("failed to unmap region {}", ack);
+        }
+
+        let pending_unmap = self.pending_unmap.take().context("unexpected unmap ack")?;
+        // Both handle_unmap_message and unmap_all_exported_shmem ensure that
+        // self.pending_unmap is in the exported_regions map.
+        let (_, iova, size) = self
+            .exported_regions
+            .remove(&pending_unmap)
+            .expect("missing region");
+        self.iommu
+            .lock()
+            .release(iova, size)
+            .context("failed to release export")?;
+
+        Ok(())
+    }
+
+    fn process_message_from_backend(
+        &mut self,
+        mut msg: Vec<u8>,
+    ) -> Result<(Vec<u8>, Option<Box<dyn AsRawDescriptor>>)> {
+        // The message was already parsed as a MasterReq, so this can't fail
+        let hdr = vhost_header_from_bytes::<SlaveReq>(&msg).unwrap();
+
+        let fd = match hdr.get_code() {
+            SlaveReq::SHMEM_MAP => {
+                let mut msg =
+                    vhost_body_from_message_bytes(&mut msg).context("incomplete message")?;
+                let fd = self
+                    .handle_map_message(msg)
+                    .context("failed to handle map message")?;
+                // VVU reuses the fd_offset field for the IOVA of the buffer. The
+                // udmabuf corresponds to exactly what should be mapped, so set
+                // fd_offset to 0 for regular vhost-user.
+                msg.fd_offset = 0;
+                Some(fd)
+            }
+            SlaveReq::SHMEM_UNMAP => {
+                let msg = vhost_body_from_message_bytes(&mut msg).context("incomplete message")?;
+                self.handle_unmap_message(msg)
+                    .context("failed to handle unmap message")?;
+                None
+            }
+            _ => None,
+        };
+        Ok((msg, fd))
+    }
+
     // Processes data from the device backend (via virtio Tx queue) and forward it to
     // the Vhost-user sibling over its socket connection.
-    fn process_tx(&mut self) {
+    fn process_tx(&mut self) -> Result<()> {
         while let Some(desc_chain) = self.tx_queue.pop(&self.mem) {
             let index = desc_chain.index;
             match Reader::new(self.mem.clone(), desc_chain) {
                 Ok(mut reader) => {
                     let expected_count = reader.available_bytes();
-                    match reader.read_to(self.slave_req_helper.as_mut().as_mut(), expected_count) {
-                        Ok(count) => {
-                            // The |reader| guarantees that all the available data is read.
-                            if count != expected_count {
-                                error!("wrote only {} bytes of {}", count, expected_count);
-                            }
-                        }
-                        Err(e) => error!("failed to write message to vhost-vmm: {}", e),
+                    let mut msg = vec![0; expected_count];
+                    reader
+                        .read_exact(&mut msg)
+                        .context("virtqueue read failed")?;
+
+                    // This may be a SlaveReq, but the bytes of any valid SlaveReq
+                    // are also a valid MasterReq.
+                    let hdr =
+                        vhost_header_from_bytes::<MasterReq>(&msg).context("message too short")?;
+                    let (dest, (msg, fd)) = if hdr.is_reply() {
+                        (self.slave_req_helper.as_mut().as_mut(), (msg, None))
+                    } else {
+                        let processed_msg = self.process_message_from_backend(msg)?;
+                        (
+                            self.slave_req_fd
+                                .as_mut()
+                                .context("missing slave_req_fd")?
+                                .as_mut(),
+                            processed_msg,
+                        )
+                    };
+
+                    if let Some(fd) = fd {
+                        let written = dest
+                            .send_with_fd(&[IoSlice::new(msg.as_slice())], fd.as_raw_descriptor())
+                            .context("failed to foward message")?;
+                        dest.write_all(&msg[written..])
+                    } else {
+                        dest.write_all(msg.as_slice())
                     }
+                    .context("failed to foward message")?;
                 }
                 Err(e) => error!("failed to create Reader: {}", e),
             }
@@ -813,6 +1132,7 @@ impl Worker {
                 panic!("failed inject tx queue interrupt");
             }
         }
+        Ok(())
     }
 
     // Processes a sibling kick for the |index|-th vring and injects the corresponding interrupt
@@ -840,22 +1160,6 @@ impl Worker {
         }
     }
 
-    // Processes a message sent, on `main_thread_tube`, in response to a doorbell write. It writes
-    // to the corresponding call event of the vring index sent over `main_thread_tube`.
-    fn process_doorbell_message(&mut self, main_thread_tube: &Tube) -> Result<()> {
-        let index: usize = main_thread_tube
-            .recv()
-            .context("failed to receive doorbell data")?;
-        let call_evt = self.vrings[index]
-            .call_evt
-            .as_ref()
-            .ok_or(anyhow!("call event for {}-th ring is not set", index))?;
-        call_evt
-            .write(1)
-            .with_context(|| format!("failed to write call event for {}-th ring", index))?;
-        Ok(())
-    }
-
     // Clean up memory regions that the worker registered so that the device can start another
     // worker later.
     fn cleanup_registered_memory(&mut self) {
@@ -865,6 +1169,92 @@ impl Worker {
                 error!("failed to unregister memory slot: {}", e);
             }
         }
+    }
+
+    // Unmaps all exported regions
+    fn release_exported_regions(&mut self) -> Result<()> {
+        self.rx_queue.release_exported_memory();
+        self.tx_queue.release_exported_memory();
+
+        match self.unmap_all_exported_shmem() {
+            Ok(()) => Ok(()),
+            Err(VhostError::SocketBroken(_)) | Err(VhostError::Disconnect) => {
+                // If the socket is broken or the sibling is disconnected, then we assume
+                // the sibling is no longer running, so unmapping is unnecessary.
+                for (_, iova, size) in self.exported_regions.values() {
+                    self.iommu
+                        .lock()
+                        .release(*iova, *size)
+                        .context("failed to release export")?;
+                }
+                Ok(())
+            }
+            err => err.context("error while unmapping exported regions"),
+        }
+    }
+
+    // Unmaps anything mapped into the shmem regions.
+    fn unmap_all_exported_shmem(&mut self) -> VhostResult<()> {
+        loop {
+            let endpoint = match self.slave_req_fd.as_mut() {
+                Some(e) => e,
+                None => return Ok(()),
+            };
+
+            // There may already be pending unmap operation when we enter the loop,
+            // so reply handling needs to come first.
+            if self.pending_unmap.is_some() {
+                loop {
+                    let (hdr, _) = endpoint.recv_header()?;
+                    let payload = endpoint.recv_data(hdr.get_size() as usize)?;
+                    // This function is only called when the worker is aborting, so
+                    // there's nothing to do for other replies - just drop them.
+                    if hdr.get_code() == SlaveReq::SHMEM_UNMAP {
+                        if let Err(e) = self.handle_unmap_reply(&payload) {
+                            error!("failed to unmap: {:?}", e);
+                            return Err(VhostError::SlaveInternalError);
+                        }
+                        break;
+                    }
+                }
+            } else if let Some((offset, (shmid, _, size))) = self.exported_regions.iter().next() {
+                let hdr = VhostUserMsgHeader::new(
+                    SlaveReq::SHMEM_UNMAP,
+                    0,
+                    std::mem::size_of::<VhostUserShmemUnmapMsg>() as u32,
+                );
+                let msg = VhostUserShmemUnmapMsg::new(*shmid, *offset, *size);
+                endpoint.send_message(&hdr, &msg, None)?;
+                self.pending_unmap = Some(*offset);
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    // Unregister all vring_call eventfds.
+    fn unregister_vring_call_eventfds(&mut self) -> Result<()> {
+        let mut last_err = None;
+        let vring_call_evts: Vec<(usize, Event)> = self
+            .vrings
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(idx, v)| v.call_evt.take().map(|e| (idx, e)))
+            .collect();
+        for (idx, evt) in vring_call_evts {
+            if let Err(e) = self.send_memory_request(&VmMemoryRequest::IoEvent {
+                evt,
+                allocation: self.io_pci_bar,
+                offset: DOORBELL_OFFSET + DOORBELL_OFFSET_MULTIPLIER as u64 * idx as u64,
+                datamatch: Datamatch::AnyLength,
+                register: false,
+            }) {
+                error!("failed to unregister ioevent: idx={}:, {:#}", idx, e);
+                last_err = Some(e);
+            }
+        }
+        last_err.map_or(Ok(()), Err)
     }
 }
 
@@ -905,6 +1295,7 @@ impl VirtioPciDoorbellCap {
 }
 
 /// Represents the `VirtioVhostUser` device's state.
+#[allow(clippy::large_enum_variant)]
 enum State {
     /// The device is initialized but not activated.
     Initialized {
@@ -927,12 +1318,11 @@ enum State {
         tx_queue: Queue,
         rx_queue_evt: Event,
         tx_queue_evt: Event,
+
+        iommu: Arc<Mutex<IpcMemoryMapper>>,
     },
     /// The worker thread is running.
     Running {
-        // To communicate with the worker thread.
-        worker_thread_tube: Tube,
-
         kill_evt: Event,
         worker_thread: thread::JoinHandle<Result<()>>,
     },
@@ -973,8 +1363,10 @@ pub struct VirtioVhostUser {
     // Device configuration.
     config: VirtioVhostUserConfig,
 
-    // The bar representing the doorbell, notification and shared memory regions.
-    pci_bar: Option<Alloc>,
+    // The bar representing the doorbell and notification.
+    io_pci_bar: Option<Alloc>,
+    // The bar representing the shared memory regions.
+    shmem_pci_bar: Option<Alloc>,
     // The device backend queue index selected by the driver by writing to the
     // Notifications region at offset `NOTIFICATIONS_MSIX_VECTOR_SELECT_OFFSET`
     // in the bar. This points into `notification_msix_vectors`.
@@ -989,6 +1381,8 @@ pub struct VirtioVhostUser {
     // The value is wrapped with `Arc<Mutex<_>>` because it can be modified from the worker thread
     // as well as the main device thread.
     state: Arc<Mutex<State>>,
+
+    iommu: Option<Arc<Mutex<IpcMemoryMapper>>>,
 }
 
 impl VirtioVhostUser {
@@ -1012,7 +1406,8 @@ impl VirtioVhostUser {
                 max_vhost_queues: Le32::from(MAX_VHOST_DEVICE_QUEUES as u32),
                 uuid: *uuid.unwrap_or_default().as_bytes(),
             },
-            pci_bar: None,
+            io_pci_bar: None,
+            shmem_pci_bar: None,
             notification_select: None,
             notification_msix_vectors: [None; MAX_VHOST_DEVICE_QUEUES],
             state: Arc::new(Mutex::new(State::Initialized {
@@ -1020,42 +1415,20 @@ impl VirtioVhostUser {
                 listener,
             })),
             pci_address,
+            iommu: None,
         })
     }
 
-    fn check_bar_metadata(&self, bar_index: PciBarIndex) -> Result<()> {
-        if bar_index != BAR_INDEX as usize {
+    fn check_io_bar_metadata(&self, bar_index: PciBarIndex) -> Result<()> {
+        if bar_index != IO_BAR_INDEX as usize {
             bail!("invalid bar index: {}", bar_index);
         }
 
-        if self.pci_bar.is_none() {
+        if self.io_pci_bar.is_none() {
             bail!("bar is not allocated for {}", bar_index);
         }
 
         Ok(())
-    }
-
-    // Handles writes to the DOORBELL region of the BAR as per the VVU spec.
-    fn write_bar_doorbell(&mut self, offset: u64) {
-        match &*self.state.lock() {
-            State::Running {
-                worker_thread_tube, ..
-            } => {
-                // The |offset| represents the Vring number who call event needs to be
-                // written to.
-                let vring = (offset / DOORBELL_OFFSET_MULTIPLIER as u64) as usize;
-
-                if let Err(e) = worker_thread_tube.send(&vring) {
-                    error!("failed to send doorbell write request: {}", e);
-                }
-            }
-            s => {
-                error!(
-                    "write_bar_doorbell is called in an invalid state {} with offset={}",
-                    s, offset,
-                );
-            }
-        }
     }
 
     // Implement writing to the notifications bar as per the VVU spec.
@@ -1147,10 +1520,6 @@ impl VirtioVhostUser {
         // Clone to pass it into a worker thread.
         let state_cloned = Arc::clone(&self.state);
 
-        // Create tube to communicate with the worker thread and update the state.
-        let (worker_thread_tube, main_thread_tube) =
-            Tube::pair().expect("failed to create tube pair");
-
         // Use `State::Invalid` as the intermediate state while preparing the proper next state.
         // Once a worker thread is successfully started, `self.state` will be updated to `Running`.
         let old_state: State = std::mem::replace(&mut *state, State::Invalid);
@@ -1165,6 +1534,7 @@ impl VirtioVhostUser {
             tx_queue,
             rx_queue_evt,
             tx_queue_evt,
+            iommu,
         ) = match old_state {
             State::Activated {
                 main_process_tube,
@@ -1175,6 +1545,7 @@ impl VirtioVhostUser {
                 tx_queue,
                 rx_queue_evt,
                 tx_queue_evt,
+                iommu,
             } => (
                 main_process_tube,
                 listener,
@@ -1184,6 +1555,7 @@ impl VirtioVhostUser {
                 tx_queue,
                 rx_queue_evt,
                 tx_queue_evt,
+                iommu,
             ),
             s => {
                 // Unreachable because we've checked the state at the beginning of this function.
@@ -1200,7 +1572,8 @@ impl VirtioVhostUser {
         };
 
         // Safe because a PCI bar is guaranteed to be allocated at this point.
-        let pci_bar = self.pci_bar.expect("PCI bar unallocated");
+        let io_pci_bar = self.io_pci_bar.expect("PCI bar unallocated");
+        let shmem_pci_bar = self.shmem_pci_bar.expect("PCI bar unallocated");
 
         // Initialize the Worker with the Msix vector values to be injected for
         // each Vhost device queue.
@@ -1236,18 +1609,45 @@ impl VirtioVhostUser {
                     rx_queue,
                     tx_queue,
                     main_process_tube,
-                    pci_bar,
-                    mem_offset: SHARED_MEMORY_OFFSET as usize,
+                    io_pci_bar,
+                    shmem_pci_bar,
+                    shmem_pci_bar_mem_offset: 0,
                     vrings,
                     slave_req_helper,
                     registered_memory: Vec::new(),
+                    slave_req_fd: None,
+                    udmabuf_driver: None,
+                    iommu: iommu.clone(),
+                    exported_regions: BTreeMap::new(),
+                    pending_unmap: None,
                 };
-                match worker.run(
+
+                let run_result = worker.run(
                     rx_queue_evt.try_clone().unwrap(),
                     tx_queue_evt.try_clone().unwrap(),
-                    main_thread_tube,
                     kill_evt,
-                ) {
+                );
+
+                if let Err(e) = worker.release_exported_regions() {
+                    error!("failed to release exported memory: {:?}", e);
+                    *state_cloned.lock() = State::Invalid;
+                    return Ok(());
+                }
+
+                // Unregister any vring_call eventfds in case we need to
+                // reuse the proxy device later.
+                if let Err(e) = worker.unregister_vring_call_eventfds() {
+                    error!("error unmapping ioevent: {:#}", e);
+                    *state_cloned.lock() = State::Invalid;
+                    return Ok(());
+                }
+
+                match run_result {
+                    Ok(ExitReason::IommuFault) => {
+                        info!("worker thread exited due to IOMMU fault");
+                        Ok(())
+                    }
+
                     Ok(ExitReason::Killed) => {
                         info!("worker thread exited successfully");
                         Ok(())
@@ -1276,6 +1676,7 @@ impl VirtioVhostUser {
                             tx_queue,
                             rx_queue_evt,
                             tx_queue_evt,
+                            iommu,
                         };
 
                         Ok(())
@@ -1294,7 +1695,6 @@ impl VirtioVhostUser {
             }
             Ok(worker_thread) => {
                 *state = State::Running {
-                    worker_thread_tube,
                     kill_evt: self_kill_evt,
                     worker_thread,
                 };
@@ -1348,8 +1748,6 @@ impl VirtioDevice for VirtioVhostUser {
             }
         };
 
-        // `self.worker_thread_tube` is set after a fork / keep_rds is called in multiprocess mode.
-        // Hence, it's not required to be processed in this function.
         rds
     }
 
@@ -1397,7 +1795,7 @@ impl VirtioDevice for VirtioVhostUser {
         // following format |Doorbell|Notification|Shared Memory|.
         let mut doorbell_virtio_pci_cap = VirtioPciCap::new(
             PciCapabilityType::DoorbellConfig,
-            BAR_INDEX,
+            IO_BAR_INDEX,
             DOORBELL_OFFSET as u32,
             DOORBELL_SIZE as u32,
         );
@@ -1409,40 +1807,61 @@ impl VirtioDevice for VirtioVhostUser {
 
         let notification = Box::new(VirtioPciCap::new(
             PciCapabilityType::NotificationConfig,
-            BAR_INDEX,
+            IO_BAR_INDEX,
             NOTIFICATIONS_OFFSET as u32,
             NOTIFICATIONS_SIZE as u32,
         ));
 
         let shared_memory = Box::new(VirtioPciCap::new(
             PciCapabilityType::SharedMemoryConfig,
-            BAR_INDEX,
-            SHARED_MEMORY_OFFSET as u32,
-            SHARED_MEMORY_SIZE as u32,
+            SHMEM_BAR_INDEX,
+            0,
+            self.device_bar_size as u32,
         ));
 
         vec![doorbell, notification, shared_memory]
     }
 
     fn get_device_bars(&mut self, address: PciAddress) -> Vec<PciBarConfiguration> {
-        // A PCI bar corresponding to |Doorbell|Notification|Shared Memory| will
-        // be allocated and its address (64 bit) will be stored in BAR 2 and BAR
-        // 3. This is as per the VVU spec and qemu implementation.
-        self.pci_bar = Some(Alloc::PciBar {
+        // Allocate one PCI bar for the doorbells and notifications, and a second
+        // bar for shared memory. These are 64 bit bars, and go in bars 2|3 and 4|5,
+        // respectively. The shared memory bar is prefetchable, as recommended
+        // by the VVU spec.
+        self.io_pci_bar = Some(Alloc::PciBar {
             bus: address.bus,
             dev: address.dev,
             func: address.func,
-            bar: BAR_INDEX,
+            bar: IO_BAR_INDEX,
+        });
+        self.shmem_pci_bar = Some(Alloc::PciBar {
+            bus: address.bus,
+            dev: address.dev,
+            func: address.func,
+            bar: SHMEM_BAR_INDEX,
         });
 
-        vec![PciBarConfiguration::new(
-            BAR_INDEX as usize,
-            self.device_bar_size,
-            PciBarRegionType::Memory64BitRegion,
-            // NotPrefetchable so as to exit on every read / write event in the
-            // guest.
-            PciBarPrefetchable::NotPrefetchable,
-        )]
+        vec![
+            PciBarConfiguration::new(
+                IO_BAR_INDEX as usize,
+                NOTIFICATIONS_END.next_power_of_two(),
+                PciBarRegionType::Memory64BitRegion,
+                // Accesses to the IO bar trigger EPT faults, so it doesn't matter
+                // whether or not the bar is prefetchable.
+                PciBarPrefetchable::NotPrefetchable,
+            ),
+            PciBarConfiguration::new(
+                SHMEM_BAR_INDEX as usize,
+                self.device_bar_size,
+                PciBarRegionType::Memory64BitRegion,
+                // The shared memory bar is for regular memory mappings and
+                // should be prefetchable for better performance.
+                PciBarPrefetchable::Prefetchable,
+            ),
+        ]
+    }
+
+    fn set_iommu(&mut self, iommu: &Arc<Mutex<IpcMemoryMapper>>) {
+        self.iommu = Some(iommu.clone());
     }
 
     fn activate(
@@ -1475,6 +1894,7 @@ impl VirtioDevice for VirtioVhostUser {
                     tx_queue: queues.remove(0),
                     rx_queue_evt: queue_evts.remove(0),
                     tx_queue_evt: queue_evts.remove(0),
+                    iommu: self.iommu.take().unwrap(),
                 };
             }
             s => {
@@ -1485,12 +1905,12 @@ impl VirtioDevice for VirtioVhostUser {
     }
 
     fn read_bar(&mut self, bar_index: PciBarIndex, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self.check_bar_metadata(bar_index) {
+        if let Err(e) = self.check_io_bar_metadata(bar_index) {
             error!("invalid bar metadata: {}", e);
             return;
         }
 
-        if (NOTIFICATIONS_OFFSET..SHARED_MEMORY_OFFSET).contains(&offset) {
+        if (NOTIFICATIONS_OFFSET..NOTIFICATIONS_END).contains(&offset) {
             self.read_bar_notifications(offset - NOTIFICATIONS_OFFSET, data);
         } else {
             error!("addr is outside known region for reads");
@@ -1498,14 +1918,21 @@ impl VirtioDevice for VirtioVhostUser {
     }
 
     fn write_bar(&mut self, bar_index: PciBarIndex, offset: u64, data: &[u8]) {
-        if let Err(e) = self.check_bar_metadata(bar_index) {
+        if let Err(e) = self.check_io_bar_metadata(bar_index) {
             error!("invalid bar metadata: {}", e);
             return;
         }
 
         if (DOORBELL_OFFSET..NOTIFICATIONS_OFFSET).contains(&offset) {
-            self.write_bar_doorbell(offset - DOORBELL_OFFSET);
-        } else if (NOTIFICATIONS_OFFSET..SHARED_MEMORY_OFFSET).contains(&offset) {
+            // The vring_call eventfds which back doorbells are registered with the
+            // host kernel via KVM_IOEVENTFD, so the host kernel will signal them
+            // directly. If we're here, then that means the guest wrote to a doorbell
+            // without a registered eventfd, so there's nothing for us to signal.
+            warn!(
+                "doorbell write with no corresponding evenetfd: offset={}",
+                offset
+            );
+        } else if (NOTIFICATIONS_OFFSET..NOTIFICATIONS_END).contains(&offset) {
             self.write_bar_notifications(offset - NOTIFICATIONS_OFFSET, data);
         } else {
             error!("addr is outside known region for writes");

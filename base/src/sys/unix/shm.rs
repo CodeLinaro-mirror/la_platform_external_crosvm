@@ -2,24 +2,46 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::{
-    ffi::CStr,
-    fs::{read_link, File},
-    io::{
-        Read, Seek, SeekFrom, Write, {self},
-    },
-};
+use std::ffi::CStr;
+use std::fs::read_link;
+use std::fs::File;
+use std::io;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::io::Write;
 
-use libc::{
-    c_char, c_int, c_long, c_uint, close, fcntl, ftruncate64, off64_t, syscall, SYS_memfd_create,
-    EINVAL, F_ADD_SEALS, F_GET_SEALS, F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK,
-    F_SEAL_WRITE, MFD_ALLOW_SEALING, {self},
-};
-use serde::{Deserialize, Serialize};
+use libc::c_char;
+use libc::c_int;
+use libc::c_long;
+use libc::c_uint;
+use libc::close;
+use libc::fcntl;
+use libc::ftruncate64;
+use libc::off64_t;
+use libc::syscall;
+use libc::SYS_memfd_create;
+use libc::EINVAL;
+use libc::F_ADD_SEALS;
+use libc::F_GET_SEALS;
+use libc::F_SEAL_FUTURE_WRITE;
+use libc::F_SEAL_GROW;
+use libc::F_SEAL_SEAL;
+use libc::F_SEAL_SHRINK;
+use libc::F_SEAL_WRITE;
+use libc::MFD_ALLOW_SEALING;
+use serde::Deserialize;
+use serde::Serialize;
 
-use super::{errno_result, Error, Result};
-use crate::{AsRawDescriptor, IntoRawDescriptor, RawDescriptor, SafeDescriptor};
-use crate::{FromRawDescriptor, SharedMemory as CrateSharedMemory};
+use super::errno_result;
+use super::Error;
+use super::Result;
+use crate::AsRawDescriptor;
+use crate::FromRawDescriptor;
+use crate::IntoRawDescriptor;
+use crate::RawDescriptor;
+use crate::SafeDescriptor;
+use crate::SharedMemory as CrateSharedMemory;
 
 /// A shared memory file descriptor and its size.
 #[derive(Debug, Serialize, Deserialize)]
@@ -327,13 +349,13 @@ impl Unix for CrateSharedMemory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use std::ffi::CString;
 
     use data_model::VolatileMemory;
 
-    use super::super::MemoryMapping;
+    use super::kernel_has_memfd;
+    use super::SharedMemory;
+    use crate::MemoryMappingBuilder;
 
     fn create_test_shmem() -> SharedMemory {
         let name = CString::new("test").expect("failed to create cstr name");
@@ -407,11 +429,16 @@ mod tests {
         let mut shm = create_test_shmem();
         shm.set_size(4096)
             .expect("failed to set shared memory size");
+        let shm = crate::SharedMemory(shm);
 
-        let mmap1 =
-            MemoryMapping::from_fd(&shm, shm.size() as usize).expect("failed to map shared memory");
-        let mmap2 =
-            MemoryMapping::from_fd(&shm, shm.size() as usize).expect("failed to map shared memory");
+        let mmap1 = MemoryMappingBuilder::new(shm.size() as usize)
+            .from_shared_memory(&shm)
+            .build()
+            .expect("failed to map shared memory");
+        let mmap2 = MemoryMappingBuilder::new(shm.size() as usize)
+            .from_shared_memory(&shm)
+            .build()
+            .expect("failed to map shared memory");
 
         assert_ne!(
             mmap1.get_slice(0, 1).unwrap().as_ptr(),
@@ -436,11 +463,17 @@ mod tests {
         let mut shm = create_test_shmem();
         shm.set_size(8092)
             .expect("failed to set shared memory size");
+        let shm = crate::SharedMemory(shm);
 
-        let mmap1 = MemoryMapping::from_fd_offset(&shm, shm.size() as usize, 4096)
+        let mmap1 = MemoryMappingBuilder::new(shm.size() as usize)
+            .from_shared_memory(&shm)
+            .offset(4096)
+            .build()
             .expect("failed to map shared memory");
-        let mmap2 =
-            MemoryMapping::from_fd(&shm, shm.size() as usize).expect("failed to map shared memory");
+        let mmap2 = MemoryMappingBuilder::new(shm.size() as usize)
+            .from_shared_memory(&shm)
+            .build()
+            .expect("failed to map shared memory");
 
         mmap1
             .get_slice(0, 4096)

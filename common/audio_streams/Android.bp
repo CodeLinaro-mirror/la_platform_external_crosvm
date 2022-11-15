@@ -26,6 +26,7 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libfutures",
+        "libserde",
         "libthiserror",
     ],
     proc_macros: [
@@ -45,6 +46,7 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libfutures",
+        "libserde",
         "libthiserror",
     ],
     proc_macros: [

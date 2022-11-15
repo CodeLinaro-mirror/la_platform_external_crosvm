@@ -19,6 +19,7 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
+    features: ["balloon"],
     rustlibs: [
         "libanyhow",
         "libballoon_control",
@@ -39,6 +40,51 @@ rust_library {
     apex_available: [
         "//apex_available:platform",
     ],
+    target: {
+        host_linux: {
+            features: [
+                "gdb",
+            ],
+            rustlibs: [
+                "libgdbstub_arch",
+            ],
+        },
+    },
+
+}
+
+rust_test {
+    name: "vm_control_test_src_lib",
+    defaults: ["crosvm_defaults"],
+    host_supported: true,
+    crate_name: "vm_control",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
+    srcs: ["src/lib.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
+    edition: "2021",
+    features: ["balloon"],
+    rustlibs: [
+        "libanyhow",
+        "libballoon_control",
+        "libbase_rust",
+        "libcfg_if",
+        "libdata_model",
+        "libhypervisor",
+        "liblibc",
+        "libresources",
+        "librutabaga_gfx",
+        "libserde",
+        "libserde_json",
+        "libsync_rust",
+        "libthiserror",
+        "libvm_memory",
+    ],
+    proc_macros: ["libremain"],
     target: {
         host_linux: {
             features: [
