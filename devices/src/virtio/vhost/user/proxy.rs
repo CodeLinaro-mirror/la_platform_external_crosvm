@@ -97,6 +97,7 @@ use crate::virtio::Writer;
 use crate::virtio::VIRTIO_F_ACCESS_PLATFORM;
 use crate::virtio::VIRTIO_MSI_NO_VECTOR;
 use crate::PciAddress;
+use crate::Suspendable;
 
 // Note: There are two sets of queues that will be mentioned here. 1st set is
 // for this Virtio PCI device itself. 2nd set is the actual device backends
@@ -1679,17 +1680,15 @@ impl VirtioVhostUser {
                 }
             });
 
-        match worker_result {
+        *state = match worker_result {
             Err(e) => {
                 error!("failed to spawn virtio_vhost_user worker: {}", e);
                 return;
             }
-            Ok(worker_thread) => {
-                *state = State::Running {
-                    kill_evt: self_kill_evt,
-                    worker_thread,
-                };
-            }
+            Ok(worker_thread) => State::Running {
+                kill_evt: self_kill_evt,
+                worker_thread,
+            },
         }
     }
 }
@@ -1989,3 +1988,5 @@ impl VirtioDevice for VirtioVhostUser {
         self.pci_address
     }
 }
+
+impl Suspendable for VirtioVhostUser {}

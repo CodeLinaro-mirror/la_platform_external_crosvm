@@ -113,7 +113,6 @@ KNOWN_DISABLED_FEATURES = [
     "default-no-sandbox",
     "direct",
     "libvda",
-    "scudo",
     "whpx",
 ]
 
@@ -303,11 +302,13 @@ CHECKS: List[Check] = [
         exclude=[
             "**.h264",
             "**.vp8",
+            "**.vp9",
+            "**.ivf",
             "**.bin",
             "**.png",
             "**.min.js",
             "**.drawio",
-            "infra/**.json",
+            "**.json",
         ],
     ),
     Check(check_crlf_line_endings),

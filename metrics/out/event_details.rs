@@ -17,7 +17,7 @@
 #![allow(trivial_casts)]
 #![allow(unused_imports)]
 #![allow(unused_results)]
-//! Generated file from `protos/event_details.proto`
+//! Generated file from `event_details.proto`
 
 /// Generated files are compatible only with the same version
 /// of protobuf runtime.
@@ -1619,40 +1619,40 @@ impl ::protobuf::reflect::ProtobufValue for EmulatorProcessType {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x1aprotos/event_details.proto\"\x96\x02\n\rRecordDetails\x12n\n#emula\
-    tor_child_process_exit_details\x18\x0c\x20\x01(\x0b2\x20.EmulatorChildPr\
-    ocessExitDetailsR\x1femulatorChildProcessExitDetails\x12B\n\x13wave_form\
-    at_details\x18\r\x20\x01(\x0b2\x12.WaveFormatDetailsR\x11waveFormatDetai\
-    ls\x12E\n\x14emulator_dll_details\x18\x13\x20\x01(\x0b2\x13.EmulatorDllD\
-    etailsR\x12emulatorDllDetailsJ\x04\x08\x01\x10\x0cJ\x04\x08\x0e\x10\x13\
-    \"\x9d\x01\n\x11WaveFormatDetails\x12)\n\trequested\x18\x01\x20\x01(\x0b\
-    2\x0b.WaveFormatR\trequested\x12'\n\x08modified\x18\x02\x20\x01(\x0b2\
-    \x0b.WaveFormatR\x08modified\x124\n\x0fclosest_matched\x18\x03\x20\x01(\
-    \x0b2\x0b.WaveFormatR\x0eclosestMatched\"\xb9\x05\n\nWaveFormat\x12\x1d\
-    \n\nformat_tag\x18\x01\x20\x01(\x05R\tformatTag\x12\x1a\n\x08channels\
-    \x18\x02\x20\x01(\x05R\x08channels\x12&\n\x0fsamples_per_sec\x18\x03\x20\
-    \x01(\x05R\rsamplesPerSec\x12)\n\x11avg_bytes_per_sec\x18\x04\x20\x01(\
-    \x05R\x0eavgBytesPerSec\x12\x1f\n\x0bblock_align\x18\x05\x20\x01(\x05R\n\
-    blockAlign\x12&\n\x0fbits_per_sample\x18\x06\x20\x01(\x05R\rbitsPerSampl\
-    e\x12\x1d\n\nsize_bytes\x18\x07\x20\x01(\x05R\tsizeBytes\x12\x18\n\x07sa\
-    mples\x18\x08\x20\x01(\x05R\x07samples\x12!\n\x0cchannel_mask\x18\t\x20\
-    \x01(\x03R\x0bchannelMask\x12>\n\nsub_format\x18\n\x20\x01(\x0e2\x1f.Wav\
-    eFormat.WaveFormatSubFormatR\tsubFormat\"\xb7\x02\n\x13WaveFormatSubForm\
-    at\x12\x20\n\x1cKSDATAFORMAT_SUBTYPE_INVALID\x10\0\x12\x1f\n\x1bKSDATAFO\
-    RMAT_SUBTYPE_ANALOG\x10\x01\x12\x1c\n\x18KSDATAFORMAT_SUBTYPE_PCM\x10\
-    \x02\x12#\n\x1fKSDATAFORMAT_SUBTYPE_IEEE_FLOAT\x10\x03\x12\x1c\n\x18KSDA\
-    TAFORMAT_SUBTYPE_DRM\x10\x04\x12\x1d\n\x19KSDATAFORMAT_SUBTYPE_ALAW\x10\
-    \x05\x12\x1e\n\x1aKSDATAFORMAT_SUBTYPE_MULAW\x10\x06\x12\x1e\n\x1aKSDATA\
-    FORMAT_SUBTYPE_ADPCM\x10\x07\x12\x1d\n\x19KSDATAFORMAT_SUBTYPE_MPEG\x10\
-    \x08\"w\n\x1fEmulatorChildProcessExitDetails\x12\x1b\n\texit_code\x18\
-    \x01\x20\x01(\rR\x08exitCode\x127\n\x0cprocess_type\x18\x02\x20\x01(\x0e\
-    2\x14.EmulatorProcessTypeR\x0bprocessType\"8\n\x12EmulatorDllDetails\x12\
-    \"\n\rdll_base_name\x18\x01\x20\x01(\tR\x0bdllBaseName*\xd4\x01\n\x13Emu\
-    latorProcessType\x12\x18\n\x14PROCESS_TYPE_UNKNOWN\x10\0\x12\x15\n\x11PR\
-    OCESS_TYPE_MAIN\x10\x01\x12\x16\n\x12PROCESS_TYPE_BLOCK\x10\x02\x12\x18\
-    \n\x14PROCESS_TYPE_METRICS\x10\x03\x12\x14\n\x10PROCESS_TYPE_NET\x10\x04\
-    \x12\x16\n\x12PROCESS_TYPE_SLIRP\x10\x05\x12\x14\n\x10PROCESS_TYPE_GPU\
-    \x10\x06\x12\x16\n\x12PROCESS_TYPE_SOUND\x10\x07\
+    \n\x13event_details.proto\"\x96\x02\n\rRecordDetails\x12n\n#emulator_chi\
+    ld_process_exit_details\x18\x0c\x20\x01(\x0b2\x20.EmulatorChildProcessEx\
+    itDetailsR\x1femulatorChildProcessExitDetails\x12B\n\x13wave_format_deta\
+    ils\x18\r\x20\x01(\x0b2\x12.WaveFormatDetailsR\x11waveFormatDetails\x12E\
+    \n\x14emulator_dll_details\x18\x13\x20\x01(\x0b2\x13.EmulatorDllDetailsR\
+    \x12emulatorDllDetailsJ\x04\x08\x01\x10\x0cJ\x04\x08\x0e\x10\x13\"\x9d\
+    \x01\n\x11WaveFormatDetails\x12)\n\trequested\x18\x01\x20\x01(\x0b2\x0b.\
+    WaveFormatR\trequested\x12'\n\x08modified\x18\x02\x20\x01(\x0b2\x0b.Wave\
+    FormatR\x08modified\x124\n\x0fclosest_matched\x18\x03\x20\x01(\x0b2\x0b.\
+    WaveFormatR\x0eclosestMatched\"\xb9\x05\n\nWaveFormat\x12\x1d\n\nformat_\
+    tag\x18\x01\x20\x01(\x05R\tformatTag\x12\x1a\n\x08channels\x18\x02\x20\
+    \x01(\x05R\x08channels\x12&\n\x0fsamples_per_sec\x18\x03\x20\x01(\x05R\r\
+    samplesPerSec\x12)\n\x11avg_bytes_per_sec\x18\x04\x20\x01(\x05R\x0eavgBy\
+    tesPerSec\x12\x1f\n\x0bblock_align\x18\x05\x20\x01(\x05R\nblockAlign\x12\
+    &\n\x0fbits_per_sample\x18\x06\x20\x01(\x05R\rbitsPerSample\x12\x1d\n\ns\
+    ize_bytes\x18\x07\x20\x01(\x05R\tsizeBytes\x12\x18\n\x07samples\x18\x08\
+    \x20\x01(\x05R\x07samples\x12!\n\x0cchannel_mask\x18\t\x20\x01(\x03R\x0b\
+    channelMask\x12>\n\nsub_format\x18\n\x20\x01(\x0e2\x1f.WaveFormat.WaveFo\
+    rmatSubFormatR\tsubFormat\"\xb7\x02\n\x13WaveFormatSubFormat\x12\x20\n\
+    \x1cKSDATAFORMAT_SUBTYPE_INVALID\x10\0\x12\x1f\n\x1bKSDATAFORMAT_SUBTYPE\
+    _ANALOG\x10\x01\x12\x1c\n\x18KSDATAFORMAT_SUBTYPE_PCM\x10\x02\x12#\n\x1f\
+    KSDATAFORMAT_SUBTYPE_IEEE_FLOAT\x10\x03\x12\x1c\n\x18KSDATAFORMAT_SUBTYP\
+    E_DRM\x10\x04\x12\x1d\n\x19KSDATAFORMAT_SUBTYPE_ALAW\x10\x05\x12\x1e\n\
+    \x1aKSDATAFORMAT_SUBTYPE_MULAW\x10\x06\x12\x1e\n\x1aKSDATAFORMAT_SUBTYPE\
+    _ADPCM\x10\x07\x12\x1d\n\x19KSDATAFORMAT_SUBTYPE_MPEG\x10\x08\"w\n\x1fEm\
+    ulatorChildProcessExitDetails\x12\x1b\n\texit_code\x18\x01\x20\x01(\rR\
+    \x08exitCode\x127\n\x0cprocess_type\x18\x02\x20\x01(\x0e2\x14.EmulatorPr\
+    ocessTypeR\x0bprocessType\"8\n\x12EmulatorDllDetails\x12\"\n\rdll_base_n\
+    ame\x18\x01\x20\x01(\tR\x0bdllBaseName*\xd4\x01\n\x13EmulatorProcessType\
+    \x12\x18\n\x14PROCESS_TYPE_UNKNOWN\x10\0\x12\x15\n\x11PROCESS_TYPE_MAIN\
+    \x10\x01\x12\x16\n\x12PROCESS_TYPE_BLOCK\x10\x02\x12\x18\n\x14PROCESS_TY\
+    PE_METRICS\x10\x03\x12\x14\n\x10PROCESS_TYPE_NET\x10\x04\x12\x16\n\x12PR\
+    OCESS_TYPE_SLIRP\x10\x05\x12\x14\n\x10PROCESS_TYPE_GPU\x10\x06\x12\x16\n\
+    \x12PROCESS_TYPE_SOUND\x10\x07\
 ";
 
 static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;

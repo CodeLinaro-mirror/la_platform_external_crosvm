@@ -12,7 +12,6 @@ use std::alloc::Layout;
 use std::io::Error as IoError;
 use std::ptr::null;
 
-use assertions::const_assert;
 use base::ioctl;
 use base::ioctl_with_mut_ref;
 use base::ioctl_with_ptr;
@@ -21,6 +20,7 @@ use base::AsRawDescriptor;
 use base::Event;
 use base::LayoutAllocation;
 use remain::sorted;
+use static_assertions::const_assert;
 use thiserror::Error;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -127,9 +127,9 @@ pub trait Vhost: AsRawDescriptor + std::marker::Sized {
         const SIZE_OF_MEMORY: usize = std::mem::size_of::<virtio_sys::vhost::vhost_memory>();
         const SIZE_OF_REGION: usize = std::mem::size_of::<virtio_sys::vhost::vhost_memory_region>();
         const ALIGN_OF_MEMORY: usize = std::mem::align_of::<virtio_sys::vhost::vhost_memory>();
-        const ALIGN_OF_REGION: usize =
-            std::mem::align_of::<virtio_sys::vhost::vhost_memory_region>();
-        const_assert!(ALIGN_OF_MEMORY >= ALIGN_OF_REGION);
+        const_assert!(
+            ALIGN_OF_MEMORY >= std::mem::align_of::<virtio_sys::vhost::vhost_memory_region>()
+        );
 
         let num_regions = mem.num_regions() as usize;
         let size = SIZE_OF_MEMORY + num_regions * SIZE_OF_REGION;
@@ -392,120 +392,5 @@ pub trait Vhost: AsRawDescriptor + std::marker::Sized {
             return ioctl_result();
         }
         Ok(())
-    }
-}
-
-// TODO(225193541): Enable/add tests for windows.
-#[cfg(unix)]
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::result;
-
-    use net_util::sys::unix::fakes::FakeTap;
-    use vm_memory::GuestAddress;
-    use vm_memory::GuestMemory;
-    use vm_memory::GuestMemoryError;
-
-    use super::*;
-    use crate::net::fakes::FakeNet;
-
-    fn create_guest_memory() -> result::Result<GuestMemory, GuestMemoryError> {
-        let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x4000)])
-    }
-
-    fn assert_ok_or_known_failure<T>(res: Result<T>) {
-        match &res {
-            // FakeNet won't respond to ioctl's
-            Ok(_t) => {}
-            Err(Error::IoctlError(ioe)) if ioe.raw_os_error().unwrap() == 25 => {}
-            Err(e) => panic!("Unexpected Error:\n{}", e),
-        }
-    }
-
-    fn create_fake_vhost_net() -> FakeNet<FakeTap> {
-        FakeNet::<FakeTap>::new(&PathBuf::from("")).unwrap()
-    }
-
-    #[test]
-    fn test_create_fake_vhost_net() {
-        create_fake_vhost_net();
-    }
-
-    #[test]
-    fn set_owner() {
-        let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_owner();
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn get_features() {
-        let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.get_features();
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn set_features() {
-        let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_features(0);
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn set_mem_table() {
-        let vhost_net = create_fake_vhost_net();
-        let gm = create_guest_memory().unwrap();
-        let res = vhost_net.set_mem_table(&gm);
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn set_vring_num() {
-        let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_vring_num(0, 1);
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn set_vring_addr() {
-        let vhost_net = create_fake_vhost_net();
-        let gm = create_guest_memory().unwrap();
-        let res = vhost_net.set_vring_addr(
-            &gm,
-            1,
-            1,
-            0,
-            0x0,
-            GuestAddress(0x0),
-            GuestAddress(0x0),
-            GuestAddress(0x0),
-            None,
-        );
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn set_vring_base() {
-        let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_vring_base(0, 1);
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn set_vring_call() {
-        let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_vring_call(0, &Event::new().unwrap());
-        assert_ok_or_known_failure(res);
-    }
-
-    #[test]
-    fn set_vring_kick() {
-        let vhost_net = create_fake_vhost_net();
-        let res = vhost_net.set_vring_kick(0, &Event::new().unwrap());
-        assert_ok_or_known_failure(res);
     }
 }

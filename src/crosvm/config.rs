@@ -7,19 +7,21 @@ use std::net;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
 use arch::set_default_serial_parameters;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrAction;
 use arch::MsrConfig;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrFilter;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrRWType;
 use arch::MsrValueFrom;
 use arch::Pstore;
 use arch::VcpuAffinity;
 use base::debug;
 use base::pagesize;
+use cros_async::ExecutorKind;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
 use devices::virtio::block::block::DiskOption;
@@ -520,25 +522,13 @@ fn jail_config_default_pivot_root() -> PathBuf {
     PathBuf::from(option_env!("DEFAULT_PIVOT_ROOT").unwrap_or("/var/empty"))
 }
 
-#[cfg(unix)]
-fn jail_config_default_seccomp_policy_dir() -> Option<PathBuf> {
-    // If we do not have embedded seccomp policies, fall back to loading policies from
-    // disk by default.
-    // TODO(b/250956589): Remove once ChromeOS uses embedded policies.
-    if super::sys::unix::jail_helpers::EMBEDDED_BPFS.is_empty() {
-        Some(PathBuf::from("/usr/share/policy/crosvm"))
-    } else {
-        None
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, serde_keyvalue::FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct JailConfig {
     #[serde(default = "jail_config_default_pivot_root")]
     pub pivot_root: PathBuf,
     #[cfg(unix)]
-    #[serde(default = "jail_config_default_seccomp_policy_dir")]
+    #[serde(default)]
     pub seccomp_policy_dir: Option<PathBuf>,
     #[serde(default)]
     pub seccomp_log_failures: bool,
@@ -549,7 +539,7 @@ impl Default for JailConfig {
         JailConfig {
             pivot_root: jail_config_default_pivot_root(),
             #[cfg(unix)]
-            seccomp_policy_dir: jail_config_default_seccomp_policy_dir(),
+            seccomp_policy_dir: None,
             seccomp_log_failures: false,
         }
     }
@@ -565,9 +555,7 @@ pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
             let parse = |s: &str| -> Result<u64, String> {
                 match parse_hex_or_decimal(s) {
                     Ok(v) => Ok(v),
-                    Err(_) => {
-                        return Err(invalid_value_err(s, "expected u64 value"));
-                    }
+                    Err(_) => Err(invalid_value_err(s, "expected u64 value")),
                 }
             };
             Ok(AddressRange {
@@ -576,38 +564,6 @@ pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
             })
         })
         .collect()
-}
-
-pub fn parse_pstore(value: &str) -> Result<Pstore, String> {
-    let components: Vec<&str> = value.split(',').collect();
-    if components.len() != 2 {
-        return Err(invalid_value_err(
-            value,
-            "pstore must have exactly 2 components: path=<path>,size=<size>",
-        ));
-    }
-    Ok(Pstore {
-        path: {
-            if components[0].len() <= 5 || !components[0].starts_with("path=") {
-                return Err(invalid_value_err(
-                    components[0],
-                    "pstore path must follow with `path=`",
-                ));
-            };
-            PathBuf::from(&components[0][5..])
-        },
-        size: {
-            if components[1].len() <= 5 || !components[1].starts_with("size=") {
-                return Err(invalid_value_err(
-                    components[1],
-                    "pstore size must follow with `size=`",
-                ));
-            };
-            components[1][5..]
-                .parse()
-                .map_err(|_| invalid_value_err(value, "pstore size must be an integer"))?
-        },
-    })
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -963,12 +919,6 @@ pub fn from_key_values<'a, T: Deserialize<'a>>(value: &'a str) -> Result<T, Stri
     serde_keyvalue::from_key_values(value).map_err(|e| e.to_string())
 }
 
-pub fn numbered_disk_option(value: &str) -> Result<(usize, DiskOption), String> {
-    static DISK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let disk = from_key_values(value)?;
-    Ok((DISK_COUNTER.fetch_add(1, Ordering::Relaxed), disk))
-}
-
 /// Parse a list of guest to host CPU mappings.
 ///
 /// Each mapping consists of a single guest CPU index mapped to one or more host CPUs in the form
@@ -1019,11 +969,11 @@ pub fn parse_direct_io_options(s: &str) -> Result<DirectIoOption, String> {
         .map(|mut range| {
             let base = range
                 .next()
-                .map(|v| parse_hex_or_decimal(v))
+                .map(parse_hex_or_decimal)
                 .map_or(Ok(None), |r| r.map(Some));
             let last = range
                 .next()
-                .map(|v| parse_hex_or_decimal(v))
+                .map(parse_hex_or_decimal)
                 .map_or(Ok(None), |r| r.map(Some));
             (base, last)
         })
@@ -1147,6 +1097,7 @@ pub struct Config {
     pub ac97_parameters: Vec<Ac97Parameters>,
     pub acpi_tables: Vec<PathBuf>,
     pub android_fstab: Option<PathBuf>,
+    pub async_executor: Option<ExecutorKind>,
     pub balloon: bool,
     pub balloon_bias: i64,
     pub balloon_control: Option<PathBuf>,
@@ -1314,15 +1265,15 @@ pub struct Config {
     pub vhost_user_mac80211_hwsim: Option<VhostUserOption>,
     pub vhost_user_net: Vec<VhostUserOption>,
     pub vhost_user_snd: Vec<VhostUserOption>,
-    pub vhost_user_video_dec: Option<VhostUserOption>,
+    pub vhost_user_video_dec: Vec<VhostUserOption>,
     pub vhost_user_vsock: Vec<VhostUserOption>,
     pub vhost_user_wl: Option<VhostUserOption>,
     #[cfg(unix)]
     pub vhost_vsock_device: Option<PathBuf>,
     #[cfg(feature = "video-decoder")]
-    pub video_dec: Option<VideoDeviceConfig>,
+    pub video_dec: Vec<VideoDeviceConfig>,
     #[cfg(feature = "video-encoder")]
-    pub video_enc: Option<VideoDeviceConfig>,
+    pub video_enc: Vec<VideoDeviceConfig>,
     pub virtio_input_evdevs: Vec<PathBuf>,
     pub virtio_keyboard: Vec<PathBuf>,
     pub virtio_mice: Vec<PathBuf>,
@@ -1347,6 +1298,7 @@ impl Default for Config {
             ac97_parameters: Vec::new(),
             acpi_tables: Vec::new(),
             android_fstab: None,
+            async_executor: None,
             balloon: true,
             balloon_bias: 0,
             balloon_control: None,
@@ -1510,7 +1462,7 @@ impl Default for Config {
             vhost_net_device_path: PathBuf::from(VHOST_NET_PATH),
             vhost_user_blk: Vec::new(),
             vhost_user_console: Vec::new(),
-            vhost_user_video_dec: None,
+            vhost_user_video_dec: Vec::new(),
             vhost_user_fs: Vec::new(),
             vhost_user_gpu: Vec::new(),
             vhost_user_mac80211_hwsim: None,
@@ -1521,9 +1473,9 @@ impl Default for Config {
             #[cfg(unix)]
             vhost_vsock_device: None,
             #[cfg(feature = "video-decoder")]
-            video_dec: None,
+            video_dec: Vec::new(),
             #[cfg(feature = "video-encoder")]
-            video_enc: None,
+            video_enc: Vec::new(),
             virtio_input_evdevs: Vec::new(),
             virtio_keyboard: Vec::new(),
             virtio_mice: Vec::new(),
@@ -1553,7 +1505,7 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
 
     #[cfg(feature = "gpu")]
     {
-        crate::crosvm::sys::validate_gpu_config(cfg)?;
+        crate::crosvm::gpu_config::validate_gpu_config(cfg)?;
     }
     #[cfg(feature = "gdb")]
     if cfg.gdb.is_some() && cfg.vcpu_count.unwrap_or(1) != 1 {
@@ -2169,7 +2121,7 @@ mod tests {
             JailConfig {
                 pivot_root: jail_config_default_pivot_root(),
                 #[cfg(unix)]
-                seccomp_policy_dir: jail_config_default_seccomp_policy_dir(),
+                seccomp_policy_dir: None,
                 seccomp_log_failures: false,
             }
         );
@@ -2237,22 +2189,22 @@ mod tests {
         #[cfg(feature = "libvda")]
         {
             let params: VideoDeviceConfig = from_key_values("libvda").unwrap();
-            assert_eq!(params.backend_type, VideoBackendType::Libvda);
+            assert_eq!(params.backend, VideoBackendType::Libvda);
 
             let params: VideoDeviceConfig = from_key_values("libvda-vd").unwrap();
-            assert_eq!(params.backend_type, VideoBackendType::LibvdaVd);
+            assert_eq!(params.backend, VideoBackendType::LibvdaVd);
         }
 
         #[cfg(feature = "ffmpeg")]
         {
             let params: VideoDeviceConfig = from_key_values("ffmpeg").unwrap();
-            assert_eq!(params.backend_type, VideoBackendType::Ffmpeg);
+            assert_eq!(params.backend, VideoBackendType::Ffmpeg);
         }
 
         #[cfg(feature = "vaapi")]
         {
             let params: VideoDeviceConfig = from_key_values("vaapi").unwrap();
-            assert_eq!(params.backend_type, VideoBackendType::Vaapi);
+            assert_eq!(params.backend, VideoBackendType::Vaapi);
         }
     }
 

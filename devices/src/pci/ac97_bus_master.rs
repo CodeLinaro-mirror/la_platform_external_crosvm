@@ -10,8 +10,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use audio_streams::shm_streams::ShmStreamSource;
-use audio_streams::BoxError;
 use audio_streams::StreamControl;
 use base::error;
 use base::warn;
@@ -22,6 +20,9 @@ use thiserror::Error;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
+use crate::pci::ac97::sys::AudioStreamSource;
+use crate::pci::ac97_bus_master::sys::Ac97BusMasterSys;
+pub(crate) use crate::pci::ac97_bus_master::sys::AudioError;
 use crate::pci::ac97_mixer::Ac97Mixer;
 use crate::pci::ac97_regs::*;
 use crate::IrqLevelEvent;
@@ -101,7 +102,7 @@ impl Ac97BusMasterRegs {
 // Internal error type used for reporting errors from guest memory reading.
 #[sorted]
 #[derive(Error, Debug)]
-enum GuestMemoryError {
+pub(crate) enum GuestMemoryError {
     // Failure getting the address of the audio buffer.
     #[error("Failed to get the address of the audio buffer: {0}.")]
     ReadingGuestBufferAddress(vm_memory::GuestMemoryError),
@@ -114,39 +115,6 @@ impl From<GuestMemoryError> for AudioError {
 }
 
 type GuestMemoryResult<T> = std::result::Result<T, GuestMemoryError>;
-
-// Internal error type used for reporting errors from the audio thread.
-#[sorted]
-#[derive(Error, Debug)]
-enum AudioError {
-    // Failed to clone a descriptor.
-    #[error("Failed to clone a descriptor: {0}")]
-    CloneDescriptor(base::Error),
-    // Failed to create a shared memory.
-    #[error("Failed to create a shared memory: {0}.")]
-    CreateSharedMemory(base::Error),
-    // Failed to create a new stream.
-    #[error("Failed to create audio stream: {0}.")]
-    CreateStream(BoxError),
-    // Failure to get regions from guest memory.
-    #[error("Failed to get guest memory region: {0}.")]
-    GuestRegion(GuestMemoryError),
-    // Invalid buffer offset received from the audio server.
-    #[error("Offset > max usize")]
-    InvalidBufferOffset,
-    // Guest did not provide a buffer when needed.
-    #[error("No buffer was available from the Guest")]
-    NoBufferAvailable,
-    // Failure to read guest memory.
-    #[error("Failed to read guest memory: {0}.")]
-    ReadingGuestError(GuestMemoryError),
-    // Failure to respond to the ServerRequest.
-    #[error("Failed to respond to the ServerRequest: {0}")]
-    RespondRequest(BoxError),
-    // Failure to wait for a request from the stream.
-    #[error("Failed to wait for a message from the stream: {0}")]
-    WaitForAction(BoxError),
-}
 
 type AudioResult<T> = std::result::Result<T, AudioError>;
 
@@ -197,10 +165,12 @@ pub struct Ac97BusMaster {
     pmic_info: AudioThreadInfo,
 
     // Audio server used to create playback or capture streams.
-    audio_server: Box<dyn ShmStreamSource<base::Error>>,
+    audio_server: AudioStreamSource,
 
     // Thread for hadlind IRQ resample events from the guest.
     irq_resample_thread: Option<thread::JoinHandle<()>>,
+    #[cfg_attr(unix, allow(dead_code))]
+    sys: Ac97BusMasterSys,
 }
 
 impl Ac97BusMaster {
@@ -621,16 +591,31 @@ fn current_buffer_size(
 
 #[cfg(test)]
 mod tests {
-    use audio_streams::shm_streams::MockShmStreamSource;
 
     use super::*;
 
+    #[cfg(unix)]
+    fn new_mock_ac97_bus_master() -> Ac97BusMaster {
+        Ac97BusMaster::new(
+            GuestMemory::new(&[]).expect("Creating guest memory failed."),
+            Box::new(audio_streams::shm_streams::MockShmStreamSource::new()),
+        )
+    }
+
+    #[cfg(windows)]
+    fn new_mock_ac97_bus_master() -> Ac97BusMaster {
+        let memory_start_addr = GuestAddress(0x0);
+        Ac97BusMaster::new(
+            GuestMemory::new(&[(memory_start_addr, 0x1000)])
+                .expect("Creating guest memory failed."),
+            Arc::new(Mutex::new(audio_streams::NoopStreamSource::new())),
+            None,
+        )
+    }
+
     #[test]
     fn bm_bdbar() {
-        let mut bm = Ac97BusMaster::new(
-            GuestMemory::new(&[]).expect("Creating guest memory failed."),
-            Box::new(MockShmStreamSource::new()),
-        );
+        let mut bm = new_mock_ac97_bus_master();
         let mut mixer = Ac97Mixer::new();
 
         let bdbars = [0x00u64, 0x10, 0x20];
@@ -652,10 +637,7 @@ mod tests {
 
     #[test]
     fn bm_status_reg() {
-        let mut bm = Ac97BusMaster::new(
-            GuestMemory::new(&[]).expect("Creating guest memory failed."),
-            Box::new(MockShmStreamSource::new()),
-        );
+        let mut bm = new_mock_ac97_bus_master();
         let mixer = Ac97Mixer::new();
 
         let sr_addrs = [0x06u64, 0x16, 0x26];
@@ -669,10 +651,7 @@ mod tests {
 
     #[test]
     fn bm_global_control() {
-        let mut bm = Ac97BusMaster::new(
-            GuestMemory::new(&[]).expect("Creating guest memory failed."),
-            Box::new(MockShmStreamSource::new()),
-        );
+        let mut bm = new_mock_ac97_bus_master();
         let mut mixer = Ac97Mixer::new();
 
         assert_eq!(bm.readl(GLOB_CNT_2C), 0x0000_0000);

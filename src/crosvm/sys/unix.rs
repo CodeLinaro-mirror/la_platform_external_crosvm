@@ -31,8 +31,6 @@ use std::process;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Barrier;
-#[cfg(any(target_arch = "x86_64", feature = "gdb"))]
-use std::thread;
 #[cfg(feature = "balloon")]
 use std::time::Duration;
 
@@ -121,8 +119,6 @@ use devices::VirtioMmioDevice;
 use devices::VirtioPciDevice;
 #[cfg(feature = "usb")]
 use devices::XhciController;
-#[cfg(feature = "gpu")]
-pub use gpu::GpuRenderServerParameters;
 #[cfg(feature = "gpu")]
 use gpu::*;
 use hypervisor::kvm::Kvm;
@@ -237,22 +233,28 @@ fn create_virtio_devices(
     }
 
     #[cfg(feature = "video-decoder")]
-    let video_dec_cfg = if let Some(config) = &cfg.video_dec {
-        let (video_tube, gpu_tube) = Tube::pair().context("failed to create tube")?;
-        resource_bridges.push(gpu_tube);
-        Some((video_tube, config.backend_type))
-    } else {
-        None
-    };
+    let video_dec_cfg = cfg
+        .video_dec
+        .iter()
+        .map(|config| {
+            let (video_tube, gpu_tube) =
+                Tube::pair().expect("failed to create tube for video decoder");
+            resource_bridges.push(gpu_tube);
+            (video_tube, config.backend)
+        })
+        .collect::<Vec<_>>();
 
     #[cfg(feature = "video-encoder")]
-    let video_enc_cfg = if let Some(config) = &cfg.video_enc {
-        let (video_tube, gpu_tube) = Tube::pair().context("failed to create tube")?;
-        resource_bridges.push(gpu_tube);
-        Some((video_tube, config.backend_type))
-    } else {
-        None
-    };
+    let video_enc_cfg = cfg
+        .video_enc
+        .iter()
+        .map(|config| {
+            let (video_tube, gpu_tube) =
+                Tube::pair().expect("failed to create tube for video encoder");
+            resource_bridges.push(gpu_tube);
+            (video_tube, config.backend)
+        })
+        .collect::<Vec<_>>();
 
     #[cfg(feature = "gpu")]
     {
@@ -587,18 +589,18 @@ fn create_virtio_devices(
 
     #[cfg(feature = "video-decoder")]
     {
-        if let Some((video_dec_tube, video_dec_backend)) = video_dec_cfg {
+        for (tube, backend) in video_dec_cfg {
             register_video_device(
-                video_dec_backend,
+                backend,
                 &mut devs,
-                video_dec_tube,
+                tube,
                 cfg.protection_type,
                 &cfg.jail_config,
                 VideoDeviceType::Decoder,
             )?;
         }
     }
-    if let Some(socket_path) = &cfg.vhost_user_video_dec {
+    for socket_path in &cfg.vhost_user_video_dec {
         devs.push(create_vhost_user_video_device(
             cfg.protection_type,
             socket_path,
@@ -608,11 +610,11 @@ fn create_virtio_devices(
 
     #[cfg(feature = "video-encoder")]
     {
-        if let Some((video_enc_tube, video_enc_backend)) = video_enc_cfg {
+        for (tube, backend) in video_enc_cfg {
             register_video_device(
-                video_enc_backend,
+                backend,
                 &mut devs,
-                video_enc_tube,
+                tube,
                 cfg.protection_type,
                 &cfg.jail_config,
                 VideoDeviceType::Encoder,
@@ -789,20 +791,20 @@ fn create_devices(
         }
 
         if !coiommu_attached_endpoints.is_empty() || !iommu_attached_endpoints.is_empty() {
-            let mut buf = mem::MaybeUninit::<libc::rlimit>::zeroed();
-            let res = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, buf.as_mut_ptr()) };
+            let mut buf = mem::MaybeUninit::<libc::rlimit64>::zeroed();
+            let res = unsafe { libc::getrlimit64(libc::RLIMIT_MEMLOCK, buf.as_mut_ptr()) };
             if res == 0 {
                 let limit = unsafe { buf.assume_init() };
                 let rlim_new = limit
                     .rlim_cur
-                    .saturating_add(vm.get_memory().memory_size() as libc::rlim_t);
+                    .saturating_add(vm.get_memory().memory_size());
                 let rlim_max = max(limit.rlim_max, rlim_new);
                 if limit.rlim_cur < rlim_new {
-                    let limit_arg = libc::rlimit {
-                        rlim_cur: rlim_new as libc::rlim_t,
-                        rlim_max: rlim_max as libc::rlim_t,
+                    let limit_arg = libc::rlimit64 {
+                        rlim_cur: rlim_new,
+                        rlim_max: rlim_max,
                     };
-                    let res = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit_arg) };
+                    let res = unsafe { libc::setrlimit64(libc::RLIMIT_MEMLOCK, &limit_arg) };
                     if res != 0 {
                         bail!("Set rlimit failed");
                     }
@@ -1387,6 +1389,11 @@ fn get_default_hypervisor() -> Result<HypervisorKind> {
 }
 
 pub fn run_config(cfg: Config) -> Result<ExitState> {
+    if let Some(async_executor) = cfg.async_executor {
+        Executor::set_default_executor_kind(async_executor)
+            .context("Failed to set the default async executor")?;
+    }
+
     let components = setup_vm_components(&cfg)?;
 
     let guest_mem_layout =
@@ -1831,7 +1838,7 @@ where
         }
 
         let pci_root = linux.root_config.clone();
-        thread::Builder::new()
+        std::thread::Builder::new()
             .name("pci_root".to_string())
             .spawn(move || start_pci_root_worker(pci_root, hp_worker_tube))?;
     }
@@ -2461,7 +2468,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             to_vcpu_channels,
             from_vcpu_channel.unwrap(), // Must succeed to unwrap()
         );
-        thread::Builder::new()
+        std::thread::Builder::new()
             .name("gdb".to_owned())
             .spawn(move || gdb_thread(target, gdb_port_num))
             .context("failed to spawn GDB thread")?;
@@ -2612,7 +2619,11 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 target_arch = "x86",
                                                 target_arch = "x86_64"
                                             )))]
-                                            VmResponse::Ok
+                                            {
+                                                // Suppress warnings.
+                                                let _ = (device, add);
+                                                VmResponse::Ok
+                                            }
                                         }
                                         _ => request.execute(
                                             &mut run_mode_opt,
@@ -2915,6 +2926,8 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
         .or_else(|_| Minijail::new())
         .with_context(|| format!("failed to create empty jail for {}", name))?;
 
+    let tz = std::env::var("TZ").unwrap_or_default();
+
     // Safe because we are keeping all the descriptors needed for the child to function.
     match unsafe { jail.fork(Some(&keep_rds)).context("error while forking")? } {
         0 => {
@@ -2936,6 +2949,9 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
             // Safe because we trimmed the name to 15 characters (and pthread_setname_np will return
             // an error if we don't anyway).
             let _ = unsafe { libc::pthread_setname_np(libc::pthread_self(), thread_name.as_ptr()) };
+
+            // Preserve TZ for `chrono::Local` (b/257987535).
+            std::env::set_var("TZ", tz);
 
             // Run the device loop and terminate the child process once it exits.
             let res = match listener.run_device(device) {
@@ -3005,6 +3021,11 @@ fn start_vhost_user_control_server(
 }
 
 pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
+    if let Some(async_executor) = opts.async_executor {
+        Executor::set_default_executor_kind(async_executor)
+            .context("Failed to set the default async executor")?;
+    }
+
     struct DeviceJailInfo {
         // Unique name for the device, in the form `foomatic-0`.
         name: String,

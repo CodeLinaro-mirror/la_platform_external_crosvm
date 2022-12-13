@@ -84,6 +84,7 @@ use crate::virtio::Reader;
 use crate::virtio::SignalableInterrupt;
 use crate::virtio::VirtioDevice;
 use crate::virtio::Writer;
+use crate::Suspendable;
 
 const DEFAULT_QUEUE_SIZE: u16 = 256;
 // ANDROID(b/251366833): We've temporarily reduced the number of queues to debug an issue.
@@ -972,14 +973,12 @@ impl VirtioDevice for BlockAsync {
                         )
                     });
 
-            match worker_result {
+            self.worker_thread = match worker_result {
                 Err(e) => {
                     error!("failed to spawn virtio_blk worker: {}", e);
                     return;
                 }
-                Ok(join_handle) => {
-                    self.worker_thread = Some(join_handle);
-                }
+                Ok(join_handle) => Some(join_handle),
             }
         }
     }
@@ -1008,6 +1007,8 @@ impl VirtioDevice for BlockAsync {
         false
     }
 }
+
+impl Suspendable for BlockAsync {}
 
 #[cfg(test)]
 mod tests {

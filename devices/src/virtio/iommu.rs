@@ -70,6 +70,7 @@ use crate::virtio::Reader;
 use crate::virtio::SignalableInterrupt;
 use crate::virtio::VirtioDevice;
 use crate::virtio::Writer;
+use crate::Suspendable;
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 2;
@@ -896,7 +897,6 @@ impl VirtioDevice for Iommu {
             }
             None => {
                 error!("failed to start virtio-iommu worker: No control tube");
-                return;
             }
         }
     }
@@ -977,3 +977,5 @@ impl VirtioDevice for Iommu {
         Some(sdts)
     }
 }
+
+impl Suspendable for Iommu {}

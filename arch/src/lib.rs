@@ -28,7 +28,7 @@ use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::Event;
 use base::SendTube;
-#[cfg(feature = "gdb")]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 use base::Tube;
 use devices::virtio::VirtioDevice;
 use devices::BarRange;
@@ -96,6 +96,7 @@ use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_keyvalue::FromKeyValues;
 pub use serial::add_serial_devices;
 pub use serial::get_serial_cmdline;
 pub use serial::set_default_serial_parameters;
@@ -115,7 +116,8 @@ pub enum VmImage {
     Bios(File),
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, FromKeyValues, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Pstore {
     pub path: PathBuf,
     pub size: u32,
@@ -567,10 +569,14 @@ pub fn generate_virtio_mmio_bus(
     mmio_bus: &Bus,
     resources: &mut SystemAllocator,
     vm: &mut impl Vm,
-    mut sdts: Vec<SDT>,
+    sdts: Vec<SDT>,
 ) -> Result<(BTreeMap<u32, String>, Vec<SDT>), DeviceRegistrationError> {
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut pid_labels = BTreeMap::new();
 
+    // sdts can be updated only on x86 platforms.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let mut sdts = sdts;
     for dev_value in devices.into_iter() {
         #[cfg(unix)]
         let (mut device, jail) = dev_value;
@@ -1119,4 +1125,32 @@ pub struct MsrConfig {
 pub enum MsrExitHandlerError {
     #[error("Fail to create MSR handler")]
     HandlerCreateFailed,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_keyvalue::from_key_values;
+
+    use super::*;
+
+    #[test]
+    fn parse_pstore() {
+        let res: Pstore = from_key_values("path=/some/path,size=16384").unwrap();
+        assert_eq!(
+            res,
+            Pstore {
+                path: "/some/path".into(),
+                size: 16384,
+            }
+        );
+
+        let res = from_key_values::<Pstore>("path=/some/path");
+        assert!(res.is_err());
+
+        let res = from_key_values::<Pstore>("size=16384");
+        assert!(res.is_err());
+
+        let res = from_key_values::<Pstore>("");
+        assert!(res.is_err());
+    }
 }

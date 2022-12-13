@@ -10,29 +10,6 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
-rust_test {
-    name: "kvm_test_src_lib",
-    defaults: ["crosvm_defaults"],
-    host_supported: true,
-    crate_name: "kvm",
-    cargo_env_compat: true,
-    srcs: ["src/lib.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: false,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libbase_rust",
-        "libdata_model",
-        "libkvm_sys",
-        "liblibc",
-        "libsync_rust",
-        "libvm_memory",
-    ],
-}
-
 rust_defaults {
     name: "kvm_test_defaults",
     defaults: ["crosvm_defaults"],
@@ -57,6 +34,16 @@ rust_test {
     defaults: ["kvm_test_defaults"],
     host_supported: true,
     srcs: ["tests/dirty_log.rs"],
+    test_options: {
+        unit_test: false,
+    },
+}
+
+rust_test {
+    name: "kvm_test_tests_kvm_tests",
+    defaults: ["kvm_test_defaults"],
+    host_supported: true,
+    srcs: ["tests/kvm_tests.rs"],
     test_options: {
         unit_test: false,
     },

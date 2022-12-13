@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use audio_streams::shm_streams::ShmStream;
+use audio_streams::BoxError;
 use audio_streams::NoopStreamControl;
 use audio_streams::SampleFormat;
 use audio_streams::StreamDirection;
@@ -23,8 +24,10 @@ use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::FromRawDescriptor;
 use base::RawDescriptor;
+use remain::sorted;
 use sync::Condvar;
 use sync::Mutex;
+use thiserror::Error;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
@@ -34,13 +37,49 @@ use crate::pci::ac97_bus_master::current_buffer_size;
 use crate::pci::ac97_bus_master::get_buffer_samples;
 use crate::pci::ac97_bus_master::Ac97BusMaster;
 use crate::pci::ac97_bus_master::Ac97BusMasterRegs;
-use crate::pci::ac97_bus_master::AudioError;
 use crate::pci::ac97_bus_master::AudioResult;
 use crate::pci::ac97_bus_master::AudioThreadInfo;
 use crate::pci::ac97_bus_master::GuestMemoryError;
 use crate::pci::ac97_bus_master::GuestMemoryResult;
 use crate::pci::ac97_mixer::Ac97Mixer;
 use crate::pci::ac97_regs::*;
+
+// Internal error type used for reporting errors from the audio thread.
+#[sorted]
+#[derive(Error, Debug)]
+pub(crate) enum AudioError {
+    // Failed to clone a descriptor.
+    #[error("Failed to clone a descriptor: {0}")]
+    CloneDescriptor(base::Error),
+    // Failed to create a shared memory.
+    #[error("Failed to create a shared memory: {0}.")]
+    CreateSharedMemory(base::Error),
+    // Failed to create a new stream.
+    #[error("Failed to create audio stream: {0}.")]
+    CreateStream(BoxError),
+    // Failure to get regions from guest memory.
+    #[error("Failed to get guest memory region: {0}.")]
+    GuestRegion(GuestMemoryError),
+    // Invalid buffer offset received from the audio server.
+    #[error("Offset > max usize")]
+    InvalidBufferOffset,
+    // Guest did not provide a buffer when needed.
+    #[error("No buffer was available from the Guest")]
+    NoBufferAvailable,
+    // Failure to read guest memory.
+    #[error("Failed to read guest memory: {0}.")]
+    ReadingGuestError(GuestMemoryError),
+    // Failure to respond to the ServerRequest.
+    #[error("Failed to respond to the ServerRequest: {0}")]
+    RespondRequest(BoxError),
+    // Failure to wait for a request from the stream.
+    #[error("Failed to wait for a message from the stream: {0}")]
+    WaitForAction(BoxError),
+}
+
+// Unix specific members of Ac97BusMaster - a placeholder.
+#[derive(Default)]
+pub struct Ac97BusMasterSys {}
 
 impl AudioThreadInfo {
     fn start(&mut self, mut worker: AudioWorker) {
@@ -79,6 +118,7 @@ impl Ac97BusMaster {
             audio_server,
 
             irq_resample_thread: None,
+            sys: Default::default(),
         }
     }
 
@@ -415,17 +455,33 @@ mod tests {
     use crate::pci::ac97_bus_master::tests::stop;
 
     #[test]
-    fn run_multi_tube_playback() {
+    fn run_multi_tube_playback_2() {
         start_playback(2, 48000);
+    }
+
+    #[test]
+    fn run_multi_tube_playback_4() {
         start_playback(4, 48000);
+    }
+
+    #[test]
+    fn run_multi_tube_playback_6() {
         start_playback(6, 48000);
     }
 
     #[test]
-    fn run_multi_rate_playback() {
+    fn run_multi_rate_playback_32() {
         start_playback(2, 32000);
+    }
+
+    #[test]
+    fn run_multi_rate_playback_44() {
         start_playback(2, 44100);
-        start_playback(2, 48000);
+    }
+
+    #[test]
+    fn run_multi_rate_playback_48() {
+        start_playback(2, 32000);
     }
 
     fn start_playback(num_channels: usize, rate: u16) {
@@ -437,7 +493,7 @@ mod tests {
         const FRAGMENT_SIZE: usize = BUFFER_SIZE / 2;
 
         const GUEST_ADDR_BASE: u32 = 0x100_0000;
-        let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024 * 1024 * 1024)])
+        let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024 * 1024 * 8)])
             .expect("Creating guest memory failed.");
         let stream_source = MockShmStreamSource::new();
         let mut bm = Ac97BusMaster::new(mem.clone(), Box::new(stream_source.clone()));
@@ -531,8 +587,12 @@ mod tests {
     }
 
     #[test]
-    fn run_capture() {
+    fn run_capture_input() {
         start_capture(Ac97Function::Input);
+    }
+
+    #[test]
+    fn run_capture_microphone() {
         start_capture(Ac97Function::Microphone);
     }
 
@@ -545,7 +605,7 @@ mod tests {
         const FRAGMENT_SIZE: usize = BUFFER_SIZE / 2;
 
         const GUEST_ADDR_BASE: u32 = 0x100_0000;
-        let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024 * 1024 * 1024)])
+        let mem = GuestMemory::new(&[(GuestAddress(GUEST_ADDR_BASE as u64), 1024 * 1024 * 8)])
             .expect("Creating guest memory failed.");
         let stream_source = MockShmStreamSource::new();
         let mut bm = Ac97BusMaster::new(mem.clone(), Box::new(stream_source.clone()));

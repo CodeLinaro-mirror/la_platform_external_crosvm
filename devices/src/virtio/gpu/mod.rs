@@ -61,6 +61,7 @@ pub use self::protocol::VIRTIO_GPU_F_RESOURCE_UUID;
 pub use self::protocol::VIRTIO_GPU_F_VIRGL;
 pub use self::protocol::VIRTIO_GPU_SHM_ID_HOST_VISIBLE;
 use self::protocol::*;
+pub use self::virtio_gpu::ProcessDisplayResult;
 use self::virtio_gpu::VirtioGpu;
 use super::copy_config;
 pub use super::device_constants::gpu::QUEUE_SIZES;
@@ -76,16 +77,34 @@ use super::SharedMemoryRegion;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
 use super::Writer;
+use crate::Suspendable;
 
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GpuMode {
     #[serde(rename = "2d", alias = "2D")]
     Mode2D,
+    #[cfg(feature = "virgl_renderer")]
     #[serde(rename = "virglrenderer", alias = "3d", alias = "3D")]
     ModeVirglRenderer,
     #[cfg(feature = "gfxstream")]
     #[serde(rename = "gfxstream")]
     ModeGfxstream,
+}
+
+impl Default for GpuMode {
+    fn default() -> Self {
+        #[cfg(all(windows, feature = "gfxstream"))]
+        return GpuMode::ModeGfxstream;
+
+        #[cfg(all(unix, feature = "virgl_renderer"))]
+        return GpuMode::ModeVirglRenderer;
+
+        #[cfg(not(any(
+            all(windows, feature = "gfxstream"),
+            all(unix, feature = "virgl_renderer"),
+        )))]
+        return GpuMode::Mode2D;
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -303,7 +322,7 @@ impl Frontend {
     }
 
     /// Processes the internal `display` events and returns `true` if any display was closed.
-    pub fn process_display(&mut self) -> bool {
+    pub fn process_display(&mut self) -> ProcessDisplayResult {
         self.virtio_gpu.process_display()
     }
 
@@ -894,6 +913,7 @@ impl Worker {
             let mut signal_used_cursor = false;
             let mut signal_used_ctrl = false;
             let mut ctrl_available = false;
+            let mut display_available = false;
             let mut needs_config_interrupt = false;
 
             // Remove event triggers that have been hung-up to prevent unnecessary worker wake-ups
@@ -921,10 +941,9 @@ impl Worker {
                         }
                     }
                     WorkerToken::Display => {
-                        let close_requested = self.state.process_display();
-                        if close_requested {
-                            let _ = self.exit_evt_wrtube.send::<VmEventType>(&VmEventType::Exit);
-                        }
+                        // We only need to process_display once-per-wake, regardless of how many
+                        // WorkerToken::Display events are received.
+                        display_available = true;
                     }
                     #[cfg(unix)]
                     WorkerToken::GpuControl => {
@@ -966,6 +985,19 @@ impl Worker {
             while let Some(desc) = self.state.return_cursor() {
                 self.cursor_queue.add_used(&self.mem, desc.index, desc.len);
                 signal_used_cursor = true;
+            }
+
+            if display_available {
+                match self.state.process_display() {
+                    ProcessDisplayResult::CloseRequested => {
+                        let _ = self.exit_evt_wrtube.send::<VmEventType>(&VmEventType::Exit);
+                    }
+                    ProcessDisplayResult::Error(_e) => {
+                        base::error!("Display processing failed, disabling display event handler.");
+                        event_manager.delete(WorkerToken::Display);
+                    }
+                    ProcessDisplayResult::Success => (),
+                };
             }
 
             if ctrl_available && self.state.process_queue(&self.mem, &self.ctrl_queue) {
@@ -1108,6 +1140,7 @@ impl Gpu {
         let rutabaga_channels_opt = Some(rutabaga_channels);
         let component = match gpu_parameters.mode {
             GpuMode::Mode2D => RutabagaComponentType::Rutabaga2D,
+            #[cfg(feature = "virgl_renderer")]
             GpuMode::ModeVirglRenderer => RutabagaComponentType::VirglRenderer,
             #[cfg(feature = "gfxstream")]
             GpuMode::ModeGfxstream => RutabagaComponentType::Gfxstream,
@@ -1135,7 +1168,7 @@ impl Gpu {
         #[cfg(feature = "gfxstream")]
         let rutabaga_builder = rutabaga_builder
             .set_use_guest_angle(gpu_parameters.gfxstream_use_guest_angle.unwrap_or_default())
-            .set_support_gles31(gpu_parameters.gfxstream_support_gles31);
+            .set_support_gles31(gpu_parameters.gfxstream_support_gles31.unwrap_or_default());
 
         Gpu {
             exit_evt_wrtube,
@@ -1452,14 +1485,12 @@ impl VirtioDevice for Gpu {
                         .run()
                     });
 
-            match worker_result {
+            self.worker_thread = match worker_result {
                 Err(e) => {
                     error!("failed to spawn virtio_gpu worker: {}", e);
                     return;
                 }
-                Ok(join_handle) => {
-                    self.worker_thread = Some(join_handle);
-                }
+                Ok(join_handle) => Some(join_handle),
             }
         }
     }
@@ -1479,6 +1510,8 @@ impl VirtioDevice for Gpu {
         true
     }
 }
+
+impl Suspendable for Gpu {}
 
 /// This struct takes the ownership of resource bridges and tracks which ones should be processed.
 struct ResourceBridges {
