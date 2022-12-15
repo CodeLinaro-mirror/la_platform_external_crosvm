@@ -11,12 +11,12 @@ package {
 }
 
 rust_test {
-    name: "hypervisor_test_src_lib",
+    name: "hypervisor_test_tests_kvm_main",
     defaults: ["crosvm_defaults"],
     host_supported: true,
-    crate_name: "hypervisor",
+    crate_name: "kvm",
     cargo_env_compat: true,
-    srcs: ["src/lib.rs"],
+    srcs: ["tests/kvm/main.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -37,6 +37,7 @@ rust_test {
         "libfnv",
         "libgdbstub",
         "libgdbstub_arch",
+        "libhypervisor",
         "libkvm",
         "libkvm_sys",
         "liblibc",

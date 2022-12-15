@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, NamedTuple, Optional
 
 from . import test_target, testvm
-from .common import all_tracked_files
+from .common import all_tracked_files, very_verbose
 from .test_config import BUILD_FEATURES, CRATE_OPTIONS, TestOption
 from .test_target import TestTarget, Triple
 
@@ -236,17 +236,15 @@ def cargo_build_executables(
     yield from cargo("test", cwd, ["--no-run", *flags], env)
 
 
-def build_common_crate(build_env: Dict[str, str], crate: Crate):
-    print(f"Building tests for: common/{crate.name}")
-    return list(cargo_build_executables([], env=build_env, cwd=crate.path))
-
-
 def build_all_binaries(target: TestTarget, crosvm_direct: bool, instrument_coverage: bool):
     """Discover all crates and build them."""
     build_env = os.environ.copy()
     build_env.update(test_target.get_cargo_env(target))
+
+    build_env.setdefault("RUSTFLAGS", "")
+    build_env["RUSTFLAGS"] += " -D warnings"
     if instrument_coverage:
-        build_env["RUSTFLAGS"] = "-C instrument-coverage"
+        build_env["RUSTFLAGS"] += " -C instrument-coverage"
 
     print("Building crosvm workspace")
     features = target.build_triple.feature_flag
@@ -255,17 +253,14 @@ def build_all_binaries(target: TestTarget, crosvm_direct: bool, instrument_cover
         features += ",direct"
         extra_args.append("--no-default-features")
 
-    # TODO(:b:241251677) Enable default features on windows.
-    if target.build_triple.sys == "windows":
-        extra_args.append("--no-default-features")
-
     cargo_args = [
         "--features=" + features,
         f"--target={target.build_triple}",
-        "--verbose",
         "--workspace",
         *[f"--exclude={crate}" for crate in get_workspace_excludes(target.build_triple)],
     ]
+    if very_verbose():
+        cargo_args.append("--verbose")
     cargo_args.extend(extra_args)
 
     yield from cargo_build_executables(
@@ -273,13 +268,6 @@ def build_all_binaries(target: TestTarget, crosvm_direct: bool, instrument_cover
         cwd=CROSVM_ROOT,
         env=build_env,
     )
-
-    with Pool(PARALLELISM) as pool:
-        for executables in pool.imap(
-            functools.partial(build_common_crate, build_env),
-            list_common_crates(target.build_triple),
-        ):
-            yield from executables
 
 
 def get_test_timeout(target: TestTarget, executable: Executable):
@@ -291,7 +279,13 @@ def get_test_timeout(target: TestTarget, executable: Executable):
         return timeout * EMULATION_TIMEOUT_MULTIPLIER
 
 
-def execute_test(target: TestTarget, attempts: int, collect_coverage: bool, executable: Executable):
+def execute_test(
+    target: TestTarget,
+    attempts: int,
+    collect_coverage: bool,
+    integration_test: bool,
+    executable: Executable,
+):
     """
     Executes a single test on the given test targed
 
@@ -301,7 +295,7 @@ def execute_test(target: TestTarget, attempts: int, collect_coverage: bool, exec
     """
     options = CRATE_OPTIONS.get(executable.crate_name, [])
     args: List[str] = []
-    if TestOption.SINGLE_THREADED in options:
+    if TestOption.SINGLE_THREADED in options or integration_test:
         args += ["--test-threads=1"]
 
     binary_path = executable.binary_path
@@ -400,7 +394,9 @@ def execute_all(
         sys.stdout.flush()
         with Pool(PARALLELISM) as pool:
             for result in pool.imap(
-                functools.partial(execute_test, unit_test_target, attempts, collect_coverage),
+                functools.partial(
+                    execute_test, unit_test_target, attempts, collect_coverage, False
+                ),
                 unit_tests,
             ):
                 print_test_progress(result)
@@ -416,7 +412,9 @@ def execute_all(
         )
         sys.stdout.flush()
         for executable in integration_tests:
-            result = execute_test(integration_test_target, attempts, collect_coverage, executable)
+            result = execute_test(
+                integration_test_target, attempts, collect_coverage, True, executable
+            )
             print_test_progress(result)
             yield result
         print()
@@ -582,13 +580,15 @@ def main():
     else:
         build_target = build_target or Triple.host_default()
         unit_test_target = test_target.TestTarget("host", build_target)
-        if str(build_target) == "x86_64-unknown-linux-gnu":
+        if str(build_target) == "x86_64-unknown-linux-gnu" and os.name == "posix":
             print("Note: x86 tests are temporarily all run on the host until we improve the")
             print("      performance of the built-in VM. See http://b/247139912")
             print("")
             integration_test_target = unit_test_target
         elif str(build_target) == "aarch64-unknown-linux-gnu":
             integration_test_target = test_target.TestTarget("vm:aarch64", build_target)
+        elif str(build_target) == "x86_64-pc-windows-gnu" and os.name == "nt":
+            integration_test_target = unit_test_target
         else:
             # Do not run integration tests in unrecognized scenarios.
             integration_test_target = None

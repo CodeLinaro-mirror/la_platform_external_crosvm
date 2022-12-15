@@ -3,8 +3,6 @@
 // found in the LICENSE file.
 
 use std::mem;
-use std::os::unix::io::AsRawFd;
-use std::os::unix::io::RawFd;
 use std::ptr;
 use std::time::Duration;
 
@@ -76,7 +74,7 @@ impl PlatformEvent {
         // give the syscall's size parameter properly.
         let ret = unsafe {
             write(
-                self.as_raw_fd(),
+                self.as_raw_descriptor(),
                 &v as *const u64 as *const c_void,
                 mem::size_of::<u64>(),
             )
@@ -94,7 +92,7 @@ impl PlatformEvent {
             // This is safe because we made this fd and the pointer we pass can not overflow because
             // we give the syscall's size parameter properly.
             read(
-                self.as_raw_fd(),
+                self.as_raw_descriptor(),
                 &mut buf as *mut u64 as *mut c_void,
                 mem::size_of::<u64>(),
             )
@@ -164,12 +162,6 @@ impl PlatformEvent {
     }
 }
 
-impl AsRawFd for PlatformEvent {
-    fn as_raw_fd(&self) -> RawFd {
-        self.event_handle.as_raw_fd()
-    }
-}
-
 impl AsRawDescriptor for PlatformEvent {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.event_handle.as_raw_descriptor()
@@ -199,22 +191,24 @@ impl From<PlatformEvent> for SafeDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Event;
+    use crate::EventExt;
 
     #[test]
     fn new() {
-        PlatformEvent::new().unwrap();
+        Event::new().unwrap();
     }
 
     #[test]
     fn read_write() {
-        let evt = PlatformEvent::new().unwrap();
+        let evt = Event::new().unwrap();
         evt.write_count(55).unwrap();
         assert_eq!(evt.read_count(), Ok(55));
     }
 
     #[test]
     fn clone() {
-        let evt = PlatformEvent::new().unwrap();
+        let evt = Event::new().unwrap();
         let evt_clone = evt.try_clone().unwrap();
         evt.write_count(923).unwrap();
         assert_eq!(evt_clone.read_count(), Ok(923));
@@ -222,7 +216,7 @@ mod tests {
 
     #[test]
     fn timeout() {
-        let evt = PlatformEvent::new().expect("failed to create eventfd");
+        let evt = Event::new().expect("failed to create eventfd");
         assert_eq!(
             evt.wait_timeout(Duration::from_millis(1))
                 .expect("failed to read from eventfd with timeout"),

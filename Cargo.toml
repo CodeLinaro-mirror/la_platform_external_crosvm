@@ -28,18 +28,16 @@ panic = 'unwind'
 [profile.chromeos]
 inherits = "release"
 opt-level = "s"
+strip = "symbols"
 
 # Enables LTO to further reduce the size of the binary.
 [profile.lto]
 inherits = "chromeos"
 lto = true
 
-# We currently need to exclude some crates from the workspace to allow
-# these crates to be independently built by portage. These crates will
-# eventually be moved into separate repositories.
-# The only workspace members that need to be explicitly specified here are those
-# that are not dependencies of the crosvm root crate.
 [workspace]
+# Explicitly list all crates of crosvm as workspace members since not all of them may be referenced
+# by dependencies.
 members = [
     "aarch64",
     "acpi_tables",
@@ -49,42 +47,53 @@ members = [
     "base",
     "bit_field",
     "broker_ipc",
+    "common/audio_streams",
+    "common/balloon_control",
+    "common/cros_asyncv2",
+    "common/cros-fuzz",
+    "common/data_model",
+    "common/p9",
+    "common/sync",
     "crash_report",
     "cros_async",
     "cros_fdt",
-    "crosvm-fuzz",
+    "cros_tracing",
     "crosvm_cli",
     "crosvm_control",
     "crosvm_plugin",
+    "crosvm-fuzz",
     "devices",
     "disk",
+    "e2e_tests",
     "fuse",
     "gpu_display",
     "hypervisor",
-    "integration_tests",
     "io_uring",
     "kernel_cmdline",
     "kernel_loader",
-    "kvm",
     "kvm_sys",
+    "kvm",
+    "libcras_stub",
     "linux_input_sys",
+    "media/cros-codecs",
     "media/ffmpeg",
     "media/libva",
     "media/libvda",
-    "media/vp8",
+    "metrics",
     "net_sys",
     "net_util",
     "power_monitor",
     "prebuilts",
     "protos",
+    "proto_build_tools",
     "qcow_utils",
     "resources",
     "rutabaga_gfx",
     "serde_keyvalue",
     "system_api",
-    "tpm2",
+    "third_party/vmm_vhost",
     "tpm2-sys",
-    "cros_tracing",
+    "tpm2",
     "usb_sys",
     "usb_util",
     "vfio_sys",
@@ -93,24 +102,17 @@ members = [
     "vm_control",
     "vm_memory",
     "x86_64",
-    "third_party/vmm_vhost",
 ]
+
+# Exclude crates from crosvm builds completely. Avoid using this if possible as crates added here
+# will not be tested in CI and may break at any time.
 exclude = [
-    "common/assertions",
-    "common/audio_streams",
-    "common/balloon_control",
-    "common/cros-fuzz",
-    "common/cros_async",
-    "common/cros_asyncv2",
-    "common/data_model",
-    "common/io_uring",
-    "common/p9",
-    "common/sync",
     "sandbox",
-    "tube_transporter",
-    "win_util",
-    "tools/examples/baremetal",
     "tools/audio_streams_conformance_test",
+    "tools/examples/baremetal",
+    "tube_transporter",
+    "win_audio",
+    "win_util",
 ]
 
 [features]
@@ -153,6 +155,7 @@ stats = ["devices/stats"]
 tpm = ["devices/tpm"]
 
 ## Enables USB host device passthrough via an emulated XHCI controller.
+## USB is supported only on unix/linux. The feature is a no-op on windows.
 usb = ["devices/usb"]
 
 ## Enables the non-upstream virtio wayland protocol. This can be used in conjuction with the gpu
@@ -305,19 +308,20 @@ all-aarch64 = [
 ]
 
 ## All features that are compiled and tested for x86_64
-all-x86_64 = ["all-aarch64", "plugin"]
+all-x86_64 = ["all-aarch64", "plugin", "scudo"]
 
 ## All features that are compiled and tested for armhf
 ## Note: This platform is deprecated and will be phased out.
 all-armhf = [
     "composite-disk",
     "default",
-    "gdb",
+    "gdb", # no effect because gdb is not supported for armhf
+    "libvda-stub",
     "tpm",
     ]
 
 ## All features that are compiled and tested for mingw64
-all-mingw64 = [ "balloon", "crash_report", "gpu", "haxm", "slirp", "stats" ]
+all-mingw64 = [ "audio", "balloon", "crash_report", "gpu", "haxm", "slirp", "stats" ]
 
 ## All features that are compiled and tested for msvc64
 all-msvc64 = [ "all-mingw64" ]
@@ -333,7 +337,6 @@ anyhow = "1.0.32"
 arch = { path = "arch" }
 argh = "0.1"
 argh_helpers = { path = "argh_helpers" }
-assertions = { path = "common/assertions" }
 audio_streams = "*"
 base = "*"
 bit_field = { path = "bit_field" }
@@ -371,6 +374,7 @@ scudo = { version = "0.1", optional = true }
 serde = "*"
 serde_json = "*"
 serde_keyvalue = { path = "serde_keyvalue", features = ["argh_derive"] }
+static_assertions = "1.1"
 sync = { path = "common/sync" }
 tempfile = "3"
 terminal_size = "0.1.17"
@@ -388,7 +392,7 @@ x86_64 = { path = "x86_64" }
 aarch64 = { path = "aarch64" }
 
 [target.'cfg(unix)'.dependencies]
-minijail = "*" # provided by ebuild
+minijail = { path = "../minijail/rust/minijail" } # ignored by ebuild
 p9 = "*"
 
 [target.'cfg(windows)'.dependencies]
@@ -402,17 +406,18 @@ sandbox = { path = "sandbox" }
 cros_tracing = { path = "cros_tracing" }
 tube_transporter = { path = "tube_transporter" }
 winapi = "*"
+win_audio = { path = "win_audio"}
 win_util = { path = "win_util"}
 
 [build-dependencies]
 cc = "*"
+which = "4"
 
 [dev-dependencies]
 base = "*"
 prebuilts = { path = "prebuilts" }
 
 [patch.crates-io]
-assertions = { path = "common/assertions" }
 audio_streams = { path = "common/audio_streams" }
 base = { path = "base" }
 cros_async =  { path = "cros_async" }

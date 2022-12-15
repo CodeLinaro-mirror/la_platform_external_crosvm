@@ -17,7 +17,6 @@ rust_library {
     host_supported: true,
     crate_name: "x86_64",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
     features: [
@@ -28,7 +27,6 @@ rust_library {
         "libacpi_tables",
         "libanyhow",
         "libarch",
-        "libassertions",
         "libbase_rust",
         "libcfg_if",
         "libchrono",
@@ -80,7 +78,6 @@ rust_test {
     host_supported: true,
     crate_name: "x86_64",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
@@ -96,7 +93,6 @@ rust_test {
         "libacpi_tables",
         "libanyhow",
         "libarch",
-        "libassertions",
         "libbase_rust",
         "libcfg_if",
         "libchrono",
@@ -115,6 +111,134 @@ rust_test {
         "libthiserror",
         "libvm_control",
         "libvm_memory",
+    ],
+    proc_macros: ["libremain"],
+    target: {
+        host_linux: {
+            features: [
+                "gdb",
+            ],
+            rustlibs: [
+                "libgdbstub_arch",
+            ],
+        },
+    },
+    // Exclude arm family manually
+    arch: {
+        arm: {
+            enabled: false,
+        },
+        arm64: {
+            enabled: false,
+        },
+    },
+
+}
+
+rust_test {
+    name: "x86_64_test_tests_integration_main",
+    defaults: ["crosvm_defaults"],
+    host_supported: true,
+    crate_name: "integration",
+    cargo_env_compat: true,
+    srcs: ["tests/integration/main.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: false,
+    },
+    edition: "2021",
+    features: [
+        "gdb",
+        "gdbstub_arch",
+    ],
+    rustlibs: [
+        "libacpi_tables",
+        "libanyhow",
+        "libarch",
+        "libbase_rust",
+        "libcfg_if",
+        "libchrono",
+        "libcros_fdt",
+        "libdata_model",
+        "libdevices",
+        "libgdbstub_arch",
+        "libhypervisor",
+        "libkernel_cmdline",
+        "libkernel_loader",
+        "liblibc",
+        "libminijail_rust",
+        "libonce_cell",
+        "libresources",
+        "libsync_rust",
+        "libthiserror",
+        "libvm_control",
+        "libvm_memory",
+        "libx86_64_rust",
+    ],
+    proc_macros: ["libremain"],
+    target: {
+        host_linux: {
+            features: [
+                "gdb",
+            ],
+            rustlibs: [
+                "libgdbstub_arch",
+            ],
+        },
+    },
+    // Exclude arm family manually
+    arch: {
+        arm: {
+            enabled: false,
+        },
+        arm64: {
+            enabled: false,
+        },
+    },
+
+}
+
+rust_test {
+    name: "x86_64_test_tests_unix",
+    defaults: ["crosvm_defaults"],
+    host_supported: true,
+    crate_name: "unix",
+    cargo_env_compat: true,
+    srcs: ["tests/unix.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: false,
+    },
+    edition: "2021",
+    features: [
+        "gdb",
+        "gdbstub_arch",
+    ],
+    rustlibs: [
+        "libacpi_tables",
+        "libanyhow",
+        "libarch",
+        "libbase_rust",
+        "libcfg_if",
+        "libchrono",
+        "libcros_fdt",
+        "libdata_model",
+        "libdevices",
+        "libgdbstub_arch",
+        "libhypervisor",
+        "libkernel_cmdline",
+        "libkernel_loader",
+        "liblibc",
+        "libminijail_rust",
+        "libonce_cell",
+        "libresources",
+        "libsync_rust",
+        "libthiserror",
+        "libvm_control",
+        "libvm_memory",
+        "libx86_64_rust",
     ],
     proc_macros: ["libremain"],
     target: {

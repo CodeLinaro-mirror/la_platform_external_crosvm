@@ -111,31 +111,14 @@ impl CommandStatus {
     }
 }
 
-fn to_command_status(result: Result<sys::ExitState>) -> Result<CommandStatus> {
-    match result {
-        Ok(sys::ExitState::Stop) => {
-            info!("crosvm has exited normally");
-            Ok(CommandStatus::SuccessOrVmStop)
-        }
-        Ok(sys::ExitState::Reset) => {
-            info!("crosvm has exited normally due to reset request");
-            Ok(CommandStatus::VmReset)
-        }
-        Ok(sys::ExitState::Crash) => {
-            info!("crosvm has exited due to a VM crash");
-            Ok(CommandStatus::VmCrash)
-        }
-        Ok(sys::ExitState::GuestPanic) => {
-            info!("crosvm has exited due to a kernel panic in guest");
-            Ok(CommandStatus::GuestPanic)
-        }
-        Ok(sys::ExitState::WatchdogReset) => {
-            info!("crosvm has exited due to watchdog reboot");
-            Ok(CommandStatus::WatchdogReset)
-        }
-        Err(e) => {
-            error!("crosvm has exited with error: {:#}", e);
-            Err(e)
+impl From<sys::ExitState> for CommandStatus {
+    fn from(result: sys::ExitState) -> CommandStatus {
+        match result {
+            sys::ExitState::Stop => CommandStatus::SuccessOrVmStop,
+            sys::ExitState::Reset => CommandStatus::VmReset,
+            sys::ExitState::Crash => CommandStatus::VmCrash,
+            sys::ExitState::GuestPanic => CommandStatus::GuestPanic,
+            sys::ExitState::WatchdogReset => CommandStatus::WatchdogReset,
         }
     }
 }
@@ -174,8 +157,8 @@ where
     metrics::setup_metrics_reporting()?;
 
     init_log(log_config, &cfg)?;
-    let exit_state = crate::sys::run_config(cfg);
-    to_command_status(exit_state)
+    let exit_state = crate::sys::run_config(cfg)?;
+    Ok(CommandStatus::from(exit_state))
 }
 
 fn stop_vms(cmd: cmdline::StopCommand) -> std::result::Result<(), ()> {
@@ -416,6 +399,11 @@ fn create_qcow2(cmd: cmdline::CreateQcow2Command) -> std::result::Result<(), ()>
 }
 
 fn start_device(opts: cmdline::DeviceCommand) -> std::result::Result<(), ()> {
+    if let Some(async_executor) = opts.async_executor {
+        cros_async::Executor::set_default_executor_kind(async_executor)
+            .map_err(|e| error!("Failed to set the default async executor: {:#}", e))?;
+    }
+
     let result = match opts.command {
         cmdline::DeviceSubcommand::CrossPlatform(command) => match command {
             CrossPlatformDevicesCommands::Block(cfg) => run_block_device(cfg),
@@ -591,7 +579,7 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
             return Ok(CommandStatus::SuccessOrVmStop);
         }
         Err(e) => {
-            eprintln!("arg parsing failed: {}", e.output);
+            error!("arg parsing failed: {}", e.output);
             return Ok(CommandStatus::InvalidArgs);
         }
     };
@@ -605,11 +593,6 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
         syslog: !args.no_syslog,
         ..Default::default()
     };
-
-    if let Some(async_executor) = args.async_executor {
-        cros_async::Executor::set_default_executor_kind(async_executor)
-            .context("Failed to set the default async executor")?;
-    }
 
     let ret = match args.command {
         Command::CrossPlatform(command) => {

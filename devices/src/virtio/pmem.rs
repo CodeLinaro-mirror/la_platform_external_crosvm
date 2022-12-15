@@ -38,6 +38,7 @@ use super::Queue;
 use super::Reader;
 use super::VirtioDevice;
 use super::Writer;
+use crate::Suspendable;
 
 const QUEUE_SIZE: u16 = 256;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
@@ -356,15 +357,15 @@ impl VirtioDevice for Pmem {
                     )
                 });
 
-            match worker_result {
+            self.worker_thread = match worker_result {
                 Err(e) => {
                     error!("failed to spawn virtio_pmem worker: {}", e);
                     return;
                 }
-                Ok(join_handle) => {
-                    self.worker_thread = Some(join_handle);
-                }
+                Ok(join_handle) => Some(join_handle),
             }
         }
     }
 }
+
+impl Suspendable for Pmem {}

@@ -16,12 +16,12 @@ linux_input_sys = { path = "../linux_input_sys" }
 remain = "*"
 thiserror = "*"
 cfg-if = "*"
+serde = { version = "1", features = [ "derive" ] }
 
 [target.'cfg(windows)'.dependencies]
 anyhow = "*"
 metrics = { path = "../metrics" }
 num-traits = "*"
-serde = { version = "1", features = [ "derive" ] }
 winapi = "*"
 win_util = { path = "../win_util" }
 sync = { path = "../common/sync" }
@@ -32,3 +32,11 @@ vm_control = { path = "../vm_control" }
 cc = "1.0.25"
 pkg-config = "0.3.11"
 cfg-if = "1.0.0"
+
+[[bin]]
+name = "simple"
+path = "examples/simple.rs"
+
+[[bin]]
+name = "simple_open"
+path = "examples/simple_open.rs"

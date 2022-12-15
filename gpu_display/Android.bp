@@ -22,7 +22,6 @@ rust_library {
     host_supported: true,
     crate_name: "gpu_display",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
@@ -31,6 +30,7 @@ rust_library {
         "libdata_model",
         "liblibc",
         "liblinux_input_sys",
+        "libserde",
         "libthiserror",
     ],
     proc_macros: ["libremain"],
@@ -51,6 +51,48 @@ rust_library {
     apex_available: [
         "//apex_available:platform",
     ],
+}
+
+rust_binary {
+    name: "simple",
+    defaults: ["crosvm_defaults"],
+    host_supported: true,
+    crate_name: "simple",
+    cargo_env_compat: true,
+    srcs: ["examples/simple.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libbase_rust",
+        "libcfg_if",
+        "libdata_model",
+        "libgpu_display",
+        "liblibc",
+        "liblinux_input_sys",
+        "libserde",
+        "libthiserror",
+    ],
+    proc_macros: ["libremain"],
+}
+
+rust_binary {
+    name: "simple_open",
+    defaults: ["crosvm_defaults"],
+    host_supported: true,
+    crate_name: "simple_open",
+    cargo_env_compat: true,
+    srcs: ["examples/simple_open.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libbase_rust",
+        "libcfg_if",
+        "libdata_model",
+        "libgpu_display",
+        "liblibc",
+        "liblinux_input_sys",
+        "libserde",
+        "libthiserror",
+    ],
+    proc_macros: ["libremain"],
 }
 
 cc_library_static {

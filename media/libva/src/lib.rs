@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! This module implements a lightweight and safe decoder interface over
-//! `libva`. It is designed to concentrate all calls to unsafe methods in one
-//! place
+//! Implements a lightweight and safe interface over `libva`.
+//!
+//! The starting point to using this crate is to open a [`Display`], from which a [`Context`] and
+//! [`Surface`]s can be allocated and used for doing actual work.
 
 #![deny(missing_docs)]
 
@@ -87,7 +88,7 @@ mod tests {
     #[ignore]
     fn libva_utils_mpeg2vldemo() {
         // Adapted from <https://github.com/intel/libva-utils/blob/master/decode/mpeg2vldemo.cpp>
-        let display = Rc::new(Display::open().unwrap());
+        let display = Display::open().unwrap();
 
         assert!(!display.query_vendor_string().unwrap().is_empty());
         let profiles = display.query_config_profiles().unwrap();
@@ -116,9 +117,7 @@ mod tests {
         assert!(attrs[0].value != bindings::constants::VA_ATTRIB_NOT_SUPPORTED);
         assert!(attrs[0].value & bindings::constants::VA_RT_FORMAT_YUV420 != 0);
 
-        let config = display
-            .create_config(Some(attrs), profile, entrypoint)
-            .unwrap();
+        let config = display.create_config(attrs, profile, entrypoint).unwrap();
 
         let mut surfaces = display
             .create_surfaces(
@@ -130,17 +129,15 @@ mod tests {
                 1,
             )
             .unwrap();
-        let context = Rc::new(
-            display
-                .create_context(
-                    &config,
-                    width as i32,
-                    (((height + 15) / 16) * 16) as i32,
-                    Some(&surfaces),
-                    true,
-                )
-                .unwrap(),
-        );
+        let context = display
+            .create_context(
+                &config,
+                width as i32,
+                (((height + 15) / 16) * 16) as i32,
+                Some(&surfaces),
+                true,
+            )
+            .unwrap();
 
         // The picture data is adapted from libva-utils at decode/mpeg2vldemo.cpp
         // Data dump of a 16x16 MPEG2 video clip,it has one I frame

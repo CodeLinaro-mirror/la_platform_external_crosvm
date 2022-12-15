@@ -21,8 +21,8 @@ use broker_ipc::CommonChildStartupArgs;
 use crosvm_cli::sys::windows::exit::Exit;
 use crosvm_cli::sys::windows::exit::ExitContext;
 use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
-use metrics::event_details_proto::EmulatorDllDetails;
-use metrics::event_details_proto::RecordDetails;
+use metrics::protos::event_details::EmulatorDllDetails;
+use metrics::protos::event_details::RecordDetails;
 use metrics::MetricEventType;
 #[cfg(all(feature = "slirp"))]
 use net_util::slirp::sys::windows::SlirpStartupConfig;
@@ -148,8 +148,9 @@ pub(crate) fn run_vm_for_broker(args: RunMainCommand) -> Result<()> {
 
     let raw_transport_tube = args.bootstrap as RawDescriptor;
 
-    let exit_state = crate::sys::windows::run_config_for_broker(raw_transport_tube);
-    crate::to_command_status(exit_state).map(|_| ())
+    let exit_state = crate::sys::windows::run_config_for_broker(raw_transport_tube)?;
+    info!("{}", CommandStatus::from(exit_state).message());
+    Ok(())
 }
 
 pub(crate) fn set_bootstrap_arguments(

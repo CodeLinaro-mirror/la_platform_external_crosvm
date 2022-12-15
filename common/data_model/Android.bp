@@ -25,10 +25,10 @@ rust_test {
     },
     edition: "2021",
     rustlibs: [
-        "libassertions",
         "libcfg_if",
         "liblibc",
         "libserde",
+        "libstatic_assertions",
         "libthiserror",
     ],
     proc_macros: ["libremain"],
@@ -44,10 +44,10 @@ rust_library {
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
-        "libassertions",
         "libcfg_if",
         "liblibc",
         "libserde",
+        "libstatic_assertions",
         "libthiserror",
     ],
     proc_macros: ["libremain"],

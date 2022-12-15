@@ -51,6 +51,7 @@ use super::Reader;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
 use super::Writer;
+use crate::Suspendable;
 
 /// The maximum buffer size when segmentation offload is enabled. This
 /// includes the 12-byte virtio net header.
@@ -142,12 +143,11 @@ pub enum NetError {
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum NetParametersMode {
-    TapName {
-        tap_name: String,
-    },
-    TapFd {
-        tap_fd: i32,
-    },
+    #[serde(rename_all = "kebab-case")]
+    TapName { tap_name: String },
+    #[serde(rename_all = "kebab-case")]
+    TapFd { tap_fd: i32 },
+    #[serde(rename_all = "kebab-case")]
     RawConfig {
         #[serde(default)]
         vhost_net: bool,
@@ -822,6 +822,8 @@ where
     }
 }
 
+impl<T> Suspendable for Net<T> where T: 'static + TapT + ReadNotifier {}
+
 #[cfg(test)]
 mod tests {
     use serde_keyvalue::*;
@@ -837,7 +839,7 @@ mod tests {
         let params = from_net_arg("");
         assert!(params.is_err());
 
-        let params = from_net_arg("tap_name=tap").unwrap();
+        let params = from_net_arg("tap-name=tap").unwrap();
         assert_eq!(
             params,
             NetParameters {
@@ -847,7 +849,7 @@ mod tests {
             }
         );
 
-        let params = from_net_arg("tap_fd=12").unwrap();
+        let params = from_net_arg("tap-fd=12").unwrap();
         assert_eq!(
             params,
             NetParameters {
@@ -856,7 +858,7 @@ mod tests {
         );
 
         let params = from_net_arg(
-            "host_ip=\"192.168.10.1\",netmask=\"255.255.255.0\",mac=\"3d:70:eb:61:1a:91\"",
+            "host-ip=\"192.168.10.1\",netmask=\"255.255.255.0\",mac=\"3d:70:eb:61:1a:91\"",
         )
         .unwrap();
         assert_eq!(
@@ -872,8 +874,8 @@ mod tests {
         );
 
         let params = from_net_arg(
-            "vhost_net=true,\
-                host_ip=\"192.168.10.1\",\
+            "vhost-net=true,\
+                host-ip=\"192.168.10.1\",\
                 netmask=\"255.255.255.0\",\
                 mac=\"3d:70:eb:61:1a:91\"",
         )
@@ -892,18 +894,18 @@ mod tests {
 
         // mixed configs
         assert!(from_net_arg(
-            "tap_name=tap,\
-            vhost_net=true,\
-            host_ip=\"192.168.10.1\",\
+            "tap-name=tap,\
+            vhost-net=true,\
+            host-ip=\"192.168.10.1\",\
             netmask=\"255.255.255.0\",\
             mac=\"3d:70:eb:61:1a:91\"",
         )
         .is_err());
 
         // missing netmask
-        assert!(from_net_arg("host_ip=\"192.168.10.1\",mac=\"3d:70:eb:61:1a:91\"").is_err());
+        assert!(from_net_arg("host-ip=\"192.168.10.1\",mac=\"3d:70:eb:61:1a:91\"").is_err());
 
         // invalid parameter
-        assert!(from_net_arg("tap_name=tap,foomatic=true").is_err());
+        assert!(from_net_arg("tap-name=tap,foomatic=true").is_err());
     }
 }
