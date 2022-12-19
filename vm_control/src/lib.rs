@@ -42,8 +42,6 @@ use balloon_control::BalloonTubeCommand;
 #[cfg(feature = "balloon")]
 use balloon_control::BalloonTubeResult;
 use base::error;
-use base::info;
-use base::warn;
 use base::with_as_descriptor;
 use base::AsRawDescriptor;
 use base::Error as SysError;
@@ -77,7 +75,6 @@ use rutabaga_gfx::RutabagaHandle;
 use rutabaga_gfx::VulkanInfo;
 use serde::Deserialize;
 use serde::Serialize;
-use sync::Condvar;
 use sync::Mutex;
 use sys::kill_handle;
 #[cfg(unix)]
@@ -235,7 +232,7 @@ impl UsbControlAttachedDevice {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum UsbControlResult {
     Ok { port: u8 },
     NoAvailablePort,
@@ -682,7 +679,7 @@ pub enum VmIrqResponse {
     Err(SysError),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum BatControlResult {
     Ok,
     NoBatDevice,
@@ -909,6 +906,23 @@ pub enum PvClockCommandResponse {
     Err(SysError),
 }
 
+/// Commands for vmm-swap feature
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SwapCommand {
+    Enable,
+    Status,
+    StartPageFaultLogging,
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "swap")] {
+        use swap::Status as SwapStatus;
+    } else {
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        pub enum SwapStatus {}
+    }
+}
+
 ///
 /// A request to the main process to perform some operation on the VM.
 ///
@@ -923,6 +937,8 @@ pub enum VmRequest {
     Sleepbtn,
     /// Suspend the VM's VCPUs until resume.
     Suspend,
+    /// Swap the memory content into files on a disk
+    Swap(SwapCommand),
     /// Resume the VM's VCPUs that were previously suspended.
     Resume,
     /// Inject a general-purpose event.
@@ -989,35 +1005,6 @@ fn map_descriptor(
     }
 }
 
-fn generate_sleep_button_event(
-    pm: &mut Option<Arc<Mutex<dyn PmResource>>>,
-    guest_suspended_cvar: &Arc<(Mutex<bool>, Condvar)>,
-) {
-    // During suspend also emulate sleepbtn, which allows to suspend VM (if running e.g. acpid and
-    // reacts on sleep button events)
-    if let Some(pm) = pm {
-        pm.lock().slpbtn_evt();
-    } else {
-        error!("generating sleepbtn during suspend not supported");
-    }
-
-    let (lock, cvar) = &**guest_suspended_cvar;
-    let mut guest_suspended = lock.lock();
-
-    *guest_suspended = false;
-
-    // Wait for notification about guest suspension, if not received after 15sec,
-    // proceed anyway.
-    let result = cvar.wait_timeout(guest_suspended, std::time::Duration::from_secs(15));
-    guest_suspended = result.0;
-
-    if result.1.timed_out() {
-        warn!("Guest suspension timeout - proceeding anyway");
-    } else if *guest_suspended {
-        info!("Guest suspended");
-    }
-}
-
 impl VmRequest {
     /// Executes this request on the given Vm and other mutable state.
     ///
@@ -1030,13 +1017,13 @@ impl VmRequest {
         #[cfg(feature = "balloon")] balloon_host_tube: Option<&Tube>,
         #[cfg(feature = "balloon")] balloon_stats_id: &mut u64,
         disk_host_tubes: &[Tube],
-        pm: &mut Option<Arc<Mutex<dyn PmResource>>>,
+        pm: &mut Option<Arc<Mutex<dyn PmResource + Send>>>,
         #[cfg(feature = "gpu")] gpu_control_tube: &Tube,
         usb_control_tube: Option<&Tube>,
         bat_control: &mut Option<BatControl>,
         vcpu_handles: &[(JoinHandle<()>, mpsc::Sender<VcpuControl>)],
         force_s2idle: bool,
-        guest_suspended_cvar: Arc<(Mutex<bool>, Condvar)>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1062,12 +1049,47 @@ impl VmRequest {
                 }
             }
             VmRequest::Suspend => {
-                if force_s2idle {
-                    generate_sleep_button_event(pm, &guest_suspended_cvar);
-                }
-
                 *run_mode = Some(VmRunMode::Suspending);
                 VmResponse::Ok
+            }
+            VmRequest::Swap(SwapCommand::Enable) => {
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    return match swap_controller.enable() {
+                        Ok(()) => VmResponse::Ok,
+                        Err(e) => {
+                            error!("swap enable failed: {}", e);
+                            VmResponse::Err(SysError::new(EINVAL))
+                        }
+                    };
+                }
+                VmResponse::Err(SysError::new(ENOTSUP))
+            }
+            VmRequest::Swap(SwapCommand::Status) => {
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    return match swap_controller.status() {
+                        Ok(status) => VmResponse::SwapStatus(status),
+                        Err(e) => {
+                            error!("swap status failed: {}", e);
+                            VmResponse::Err(SysError::new(EINVAL))
+                        }
+                    };
+                }
+                VmResponse::Err(SysError::new(ENOTSUP))
+            }
+            VmRequest::Swap(SwapCommand::StartPageFaultLogging) => {
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    return match swap_controller.start_page_fault_logging() {
+                        Ok(()) => VmResponse::Ok,
+                        Err(e) => {
+                            error!("swap log_page_fault failed: {}", e);
+                            VmResponse::Err(SysError::new(EINVAL))
+                        }
+                    };
+                }
+                VmResponse::Err(SysError::new(ENOTSUP))
             }
             VmRequest::Resume => {
                 *run_mode = Some(VmRunMode::Running);
@@ -1246,7 +1268,7 @@ impl VmRequest {
 /// Indication of success or failure of a `VmRequest`.
 ///
 /// Success is usually indicated `VmResponse::Ok` unless there is data associated with the response.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum VmResponse {
     /// Indicates the request was executed successfully.
     Ok,
@@ -1267,6 +1289,8 @@ pub enum VmResponse {
     GpuResponse(GpuControlResult),
     /// Results of battery control commands.
     BatResponse(BatControlResult),
+    /// Results of swap status command.
+    SwapStatus(SwapStatus),
 }
 
 impl Display for VmResponse {
@@ -1297,6 +1321,14 @@ impl Display for VmResponse {
             #[cfg(feature = "gpu")]
             GpuResponse(result) => write!(f, "gpu control request result {:?}", result),
             BatResponse(result) => write!(f, "{}", result),
+            SwapStatus(status) => {
+                write!(
+                    f,
+                    "{}",
+                    serde_json::to_string(&status)
+                        .unwrap_or_else(|_| "invalid_response".to_string()),
+                )
+            }
         }
     }
 }
