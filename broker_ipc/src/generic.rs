@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,7 +18,11 @@ use crate::CommonChildStartupArgs;
 pub struct ProductAttributes {}
 
 impl CommonChildStartupArgs {
-    pub fn new(syslog_path: Option<PathBuf>, metrics_tube: Option<Tube>) -> anyhow::Result<Self> {
+    pub fn new(
+        syslog_path: Option<PathBuf>,
+        #[cfg(feature = "crash-report")] _crash_attrs: crash_report::CrashReportAttributes,
+        metrics_tube: Option<Tube>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             product_attrs: ProductAttributes {},
             metrics_tube,

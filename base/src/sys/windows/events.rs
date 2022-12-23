@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -37,15 +37,15 @@ impl<T: EventToken> Clone for EventTrigger<T> {
 mod tests {
     use std::time::Duration;
 
-    use super::super::Event;
+    use super::super::PlatformEvent;
     use super::*;
 
     #[test]
     fn event_context() {
-        let evt1 = Event::new().unwrap();
-        let evt2 = Event::new().unwrap();
-        evt1.write(1).unwrap();
-        evt2.write(1).unwrap();
+        let evt1 = PlatformEvent::new().unwrap();
+        let evt2 = PlatformEvent::new().unwrap();
+        evt1.signal().unwrap();
+        evt2.signal().unwrap();
         let ctx: EventContext<u32> =
             EventContext::build_with(&[EventTrigger::from(&evt1, 1), EventTrigger::from(&evt2, 2)])
                 .unwrap();
@@ -56,11 +56,11 @@ mod tests {
                 evt_count += 1;
                 match event.token {
                     1 => {
-                        evt1.read().unwrap();
+                        evt1.wait().unwrap();
                         ctx.delete(&evt1).unwrap();
                     }
                     2 => {
-                        evt2.read().unwrap();
+                        evt2.wait().unwrap();
                         ctx.delete(&evt2).unwrap();
                     }
                     _ => panic!("unexpected token"),
@@ -78,15 +78,15 @@ mod tests {
     //     let ctx: EventContext<usize> = EventContext::new().unwrap();
     //     let mut evts = Vec::with_capacity(EVT_COUNT);
     //     for i in 0..EVT_COUNT {
-    //         let evt = Event::new().unwrap();
-    //         evt.write(1).unwrap();
+    //         let evt = PlatformEvent::new().unwrap();
+    //         evt.signal().unwrap();
     //         ctx.add(&evt, i).unwrap();
     //         evts.push(evt);
     //     }
     //     let mut evt_count = 0;
     //     while evt_count < EVT_COUNT {
     //         for event in ctx.wait().unwrap().iter_readable() {
-    //             evts[event.token()].read().unwrap();
+    //             evts[event.token()].wait().unwrap();
     //             evt_count += 1;
     //         }
     //     }
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn poll_context_timeout() {
         let ctx: EventContext<u32> = EventContext::new().unwrap();
-        let evt = Event::new().unwrap();
+        let evt = PlatformEvent::new().unwrap();
         ctx.add(EventTrigger::from(&evt, 1))
             .expect("Failed to add event.");
         let dur = Duration::from_millis(100);
@@ -105,12 +105,12 @@ mod tests {
 
     #[test]
     fn wait_returns_mulitple_signal_events() {
-        let evt1 = Event::new().unwrap();
-        let evt2 = Event::new().unwrap();
-        let evt3 = Event::new().unwrap();
-        evt1.write(1).expect("Failed to write to event.");
-        evt2.write(1).expect("Failed to write to event.");
-        evt3.write(1).expect("Failed to write to event.");
+        let evt1 = PlatformEvent::new().unwrap();
+        let evt2 = PlatformEvent::new().unwrap();
+        let evt3 = PlatformEvent::new().unwrap();
+        evt1.signal().expect("Failed to write to event.");
+        evt2.signal().expect("Failed to write to event.");
+        evt3.signal().expect("Failed to write to event.");
         let ctx: EventContext<u32> = EventContext::build_with(&[
             EventTrigger::from(&evt1, 1),
             EventTrigger::from(&evt2, 2),
@@ -126,17 +126,17 @@ mod tests {
 
     #[test]
     fn wait_returns_mulitple_signal_and_unsignaled_events() {
-        let evt1 = Event::new().unwrap();
-        let evt2 = Event::new().unwrap();
-        let evt3 = Event::new().unwrap();
-        let evt4 = Event::new().unwrap();
-        let evt5 = Event::new().unwrap();
-        let evt6 = Event::new().unwrap();
-        let evt7 = Event::new().unwrap();
-        evt1.write(1).unwrap();
-        evt2.write(1).unwrap();
-        evt4.write(1).unwrap();
-        evt7.write(1).unwrap();
+        let evt1 = PlatformEvent::new().unwrap();
+        let evt2 = PlatformEvent::new().unwrap();
+        let evt3 = PlatformEvent::new().unwrap();
+        let evt4 = PlatformEvent::new().unwrap();
+        let evt5 = PlatformEvent::new().unwrap();
+        let evt6 = PlatformEvent::new().unwrap();
+        let evt7 = PlatformEvent::new().unwrap();
+        evt1.signal().unwrap();
+        evt2.signal().unwrap();
+        evt4.signal().unwrap();
+        evt7.signal().unwrap();
         let ctx: EventContext<u32> = EventContext::build_with(&[
             EventTrigger::from(&evt1, 1),
             EventTrigger::from(&evt2, 2),

@@ -8,8 +8,11 @@ version = "0.1.0"
 dependencies = [
  "arch",
  "base",
+ "cros_fdt",
  "data_model",
  "devices",
+ "gdbstub",
+ "gdbstub_arch",
  "hypervisor",
  "kernel_cmdline",
  "kernel_loader",
@@ -66,6 +69,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb07d2053ccdbe10e2af2995a2f116c1330396493dc1269f6a91d0ae82e19704"
 
 [[package]]
+name = "arbitrary"
+version = "1.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f44124848854b941eafdb34f05b3bcf59472f643c7e151eba7c2b69daa469ed5"
+
+[[package]]
 name = "arch"
 version = "0.1.0"
 dependencies = [
@@ -73,7 +82,9 @@ dependencies = [
  "anyhow",
  "base",
  "cfg-if",
+ "cros_fdt",
  "devices",
+ "gdbstub",
  "gdbstub_arch",
  "hypervisor",
  "kernel_cmdline",
@@ -197,6 +208,7 @@ dependencies = [
  "libc",
  "log",
  "once_cell",
+ "protobuf",
  "rand",
  "regex",
  "remain",
@@ -248,6 +260,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base",
+ "crash_report",
  "metrics",
  "serde",
 ]
@@ -288,6 +301,9 @@ name = "cc"
 version = "1.0.73"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fff2a6927b3bb87f9595d67196a70493f627687a71d87a0d692242c33f58c11"
+dependencies = [
+ "jobserver",
+]
 
 [[package]]
 name = "cfg-if"
@@ -331,6 +347,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb58b6451e8c2a812ad979ed1d83378caa5e927eef2622017a45f251457c2c9d"
 
 [[package]]
+name = "crash_report"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base",
+ "serde",
+ "win_util",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -361,6 +387,7 @@ dependencies = [
  "pin-utils",
  "remain",
  "serde",
+ "serde_keyvalue",
  "slab",
  "smallvec",
  "sync",
@@ -371,11 +398,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cros_fdt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "remain",
+ "thiserror",
+]
+
+[[package]]
 name = "cros_fuzz"
 version = "0.1.0"
 dependencies = [
+ "libfuzzer-sys",
  "rand_core",
 ]
+
+[[package]]
+name = "cros_tracing"
+version = "0.1.0"
 
 [[package]]
 name = "crossbeam-utils"
@@ -403,13 +444,18 @@ dependencies = [
  "base",
  "bit_field",
  "broker_ipc",
+ "cc",
  "cfg-if",
+ "crash_report",
  "cros_async",
+ "cros_tracing",
+ "crosvm_cli",
  "crosvm_plugin",
  "ctrlc",
  "data_model",
  "devices",
  "disk",
+ "document-features",
  "enumn",
  "futures",
  "gdbstub",
@@ -428,12 +474,14 @@ dependencies = [
  "net_util",
  "once_cell",
  "p9",
+ "prebuilts",
  "protobuf",
  "protos",
  "rand",
  "remain",
  "resources",
  "rutabaga_gfx",
+ "sandbox",
  "scudo",
  "serde",
  "serde_json",
@@ -442,7 +490,6 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "thiserror",
- "tracing",
  "tube_transporter",
  "uuid",
  "vhost",
@@ -470,6 +517,16 @@ dependencies = [
  "tempfile",
  "usb_util",
  "vm_memory",
+]
+
+[[package]]
+name = "crosvm_cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cfg-if",
+ "win_util",
+ "winapi",
 ]
 
 [[package]]
@@ -557,6 +614,8 @@ dependencies = [
  "chrono",
  "crc32fast",
  "cros_async",
+ "cros_tracing",
+ "crosvm_cli",
  "data_model",
  "dbus",
  "disk",
@@ -598,7 +657,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tpm2",
- "tracing",
  "tube_transporter",
  "usb_util",
  "uuid",
@@ -629,10 +687,20 @@ dependencies = [
  "protos",
  "remain",
  "serde",
+ "sync",
  "tempfile",
  "thiserror",
  "uuid",
  "vm_memory",
+]
+
+[[package]]
+name = "document-features"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3267e1ade4f1f6ddd35fed44a04b6514e244ffeda90c6a14a9ee30f9c9fd7a1"
+dependencies = [
+ "litrs",
 ]
 
 [[package]]
@@ -672,6 +740,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "euclid"
+version = "0.22.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b52c2ef4a78da0ba68fbe1fd920627411096d2ac478f7f4c9f3a54ba6705bade"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "fastrand"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -685,7 +762,6 @@ name = "ffmpeg"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base",
  "libc",
  "pkg-config",
  "thiserror",
@@ -803,9 +879,9 @@ dependencies = [
 
 [[package]]
 name = "gdbstub"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c1f9371c87c11642ee94dcf92cb48b1484ba250b8e8bff3df71c28651f3f4e7"
+checksum = "32c95766e0414f8bfc1d07055574c621b67739466d6ba516c4fef8e99d30d2e6"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -817,9 +893,9 @@ dependencies = [
 
 [[package]]
 name = "gdbstub_arch"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c24f469ba9556c5a063d6df35a8a338025fccf96ecae44f330a156b686f7a268"
+checksum = "eecb536c55c43593a00dde9074dbbdb0e81ce5f20dbca921400f8779c21dea9c"
 dependencies = [
  "gdbstub",
  "num-traits",
@@ -840,15 +916,24 @@ dependencies = [
 name = "gpu_display"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base",
  "cc",
  "cfg-if",
  "data_model",
+ "euclid",
  "libc",
  "linux_input_sys",
+ "metrics",
+ "num-traits",
  "pkg-config",
  "remain",
+ "serde",
+ "sync",
  "thiserror",
+ "vm_control",
+ "win_util",
+ "winapi",
 ]
 
 [[package]]
@@ -892,6 +977,8 @@ dependencies = [
  "downcast-rs",
  "enumn",
  "fnv",
+ "gdbstub",
+ "gdbstub_arch",
  "kvm",
  "kvm_sys",
  "libc",
@@ -934,6 +1021,7 @@ dependencies = [
  "base",
  "cfg-if",
  "libc",
+ "prebuilts",
  "tempfile",
 ]
 
@@ -964,6 +1052,15 @@ name = "itoa"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112c678d4050afce233f4f2852bb2eb519230b3cf12f33585275537d7e41578d"
+
+[[package]]
+name = "jobserver"
+version = "0.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af25a77299a7f711a01975c35a6a424eb6862092cc2d6c72c4ed6cbc56dfc1fa"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "kernel_cmdline"
@@ -1024,6 +1121,10 @@ checksum = "349d5a591cd28b49e1d1037471617a32ddcda5731b99419008085f72d5a53836"
 [[package]]
 name = "libcras"
 version = "0.1.0"
+dependencies = [
+ "audio_streams",
+ "serde",
+]
 
 [[package]]
 name = "libdbus-sys"
@@ -1032,6 +1133,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c185b5b7ad900923ef3a8ff594083d4d9b5aea80bb4f32b8342363138c0d456b"
 dependencies = [
  "pkg-config",
+]
+
+[[package]]
+name = "libfuzzer-sys"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae185684fe19814afd066da15a7cc41e126886c21282934225d9fc847582da58"
+dependencies = [
+ "arbitrary",
+ "cc",
+ "once_cell",
 ]
 
 [[package]]
@@ -1094,6 +1206,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "litrs"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9275e0933cf8bb20f008924c0cb07a0692fe54d8064996520bf998de9eb79aa"
+
+[[package]]
 name = "log"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1146,6 +1264,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sync",
+ "win_util",
  "winapi",
  "wmi",
 ]
@@ -1168,6 +1287,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
 name = "net_sys"
 version = "0.1.0"
 dependencies = [
@@ -1179,6 +1304,7 @@ dependencies = [
 name = "net_util"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base",
  "cfg-if",
  "cros_async",
@@ -1188,8 +1314,10 @@ dependencies = [
  "metrics",
  "net_sys",
  "pcap-file",
+ "prebuilts",
  "remain",
  "serde",
+ "serde_json",
  "smallvec",
  "thiserror",
  "virtio_sys",
@@ -1205,6 +1333,16 @@ dependencies = [
  "bitflags",
  "cfg-if",
  "libc",
+]
+
+[[package]]
+name = "nom"
+version = "7.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8903e5a29a317527874d0402f867152a3d21c908bb0b933e416c65e301d4c36"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
 ]
 
 [[package]]
@@ -1303,6 +1441,14 @@ name = "ppv-lite86"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb9f9e6e233e5c4a35559a617bf40a4ec447db2e84c20b55a6f83167b7e57872"
+
+[[package]]
+name = "prebuilts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cfg-if",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -1497,6 +1643,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3f6f92acf49d1b98f7a81226834412ada05458b7364277387724a237f062695"
 
 [[package]]
+name = "sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base",
+ "prebuilts",
+ "win_util",
+ "winapi",
+]
+
+[[package]]
 name = "scudo"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1552,6 +1709,7 @@ name = "serde_keyvalue"
 version = "0.1.0"
 dependencies = [
  "argh",
+ "nom",
  "num-traits",
  "remain",
  "serde",
@@ -1628,6 +1786,10 @@ dependencies = [
 [[package]]
 name = "system_api"
 version = "0.1.0"
+dependencies = [
+ "dbus",
+ "protobuf",
+]
 
 [[package]]
 name = "tempfile"
@@ -1725,10 +1887,6 @@ dependencies = [
  "anyhow",
  "pkg-config",
 ]
-
-[[package]]
-name = "tracing"
-version = "0.1.0"
 
 [[package]]
 name = "tube_transporter"
@@ -1843,6 +2001,7 @@ dependencies = [
  "base",
  "cfg-if",
  "data_model",
+ "gdbstub",
  "gdbstub_arch",
  "hypervisor",
  "libc",
@@ -1851,9 +2010,11 @@ dependencies = [
  "rutabaga_gfx",
  "serde",
  "serde_json",
+ "serde_keyvalue",
  "sync",
  "thiserror",
  "vm_memory",
+ "winapi",
 ]
 
 [[package]]
@@ -1886,6 +2047,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tube_transporter",
 ]
 
 [[package]]
@@ -1931,8 +2093,10 @@ name = "win_util"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "enumn",
  "libc",
  "once_cell",
+ "serde",
  "winapi",
  "windows",
 ]
@@ -2029,6 +2193,7 @@ dependencies = [
  "base",
  "cfg-if",
  "chrono",
+ "cros_fdt",
  "data_model",
  "devices",
  "gdbstub_arch",

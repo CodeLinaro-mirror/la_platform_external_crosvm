@@ -1,8 +1,8 @@
 {
-  "add-module-block": "cargo2android_gdb.bp",
+  "add-module-block": "cargo2android.bp.patch",
   "add_workspace": true,
   "device": true,
-  "features": "balloon",
+  "features": "balloon,gdb",
   "global_defaults": "crosvm_defaults",
   "run": true,
   "tests": true

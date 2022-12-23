@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,6 @@ use std::sync::Arc;
 use acpi_tables::aml::Aml;
 use base::syslog;
 use base::AsRawDescriptors;
-#[cfg(any(all(target_arch = "x86_64", feature = "gdb"), unix))]
 use base::Tube;
 use devices::Bus;
 use devices::BusDevice;
@@ -139,7 +138,8 @@ pub fn generate_platform_bus(
     irq_chip: &mut dyn IrqChip,
     mmio_bus: &Bus,
     resources: &mut SystemAllocator,
-) -> Result<BTreeMap<u32, String>, DeviceRegistrationError> {
+) -> Result<(Vec<Arc<Mutex<dyn BusDevice>>>, BTreeMap<u32, String>), DeviceRegistrationError> {
+    let mut platform_devices = Vec::new();
     let mut pid_labels = BTreeMap::new();
 
     // Allocate ranges that may need to be in the Platform MMIO region (MmioType::Platform).
@@ -199,11 +199,12 @@ pub fn generate_platform_bus(
             device.on_sandboxed();
             Arc::new(Mutex::new(device))
         };
+        platform_devices.push(arced_dev.clone());
         for range in &ranges {
             mmio_bus
                 .insert(arced_dev.clone(), range.0, range.1)
                 .map_err(DeviceRegistrationError::MmioInsert)?;
         }
     }
-    Ok(pid_labels)
+    Ok((platform_devices, pid_labels))
 }

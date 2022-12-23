@@ -1,9 +1,8 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -21,7 +20,6 @@ use futures::future::AbortHandle;
 use futures::future::Abortable;
 use hypervisor::ProtectionType;
 use once_cell::sync::OnceCell;
-use sync::Mutex;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
@@ -35,9 +33,9 @@ use crate::virtio::snd::common_backend::async_funcs::send_pcm_response_worker;
 use crate::virtio::snd::common_backend::create_stream_source_generators;
 use crate::virtio::snd::common_backend::hardcoded_snd_data;
 use crate::virtio::snd::common_backend::hardcoded_virtio_snd_config;
+use crate::virtio::snd::common_backend::stream_info::StreamInfo;
 use crate::virtio::snd::common_backend::PcmResponse;
 use crate::virtio::snd::common_backend::SndData;
-use crate::virtio::snd::common_backend::StreamInfo;
 use crate::virtio::snd::common_backend::MAX_QUEUE_NUM;
 use crate::virtio::snd::common_backend::MAX_VRING_LEN;
 use crate::virtio::snd::parameters::Parameters;
@@ -171,7 +169,7 @@ impl VhostUserBackend for SndBackend {
         idx: usize,
         mut queue: virtio::Queue,
         mem: GuestMemory,
-        doorbell: Arc<Mutex<Doorbell>>,
+        doorbell: Doorbell,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
         if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
@@ -185,7 +183,7 @@ impl VhostUserBackend for SndBackend {
         // Enable any virtqueue features that were negotiated (like VIRTIO_RING_F_EVENT_IDX).
         queue.ack_features(self.acked_features);
 
-        let kick_evt =
+        let mut kick_evt =
             EventAsync::new(kick_evt, ex).context("failed to create EventAsync for kick_evt")?;
         let (handle, registration) = AbortHandle::new_pair();
         match idx {
@@ -198,8 +196,16 @@ impl VhostUserBackend for SndBackend {
                 ex.spawn_local(Abortable::new(
                     async move {
                         handle_ctrl_queue(
-                            ex, &mem, &streams, &*snd_data, queue, kick_evt, &doorbell, tx_send,
+                            ex,
+                            &mem,
+                            &streams,
+                            &*snd_data,
+                            &mut queue,
+                            &mut kick_evt,
+                            doorbell,
+                            tx_send,
                             rx_send,
+                            None,
                         )
                         .await
                     },
@@ -221,7 +227,9 @@ impl VhostUserBackend for SndBackend {
                 let mem2 = Rc::clone(&mem);
                 let streams = Rc::clone(&self.streams);
                 ex.spawn_local(Abortable::new(
-                    async move { handle_pcm_queue(&*mem, &streams, send, &queue, kick_evt).await },
+                    async move {
+                        handle_pcm_queue(&*mem, &streams, send, &queue, &kick_evt, None).await
+                    },
                     registration,
                 ))
                 .detach();
@@ -230,7 +238,7 @@ impl VhostUserBackend for SndBackend {
 
                 ex.spawn_local(Abortable::new(
                     async move {
-                        send_pcm_response_worker(&*mem2, &queue2, &doorbell, &mut recv).await
+                        send_pcm_response_worker(&*mem2, &queue2, doorbell, &mut recv, None).await
                     },
                     registration2,
                 ))
@@ -281,7 +289,7 @@ pub struct Options {
     /// comma separated key=value pairs for setting up cras snd devices.
     /// Possible key values:
     /// capture - Enable audio capture. Default to false.
-    /// backend(null,[cras]) - Which backend to use for vhost-snd.
+    /// backend - Which backend to use for vhost-snd (null|cras).
     /// client_type - Set specific client type for cras backend.
     /// socket_type - Set socket type for cras backend.
     /// num_output_devices - Set number of output PCM devices.

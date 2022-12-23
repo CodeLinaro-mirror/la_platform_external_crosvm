@@ -1,4 +1,4 @@
-# Copyright 2022 The Chromium OS Authors. All rights reserved.
+# Copyright 2022 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -26,7 +26,6 @@ def RunSteps(api):
                 "vpython3",
                 "./tools/run_tests",
                 "--verbose",
-                "--target=host",
                 "--build-only",
             ],
         )
@@ -36,7 +35,6 @@ def RunSteps(api):
                 "vpython3",
                 "./tools/run_tests",
                 "--verbose",
-                "--target=host",
             ],
         )
 

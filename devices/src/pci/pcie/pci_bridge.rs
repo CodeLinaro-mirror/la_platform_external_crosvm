@@ -1,6 +1,7 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 use std::cmp::max;
 use std::cmp::min;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use crate::pci::PciHeaderType;
 use crate::pci::PCI_VENDOR_ID_INTEL;
 use crate::IrqLevelEvent;
 use crate::PciInterruptPin;
+use crate::Suspendable;
 
 pub const BR_BUS_NUMBER_REG: usize = 0x6;
 pub const BR_BUS_SUBORDINATE_OFFSET: usize = 0x2;
@@ -503,3 +505,5 @@ impl PciDevice for PciBridge {
         self.msi_config.lock().destroy()
     }
 }
+
+impl Suspendable for PciBridge {}

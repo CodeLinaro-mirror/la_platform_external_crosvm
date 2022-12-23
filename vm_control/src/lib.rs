@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,8 +10,10 @@
 //! The wire message format is a little-endian C-struct of fixed size, along with a file descriptor
 //! if the request type expects one.
 
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 pub mod gdb;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 
 #[cfg(unix)]
 use base::MemoryMappingBuilderUnix;
@@ -69,6 +71,7 @@ use libc::ERANGE;
 use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
+use rutabaga_gfx::DeviceId;
 use rutabaga_gfx::RutabagaGralloc;
 use rutabaga_gfx::RutabagaHandle;
 use rutabaga_gfx::VulkanInfo;
@@ -93,13 +96,21 @@ use crate::display::MouseMode;
 use crate::display::WindowEvent;
 use crate::display::WindowMode;
 use crate::display::WindowVisibility;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-pub use crate::gdb::*;
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+pub use crate::gdb::VcpuDebug;
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+pub use crate::gdb::VcpuDebugStatus;
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+pub use crate::gdb::VcpuDebugStatusMessage;
+#[cfg(feature = "gpu")]
+use crate::gpu::GpuControlCommand;
+#[cfg(feature = "gpu")]
+use crate::gpu::GpuControlResult;
 
 /// Control the state of a particular VM CPU.
 #[derive(Clone, Debug)]
 pub enum VcpuControl {
-    #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     Debug(VcpuDebug),
     RunState(VmRunMode),
     MakeRT,
@@ -271,25 +282,23 @@ pub enum VmMemorySource {
         offset: u64,
         /// Size of the mapping in bytes.
         size: u64,
-        gpu_blob: bool,
     },
     /// Register memory mapped by Vulkano.
     Vulkan {
         descriptor: SafeDescriptor,
         handle_type: u32,
         memory_idx: u32,
-        physical_device_idx: u32,
+        device_id: DeviceId,
         size: u64,
     },
     /// Register the current rutabaga external mapping.
-    ExternalMapping { size: u64 },
+    ExternalMapping { ptr: u64, size: u64 },
 }
 
 impl VmMemorySource {
     /// Map the resource and return its mapping and size in bytes.
     pub fn map(
         self,
-        map_request: Arc<Mutex<Option<ExternalMapping>>>,
         gralloc: &mut RutabagaGralloc,
         prot: Protection,
     ) -> Result<(Box<dyn MappedRegion>, u64, Option<SafeDescriptor>)> {
@@ -298,11 +307,10 @@ impl VmMemorySource {
                 descriptor,
                 offset,
                 size,
-                gpu_blob,
             } => (
                 map_descriptor(&descriptor, offset, size, prot)?,
                 size,
-                if gpu_blob { Some(descriptor) } else { None },
+                Some(descriptor),
             ),
 
             VmMemorySource::SharedMemory(shm) => {
@@ -312,7 +320,7 @@ impl VmMemorySource {
                 descriptor,
                 handle_type,
                 memory_idx,
-                physical_device_idx,
+                device_id,
                 size,
             } => {
                 let mapped_region = match gralloc.import_and_map(
@@ -322,7 +330,7 @@ impl VmMemorySource {
                     },
                     VulkanInfo {
                         memory_idx,
-                        physical_device_idx,
+                        device_id,
                     },
                     size,
                 ) {
@@ -334,13 +342,11 @@ impl VmMemorySource {
                 };
                 (mapped_region, size, None)
             }
-            VmMemorySource::ExternalMapping { size } => {
-                let mem = map_request
-                    .lock()
-                    .take()
-                    .ok_or_else(|| VmMemoryResponse::Err(SysError::new(EINVAL)))
-                    .unwrap();
-                let mapped_region: Box<dyn MappedRegion> = Box::new(mem);
+            VmMemorySource::ExternalMapping { ptr, size } => {
+                let mapped_region: Box<dyn MappedRegion> = Box::new(ExternalMapping {
+                    ptr,
+                    size: size as usize,
+                });
                 (mapped_region, size, None)
             }
         };
@@ -433,17 +439,15 @@ impl VmMemoryRequest {
         self,
         vm: &mut impl Vm,
         sys_allocator: &mut SystemAllocator,
-        map_request: Arc<Mutex<Option<ExternalMapping>>>,
         gralloc: &mut RutabagaGralloc,
-        iommu_client: &mut Option<VmMemoryRequestIommuClient>,
+        iommu_client: Option<&mut VmMemoryRequestIommuClient>,
     ) -> VmMemoryResponse {
         use self::VmMemoryRequest::*;
         match self {
             RegisterMemory { source, dest, prot } => {
                 // Correct on Windows because callers of this IPC guarantee descriptor is a mapping
                 // handle.
-                let (mapped_region, size, descriptor) = match source.map(map_request, gralloc, prot)
-                {
+                let (mapped_region, size, descriptor) = match source.map(gralloc, prot) {
                     Ok((region, size, descriptor)) => (region, size, descriptor),
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
@@ -935,6 +939,9 @@ pub enum VmRequest {
     },
     /// Command to use controller.
     UsbCommand(UsbControlCommand),
+    #[cfg(feature = "gpu")]
+    /// Command to modify the gpu.
+    GpuCommand(GpuControlCommand),
     /// Command to set battery.
     BatCommand(BatteryType, BatControlCommand),
     /// Command to add/remove multiple pci devices
@@ -942,6 +949,24 @@ pub enum VmRequest {
         device: HotPlugDeviceInfo,
         add: bool,
     },
+}
+
+pub fn handle_disk_command(command: &DiskControlCommand, disk_host_tube: &Tube) -> VmResponse {
+    // Forward the request to the block device process via its control socket.
+    if let Err(e) = disk_host_tube.send(command) {
+        error!("disk socket send failed: {}", e);
+        return VmResponse::Err(SysError::new(EINVAL));
+    }
+
+    // Wait for the disk control command to be processed
+    match disk_host_tube.recv() {
+        Ok(DiskControlResult::Ok) => VmResponse::Ok,
+        Ok(DiskControlResult::Err(e)) => VmResponse::Err(e),
+        Err(e) => {
+            error!("disk socket recv failed: {}", e);
+            VmResponse::Err(SysError::new(EINVAL))
+        }
+    }
 }
 
 /// WARNING: descriptor must be a mapping handle on Windows.
@@ -1006,6 +1031,7 @@ impl VmRequest {
         #[cfg(feature = "balloon")] balloon_stats_id: &mut u64,
         disk_host_tubes: &[Tube],
         pm: &mut Option<Arc<Mutex<dyn PmResource>>>,
+        #[cfg(feature = "gpu")] gpu_control_tube: &Tube,
         usb_control_tube: Option<&Tube>,
         bat_control: &mut Option<BatControl>,
         vcpu_handles: &[(JoinHandle<()>, mpsc::Sender<VcpuControl>)],
@@ -1147,24 +1173,23 @@ impl VmRequest {
             VmRequest::DiskCommand {
                 disk_index,
                 ref command,
-            } => {
-                // Forward the request to the block device process via its control socket.
-                if let Some(sock) = disk_host_tubes.get(disk_index) {
-                    if let Err(e) = sock.send(command) {
-                        error!("disk socket send failed: {}", e);
-                        VmResponse::Err(SysError::new(EINVAL))
-                    } else {
-                        match sock.recv() {
-                            Ok(DiskControlResult::Ok) => VmResponse::Ok,
-                            Ok(DiskControlResult::Err(e)) => VmResponse::Err(e),
-                            Err(e) => {
-                                error!("disk socket recv failed: {}", e);
-                                VmResponse::Err(SysError::new(EINVAL))
-                            }
-                        }
+            } => match &disk_host_tubes.get(disk_index) {
+                Some(tube) => handle_disk_command(command, tube),
+                None => VmResponse::Err(SysError::new(ENODEV)),
+            },
+            #[cfg(feature = "gpu")]
+            VmRequest::GpuCommand(ref cmd) => {
+                let res = gpu_control_tube.send(cmd);
+                if let Err(e) = res {
+                    error!("fail to send command to gpu control socket: {}", e);
+                    return VmResponse::Err(SysError::new(EIO));
+                }
+                match gpu_control_tube.recv() {
+                    Ok(response) => VmResponse::GpuResponse(response),
+                    Err(e) => {
+                        error!("fail to recv command from gpu control socket: {}", e);
+                        VmResponse::Err(SysError::new(EIO))
                     }
-                } else {
-                    VmResponse::Err(SysError::new(ENODEV))
                 }
             }
             VmRequest::UsbCommand(ref cmd) => {
@@ -1237,6 +1262,9 @@ pub enum VmResponse {
     },
     /// Results of usb control commands.
     UsbResponse(UsbControlResult),
+    #[cfg(feature = "gpu")]
+    /// Results of gpu control commands.
+    GpuResponse(GpuControlResult),
     /// Results of battery control commands.
     BatResponse(BatControlResult),
 }
@@ -1266,6 +1294,8 @@ impl Display for VmResponse {
                 )
             }
             UsbResponse(result) => write!(f, "usb control request get result {:?}", result),
+            #[cfg(feature = "gpu")]
+            GpuResponse(result) => write!(f, "gpu control request result {:?}", result),
             BatResponse(result) => write!(f, "{}", result),
         }
     }
@@ -1336,8 +1366,8 @@ mod tests {
         res.send(&e1).unwrap();
 
         let recv_event: Event = req.recv().unwrap();
-        recv_event.write(1).unwrap();
-        assert_eq!(e1.read().unwrap(), 1);
+        recv_event.signal().unwrap();
+        e1.wait().unwrap();
     }
 }
 

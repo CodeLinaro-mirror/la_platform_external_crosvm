@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@ use core::ffi::c_void;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use base::errno_result;
@@ -18,7 +17,6 @@ use base::AsRawDescriptor;
 use base::Error;
 use base::Event;
 use base::MappedRegion;
-use base::MemoryMapping;
 use base::MmapError;
 use base::Protection;
 use base::RawDescriptor;
@@ -354,7 +352,7 @@ impl Vm for HaxmVm {
     /// in-kernel IO event delivery, this is a no-op.
     fn handle_io_events(&self, addr: IoEventAddress, _data: &[u8]) -> Result<()> {
         if let Some(evt) = self.ioevents.get(&addr) {
-            evt.write(1)?;
+            evt.signal()?;
         }
         Ok(())
     }
@@ -445,27 +443,11 @@ impl VmX86_64 for HaxmVm {
             return errno_result();
         }
 
-        // Safe because setup_tunnel returns the host userspace virtual address of the tunnel memory
-        // mapping, along with the size of the memory mapping, and we check the return code of
-        // setup_tunnel.
-        let tunnel = ManuallyDrop::new(
-            MemoryMapping::from_raw_ptr(tunnel_info.va as *mut c_void, tunnel_info.size as usize)
-                .map_err(|_| Error::new(ENOSPC))?,
-        );
-
-        // Safe because setup_tunnel returns the host userspace virtual address of the io_buffer
-        // memory mapping, which is always HAXM_IO_BUFFER_SIZE long, and we check the return
-        // code of setup_tunnel.
-        let io_buffer = ManuallyDrop::new(
-            MemoryMapping::from_raw_ptr(tunnel_info.io_va as *mut c_void, HAXM_IO_BUFFER_SIZE)
-                .map_err(|_| Error::new(ENOSPC))?,
-        );
-
         Ok(Box::new(HaxmVcpu {
             descriptor,
             id,
-            tunnel,
-            io_buffer,
+            tunnel: tunnel_info.va as *mut hax_tunnel,
+            io_buffer: tunnel_info.io_va as *mut c_void,
             vcpu_run_handle_fingerprint: Default::default(),
         }))
     }
@@ -489,7 +471,7 @@ impl VmX86_64 for HaxmVm {
 mod tests {
     use std::time::Duration;
 
-    use base::EventReadResult;
+    use base::EventWaitResult;
     use base::MemoryMappingBuilder;
     use base::SharedMemory;
 
@@ -579,41 +561,41 @@ mod tests {
         vm.handle_io_events(IoEventAddress::Pio(0x1000), &[])
             .expect("failed to handle_io_events");
         assert_ne!(
-            evt.read_timeout(Duration::from_millis(10))
+            evt.wait_timeout(Duration::from_millis(10))
                 .expect("failed to read event"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
         assert_eq!(
-            evt2.read_timeout(Duration::from_millis(10))
+            evt2.wait_timeout(Duration::from_millis(10))
                 .expect("failed to read event"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
         // Check an mmio address
         vm.handle_io_events(IoEventAddress::Mmio(0x1000), &[])
             .expect("failed to handle_io_events");
         assert_eq!(
-            evt.read_timeout(Duration::from_millis(10))
+            evt.wait_timeout(Duration::from_millis(10))
                 .expect("failed to read event"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
         assert_ne!(
-            evt2.read_timeout(Duration::from_millis(10))
+            evt2.wait_timeout(Duration::from_millis(10))
                 .expect("failed to read event"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
 
         // Check an address that does not match any registered ioevents
         vm.handle_io_events(IoEventAddress::Pio(0x1001), &[])
             .expect("failed to handle_io_events");
         assert_eq!(
-            evt.read_timeout(Duration::from_millis(10))
+            evt.wait_timeout(Duration::from_millis(10))
                 .expect("failed to read event"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
         assert_eq!(
-            evt2.read_timeout(Duration::from_millis(10))
+            evt2.wait_timeout(Duration::from_millis(10))
                 .expect("failed to read event"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
     }
 

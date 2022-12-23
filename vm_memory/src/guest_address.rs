@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,9 @@ use std::cmp::Ordering;
 use std::cmp::PartialEq;
 use std::cmp::PartialOrd;
 use std::fmt;
+use std::fmt::Debug;
 use std::fmt::Display;
+use std::fmt::Formatter;
 use std::ops::BitAnd;
 use std::ops::BitOr;
 
@@ -18,8 +20,14 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Represents an Address in the guest's memory.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 pub struct GuestAddress(pub u64);
+
+impl Debug for GuestAddress {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "GuestAddress({:#018x})", self.0)
+    }
+}
 
 impl GuestAddress {
     /// Returns the offset from this address to the given base address.

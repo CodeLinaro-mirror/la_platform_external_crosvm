@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,10 +14,6 @@ cfg_if::cfg_if! {
 
         #[cfg(feature = "gpu")]
         pub(crate) use unix::gpu::GpuRenderServerParameters;
-        #[cfg(all(feature = "gpu", feature = "plugin"))]
-        pub(crate) use unix::gpu::start_gpu_render_server;
-        #[cfg(all(feature = "gpu", feature = "plugin"))]
-        pub(crate) use unix::jail_helpers;
     } else if #[cfg(windows)] {
         use windows as platform;
     } else {
@@ -25,10 +21,10 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(feature = "crash-report")]
-pub(crate) use platform::broker::setup_emulator_crash_reporting;
 pub(crate) use platform::cmdline;
 pub(crate) use platform::config;
 #[cfg(feature = "gpu")]
 pub(crate) use platform::config::validate_gpu_config;
 pub(crate) use platform::config::HypervisorKind;
+#[cfg(feature = "crash-report")]
+pub(crate) use platform::setup_emulator_crash_reporting;

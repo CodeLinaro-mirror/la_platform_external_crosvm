@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,8 +19,8 @@ use winapi::um::winbase::WAIT_OBJECT_0;
 
 use super::errno_result;
 use super::Error;
-use super::Event;
 use super::EventTrigger;
+use super::PlatformEvent;
 use super::Result;
 use crate::descriptor::AsRawDescriptor;
 use crate::descriptor::Descriptor;
@@ -59,7 +59,7 @@ pub struct EventContext<T: EventToken> {
     // mid-wait. This is to solve for instances where Thread A has started waiting and
     // Thread B adds an event trigger, which needs to notify Thread A a change has been
     // made.
-    handles_modified_event: Event,
+    handles_modified_event: PlatformEvent,
 }
 
 impl<T: EventToken> EventContext<T> {
@@ -69,7 +69,7 @@ impl<T: EventToken> EventContext<T> {
                 triggers: HashMap::new(),
                 raw_handles: Vec::new(),
             })),
-            handles_modified_event: Event::new().unwrap(),
+            handles_modified_event: PlatformEvent::new().unwrap(),
         };
         // The handles-modified event will be everpresent on the raw_handles to be waited
         // upon to ensure the wait stops and we update it any time the handles list is
@@ -127,7 +127,7 @@ impl<T: EventToken> EventContext<T> {
             .push(Descriptor(trigger.event));
         // Windows doesn't support watching for specific types of events. Just treat this
         // like a normal add and do nothing with event_type
-        self.handles_modified_event.write(1)
+        self.handles_modified_event.signal()
     }
 
     pub fn modify(
@@ -147,7 +147,7 @@ impl<T: EventToken> EventContext<T> {
         }
         // Windows doesn't support watching for specific types of events. Ignore the event_type
         // and just modify the token.
-        self.handles_modified_event.write(1)
+        self.handles_modified_event.signal()
     }
 
     pub fn delete(&self, event_handle: &dyn AsRawDescriptor) -> Result<()> {
@@ -165,7 +165,7 @@ impl<T: EventToken> EventContext<T> {
             .position(|item| item == &Descriptor(event_handle.as_raw_descriptor()))
             .unwrap();
         registered_handles_locked.raw_handles.remove(index);
-        self.handles_modified_event.write(1)
+        self.handles_modified_event.signal()
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -176,7 +176,7 @@ impl<T: EventToken> EventContext<T> {
         registered_handles_locked
             .raw_handles
             .push(Descriptor(self.handles_modified_event.as_raw_descriptor()));
-        self.handles_modified_event.write(1)
+        self.handles_modified_event.signal()
     }
 
     /// Waits for one or more of the registered triggers to become signaled.
@@ -223,7 +223,7 @@ impl<T: EventToken> EventContext<T> {
                     // handles list. Note it is possible the list was modified again after the wait which will
                     // trigger the handles_modified_event again, but that will only err towards the safe side
                     // of recursing an extra time.
-                    let _ = self.handles_modified_event.read();
+                    let _ = self.handles_modified_event.wait();
                     return self.wait_timeout(timeout);
                 }
 

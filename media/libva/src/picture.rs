@@ -1,11 +1,14 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::cell::Ref;
+use std::cell::RefCell;
+use std::cell::RefMut;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::bindings;
 use crate::buffer::Buffer;
@@ -76,14 +79,15 @@ impl PictureReclaimableSurface for PictureNew {}
 impl PictureReclaimableSurface for PictureSync {}
 
 pub(crate) struct PictureInner {
-    /// Identifies this picture
-    frame_number: u32,
+    /// Timestamp of the picture
+    timestamp: u64,
     /// A context associated with this picture
     context: Rc<Context>,
     /// Contains the buffers used to decode the data
     buffers: Vec<Buffer>,
-    /// Contains the actual decoded data.
-    surface: Surface,
+    /// Contains the actual decoded data. Note that the surface may be shared in
+    /// interlaced decoding.
+    surface: Rc<RefCell<Surface>>,
 }
 
 impl PictureInner {
@@ -105,13 +109,33 @@ pub struct Picture<S: PictureState> {
 impl Picture<PictureNew> {
     /// Creates a new Picture with a given `frame_number` to identify it.
     /// `surface` is the underlying surface that libva will render to.
-    pub fn new(frame_number: u32, context: Rc<Context>, surface: Surface) -> Self {
+    pub fn new(timestamp: u64, context: Rc<Context>, surface: Surface) -> Self {
         Self {
             inner: Box::new(PictureInner {
-                frame_number,
+                timestamp,
                 context,
                 buffers: Default::default(),
-                surface,
+                surface: Rc::new(RefCell::new(surface)),
+            }),
+
+            phantom: PhantomData,
+        }
+    }
+
+    /// Creates a new Picture with a given `frame_number` to identify it,
+    /// reusing the Surface from `picture`. This is useful for interlaced
+    /// decoding as one can render both fields to the same underlying surface.
+    pub fn new_from_same_surface<T: PictureReclaimableSurface, S: PictureReclaimableSurface>(
+        timestamp: u64,
+        picture: &Picture<S>,
+    ) -> Picture<T> {
+        let context = Rc::clone(&picture.inner.context);
+        Picture {
+            inner: Box::new(PictureInner {
+                timestamp,
+                context,
+                buffers: Default::default(),
+                surface: Rc::clone(&picture.inner.surface),
             }),
 
             phantom: PhantomData,
@@ -131,7 +155,7 @@ impl Picture<PictureNew> {
             bindings::vaBeginPicture(
                 self.inner.context.display().handle(),
                 self.inner.context.id(),
-                self.inner.surface.id(),
+                self.inner.surface.borrow().id(),
             )
         })
         .check()?;
@@ -190,33 +214,26 @@ impl Picture<PictureEnd> {
     /// Syncs the picture, ensuring that any pending decode operations are
     /// complete when this call returns
     pub fn sync(self) -> Result<Picture<PictureSync>> {
-        self.inner.surface.sync()?;
+        self.inner.surface.borrow().sync()?;
 
         Ok(Picture {
             inner: self.inner,
             phantom: PhantomData,
         })
     }
-}
 
-impl Picture<PictureSync> {
-    /// Returns a reference to the underlying `Surface` for this
-    /// `Picture`
-    pub fn surface(&self) -> &Surface {
-        &self.inner.surface
-    }
-
-    /// Returns a mutable reference to the underlying `Surface` for this
-    /// `Picture`
-    pub fn surface_mut(&mut self) -> &mut Surface {
-        &mut self.inner.surface
+    /// Queries the status of the underlying surface. This call can be used to
+    /// implement a non-blocking path, wherein a decoder queries the status of
+    /// the surface after each decode operation instead of blocking on it.
+    pub fn query_status(&self) -> Result<bindings::VASurfaceStatus::Type> {
+        self.inner.surface.borrow_mut().query_status()
     }
 }
 
 impl<S: PictureState> Picture<S> {
-    /// Get the frame number for this picture.
-    pub fn frame_number(&self) -> u32 {
-        self.inner.frame_number
+    /// Get the timestamp for this picture.
+    pub fn timestamp(&self) -> u64 {
+        self.inner.timestamp
     }
 
     /// Returns a reference to the `inner` struct
@@ -228,7 +245,22 @@ impl<S: PictureState> Picture<S> {
 impl<S: PictureReclaimableSurface> Picture<S> {
     /// Reclaim ownership of the Surface, consuming the picture in the process.
     /// Useful if the Surface is part of a pool.
-    pub fn take_surface(self) -> Surface {
-        self.inner.surface
+    pub fn take_surface(self) -> Result<Surface> {
+        match Rc::try_unwrap(self.inner.surface) {
+            Ok(surface) => Ok(surface.into_inner()),
+            Err(_) => Err(anyhow!("Surface still in use")),
+        }
+    }
+
+    /// Returns a reference to the underlying `Surface` for this
+    /// `Picture`
+    pub fn surface(&self) -> Ref<Surface> {
+        self.inner.surface.borrow()
+    }
+
+    /// Returns a mutable reference to the underlying `Surface` for this
+    /// `Picture`
+    pub fn surface_mut(&mut self) -> RefMut<Surface> {
+        self.inner.surface.borrow_mut()
     }
 }

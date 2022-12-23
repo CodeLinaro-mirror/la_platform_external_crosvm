@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -26,8 +26,6 @@ use libva::PictureSync;
 use libva::Surface;
 use libva::UsageHint;
 
-use crate::virtio::video::decoder::utils::EventQueue;
-use crate::virtio::video::decoder::utils::OutputQueue;
 use crate::virtio::video::decoder::Capability;
 use crate::virtio::video::decoder::DecoderBackend;
 use crate::virtio::video::decoder::DecoderEvent;
@@ -44,6 +42,8 @@ use crate::virtio::video::format::Rect;
 use crate::virtio::video::resource::BufferHandle;
 use crate::virtio::video::resource::GuestResource;
 use crate::virtio::video::resource::GuestResourceHandle;
+use crate::virtio::video::utils::EventQueue;
+use crate::virtio::video::utils::OutputQueue;
 
 mod vp8;
 
@@ -138,7 +138,10 @@ impl Drop for DecodedFrameHandle {
 
             // Only retrieve if the resolutions match, otherwise let the stale Surface drop.
             if *pool.current_resolution() == self.resolution {
-                pool.add_surface(picture.into_inner().take_surface())
+                // Retrieve if not currently used by another field.
+                if let Ok(surface) = picture.into_inner().take_surface() {
+                    pool.add_surface(surface);
+                }
             }
         }
     }
@@ -725,7 +728,7 @@ impl VaapiDecoderSession {
             }
         };
 
-        let bitstream_id = i32::try_from(RefCell::borrow(&decoded_frame.picture()).frame_number())?;
+        let timestamp = RefCell::borrow(&decoded_frame.picture()).timestamp();
         let picture = decoded_frame.picture();
         let mut picture = picture.borrow_mut();
 
@@ -752,7 +755,7 @@ impl VaapiDecoderSession {
         self.event_queue
             .queue_event(DecoderEvent::PictureReady {
                 picture_buffer_id,
-                bitstream_id,
+                timestamp,
                 visible_rect: Rect {
                     left: 0,
                     top: 0,
@@ -826,6 +829,22 @@ impl VaapiDecoderSession {
 
         action(&out)
     }
+
+    fn try_emit_flush_completed(&mut self) -> Result<()> {
+        let num_remaining = self.ready_queue.len();
+
+        if num_remaining == 0 {
+            self.flushing = false;
+
+            let event_queue = &mut self.event_queue;
+
+            event_queue
+                .queue_event(DecoderEvent::FlushCompleted(Ok(())))
+                .map_err(|e| anyhow!("Can't queue the PictureReady event {}", e))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl DecoderSession for VaapiDecoderSession {
@@ -852,19 +871,18 @@ impl DecoderSession for VaapiDecoderSession {
 
     fn decode(
         &mut self,
-        bitstream_id: i32,
+        resource_id: u32,
+        timestamp: u64,
         resource: GuestResourceHandle,
         offset: u32,
         bytes_used: u32,
     ) -> VideoResult<()> {
-        let frames = self
-            .codec
-            .decode(bitstream_id, &resource, offset, bytes_used);
+        let frames = self.codec.decode(timestamp, &resource, offset, bytes_used);
 
         match frames {
             Ok(frames) => {
                 self.event_queue
-                    .queue_event(DecoderEvent::NotifyEndOfBitstreamBuffer(bitstream_id))
+                    .queue_event(DecoderEvent::NotifyEndOfBitstreamBuffer(resource_id))
                     .map_err(|e| {
                         VideoError::BackendFailure(anyhow!(
                             "Can't queue the NotifyEndOfBitstream event {}",
@@ -892,7 +910,7 @@ impl DecoderSession for VaapiDecoderSession {
 
                 event_queue
                     .queue_event(DecoderEvent::NotifyError(VideoError::BackendFailure(
-                        anyhow!("Decoding buffer {} failed", bitstream_id),
+                        anyhow!("Decoding buffer {} failed", resource_id),
                     )))
                     .map_err(|e| {
                         VideoError::BackendFailure(anyhow!(
@@ -909,18 +927,15 @@ impl DecoderSession for VaapiDecoderSession {
     fn flush(&mut self) -> VideoResult<()> {
         self.flushing = true;
 
+        // Retrieve ready frames from the codec, if any.
+        let pics = self.codec.flush().map_err(VideoError::BackendFailure)?;
+        self.ready_queue.extend(pics);
+
         self.drain_ready_queue()
             .map_err(VideoError::BackendFailure)?;
-        // TODO(acourbot): Shouldn't we drain *after* we flush the codec?
-        self.codec.flush().map_err(VideoError::BackendFailure)?;
 
-        let event_queue = &mut self.event_queue;
-
-        event_queue
-            .queue_event(DecoderEvent::FlushCompleted(Ok(())))
-            .map_err(|e| {
-                VideoError::BackendFailure(anyhow!("Can't queue the PictureReady event {}", e))
-            })
+        self.try_emit_flush_completed()
+            .map_err(VideoError::BackendFailure)
     }
 
     fn reset(&mut self) -> VideoResult<()> {
@@ -1022,6 +1037,11 @@ impl DecoderSession for VaapiDecoderSession {
             .reuse_buffer(picture_buffer_id as u32)
             .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?;
 
+        if self.flushing {
+            // Try flushing again now that we have a new buffer. This might let
+            // us progress further in the flush operation.
+            self.flush()?;
+        }
         Ok(())
     }
 
@@ -1063,13 +1083,13 @@ impl DecoderBackend for VaapiDecoder {
 pub trait VaapiCodec: downcast_rs::Downcast {
     /// Decode the compressed stream contained in
     /// [`offset`..`offset`+`bytes_used`] of the shared memory in `resource`.
-    /// `bitstream_id` is the identifier for that part of the stream (most
-    /// likely, a timestamp). Returns zero or more decoded pictures depending on
-    /// the compressed stream, which might also be part of the codec's decoded
-    /// picture buffer (DPB).
+    /// `timestamp` is the timestamp for that part of the stream.
+    /// Returns zero or more decoded pictures depending on the compressed
+    /// stream, which might also be part of the codec's decoded picture buffer
+    /// (DPB).
     fn decode(
         &mut self,
-        bitstream_id: i32,
+        timestamp: u64,
         resource: &GuestResourceHandle,
         offset: u32,
         bytes_used: u32,
@@ -1077,7 +1097,7 @@ pub trait VaapiCodec: downcast_rs::Downcast {
 
     /// Flush the decoder i.e. finish processing all queued decode requests and
     /// emit frames for them.
-    fn flush(&mut self) -> Result<()>;
+    fn flush(&mut self) -> Result<Vec<DecodedFrameHandle>>;
 
     /// Returns the current VA image format
     fn va_image_fmt(&self) -> &Option<libva::VAImageFormat>;

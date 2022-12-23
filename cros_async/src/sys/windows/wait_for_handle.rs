@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -296,7 +296,7 @@ mod tests {
 
             let ex = Executor::new().unwrap();
             let evt = Event::new().unwrap();
-            evt.write(0).unwrap();
+            evt.signal().unwrap();
             let async_evt = EventAsync::new(evt, &ex).unwrap();
 
             let fut = wait_on_signaled_event(async_evt);

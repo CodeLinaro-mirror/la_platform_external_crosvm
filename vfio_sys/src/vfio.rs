@@ -73,6 +73,8 @@ pub const VFIO_EEH: u32 = 5;
 pub const VFIO_TYPE1_NESTING_IOMMU: u32 = 6;
 pub const VFIO_SPAPR_TCE_v2_IOMMU: u32 = 7;
 pub const VFIO_NOIOMMU_IOMMU: u32 = 8;
+pub const VFIO_UNMAP_ALL: u32 = 9;
+pub const VFIO_UPDATE_VADDR: u32 = 10;
 pub const VFIO_TYPE: u32 = 59;
 pub const VFIO_BASE: u32 = 100;
 pub const VFIO_GROUP_FLAGS_VIABLE: u32 = 1;
@@ -145,6 +147,9 @@ pub const VFIO_DEVICE_FEATURE_GET: u32 = 65536;
 pub const VFIO_DEVICE_FEATURE_SET: u32 = 131072;
 pub const VFIO_DEVICE_FEATURE_PROBE: u32 = 262144;
 pub const VFIO_DEVICE_FEATURE_PCI_VF_TOKEN: u32 = 0;
+pub const VFIO_DEVICE_FEATURE_LOW_POWER_ENTRY: u32 = 3;
+pub const VFIO_DEVICE_FEATURE_LOW_POWER_ENTRY_WITH_WAKEUP: u32 = 4;
+pub const VFIO_DEVICE_FEATURE_LOW_POWER_EXIT: u32 = 5;
 pub const VFIO_IOMMU_INFO_PGSIZES: u32 = 1;
 pub const VFIO_IOMMU_INFO_CAPS: u32 = 2;
 pub const VFIO_IOMMU_TYPE1_INFO_CAP_IOVA_RANGE: u32 = 1;
@@ -152,7 +157,10 @@ pub const VFIO_IOMMU_TYPE1_INFO_CAP_MIGRATION: u32 = 2;
 pub const VFIO_IOMMU_TYPE1_INFO_DMA_AVAIL: u32 = 3;
 pub const VFIO_DMA_MAP_FLAG_READ: u32 = 1;
 pub const VFIO_DMA_MAP_FLAG_WRITE: u32 = 2;
+pub const VFIO_DMA_MAP_FLAG_VADDR: u32 = 4;
 pub const VFIO_DMA_UNMAP_FLAG_GET_DIRTY_BITMAP: u32 = 1;
+pub const VFIO_DMA_UNMAP_FLAG_ALL: u32 = 2;
+pub const VFIO_DMA_UNMAP_FLAG_VADDR: u32 = 4;
 pub const VFIO_IOMMU_DIRTY_PAGES_FLAG_START: u32 = 1;
 pub const VFIO_IOMMU_DIRTY_PAGES_FLAG_STOP: u32 = 2;
 pub const VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP: u32 = 4;
@@ -298,7 +306,8 @@ pub const VFIO_CCW_NUM_REGIONS: ::std::os::raw::c_uint = 1;
 pub type _bindgen_ty_3 = ::std::os::raw::c_uint;
 pub const VFIO_CCW_IO_IRQ_INDEX: ::std::os::raw::c_uint = 0;
 pub const VFIO_CCW_CRW_IRQ_INDEX: ::std::os::raw::c_uint = 1;
-pub const VFIO_CCW_NUM_IRQS: ::std::os::raw::c_uint = 2;
+pub const VFIO_CCW_REQ_IRQ_INDEX: ::std::os::raw::c_uint = 2;
+pub const VFIO_CCW_NUM_IRQS: ::std::os::raw::c_uint = 3;
 pub type _bindgen_ty_4 = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -381,6 +390,12 @@ pub struct vfio_device_feature {
     pub argsz: u32,
     pub flags: u32,
     pub data: __IncompleteArrayField<u8>,
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct vfio_device_low_power_entry_with_wakeup {
+    pub wakeup_eventfd: i32,
+    pub reserved: u32,
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]

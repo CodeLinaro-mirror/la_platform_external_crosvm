@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,22 +8,18 @@
 
 #![cfg(feature = "gfxstream")]
 
-use std::cell::RefCell;
 use std::convert::TryInto;
 use std::mem::size_of;
 use std::mem::transmute;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
+use std::os::raw::c_uchar;
 use std::os::raw::c_uint;
 use std::os::raw::c_void;
 use std::ptr::null;
 use std::ptr::null_mut;
-use std::rc::Rc;
 use std::sync::Arc;
 
-use base::ExternalMapping;
-use base::ExternalMappingError;
-use base::ExternalMappingResult;
 use base::FromRawDescriptor;
 use base::IntoRawDescriptor;
 use base::SafeDescriptor;
@@ -76,10 +72,17 @@ pub struct stream_renderer_handle {
     pub handle_type: u32,
 }
 
-#[allow(non_camel_case_types)]
-type stream_renderer_create_blob = ResourceCreateBlob;
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct stream_renderer_vulkan_info {
+    pub memory_index: u32,
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
+}
 
-#[link(name = "gfxstream_backend")]
+#[allow(non_camel_case_types)]
+pub type stream_renderer_create_blob = ResourceCreateBlob;
+
 extern "C" {
 
     // Function to globally init gfxstream backend's internal state, taking display/renderer
@@ -100,7 +103,6 @@ extern "C" {
     // forwarding and the notification of new API calls forwarded by the guest, unless they
     // correspond to minigbm resource targets (PIPE_TEXTURE_2D), in which case they create globally
     // visible shared GL textures to support gralloc.
-    fn pipe_virgl_renderer_poll();
     fn pipe_virgl_renderer_resource_create(
         args: *mut virgl_renderer_resource_create_args,
         iov: *mut iovec,
@@ -150,6 +152,15 @@ extern "C" {
     fn pipe_virgl_renderer_ctx_attach_resource(ctx_id: c_int, res_handle: c_int);
     fn pipe_virgl_renderer_ctx_detach_resource(ctx_id: c_int, res_handle: c_int);
 
+    fn stream_renderer_flush_resource_and_readback(
+        res_handle: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        pixels: *mut c_uchar,
+        max_bytes: u32,
+    );
     fn stream_renderer_create_blob(
         ctx_id: u32,
         res_handle: u32,
@@ -167,6 +178,10 @@ extern "C" {
     ) -> c_int;
     fn stream_renderer_resource_unmap(res_handle: u32) -> c_int;
     fn stream_renderer_resource_map_info(res_handle: u32, map_info: *mut u32) -> c_int;
+    fn stream_renderer_vulkan_info(
+        res_handle: u32,
+        vulkan_info: *mut stream_renderer_vulkan_info,
+    ) -> c_int;
     fn stream_renderer_context_create(
         handle: u32,
         nlen: u32,
@@ -177,11 +192,7 @@ extern "C" {
 }
 
 /// The virtio-gpu backend state tracker which supports accelerated rendering.
-pub struct Gfxstream {
-    fence_state: Rc<RefCell<FenceState>>,
-    fence_handler: RutabagaFenceHandler,
-    use_async_fence_cb: bool,
-}
+pub struct Gfxstream {}
 
 struct GfxstreamContext {
     ctx_id: u32,
@@ -260,23 +271,6 @@ const GFXSTREAM_RENDERER_CALLBACKS: &VirglRendererCallbacks = &VirglRendererCall
     write_context_fence,
 };
 
-fn map_func(resource_id: u32) -> ExternalMappingResult<(u64, usize)> {
-    let mut map: *mut c_void = null_mut();
-    let map_ptr: *mut *mut c_void = &mut map;
-    let mut size: u64 = 0;
-
-    // Safe because the Stream renderer wraps and validates use of vkMapMemory.
-    let ret = unsafe { stream_renderer_resource_map(resource_id, map_ptr, &mut size) };
-    if ret != 0 {
-        return Err(ExternalMappingError::LibraryError(ret));
-    }
-    Ok((map as u64, size as usize))
-}
-
-fn unmap_func(resource_id: u32) {
-    unsafe { stream_renderer_resource_unmap(resource_id) };
-}
-
 impl Gfxstream {
     pub fn init(
         display_width: u32,
@@ -284,16 +278,9 @@ impl Gfxstream {
         gfxstream_flags: GfxstreamFlags,
         fence_handler: RutabagaFenceHandler,
     ) -> RutabagaResult<Box<dyn RutabagaComponent>> {
-        let fence_state = Rc::new(RefCell::new(FenceState { latest_fence: 0 }));
-
-        let use_async_fence_cb =
-            (u32::from(gfxstream_flags) & GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB) != 0;
-
         let cookie: *mut VirglCookie = Box::into_raw(Box::new(VirglCookie {
-            fence_state: Rc::clone(&fence_state),
             render_server_fd: None,
             fence_handler: Some(fence_handler.clone()),
-            use_async_fence_cb,
         }));
 
         unsafe {
@@ -308,19 +295,31 @@ impl Gfxstream {
             );
         }
 
-        Ok(Box::new(Gfxstream {
-            fence_state,
-            fence_handler,
-            use_async_fence_cb,
-        }))
+        Ok(Box::new(Gfxstream {}))
     }
 
     fn map_info(&self, resource_id: u32) -> RutabagaResult<u32> {
         let mut map_info = 0;
+        // Safe because `map_info` is a local stack variable owned by us.
         let ret = unsafe { stream_renderer_resource_map_info(resource_id, &mut map_info) };
         ret_to_res(ret)?;
 
         Ok(map_info)
+    }
+
+    fn vulkan_info(&self, resource_id: u32) -> RutabagaResult<VulkanInfo> {
+        let mut vulkan_info: stream_renderer_vulkan_info = Default::default();
+        // Safe because `vulkan_info` is a local stack variable owned by us.
+        let ret = unsafe { stream_renderer_vulkan_info(resource_id, &mut vulkan_info) };
+        ret_to_res(ret)?;
+
+        Ok(VulkanInfo {
+            memory_idx: vulkan_info.memory_index,
+            device_id: DeviceId {
+                device_uuid: vulkan_info.device_uuid,
+                driver_uuid: vulkan_info.driver_uuid,
+            },
+        })
     }
 
     fn export_blob(&self, resource_id: u32) -> RutabagaResult<Arc<RutabagaHandle>> {
@@ -351,20 +350,7 @@ impl RutabagaComponent for Gfxstream {
 
     fn create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
         let ret = unsafe { pipe_virgl_renderer_create_fence(fence.fence_id as i32, fence.ctx_id) };
-
-        // When async_fence_cb is enabled, gfxstream directly calls the write_fence callback in
-        // pipe_virgl_renderer_create_fence.
-        // TODO: this can be removed when timer-based fence handling is removed.
-        if !self.use_async_fence_cb {
-            self.fence_handler.call(fence);
-        }
-
         ret_to_res(ret)
-    }
-
-    fn poll(&self) -> u32 {
-        unsafe { pipe_virgl_renderer_poll() };
-        self.fence_state.borrow().latest_fence
     }
 
     fn create_3d(
@@ -526,6 +512,21 @@ impl RutabagaComponent for Gfxstream {
         ret_to_res(ret)
     }
 
+    fn resource_flush(&self, resource: &mut RutabagaResource) -> RutabagaResult<()> {
+        unsafe {
+            stream_renderer_flush_resource_and_readback(
+                resource.resource_id,
+                0,
+                0,
+                0,
+                0,
+                null_mut(),
+                0,
+            );
+        }
+        Ok(())
+    }
+
     fn create_blob(
         &mut self,
         ctx_id: u32,
@@ -571,18 +572,30 @@ impl RutabagaComponent for Gfxstream {
             map_info: self.map_info(resource_id).ok(),
             info_2d: None,
             info_3d: None,
-            vulkan_info: None,
+            vulkan_info: self.vulkan_info(resource_id).ok(),
             backing_iovecs: iovec_opt,
             import_mask: 0,
         })
     }
 
-    fn map(&self, resource_id: u32) -> RutabagaResult<ExternalMapping> {
-        let map_result = unsafe { ExternalMapping::new(resource_id, map_func, unmap_func) };
-        match map_result {
-            Ok(mapping) => Ok(mapping),
-            Err(e) => Err(RutabagaError::MappingFailed(e)),
+    fn map(&self, resource_id: u32) -> RutabagaResult<RutabagaMapping> {
+        let mut map: *mut c_void = null_mut();
+        let mut size: u64 = 0;
+
+        // Safe because the Stream renderer wraps and validates use of vkMapMemory.
+        let ret = unsafe { stream_renderer_resource_map(resource_id, &mut map, &mut size) };
+        if ret != 0 {
+            return Err(RutabagaError::MappingFailed(ret));
         }
+        Ok(RutabagaMapping {
+            ptr: map as u64,
+            size,
+        })
+    }
+
+    fn unmap(&self, resource_id: u32) -> RutabagaResult<()> {
+        let ret = unsafe { stream_renderer_resource_unmap(resource_id) };
+        ret_to_res(ret)
     }
 
     fn create_context(

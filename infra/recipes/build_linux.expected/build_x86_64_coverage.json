@@ -359,6 +359,31 @@
     "cmd": [
       "vpython3",
       "[CACHE]/builder/crosvm/tools/dev_container",
+      "--pull"
+    ],
+    "cwd": "[CACHE]/builder/crosvm",
+    "infra_step": true,
+    "luci_context": {
+      "realm": {
+        "name": "crosvm/crosvm:ci"
+      },
+      "resultdb": {
+        "current_invocation": {
+          "name": "invocations/build:8945511751514863184",
+          "update_token": "token"
+        },
+        "hostname": "rdbhost"
+      }
+    },
+    "name": "Prepare Container Build.Prepare dev_container.Force pull dev_container",
+    "~followup_annotations": [
+      "@@@STEP_NEST_LEVEL@2@@@"
+    ]
+  },
+  {
+    "cmd": [
+      "vpython3",
+      "[CACHE]/builder/crosvm/tools/dev_container",
       "--verbose",
       "true"
     ],
@@ -389,7 +414,7 @@
       "./tools/run_tests",
       "--verbose",
       "--build-only",
-      "--target=host",
+      "--platform=x86_64",
       "--generate-lcov",
       "coverage.lcov"
     ],
@@ -420,7 +445,7 @@
       "--verbose",
       "--retry=0",
       "--repeat=1",
-      "--target=host",
+      "--platform=x86_64",
       "--generate-lcov",
       "coverage.lcov"
     ],

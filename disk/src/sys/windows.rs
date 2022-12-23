@@ -1,11 +1,10 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use std::fs::File;
 
 use cros_async::sys::windows::HandleSource;
-use cros_async::Executor;
 use cros_async::IoSourceExt;
 
 use crate::Error;
@@ -13,7 +12,7 @@ use crate::Result;
 use crate::SingleFileDisk;
 
 impl SingleFileDisk {
-    pub fn new_from_files(disk_files: Vec<File>, _ex: &Executor) -> Result<Self> {
+    pub fn new_from_files(disk_files: Vec<File>) -> Result<Self> {
         HandleSource::new(disk_files.into_boxed_slice())
             .map_err(|e| Error::CreateSingleFileDisk(cros_async::AsyncError::HandleSource(e)))
             .map(|inner| SingleFileDisk {

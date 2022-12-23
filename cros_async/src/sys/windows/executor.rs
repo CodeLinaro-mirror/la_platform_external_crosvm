@@ -1,10 +1,13 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use std::future::Future;
 
 use async_task::Task;
+use once_cell::sync::OnceCell;
+use serde::Deserialize;
+use thiserror::Error as ThisError;
 
 use super::HandleExecutor;
 use super::HandleSource;
@@ -122,10 +125,39 @@ pub enum Executor {
     Handle(HandleExecutor),
 }
 
+/// An enum to express the kind of the backend of `Executor`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde_keyvalue::FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub enum ExecutorKind {
+    Handle,
+}
+
+/// If set, [`Executor::new()`] is created with `ExecutorKind` of `DEFAULT_EXECUTOR_KIND`.
+static DEFAULT_EXECUTOR_KIND: OnceCell<ExecutorKind> = OnceCell::new();
+
+impl Default for ExecutorKind {
+    fn default() -> Self {
+        DEFAULT_EXECUTOR_KIND
+            .get()
+            .copied()
+            .unwrap_or(ExecutorKind::Handle)
+    }
+}
+
+/// The error type for [`Executor::set_default_executor_kind()`].
+#[derive(ThisError, Debug)]
+pub enum SetDefaultExecutorKindError {
+    /// The default executor kind is set more than once.
+    #[error("The default executor kind is already set to {0:?}")]
+    SetMoreThanOnce(ExecutorKind),
+}
+
 impl Executor {
     /// Create a new `Executor`.
     pub fn new() -> AsyncResult<Self> {
-        Ok(Executor::Handle(HandleExecutor::new()))
+        match ExecutorKind::default() {
+            ExecutorKind::Handle => Ok(Executor::Handle(HandleExecutor::new())),
+        }
     }
 
     /// Create a new `Box<dyn IoSourceExt<F>>` associated with `self`. Callers may then use the
@@ -138,6 +170,22 @@ impl Executor {
         match self {
             Executor::Handle(_) => async_handle_from(f),
         }
+    }
+
+    /// Set the default ExecutorKind for [`Self::new()`]. This call is effective only once.
+    /// If a call is the first call, it sets the default, and `set_default_executor_kind`
+    /// returns `Ok(())`. Otherwise, it returns `SetDefaultExecutorKindError::SetMoreThanOnce`
+    /// which contains the existing ExecutorKind value configured by the first call.
+    pub fn set_default_executor_kind(
+        executor_kind: ExecutorKind,
+    ) -> Result<(), SetDefaultExecutorKindError> {
+        DEFAULT_EXECUTOR_KIND.set(executor_kind).map_err(|_|
+            // `expect` succeeds since this closure runs only when DEFAULT_EXECUTOR_KIND is set.
+            SetDefaultExecutorKindError::SetMoreThanOnce(
+                *DEFAULT_EXECUTOR_KIND
+                    .get()
+                    .expect("Failed to get DEFAULT_EXECUTOR_KIND"),
+            ))
     }
 
     /// Spawn a new future for this executor to run to completion. Callers may use the returned

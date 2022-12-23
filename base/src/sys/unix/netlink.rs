@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -293,7 +293,7 @@ impl NetlinkGenericSocket {
         data[payload_start..payload_end].copy_from_slice(family_name.as_bytes());
 
         // Safe because we pass a valid, owned socket fd and a valid pointer/size for the buffer.
-        let _bytes_read = unsafe {
+        unsafe {
             let res = libc::send(
                 self.sock.as_raw_fd(),
                 allocation.as_ptr() as *mut libc::c_void,

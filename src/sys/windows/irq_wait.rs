@@ -1,4 +1,4 @@
-// Copyright 2022 The ChromiumOS Authors.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -297,7 +297,7 @@ impl IrqWaitWorker {
 
         // Ensure all children have ended by firing off the exit event again to make sure the loop
         // is exited, and joining to ensure none are hanging.
-        let _ = self.exit_evt.write(1);
+        let _ = self.exit_evt.signal();
         for child in children {
             match child.join() {
                 Ok(Err(e)) => warn!("IRQ woker child ended in error: {}", e),

@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,11 +7,16 @@ mod avutil;
 pub use avutil::*;
 mod error;
 pub use error::*;
-mod ffi;
+mod ffmpeg;
+use crate::ffmpeg as ffi;
 pub mod swscale;
 
+pub use ffi::AVPictureType_AV_PICTURE_TYPE_I;
 pub use ffi::AVPixelFormat_AV_PIX_FMT_NV12;
+pub use ffi::AVPixelFormat_AV_PIX_FMT_YUV420P;
+pub use ffi::AVRational;
 pub use ffi::AV_CODEC_CAP_DR1;
+pub use ffi::AV_PKT_FLAG_KEY;
 pub use ffi::FF_PROFILE_H264_BASELINE;
 pub use ffi::FF_PROFILE_H264_EXTENDED;
 pub use ffi::FF_PROFILE_H264_HIGH;

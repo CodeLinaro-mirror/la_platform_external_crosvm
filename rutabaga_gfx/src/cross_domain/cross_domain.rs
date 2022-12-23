@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -336,7 +336,7 @@ impl CrossDomainWorker {
                     //
                     // Fence handling is tied to some new data transfer across a pollable
                     // descriptor.  When we're adding new descriptors, we stop polling.
-                    resample_evt.read()?;
+                    resample_evt.wait()?;
                     self.state.add_job(CrossDomainJob::HandleFence(fence));
                 }
                 CrossDomainToken::WaylandReadPipe(pipe_id) => {
@@ -528,7 +528,9 @@ impl CrossDomainContext {
 
         if let Some(ref vk_info) = reqs.vulkan_info {
             response.memory_idx = vk_info.memory_idx as i32;
-            response.physical_device_idx = vk_info.physical_device_idx as i32;
+            // We return -1 for now since physical_device_idx is deprecated. If this backend is
+            // put back into action, it should be using device_id from the request instead.
+            response.physical_device_idx = -1;
         }
 
         if let Some(state) = &self.state {
@@ -585,7 +587,7 @@ impl Drop for CrossDomainContext {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Don't join the the worker thread unless the write to `kill_evt` is successful.
             // Otherwise, this may block indefinitely.
-            match kill_evt.write(1) {
+            match kill_evt.signal() {
                 Ok(_) => (),
                 Err(e) => {
                     error!("failed to write cross domain kill event: {}", e);

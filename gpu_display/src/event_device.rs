@@ -1,8 +1,9 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::io;
 use std::io::Error;
 use std::io::ErrorKind;
@@ -174,5 +175,11 @@ impl EventDevice {
 impl AsRawDescriptor for EventDevice {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.event_socket.as_raw_descriptor()
+    }
+}
+
+impl fmt::Debug for EventDevice {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Event device ({:?})", self.kind)
     }
 }

@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,6 +9,7 @@ mod listener;
 pub use block::run_block_device;
 pub use block::Options as BlockOptions;
 use cros_async::Executor;
+pub use handler::VhostBackendReqConnectionState;
 pub use handler::VhostUserBackend;
 pub use listener::sys::VhostUserListener;
 pub use listener::VhostUserListenerTrait;

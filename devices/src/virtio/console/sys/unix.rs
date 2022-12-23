@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@ use crate::SerialDevice;
 
 impl SerialDevice for Console {
     fn new(
-        protected_vm: ProtectionType,
+        protection_type: ProtectionType,
         _event: Event,
         input: Option<Box<dyn SerialInput>>,
         out: Option<Box<dyn io::Write + Send>>,
@@ -26,7 +26,7 @@ impl SerialDevice for Console {
         keep_rds: Vec<RawDescriptor>,
     ) -> Console {
         Console::new(
-            protected_vm,
+            protection_type,
             input.map(ConsoleInput::FromRead),
             out,
             keep_rds,

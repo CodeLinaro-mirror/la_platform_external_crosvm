@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,6 +28,7 @@ use crate::pci::pci_device::PciDevice;
 use crate::pci::pci_device::Result;
 use crate::pci::PciAddress;
 use crate::pci::PciDeviceError;
+use crate::Suspendable;
 
 #[derive(Serialize, Deserialize)]
 pub struct StubPciParameters {
@@ -135,6 +136,8 @@ impl PciDevice for StubPciDevice {
 
     fn write_bar(&mut self, _addr: u64, _data: &[u8]) {}
 }
+
+impl Suspendable for StubPciDevice {}
 
 #[cfg(test)]
 mod test {

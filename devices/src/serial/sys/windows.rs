@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -115,7 +115,7 @@ impl SerialDevice for Serial {
     ///
     /// The stream `input` should not block, instead returning 0 bytes if are no bytes available.
     fn new(
-        _protected_vm: ProtectionType,
+        _protection_type: ProtectionType,
         interrupt_evt: Event,
         input: Option<Box<dyn SerialInput>>,
         out: Option<Box<dyn io::Write + Send>>,
@@ -139,7 +139,7 @@ impl SerialDevice for Serial {
     /// pipe_in and pipe_out should both refer to the same end of the same pipe, but may have
     /// different underlying descriptors.
     fn new_with_pipe(
-        _protected_vm: ProtectionType,
+        _protection_type: ProtectionType,
         interrupt_evt: Event,
         pipe_in: PipeConnection,
         pipe_out: PipeConnection,
@@ -161,7 +161,7 @@ impl Drop for Serial {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.system_params.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
+            let _ = kill_evt.signal();
         }
 
         if let Some(sync_thread) = self.system_params.sync_thread.take() {

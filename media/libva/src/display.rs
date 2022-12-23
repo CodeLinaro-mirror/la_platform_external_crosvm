@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -76,7 +76,10 @@ impl Display {
                 None => continue,
             }
 
-            let file = std::fs::File::open(device.devnode().unwrap())?;
+            let file = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(device.devnode().unwrap())?;
             let fd = file.as_raw_descriptor();
 
             // Safe because fd represents a valid file descriptor and

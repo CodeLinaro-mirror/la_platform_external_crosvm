@@ -22,6 +22,7 @@ rust_library {
     rustlibs: [
         "libanyhow",
         "libbase_rust",
+        "libcrash_report",
         "libmetrics",
         "libserde",
     ],

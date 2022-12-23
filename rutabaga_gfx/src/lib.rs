@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,6 +8,7 @@
 mod cross_domain;
 mod generated;
 mod gfxstream;
+mod gfxstream_stub;
 #[macro_use]
 mod macros;
 #[cfg(any(feature = "gfxstream", feature = "virgl_renderer"))]
@@ -19,6 +20,7 @@ mod rutabaga_utils;
 mod virgl_renderer;
 
 pub use crate::rutabaga_core::calculate_context_mask;
+pub use crate::rutabaga_core::calculate_context_types;
 pub use crate::rutabaga_core::Rutabaga;
 pub use crate::rutabaga_core::RutabagaBuilder;
 pub use crate::rutabaga_gralloc::DrmFormat;

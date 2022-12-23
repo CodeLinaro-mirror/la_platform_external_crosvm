@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -49,7 +49,6 @@
 //!
 //! [log-crate-url]: https://docs.rs/log/
 
-use once_cell::sync::Lazy;
 use std::fmt::Display;
 use std::io;
 use std::io::Write;
@@ -59,6 +58,7 @@ use chrono::Local;
 pub use env_logger::fmt;
 pub use env_logger::{self};
 pub use log::*;
+use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use remain::sorted;
 use serde::Deserialize;

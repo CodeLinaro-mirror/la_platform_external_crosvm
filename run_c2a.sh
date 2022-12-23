@@ -3,7 +3,7 @@
 # Run cargo2android.py with the appropriate arguments for the crate in the
 # supplied directory.
 
-set -e
+set -e -u
 
 if [ "$#" -ne 1 ]; then
   echo "Usage: $0 CRATE_DIRECTORY"
@@ -30,6 +30,17 @@ else
     C2A_ARGS+=" --no-subdir"
   fi
 fi
+
+# Tell C2A to use the specific rust version that crosvm upstream expects.
+#
+# TODO: Consider reading the toolchain from external/crosvm/rust-toolchain
+#
+# TODO: Consider using android's prebuilt rust binaries. Currently doesn't work
+# because they try to incorrectly use system clang and llvm.
+RUST_TOOLCHAIN="1.62.0"
+rustup which --toolchain $RUST_TOOLCHAIN cargo || \
+  rustup toolchain install $RUST_TOOLCHAIN
+C2A_ARGS+=" --cargo_bin $(dirname $(rustup which --toolchain $RUST_TOOLCHAIN cargo))"
 
 C2A=${C2A:-cargo2android.py}
 echo "Processing \"$1\" using $C2A $C2A_ARGS"

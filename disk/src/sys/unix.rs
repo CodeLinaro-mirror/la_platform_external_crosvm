@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,11 +31,7 @@ mod tests {
             let f = File::open("/dev/zero").unwrap();
             let async_file = SingleFileDisk::new(f, ex).unwrap();
             let result = async_file
-                .read_to_mem(
-                    0,
-                    Arc::clone(&guest_mem),
-                    &[MemRegion { offset: 0, len: 48 }],
-                )
+                .read_to_mem(0, guest_mem, &[MemRegion { offset: 0, len: 48 }])
                 .await;
             assert_eq!(48, result.unwrap());
         }
@@ -51,11 +47,7 @@ mod tests {
             let f = OpenOptions::new().write(true).open("/dev/null").unwrap();
             let async_file = SingleFileDisk::new(f, ex).unwrap();
             let result = async_file
-                .write_from_mem(
-                    0,
-                    Arc::clone(&guest_mem),
-                    &[MemRegion { offset: 0, len: 48 }],
-                )
+                .write_from_mem(0, guest_mem, &[MemRegion { offset: 0, len: 48 }])
                 .await;
             assert_eq!(48, result.unwrap());
         }
@@ -75,6 +67,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "qcow")]
     fn detect_image_type_qcow2() {
         let mut t = tempfile::tempfile().unwrap();
         // Write the qcow2 magic signature. The rest of the header is not filled in, so if
@@ -87,6 +80,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "android-sparse")]
     fn detect_image_type_android_sparse() {
         let mut t = tempfile::tempfile().unwrap();
         // Write the Android sparse magic signature. The rest of the header is not filled in, so if

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-#
+
 # Usage:
 #
 # To get an interactive shell for development:
@@ -50,6 +50,8 @@ DOCKER_ARGS = [
     "--mount type=tmpfs,destination=/tmp",
     # For plugin process jail
     "--mount type=tmpfs,destination=/var/empty",
+    f"--env OUTSIDE_UID={os.getuid()}",
+    f"--env OUTSIDE_GID={os.getgid()}",
     f"gcr.io/crosvm-infra/crosvm_dev:{IMAGE_VERSION}",
 ]
 
@@ -127,6 +129,7 @@ def main(
     interactive: bool = False,
     podman: bool = PODMAN_IS_DEFAULT,
     self_test: bool = False,
+    pull: bool = False,
 ):
     chdir(CROSVM_ROOT)
 
@@ -157,27 +160,43 @@ def main(
     if clean:
         delete_container(docker)
 
+    if pull:
+        docker("pull", f"gcr.io/crosvm-infra/crosvm_dev:{IMAGE_VERSION}").fg()
+        return
+
     # If a command is provided run non-interactive unless explicitly asked for.
     tty_args = []
     if not command or interactive:
         if not sys.stdin.isatty():
             raise Exception("Trying to run an interactive session in a non-interactive terminal.")
         tty_args = ["--interactive", "--tty"]
+    elif sys.stdin.isatty():
+        # Even if run non-interactively, we do want to pass along a tty for proper output.
+        tty_args = ["--tty"]
 
     # Start an interactive shell by default
-    if not command:
-        command = ("/bin/bash",)
-
-    quoted_cmd = list(map(quoted, command))
     if hermetic:
+        # cmd is passed to entrypoint
+        quoted_cmd = list(map(quoted, command))
         docker(f"run --rm", *tty_args, *docker_args, *quoted_cmd).fg()
     else:
+        # cmd is executed directly
         cid = ensure_container_is_alive(docker, docker_args)
+        if not command:
+            command = ("/tools/entrypoint.sh",)
+        else:
+            command = ("/tools/entrypoint.sh",) + tuple(command)
+        quoted_cmd = list(map(quoted, command))
         docker("exec", *tty_args, cid, *quoted_cmd).fg()
 
 
 class TestDevContainer(unittest.TestCase):
-    """Runs live tests using the docker service."""
+    """
+    Runs live tests using the docker service.
+
+    Note: This test is not run by health-check since it cannot be run inside the
+    container. It is run by infra/recipes/health_check.py before running health checks.
+    """
 
     docker: cmd
     docker_args = [

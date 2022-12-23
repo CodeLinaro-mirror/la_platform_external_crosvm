@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -27,7 +27,7 @@ mod test {
             ffi::av_strerror(
                 averror,
                 buffer.as_mut_ptr() as *mut c_char,
-                buffer.len() as ffi::size_t,
+                buffer.len() as usize,
             )
         };
         assert_eq!(ret, 0);

@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,26 +7,10 @@
 
 pub mod cmdline;
 pub mod config;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 pub mod gdb;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 pub mod sys;
 
 pub mod argument;
-
-macro_rules! check_opt_path {
-    ($struct:ident.$field:ident) => {
-        if let Some(p) = &$struct.$field {
-            if !p.exists() {
-                return Err(format!(
-                    "{} path {:?} does not exist",
-                    stringify!($field),
-                    p
-                ));
-            }
-        }
-    };
-}
-
-pub(crate) use check_opt_path;

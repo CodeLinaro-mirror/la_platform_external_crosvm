@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,19 +21,13 @@ fn main() {
                 .collect()
         }
 
-        // Skip building dependencies when generating documents.
-        if std::env::var("CARGO_DOC").is_ok() {
-            return;
-        }
-
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-        let proto_root = match env::var("SYSROOT") {
-            Ok(dir) => PathBuf::from(dir).join("usr/include/chromeos"),
-            // Make this work when typing "cargo build" in platform/crosvm/power_monitor
-            Err(_) => PathBuf::from("../../../platform2/system_api"),
+        let power_manager_dir = match env::var("SYSROOT") {
+            Ok(dir) => PathBuf::from(dir).join("usr/include/chromeos/dbus/power_manager"),
+            // Use local copy of proto file when building upstream
+            Err(_) => PathBuf::from("."),
         };
 
-        let power_manager_dir = proto_root.join("dbus/power_manager");
         let input_files = [power_manager_dir.join("power_supply_properties.proto")];
         let include_dirs = [power_manager_dir];
 

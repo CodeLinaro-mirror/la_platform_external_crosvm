@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -69,11 +69,11 @@ extern "C" {
  */
 #define RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD 0x1
 #define RUTABAGA_MEM_HANDLE_TYPE_DMABUF 0x2
-#define RUTABAGE_MEM_HANDLE_TYPE_OPAQUE_WIN32 0x3
+#define RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_WIN32 0x3
 #define RUTABAGA_MEM_HANDLE_TYPE_SHM 0x4
 #define RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_FD 0x10
 #define RUTABAGA_FENCE_HANDLE_TYPE_SYNC_FD 0x11
-#define RUTABAGE_FENCE_HANDLE_TYPE_OPAQUE_WIN32 0x12
+#define RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_WIN32 0x12
 
 struct rutabaga;
 

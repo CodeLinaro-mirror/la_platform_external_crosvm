@@ -1,34 +1,54 @@
 #!/usr/bin/env python3
-# Copyright 2022 The Chromium OS Authors. All rights reserved.
+# Copyright 2022 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import os
 import re
 import sys
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Dict, Generator, List, cast
 
 from impl.check_code_hygiene import has_crlf_line_endings
-from impl.common import CROSVM_ROOT, argh, chdir, cmd, cwd_context, parallel, run_main
+from impl.common import (
+    CROSVM_ROOT,
+    TOOLS_ROOT,
+    argh,
+    chdir,
+    cmd,
+    cwd_context,
+    parallel,
+    run_main,
+)
 from impl.health_check import Check, CheckContext, run_checks
 
+python = cmd("python3")
+mypy = cmd("mypy").with_color_env("MYPY_FORCE_COLOR")
+black = cmd("black").with_color_arg(always="--color", never="--no-color")
+mdformat = cmd("mdformat")
+lucicfg = cmd("third_party/depot_tools/lucicfg")
 
-def check_python_tests(context: CheckContext):
-    "Run all non-main python files to execute their unit tests."
-    parallel(*cmd("python3").foreach(context.all_files)).fg()
+
+def check_python_tests(_: CheckContext):
+    "No matter which python files have changed, run all available python tests."
+    PYTHON_TESTS = [
+        *TOOLS_ROOT.glob("tests/*.py"),
+        TOOLS_ROOT / "impl/common.py",
+    ]
+    parallel(*cmd("python3").foreach(PYTHON_TESTS)).fg(quiet=True)
 
 
 def check_python_types(context: CheckContext):
     "Run mypy on all python files to type-check."
-    mypy = cmd("mypy --pretty --color-output").env("MYPY_FORCE_COLOR", "1")
-    parallel(*mypy.foreach(context.all_files)).fg()
+    parallel(*mypy("--pretty").foreach(context.all_files)).fg(quiet=True)
 
 
 def check_python_format(context: CheckContext):
-    black = cmd("black", "--check" if not context.fix else "")
-    parallel(*black.foreach(context.modified_files)).fg()
+    parallel(*black("--check" if not context.fix else None).foreach(context.modified_files)).fg(
+        quiet=not context.fix
+    )
 
 
 def check_crlf_line_endings(_: CheckContext):
@@ -42,13 +62,21 @@ def check_crlf_line_endings(_: CheckContext):
 
 def check_markdown_format(context: CheckContext):
     "Runs mdformat on all markdown files."
-    mdformat = cmd("mdformat --wrap 100", "--check" if not context.fix else "")
-    parallel(*mdformat.foreach(context.modified_files)).fg()
+    if "blaze" in mdformat("--version").stdout():
+        raise Exception(
+            "You are using google's mdformat. "
+            + "Please update your PATH to ensure the pip installed mdformat is available."
+        )
+    parallel(
+        *mdformat("--wrap 100", "--check" if not context.fix else "").foreach(
+            context.modified_files
+        )
+    ).fg(quiet=not context.fix)
 
 
 def check_rust_clippy(_: CheckContext):
     "Runs clippy on the whole project, no matter which rs files were touched."
-    cmd("./tools/clippy --locked").fg()
+    cmd("./tools/clippy --locked").with_color_flag().fg(quiet=True)
 
 
 def check_rust_format(context: CheckContext):
@@ -60,9 +88,11 @@ def check_rust_format(context: CheckContext):
         )
     else:
         rustfmt = cmd(cmd("rustup which rustfmt"))
-    parallel(*rustfmt("--check" if not context.fix else "").foreach(context.modified_files)).fg(
-        quiet=True
-    )
+    parallel(
+        *rustfmt("--check" if not context.fix else "")
+        .with_color_flag()
+        .foreach(context.modified_files)
+    ).fg(quiet=not context.fix)
 
 
 def check_rust_lockfiles(_: CheckContext):
@@ -78,27 +108,66 @@ def check_rust_lockfiles(_: CheckContext):
                 raise Exception("Cargo.lock out of date")
 
 
+# These crosvm features are currently not built upstream. Do not add to this list.
+KNOWN_DISABLED_FEATURES = [
+    "default-no-sandbox",
+    "direct",
+    "libvda",
+    "scudo",
+    "whpx",
+]
+
+
+def check_rust_features(_: CheckContext):
+    "Verifies that all cargo features are included in the list of features we compile upstream."
+    metadata = json.loads(cmd("cargo metadata --format-version=1").stdout())
+    crosvm_metadata = next(p for p in metadata["packages"] if p["name"] == "crosvm")
+    features = cast(Dict[str, List[str]], crosvm_metadata["features"])
+
+    def collect_features(feature_name: str) -> Generator[str, None, None]:
+        yield feature_name
+        for feature in features[feature_name]:
+            name = feature.split("/")[0]
+            if name in features:
+                yield from collect_features(name)
+
+    all_platform_features = set(
+        (
+            *collect_features("all-x86_64"),
+            *collect_features("all-aarch64"),
+            *collect_features("all-armhf"),
+            *collect_features("all-mingw64"),
+            *collect_features("all-msvc64"),
+        )
+    )
+    disabled_features = [
+        feature
+        for feature in features
+        if feature not in all_platform_features and feature not in KNOWN_DISABLED_FEATURES
+    ]
+    if disabled_features:
+        raise Exception(
+            f"The features {', '.join(disabled_features)} are not enabled in upstream crosvm builds."
+        )
+
+
 LICENSE_HEADER_RE = (
-    # Line 1 - copyright.
-    r".*Copyright(?P<copyright> \(c\))? (?P<year>20[0-9]{2})(?:-20[0-9]{2})? "
-    r"The Chromium(?P<chromium_space_os> )?OS Authors\."
-    r"(?P<rights_reserved> All rights reserved\.)?\n"
-    # Line 2 - License.
-    r".*Use of this source code is governed by a BSD-style license that can "
-    r"be\n"
-    # Line 3 - License continuation.
+    r".*Copyright (?P<year>20[0-9]{2})(?:-20[0-9]{2})? The ChromiumOS Authors\n"
+    r".*Use of this source code is governed by a BSD-style license that can be\n"
     r".*found in the LICENSE file\.\n"
+    r"( *\*/\n)?"  # allow the end of a C-style comment before the blank line
+    r"\n"
 )
 
 NEW_LICENSE_HEADER = [
-    f"Copyright {datetime.now().year} The ChromiumOS Authors.",
+    f"Copyright {datetime.now().year} The ChromiumOS Authors",
     "Use of this source code is governed by a BSD-style license that can be",
     "found in the LICENSE file.",
 ]
 
 
 def new_licence_header(file_suffix: str):
-    if file_suffix == ".py" or file_suffix == "":
+    if file_suffix in (".py", "", ".policy", ".sh"):
         prefix = "#"
     else:
         prefix = "//"
@@ -106,14 +175,18 @@ def new_licence_header(file_suffix: str):
 
 
 def check_copyright_header(context: CheckContext):
-    "Checks copyright header on new files only. Can 'fix' them if needed."
+    "Checks copyright header. Can 'fix' them if needed by adding the header."
     license_re = re.compile(LICENSE_HEADER_RE, re.MULTILINE)
-    for file in context.new_files:
-        header = file.open("r").read(256)
+    for file in context.modified_files:
+        header = file.open("r").read(512)
         license_match = license_re.search(header)
         if license_match:
             continue
+        # Generated files do not need a copyright header.
+        if "generated by" in header:
+            continue
         if context.fix:
+            print(f"Adding copyright header: {file}")
             contents = file.read_text()
             file.write_text(new_licence_header(file.suffix) + contents)
         else:
@@ -122,7 +195,6 @@ def check_copyright_header(context: CheckContext):
 
 def check_infra_configs(context: CheckContext):
     "Validate luci configs by sending them to luci-config."
-    lucicfg = cmd("third_party/depot_tools/lucicfg")
     for file in context.modified_files:
         if context.fix:
             lucicfg("fmt", file).fg()
@@ -133,7 +205,7 @@ def check_infra_configs(context: CheckContext):
 
 def check_infra_tests(context: CheckContext):
     "Run recipe.py tests, all of them, regardless of which files were modified."
-    recipes = cmd("infra/recipes.py").add_path("third_party/depot_tools")
+    recipes = cmd("infra/recipes.py").with_path_env("third_party/depot_tools")
     if context.fix:
         recipes("test train --py3-only").fg()
     recipes("test run --py3-only").fg(quiet=True)
@@ -161,12 +233,20 @@ def check_file_ends_with_newline(context: CheckContext):
 CHECKS: List[Check] = [
     Check(
         check_copyright_header,
-        files=["**.rs", "**.py"],
+        files=["**.rs", "**.py", "**.c", "**.h", "**.policy", "**.sh"],
+        exclude=[
+            "infra/recipes.py",
+            "hypervisor/src/whpx/whpx_sys/*.h",
+            "third_party/vmm_vhost/*",
+            "net_sys/src/lib.rs",
+            "system_api/src/bindings/*",
+        ],
         python_tools=True,
     ),
     Check(
         check_rust_format,
         files=["**.rs"],
+        exclude=["system_api/src/bindings/*"],
         can_fix=True,
     ),
     Check(
@@ -174,12 +254,17 @@ CHECKS: List[Check] = [
         files=["**Cargo.toml"],
     ),
     Check(
+        check_rust_features,
+        files=["Cargo.toml"],
+    ),
+    Check(
         check_rust_clippy,
         files=["**.rs", "**Cargo.toml"],
     ),
     Check(
         check_python_tests,
-        files=["tools/impl/common.py"],
+        files=["tools/**.py"],
+        python_tools=True,
     ),
     Check(
         check_python_types,
@@ -215,7 +300,15 @@ CHECKS: List[Check] = [
     ),
     Check(
         check_file_ends_with_newline,
-        exclude=["**.h264", "**.vp8", "**.bin", "**.png", "**.min.js", "infra/**.json"],
+        exclude=[
+            "**.h264",
+            "**.vp8",
+            "**.bin",
+            "**.png",
+            "**.min.js",
+            "**.drawio",
+            "infra/**.json",
+        ],
     ),
     Check(check_crlf_line_endings),
 ]

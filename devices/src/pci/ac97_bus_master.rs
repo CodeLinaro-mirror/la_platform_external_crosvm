@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -210,7 +210,7 @@ impl Ac97BusMaster {
         self.regs.lock().irq_evt = Some(irq_evt.try_clone().expect("cloning irq_evt failed"));
         self.irq_resample_thread = Some(thread::spawn(move || {
             loop {
-                if let Err(e) = irq_evt.get_resample().read() {
+                if let Err(e) = irq_evt.get_resample().wait() {
                     error!(
                         "Failed to read the irq event from the resample thread: {}.",
                         e,

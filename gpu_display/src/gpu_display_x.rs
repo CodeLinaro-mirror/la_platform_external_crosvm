@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -45,6 +45,7 @@ use crate::GpuDisplayFramebuffer;
 use crate::GpuDisplayResult;
 use crate::GpuDisplaySurface;
 use crate::SurfaceType;
+use crate::SysDisplayT;
 
 const BUFFER_COUNT: usize = 2;
 
@@ -694,6 +695,8 @@ impl DisplayT for DisplayX {
         }
     }
 }
+
+impl SysDisplayT for DisplayX {}
 
 impl AsRawDescriptor for DisplayX {
     fn as_raw_descriptor(&self) -> RawDescriptor {

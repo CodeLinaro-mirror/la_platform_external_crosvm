@@ -45,6 +45,10 @@ rust_binary {
     features: [
         "audio",
         "balloon",
+        "gdb",
+        "gdbstub",
+        "gdbstub_arch",
+        "qcow",
         "usb",
     ],
     rustlibs: [
@@ -58,9 +62,13 @@ rust_binary {
         "libbit_field",
         "libbroker_ipc",
         "libcfg_if",
+        "libcros_async",
+        "libcrosvm_cli",
         "libdata_model",
         "libdevices",
         "libdisk",
+        "libgdbstub",
+        "libgdbstub_arch",
         "libhypervisor",
         "libkernel_cmdline",
         "libkernel_loader",
@@ -104,6 +112,7 @@ rust_binary {
             features: [
                 "gfxstream",
                 "gpu",
+                "virgl_renderer_next",
             ],
         },
         android: {
@@ -165,6 +174,10 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "gdb",
+        "gdbstub",
+        "gdbstub_arch",
+        "qcow",
         "usb",
     ],
     rustlibs: [
@@ -178,9 +191,13 @@ rust_test {
         "libbit_field",
         "libbroker_ipc",
         "libcfg_if",
+        "libcros_async",
+        "libcrosvm_cli",
         "libdata_model",
         "libdevices",
         "libdisk",
+        "libgdbstub",
+        "libgdbstub_arch",
         "libhypervisor",
         "libkernel_cmdline",
         "libkernel_loader",
@@ -192,6 +209,7 @@ rust_test {
         "libnet_util",
         "libonce_cell",
         "libp9",
+        "libprebuilts",
         "libresources",
         "librutabaga_gfx",
         "libserde",
@@ -224,6 +242,7 @@ rust_test {
             features: [
                 "gfxstream",
                 "gpu",
+                "virgl_renderer_next",
             ],
         },
         android: {

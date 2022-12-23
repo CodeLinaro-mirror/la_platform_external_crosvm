@@ -1,4 +1,4 @@
-// Copyright 2022 The ChromiumOS Authors.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@ use crate::windows::Result;
 
 static INSTANCE_EXISTS: AtomicBool = AtomicBool::new(false);
 
-/// Used by gpu_display to show metrics in the CrosVm performance overlay.
+/// Used by gpu_display to show metrics in the crosvm performance overlay.
 pub struct Metrics {
     metrics: Vec<Box<dyn ToString + Send + Sync>>,
     // more_metrics is for metrics which have multiple owners (e.g., device dependent).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,17 +14,11 @@ from impl.common import CROSVM_ROOT, cwd, run_main, cmd, chdir
 from impl.test_runner import get_workspace_excludes
 from impl.test_target import Triple
 
-clippy = cmd("cargo clippy")
+clippy = cmd("cargo clippy").with_color_flag()
+triple = Triple.host_default()
 
-excluded_crates: list[str] = []
-features: str = ""
-
-if os.name == "posix":
-    features = "--features=all-linux"
-elif os.name == "nt":
-    excluded_crates = list(get_workspace_excludes(Triple.from_str("x86_64-pc-windows-msvc")))
-else:
-    raise Exception(f"Unsupported build target: {os.name}")
+excluded_crates: list[str] = list(get_workspace_excludes(triple))
+features: str = f"--features={triple.feature_flag}"
 
 
 def is_crate_excluded(crate: str) -> bool:

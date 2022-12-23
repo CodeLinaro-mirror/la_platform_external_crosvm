@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -125,9 +125,11 @@ fn mkfifo(path: &Path) -> io::Result<()> {
 
 /// Run the provided closure, but panic if it does not complete until the timeout has passed.
 /// We should panic here, as we cannot gracefully stop the closure from running.
-fn panic_on_timeout<F, U>(closure: F, timeout: Duration) -> U
+/// `on_timeout` will be called before panic to allow printing debug information.
+fn run_with_timeout<F, G, U>(closure: F, timeout: Duration, on_timeout: G) -> U
 where
     F: FnOnce() -> U + Send + 'static,
+    G: FnOnce(),
     U: Send + 'static,
 {
     let (tx, rx) = sync_channel::<()>(1);
@@ -136,8 +138,10 @@ where
         tx.send(()).unwrap();
         result
     });
-    rx.recv_timeout(timeout)
-        .expect("Operation timed out or closure paniced.");
+    if rx.recv_timeout(timeout).is_err() {
+        on_timeout();
+        panic!("Operation timed out or closure paniced.");
+    }
     handle.join().unwrap()
 }
 
@@ -309,7 +313,7 @@ impl TestVm {
         let control_socket_path = test_dir.path().join("control");
 
         let mut command = Command::new(find_crosvm_binary());
-        command.args(&["run", "--disable-sandbox"]);
+        command.args(&["run"]);
         TestVm::configure_serial_devices(&mut command, &from_guest_pipe, &to_guest_pipe);
         command.args(&["--socket", control_socket_path.to_str().unwrap()]);
         TestVm::configure_rootfs(&mut command, cfg.o_direct);
@@ -322,12 +326,28 @@ impl TestVm {
 
         println!("$ {:?}", command);
 
-        let process = Some(command.spawn()?);
+        let mut process = Some(command.spawn()?);
 
         // Open pipes. Panic if we cannot connect after a timeout.
-        let (to_guest, from_guest) = panic_on_timeout(
+        let (to_guest, from_guest) = run_with_timeout(
             move || (File::create(to_guest_pipe), File::open(from_guest_pipe)),
             VM_COMMUNICATION_TIMEOUT,
+            || {
+                let mut process = process.take().unwrap();
+                process.kill().unwrap();
+                let output = process.wait_with_output().unwrap();
+
+                // Print both the crosvm's stdout/stderr to stdout so that they'll be shown when
+                // the test failed.
+                println!(
+                    "TestVm stdout:\n{}",
+                    std::str::from_utf8(&output.stdout).unwrap()
+                );
+                println!(
+                    "TestVm stderr:\n{}",
+                    std::str::from_utf8(&output.stderr).unwrap()
+                );
+            },
         );
 
         // Wait for magic line to be received, indicating the delegate is ready.
@@ -371,8 +391,9 @@ impl TestVm {
         Ok(trimmed.to_string())
     }
 
-    fn crosvm_command(&self, command: &str) -> Result<()> {
-        let args = [self.control_socket_path.to_str().unwrap()];
+    fn crosvm_command(&self, command: &str, mut args: Vec<String>) -> Result<()> {
+        args.push(self.control_socket_path.to_str().unwrap().to_string());
+
         println!("$ crosvm {} {:?}", command, &args.join(" "));
 
         let mut cmd = Command::new(find_crosvm_binary());
@@ -402,15 +423,19 @@ impl TestVm {
     }
 
     pub fn stop(&self) -> Result<()> {
-        self.crosvm_command("stop")
+        self.crosvm_command("stop", vec![])
     }
 
     pub fn suspend(&self) -> Result<()> {
-        self.crosvm_command("suspend")
+        self.crosvm_command("suspend", vec![])
     }
 
     pub fn resume(&self) -> Result<()> {
-        self.crosvm_command("resume")
+        self.crosvm_command("resume", vec![])
+    }
+
+    pub fn disk(&self, args: Vec<String>) -> Result<()> {
+        self.crosvm_command("disk", args)
     }
 }
 
@@ -420,7 +445,7 @@ impl Drop for TestVm {
         let output = self.process.take().unwrap().wait_with_output().unwrap();
 
         // Print both the crosvm's stdout/stderr to stdout so that they'll be shown when the test
-        // is failed.
+        // failed.
         println!(
             "TestVm stdout:\n{}",
             std::str::from_utf8(&output.stdout).unwrap()

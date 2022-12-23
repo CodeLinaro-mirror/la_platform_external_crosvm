@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -66,6 +66,7 @@ pub mod rand;
 /// # }
 /// ```
 #[macro_export]
+#[cfg(not(feature = "upstream-fuzz"))]
 macro_rules! fuzz_target {
     (|$bytes:ident| $body:block) => {
         use std::panic;
@@ -93,3 +94,6 @@ macro_rules! fuzz_target {
         fuzz_target!(|$bytes| $body);
     };
 }
+
+#[cfg(feature = "upstream-fuzz")]
+pub use libfuzzer_sys::fuzz_target;

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -420,5 +420,23 @@ unsafe impl MappedRegion for MemoryMapping {
 
     fn size(&self) -> usize {
         self.mapping.size()
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ExternalMapping {
+    pub ptr: u64,
+    pub size: usize,
+}
+
+unsafe impl MappedRegion for ExternalMapping {
+    /// used for passing this region to ioctls for setting guest memory.
+    fn as_ptr(&self) -> *mut u8 {
+        self.ptr as *mut u8
+    }
+
+    /// Returns the size of the memory region in bytes.
+    fn size(&self) -> usize {
+        self.size
     }
 }

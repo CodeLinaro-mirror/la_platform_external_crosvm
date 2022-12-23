@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -28,6 +28,8 @@ pub use bindings::VAEntrypoint;
 pub use bindings::VAImageFormat;
 pub use bindings::VAProfile;
 pub use bindings::VASurfaceAttribType;
+pub use bindings::VASurfaceID;
+pub use bindings::VASurfaceStatus;
 pub use buffer::*;
 pub use buffer_type::*;
 pub use config::*;

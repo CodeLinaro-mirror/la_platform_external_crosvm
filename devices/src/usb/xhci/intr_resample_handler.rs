@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -47,7 +47,7 @@ impl IntrResampleHandler {
 impl EventHandler for IntrResampleHandler {
     fn on_event(&self) -> anyhow::Result<()> {
         self.resample_evt
-            .read()
+            .wait()
             .context("cannot read resample evt")?;
         usb_debug!("resample triggered");
         let mut interrupter = self.interrupter.lock();

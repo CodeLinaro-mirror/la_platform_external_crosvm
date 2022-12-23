@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,6 @@
 
 #![cfg(feature = "virgl_renderer")]
 
-use std::cell::RefCell;
 use std::cmp::min;
 use std::convert::TryFrom;
 use std::mem::size_of;
@@ -18,16 +17,12 @@ use std::os::unix::io::AsRawFd;
 use std::panic::catch_unwind;
 use std::process::abort;
 use std::ptr::null_mut;
-use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use base::warn;
 use base::Error as SysError;
-use base::ExternalMapping;
-use base::ExternalMappingError;
-use base::ExternalMappingResult;
 use base::FromRawDescriptor;
 use base::SafeDescriptor;
 use data_model::VolatileSlice;
@@ -43,10 +38,7 @@ use crate::rutabaga_utils::*;
 type Query = virgl_renderer_export_query;
 
 /// The virtio-gpu backend state tracker which supports accelerated rendering.
-pub struct VirglRenderer {
-    // Cookie must be kept alive until VirglRenderer is dropped.
-    _cookie: Rc<RefCell<VirglCookie>>,
-}
+pub struct VirglRenderer {}
 
 struct VirglRendererContext {
     ctx_id: u32,
@@ -237,40 +229,6 @@ fn export_query(resource_id: u32) -> RutabagaResult<Query> {
     Ok(query)
 }
 
-#[allow(unused_variables)]
-fn map_func(resource_id: u32) -> ExternalMappingResult<(u64, usize)> {
-    #[cfg(feature = "virgl_renderer_next")]
-    {
-        let mut map: *mut c_void = null_mut();
-        let map_ptr: *mut *mut c_void = &mut map;
-        let mut size: u64 = 0;
-        // Safe because virglrenderer wraps and validates use of GL/VK.
-        let ret = unsafe { virgl_renderer_resource_map(resource_id, map_ptr, &mut size) };
-        if ret != 0 {
-            return Err(ExternalMappingError::LibraryError(ret));
-        }
-
-        Ok((map as u64, size as usize))
-    }
-    #[cfg(not(feature = "virgl_renderer_next"))]
-    Err(ExternalMappingError::Unsupported)
-}
-
-#[allow(unused_variables)]
-fn unmap_func(resource_id: u32) {
-    #[cfg(feature = "virgl_renderer_next")]
-    {
-        unsafe {
-            // Usually, process_gpu_command forces ctx0 when processing a virtio-gpu command.
-            // During VM shutdown, the KVM thread releases mappings without virtio-gpu being
-            // involved, so force ctx0 here. It's a no-op when the ctx is already 0, so there's
-            // little performance loss during normal VM operation.
-            virgl_renderer_force_ctx_0();
-            virgl_renderer_resource_unmap(resource_id);
-        }
-    }
-}
-
 impl VirglRenderer {
     pub fn init(
         virglrenderer_flags: VirglRendererFlags,
@@ -295,34 +253,29 @@ impl VirglRenderer {
             return Err(RutabagaError::AlreadyInUse);
         }
 
-        let fence_state = Rc::new(RefCell::new(FenceState { latest_fence: 0 }));
+        unsafe { virgl_set_debug_callback(Some(debug_callback)) };
 
         // Cookie is intentionally never freed because virglrenderer never gets uninitialized.
         // Otherwise, Resource and Context would become invalid because their lifetime is not tied
         // to the Renderer instance. Doing so greatly simplifies the ownership for users of this
         // library.
-        let cookie = Rc::new(RefCell::new(VirglCookie {
-            fence_state,
+        let cookie = Box::into_raw(Box::new(VirglCookie {
             render_server_fd,
             fence_handler: Some(fence_handler),
-            use_async_fence_cb: (u32::from(virglrenderer_flags) & VIRGLRENDERER_USE_ASYNC_FENCE_CB)
-                != 0,
         }));
-
-        unsafe { virgl_set_debug_callback(Some(debug_callback)) };
 
         // Safe because a valid cookie and set of callbacks is used and the result is checked for
         // error.
         let ret = unsafe {
             virgl_renderer_init(
-                Rc::clone(&cookie).as_ptr() as *mut c_void,
+                cookie as *mut c_void,
                 virglrenderer_flags.into(),
                 transmute(VIRGL_RENDERER_CALLBACKS),
             )
         };
 
         ret_to_res(ret)?;
-        Ok(Box::new(VirglRenderer { _cookie: cookie }))
+        Ok(Box::new(VirglRenderer {}))
     }
 
     #[allow(unused_variables)]
@@ -375,6 +328,7 @@ impl VirglRenderer {
             let handle_type = match fd_type {
                 VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF => RUTABAGA_MEM_HANDLE_TYPE_DMABUF,
                 VIRGL_RENDERER_BLOB_FD_TYPE_SHM => RUTABAGA_MEM_HANDLE_TYPE_SHM,
+                VIRGL_RENDERER_BLOB_FD_TYPE_OPAQUE => RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD,
                 _ => {
                     return Err(RutabagaError::Unsupported);
                 }
@@ -433,11 +387,6 @@ impl RutabagaComponent for VirglRenderer {
     fn create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
         let ret = unsafe { virgl_renderer_create_fence(fence.fence_id as i32, fence.ctx_id) };
         ret_to_res(ret)
-    }
-
-    fn poll(&self) -> u32 {
-        unsafe { virgl_renderer_poll() };
-        self._cookie.borrow().fence_state.borrow().latest_fence
     }
 
     fn event_poll(&self) {
@@ -645,6 +594,8 @@ impl RutabagaComponent for VirglRenderer {
             let ret = unsafe { virgl_renderer_resource_create_blob(&resource_create_args) };
             ret_to_res(ret)?;
 
+            // TODO(b/244591751): assign vulkan_info to support opaque_fd mapping via Vulkano when
+            // sandboxing (hence external_blob) is enabled.
             Ok(RutabagaResource {
                 resource_id,
                 handle: self.export_blob(resource_id).ok(),
@@ -663,12 +614,35 @@ impl RutabagaComponent for VirglRenderer {
         Err(RutabagaError::Unsupported)
     }
 
-    fn map(&self, resource_id: u32) -> RutabagaResult<ExternalMapping> {
-        let map_result = unsafe { ExternalMapping::new(resource_id, map_func, unmap_func) };
-        match map_result {
-            Ok(mapping) => Ok(mapping),
-            Err(e) => Err(RutabagaError::MappingFailed(e)),
+    fn map(&self, resource_id: u32) -> RutabagaResult<RutabagaMapping> {
+        #[cfg(feature = "virgl_renderer_next")]
+        {
+            let mut map: *mut c_void = null_mut();
+            let mut size: u64 = 0;
+            // Safe because virglrenderer wraps and validates use of GL/VK.
+            let ret = unsafe { virgl_renderer_resource_map(resource_id, &mut map, &mut size) };
+            if ret != 0 {
+                return Err(RutabagaError::MappingFailed(ret));
+            }
+
+            Ok(RutabagaMapping {
+                ptr: map as u64,
+                size,
+            })
         }
+        #[cfg(not(feature = "virgl_renderer_next"))]
+        Err(RutabagaError::Unsupported)
+    }
+
+    fn unmap(&self, resource_id: u32) -> RutabagaResult<()> {
+        #[cfg(feature = "virgl_renderer_next")]
+        {
+            // Safe because virglrenderer is initialized by now.
+            let ret = unsafe { virgl_renderer_resource_unmap(resource_id) };
+            ret_to_res(ret)
+        }
+        #[cfg(not(feature = "virgl_renderer_next"))]
+        Err(RutabagaError::Unsupported)
     }
 
     #[allow(unused_variables)]

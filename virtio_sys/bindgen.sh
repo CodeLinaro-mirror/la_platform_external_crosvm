@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Copyright 2022 The Chromium OS Authors. All rights reserved.
+# Copyright 2022 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-#
+
 # Regenerate virtio_sys bindgen bindings.
 
 set -euo pipefail
@@ -46,7 +46,7 @@ pub const VIRTIO_ID_VHOST_USER: u32 = 61;
 
 bindgen_generate \
     --raw-line "${VIRTIO_IDS_EXTRAS}" \
-    --allowlist-var='VIRTIO_.*' \
+    --allowlist-var='VIRTIO_ID_.*' \
     --allowlist-type='virtio_.*' \
     "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_ids.h" \
     -- \
@@ -75,3 +75,12 @@ bindgen_generate \
     -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
     | replace_linux_int_types \
     > virtio_sys/src/virtio_ring.rs
+
+bindgen_generate \
+    --allowlist-var='VIRTIO_.*' \
+    --allowlist-type='virtio_.*' \
+    "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_mmio.h" \
+    -- \
+    -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
+    | replace_linux_int_types \
+    > virtio_sys/src/virtio_mmio.rs

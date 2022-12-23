@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,20 +21,20 @@ use base::AsRawDescriptor;
 use base::Descriptor;
 use base::Error as SysError;
 use base::Event;
+use base::EventExt;
 use base::EventToken;
-use base::EventWindows;
 use base::RawDescriptor;
 use base::Timer;
 use base::WaitContext;
+use base::WaitContextExt;
 use data_model::DataInit;
-use data_model::Le16;
 use metrics::MetricEventType;
 use metrics::PeriodicLogger;
 #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
 use pcap_file::pcap::PcapWriter;
 use smallvec::SmallVec;
-use virtio_sys::virtio_net_hdr;
-use virtio_sys::virtio_net_hdr_mrg_rxbuf;
+use virtio_sys::virtio_net::virtio_net_hdr;
+use virtio_sys::virtio_net::virtio_net_hdr_mrg_rxbuf;
 use winapi::shared::minwindef::MAKEWORD;
 use winapi::um::winnt::LONG;
 use winapi::um::winnt::SHORT;
@@ -61,6 +61,7 @@ use crate::slirp::context::Context;
 use crate::slirp::context::PollEvents;
 #[cfg(feature = "slirp-ring-capture")]
 use crate::slirp::packet_ring_buffer::PacketRingBuffer;
+use crate::slirp::SlirpError;
 use crate::slirp::ETHERNET_FRAME_SIZE;
 use crate::Error;
 use crate::Result;
@@ -113,7 +114,7 @@ impl CallbackHandler for Handler {
                 hdr_len: 0,
                 csum_start: 0,
                 csum_offset: 0,
-                gso_type: virtio_sys::VIRTIO_NET_HDR_GSO_NONE as u8,
+                gso_type: virtio_sys::virtio_net::VIRTIO_NET_HDR_GSO_NONE as u8,
             },
             num_buffers: 1,
         };
@@ -359,7 +360,7 @@ impl<'a> EventSelectedSocket<'a> {
             )
         };
         if res == SOCKET_ERROR {
-            return Err(Error::SlirpIOPollError(last_wsa_error()));
+            return Err(Error::Slirp(SlirpError::SlirpIOPollError(last_wsa_error())));
         }
         Ok(EventSelectedSocket { socket, event })
     }
@@ -402,28 +403,32 @@ fn poll<'a>(
         selected_sockets.push(EventSelectedSocket::new(*socket, socket_event_handle)?);
     }
 
-    wait_ctx.clear().map_err(Error::SlirpPollError)?;
+    wait_ctx
+        .clear()
+        .map_err(|e| Error::Slirp(SlirpError::SlirpPollError(e)))?;
     for (i, handle) in handles.iter().enumerate() {
         match wait_ctx.add(*handle, Token::EventHandleReady(i)) {
             Ok(v) => v,
             Err(e) => {
-                return Err(Error::SlirpPollError(e));
+                return Err(Error::Slirp(SlirpError::SlirpPollError(e)));
             }
         }
     }
     match wait_ctx.add(socket_event_handle, Token::SocketReady) {
         Ok(v) => v,
         Err(e) => {
-            return Err(Error::SlirpPollError(e));
+            return Err(Error::Slirp(SlirpError::SlirpPollError(e)));
         }
     }
 
     let events = if let Some(timeout) = timeout {
         wait_ctx
             .wait_timeout(timeout)
-            .map_err(Error::SlirpPollError)?
+            .map_err(|e| Error::Slirp(SlirpError::SlirpPollError(e)))?
     } else {
-        wait_ctx.wait().map_err(Error::SlirpPollError)?
+        wait_ctx
+            .wait()
+            .map_err(|e| Error::Slirp(SlirpError::SlirpPollError(e)))?
     };
 
     let tokens: Vec<Token> = events
@@ -446,7 +451,7 @@ fn poll<'a>(
     let socket_results = if sockets.is_empty() {
         Vec::new()
     } else {
-        poll_sockets(sockets).map_err(Error::SlirpIOPollError)?
+        poll_sockets(sockets).map_err(|e| Error::Slirp(SlirpError::SlirpIOPollError(e)))?
     };
 
     Ok((handle_results, socket_results))
@@ -466,7 +471,9 @@ impl WSAContext {
         // Safe because ctx.data is guaranteed to exist, and we check the return code.
         let err = unsafe { WSAStartup(MAKEWORD(2, 0), &mut ctx.data) };
         if err != 0 {
-            Err(Error::WSAStartupError(SysError::new(err)))
+            Err(Error::Slirp(SlirpError::WSAStartupError(SysError::new(
+                err,
+            ))))
         } else {
             Ok(ctx)
         }
@@ -506,8 +513,10 @@ pub fn start_slirp(
     let shutdown_event_handle = shutdown_event.as_raw_descriptor();
 
     // Stack data for the poll function.
-    let wait_ctx: WaitContext<Token> = WaitContext::new().map_err(Error::SlirpPollError)?;
-    let socket_event_handle = Event::new_auto_reset().map_err(Error::SlirpPollError)?;
+    let wait_ctx: WaitContext<Token> =
+        WaitContext::new().map_err(|e| Error::Slirp(SlirpError::SlirpPollError(e)))?;
+    let socket_event_handle =
+        Event::new_auto_reset().map_err(|e| Error::Slirp(SlirpError::SlirpPollError(e)))?;
 
     'slirp: loop {
         // Request the FDs that we should poll from Slirp. Slirp provides them to us by way of a
@@ -516,9 +525,9 @@ pub fn start_slirp(
         // flow can be thought of as follows:
         //    1. pollfds_fill creates a map of index -> fd inside Slirp based on the return values from
         //       the pollfds_fill callback.
-        //    2. CrosVM invokes poll on the FDs provided by Slirp.
-        //    3. CrosVM notifies Slirp via pollfds_poll that polling completed for the provided FDs.
-        //    4. Slirp calls into CrosVM via the pollfds_poll callback and asks for the statuses using
+        //    2. crosvm invokes poll on the FDs provided by Slirp.
+        //    3. crosvm notifies Slirp via pollfds_poll that polling completed for the provided FDs.
+        //    4. Slirp calls into crosvm via the pollfds_poll callback and asks for the statuses using
         //       the fd indicies registered in step #1.
         let mut poll_fds = Vec::new();
         // We'd like to sleep as long as possible (assuming no actionable notifications arrive).
@@ -730,7 +739,7 @@ mod tests {
         // Wait for the socket to really be readable before we return it back to the test. We've
         // seen cases in CI where send_to completes, but WSAPoll won't find the socket to be
         // readable.
-        let mut sockets = vec![poll_fd.clone()];
+        let mut sockets = vec![poll_fd];
         for _ in 0..5 {
             sockets = poll_sockets(sockets).expect("poll_sockets failed");
             if sockets[0].revents & (POLLRDNORM | POLLRDBAND) > 0 {
@@ -770,7 +779,7 @@ mod tests {
         let (_sock, _poll_fd) = create_readable_socket();
 
         let event_fd = Event::new_auto_reset().unwrap();
-        event_fd.write(0).expect("Failed to write event");
+        event_fd.signal().expect("Failed to write event");
         let (handles, _sockets) = poll(
             &wait_ctx,
             &socket_event_handle,
@@ -810,7 +819,7 @@ mod tests {
 
         let (sock, poll_fd) = create_readable_socket();
         let event_fd = Event::new_auto_reset().unwrap();
-        event_fd.write(0).expect("Failed to write event");
+        event_fd.signal().expect("Failed to write event");
 
         let (handles, sockets) = poll(
             &wait_ctx,
@@ -839,7 +848,7 @@ mod tests {
             true,
         )
         .unwrap();
-        event_fd.write(0).expect("Failed to write event");
+        event_fd.signal().expect("Failed to write event");
         start_slirp(
             host_pipe,
             event_fd.try_clone().unwrap(),
@@ -915,7 +924,7 @@ mod tests {
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(TIMEOUT_MILLIS));
             shutdown_sender
-                .write(1)
+                .signal()
                 .expect("Failed to write to shutdown sender");
         });
 

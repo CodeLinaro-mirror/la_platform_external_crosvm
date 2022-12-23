@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -205,7 +205,7 @@ impl ExportedRegion {
             .export(iova, size)
             .context("failed to export")?;
         for r in &regions {
-            if !mem.address_in_range(r.gpa) || mem.checked_offset(r.gpa, r.len).is_none() {
+            if !mem.is_valid_range(r.gpa, r.len) {
                 bail!("region not in memory range");
             }
         }

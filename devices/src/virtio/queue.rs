@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,9 +23,6 @@ use data_model::Le64;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use sync::Mutex;
-use log::debug;
-use cros_async::{AsyncError, EventAsync};
-use data_model::{DataInit, Le16, Le32, Le64};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -213,11 +210,12 @@ impl DescriptorChain {
 
     fn is_valid(&self) -> bool {
         if self.len > 0 {
-            if self.regions.iter().any(|r| {
-                self.mem
-                    .checked_offset(r.gpa, r.len as u64 - 1u64)
-                    .is_none()
-            }) {
+            // Each region in `self.regions` must be a contiguous range in `self.mem`.
+            if !self
+                .regions
+                .iter()
+                .all(|r| self.mem.is_valid_range(r.gpa, r.len as u64))
+            {
                 return false;
             }
         }
@@ -482,7 +480,7 @@ impl Queue {
         Ok(())
     }
 
-    /// Releases memory exported by a previous call to [export_memory].
+    /// Releases memory exported by a previous call to [`Queue::export_memory()`].
     pub fn release_exported_memory(&mut self) {
         self.exported_desc_table = None;
         self.exported_avail_ring = None;
@@ -553,8 +551,6 @@ impl Queue {
             avail_event_addr,
         )
         .unwrap();
-        debug!("{}", format!("desc_table {} avail_index {}", self.desc_table, avail_index.0));
-        write_obj_at_addr_wrapper(mem, &self.iommu, avail_index.0, avail_event_addr).unwrap();
     }
 
     // Query the value of a single-bit flag in the available ring.
@@ -628,9 +624,7 @@ impl Queue {
         let avail_index = self.get_avail_index(mem);
         let avail_len = avail_index - self.next_avail;
 
-        debug!("{}", format!("desc_table {} avail_idx {} avail_len {}", self.desc_table, avail_index, avail_len.0));
         if avail_len.0 > queue_size || self.next_avail == avail_index {
-            debug!("{}", format!("desc_table {} peek returns none", self.desc_table));
             return None;
         }
 
@@ -723,7 +717,6 @@ impl Queue {
         .unwrap();
 
         self.next_used += Wrapping(1);
-        debug!("{}", format!("desc_table {} next_used {}", self.desc_table, self.next_used.0));
         self.set_used_index(mem, self.next_used);
     }
 
@@ -880,10 +873,10 @@ impl Queue {
     /// inject interrupt into guest on this queue
     /// return true: interrupt is injected into guest for this queue
     ///        false: interrupt isn't injected
-    pub fn trigger_interrupt(
+    pub fn trigger_interrupt<I: SignalableInterrupt>(
         &mut self,
         mem: &GuestMemory,
-        interrupt: &dyn SignalableInterrupt,
+        interrupt: &I,
     ) -> bool {
         if self.queue_wants_interrupt(mem) {
             self.last_used = self.next_used;
@@ -907,8 +900,6 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use std::convert::TryInto;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
 
     use memoffset::offset_of;
 
@@ -1011,12 +1002,7 @@ mod tests {
         let mem = GuestMemory::new(&[(memory_start_addr, GUEST_MEMORY_SIZE)]).unwrap();
         setup_vq(&mut queue, &mem);
 
-        let interrupt = Interrupt::new(
-            Arc::new(AtomicUsize::new(0)),
-            IrqLevelEvent::new().unwrap(),
-            None,
-            10,
-        );
+        let interrupt = Interrupt::new(IrqLevelEvent::new().unwrap(), None, 10);
 
         // Offset of used_event within Avail structure
         let used_event_offset = offset_of!(Avail, used_event) as u64;
@@ -1085,12 +1071,7 @@ mod tests {
         let mem = GuestMemory::new(&[(memory_start_addr, GUEST_MEMORY_SIZE)]).unwrap();
         setup_vq(&mut queue, &mem);
 
-        let interrupt = Interrupt::new(
-            Arc::new(AtomicUsize::new(0)),
-            IrqLevelEvent::new().unwrap(),
-            None,
-            10,
-        );
+        let interrupt = Interrupt::new(IrqLevelEvent::new().unwrap(), None, 10);
 
         // Offset of used_event within Avail structure
         let used_event_offset = offset_of!(Avail, used_event) as u64;

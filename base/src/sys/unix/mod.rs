@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,7 +22,7 @@ pub mod syslog;
 mod acpi_event;
 mod capabilities;
 mod descriptor;
-mod eventfd;
+mod event;
 mod file_flags;
 pub mod file_traits;
 mod get_filesystem_type;
@@ -66,12 +66,8 @@ use std::time::Duration;
 pub use acpi_event::*;
 pub use capabilities::drop_capabilities;
 pub use descriptor::*;
-// EventFd is deprecated. Use Event instead. EventFd will be removed as soon as rest of the current
-// users migrate.
-// TODO(b:231344063): Remove EventFd.
-pub use eventfd::EventFd as Event;
-pub use eventfd::EventFd;
-pub use eventfd::EventReadResult;
+pub use event::EventExt;
+pub(crate) use event::PlatformEvent;
 pub use file_flags::*;
 pub use file_traits::AsRawFds;
 pub use file_traits::FileAllocate;
@@ -90,6 +86,7 @@ use libc::syscall;
 use libc::sysconf;
 use libc::waitpid;
 use libc::SYS_getpid;
+use libc::SYS_getppid;
 use libc::SYS_gettid;
 use libc::EINVAL;
 use libc::F_GETFL;
@@ -180,6 +177,13 @@ pub fn round_up_to_page_size(v: usize) -> usize {
 pub fn getpid() -> Pid {
     // Safe because this syscall can never fail and we give it a valid syscall number.
     unsafe { syscall(SYS_getpid as c_long) as Pid }
+}
+
+/// Safe wrapper for the geppid Linux systemcall.
+#[inline(always)]
+pub fn getppid() -> Pid {
+    // Safe because this syscall can never fail and we give it a valid syscall number.
+    unsafe { syscall(SYS_getppid as c_long) as Pid }
 }
 
 /// Safe wrapper for the gettid Linux systemcall.

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -47,7 +47,6 @@ const ECX_TOPO_SMT_TYPE: u32 = 1; // SMT type.
 const ECX_TOPO_CORE_TYPE: u32 = 2; // CORE type.
 const ECX_HCFC_PERF_SHIFT: u32 = 0; // Presence of IA32_MPERF and IA32_APERF.
 const EAX_CPU_CORES_SHIFT: u32 = 26; // Index of cpu cores in the same physical package.
-const EDX_FSRM_SHIFT: u32 = 4; // Fast Short REP MOV
 const EDX_HYBRID_CPU_SHIFT: u32 = 15; // Hybrid. The processor is identified as a hybrid part.
 const EAX_HWP_SHIFT: u32 = 7; // Intel Hardware P-states.
 const EAX_HWP_NOTIFICATION_SHIFT: u32 = 8; // IA32_HWP_INTERRUPT MSR is supported
@@ -204,10 +203,6 @@ pub fn adjust_cpuid(entry: &mut CpuIdEntry, ctx: &CpuIdContext) {
             }
         }
         7 => {
-            // b/228795137 Clear X86 FSRM feature. Broken on cuttlefish boot. Will remove once
-            // rootcaused and resolved.
-            entry.cpuid.edx &= !(1 << EDX_FSRM_SHIFT);
-
             if ctx.cpu_config.host_cpu_topology && entry.index == 0 {
                 // Safe because we pass 7 and 0 for this call and the host supports the
                 // `cpuid` instruction
@@ -375,9 +370,6 @@ pub fn cpu_manufacturer() -> CpuManufacturer {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use hypervisor::ProtectionType;
-
     use super::*;
 
     #[test]
@@ -394,7 +386,7 @@ mod tests {
         let guest_mem =
             vm_memory::GuestMemory::new(&[(vm_memory::GuestAddress(0), 0x10000)]).unwrap();
         let kvm = hypervisor::kvm::Kvm::new().unwrap();
-        let vm = hypervisor::kvm::KvmVm::new(&kvm, guest_mem, ProtectionType::Unprotected).unwrap();
+        let vm = hypervisor::kvm::KvmVm::new(&kvm, guest_mem, Default::default()).unwrap();
         let irq_chip = devices::KvmKernelIrqChip::new(vm, 1).unwrap();
 
         let entries = &mut cpuid.cpu_id_entries;

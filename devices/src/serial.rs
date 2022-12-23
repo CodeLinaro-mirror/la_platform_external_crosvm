@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,6 +21,7 @@ use base::Result;
 use crate::bus::BusAccessInfo;
 use crate::pci::CrosvmDeviceId;
 use crate::serial_device::SerialInput;
+use crate::suspendable::Suspendable;
 use crate::BusDevice;
 use crate::DeviceId;
 
@@ -119,9 +120,7 @@ impl Serial {
             system_params,
         }
     }
-}
 
-impl Serial {
     /// Returns a unique ID for the serial device.
     pub fn device_id() -> DeviceId {
         CrosvmDeviceId::Serial.into()
@@ -182,7 +181,7 @@ impl Serial {
                                 break;
                             }
                             if (interrupt_enable.load(Ordering::SeqCst) & IER_RECV_BIT) != 0 {
-                                interrupt_evt.write(1).unwrap();
+                                interrupt_evt.signal().unwrap();
                             }
                         }
                         Err(e) => {
@@ -283,7 +282,7 @@ impl Serial {
     }
 
     fn trigger_interrupt(&mut self) -> Result<()> {
-        self.interrupt_evt.write(1)
+        self.interrupt_evt.signal()
     }
 
     fn set_data_bit(&mut self) {
@@ -401,6 +400,8 @@ impl BusDevice for Serial {
     }
 }
 
+impl Suspendable for Serial {}
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -482,7 +483,7 @@ mod tests {
         serial.write(serial_bus_address(IER), &[IER_RECV_BIT]);
         serial.queue_input_bytes(&[b'a', b'b', b'c']).unwrap();
 
-        assert_eq!(intr_evt.read(), Ok(1));
+        assert_eq!(intr_evt.wait(), Ok(()));
         let mut data = [0u8; 1];
         serial.read(serial_bus_address(DATA), &mut data[..]);
         assert_eq!(data[0], b'a');

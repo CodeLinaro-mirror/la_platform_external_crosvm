@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -33,6 +33,7 @@ use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::BusType;
 use crate::DeviceId;
+use crate::Suspendable;
 
 // A PciDevice that holds the root hub's configuration.
 struct PciRootConfiguration {
@@ -70,6 +71,8 @@ impl PciDevice for PciRootConfiguration {
         self.config.get_bar_configuration(bar_num)
     }
 }
+
+impl Suspendable for PciRootConfiguration {}
 
 // Command send to pci root worker thread to add/remove device from pci root
 pub enum PciRootCommand {
@@ -121,6 +124,35 @@ impl PciRoot {
             },
             devices: BTreeMap::new(),
             pcie_cfg_mmio: None,
+        }
+    }
+
+    /// Get the root pci bus
+    pub fn get_root_bus(&self) -> Arc<Mutex<PciBus>> {
+        self.root_bus.clone()
+    }
+
+    /// Get the ACPI path to a PCI device
+    pub fn acpi_path(&self, address: &PciAddress) -> Option<String> {
+        if let Some(device) = self.devices.get(address) {
+            let path = self.root_bus.lock().path_to(address.bus);
+            if path.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "_SB_.{}.{}",
+                    path.iter()
+                        .map(|x| format!("PC{:02X}", x))
+                        .collect::<Vec<String>>()
+                        .join("."),
+                    match device.lock().is_bridge() {
+                        Some(bus_no) => format!("PC{:02X}", bus_no),
+                        None => format!("PE{:02X}", address.devfn()),
+                    }
+                ))
+            }
+        } else {
+            None
         }
     }
 
@@ -399,6 +431,8 @@ impl BusDevice for PciConfigIo {
     }
 }
 
+impl Suspendable for PciConfigIo {}
+
 /// Emulates PCI memory-mapped configuration access mechanism.
 pub struct PciConfigMmio {
     /// PCI root bridge.
@@ -464,9 +498,11 @@ impl BusDevice for PciConfigMmio {
     }
 }
 
+impl Suspendable for PciConfigMmio {}
+
 /// Inspired by PCI configuration space, CrosVM provides 2048 dword virtual registers (8KiB in
 /// total) for each PCI device. The guest can use these registers to exchange device-specific
-/// information with CrosVM. The first 4kB is trapped by crosvm and crosm supply these
+/// information with crosvm. The first 4kB is trapped by crosvm and crosvm supplies these
 /// register's emulation. The second 4KB is mapped into guest directly as shared memory, so
 /// when guest access this 4KB, vm exit doesn't happen.
 /// All these virtual registers from all PCI devices locate in a contiguous memory region.
@@ -538,3 +574,5 @@ impl BusDevice for PciVirtualConfigMmio {
             .virtual_config_space_write(address, register, value)
     }
 }
+
+impl Suspendable for PciVirtualConfigMmio {}

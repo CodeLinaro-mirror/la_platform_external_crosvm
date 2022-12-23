@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -186,7 +186,7 @@ impl Interrupter {
         self.usbsts.set_bits(USB_STS_EVENT_INTERRUPT);
         self.iman.set_bits(IMAN_INTERRUPT_PENDING);
         self.erdp.set_bits(ERDP_EVENT_HANDLER_BUSY);
-        self.interrupt_evt.write(1).map_err(Error::SendInterrupt)
+        self.interrupt_evt.signal().map_err(Error::SendInterrupt)
     }
 
     fn interrupt_if_needed(&mut self) -> Result<()> {

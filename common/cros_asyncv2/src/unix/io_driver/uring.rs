@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,7 +31,6 @@ use anyhow::Context;
 use base::error;
 use base::warn;
 use base::AsRawDescriptor;
-use base::EventFd;
 use base::FromRawDescriptor;
 use base::LayoutAllocation;
 use base::SafeDescriptor;
@@ -419,7 +418,7 @@ impl State {
 
     fn submit_waker(&mut self) -> anyhow::Result<()> {
         let entry = opcode::Read::new(
-            Fd(self.waker.0.as_raw_fd()),
+            Fd(self.waker.0.as_raw_descriptor()),
             ptr::null_mut(),
             size_of::<u64>() as u32,
         )
@@ -605,10 +604,10 @@ fn unpack_buffer_id(bid: u16) -> (usize, usize) {
     (alloc_idx, buffer_idx)
 }
 
-pub struct Waker(EventFd);
+pub struct Waker(base::Event);
 impl Waker {
     fn new() -> anyhow::Result<Waker> {
-        EventFd::new()
+        base::Event::new()
             .map(Waker)
             .map_err(|e| anyhow!(io::Error::from(e)))
     }
@@ -621,10 +620,7 @@ impl Waker {
     }
 
     pub fn wake(&self) -> anyhow::Result<()> {
-        self.0
-            .write(1)
-            .map(drop)
-            .map_err(|e| anyhow!(io::Error::from(e)))
+        self.0.signal().map_err(|e| anyhow!(io::Error::from(e)))
     }
 }
 

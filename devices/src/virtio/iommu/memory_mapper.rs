@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -99,7 +99,7 @@ impl ExportState {
     fn on_fault(&mut self) -> Option<EventAsync> {
         let ret = self.fault_resolved_event_external.take();
         if ret.is_some() {
-            self.fault_event.write(1).expect("failed to signal fault");
+            self.fault_event.signal().expect("failed to signal fault");
         }
         ret
     }
@@ -431,7 +431,7 @@ impl MemoryMapper for BasicMemoryMapper {
         if state.exported.is_empty() && state.fault_resolved_event_external.is_none() {
             state
                 .fault_resolved_event_internal
-                .write(1)
+                .signal()
                 .expect("failed to resolve fault");
         }
 

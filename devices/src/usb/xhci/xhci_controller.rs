@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -37,6 +37,7 @@ use crate::usb::xhci::xhci_regs::init_xhci_mmio_space_and_regs;
 use crate::usb::xhci::xhci_regs::XhciRegs;
 use crate::utils::FailHandle;
 use crate::IrqLevelEvent;
+use crate::Suspendable;
 
 const XHCI_BAR0_SIZE: u64 = 0x10000;
 
@@ -326,3 +327,5 @@ impl PciDevice for XhciController {
         self.init_when_forked();
     }
 }
+
+impl Suspendable for XhciController {}

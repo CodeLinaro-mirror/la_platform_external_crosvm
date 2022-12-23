@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,14 +12,12 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use argh::FromArgs;
-use async_task::Task;
 use base::clone_descriptor;
 use base::error;
 use base::warn;
 use base::Event;
 use base::FromRawDescriptor;
 use base::SafeDescriptor;
-use base::Timer;
 use base::Tube;
 use base::UnixSeqpacketListener;
 use base::UnlinkUnixSeqpacketListener;
@@ -27,10 +25,8 @@ use cros_async::AsyncWrapper;
 use cros_async::EventAsync;
 use cros_async::Executor;
 use cros_async::IoSourceExt;
-use cros_async::TimerAsync;
-use futures::future::select;
-use futures::future::Either;
-use futures::pin_mut;
+use futures::future::AbortHandle;
+use futures::future::Abortable;
 use hypervisor::ProtectionType;
 use sync::Mutex;
 use vm_memory::GuestMemory;
@@ -40,6 +36,8 @@ use vmm_vhost::message::VhostUserVirtioFeatures;
 use crate::virtio;
 use crate::virtio::gpu;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
+use crate::virtio::vhost::user::device::handler::VhostBackendReqConnection;
+use crate::virtio::vhost::user::device::handler::VhostBackendReqConnectionState;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
 use crate::virtio::vhost::user::device::listener::sys::VhostUserListener;
 use crate::virtio::vhost::user::device::listener::VhostUserListenerTrait;
@@ -50,7 +48,6 @@ use crate::virtio::GpuDisplayParameters;
 use crate::virtio::GpuParameters;
 use crate::virtio::Queue;
 use crate::virtio::QueueReader;
-use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
 use crate::virtio::VirtioDevice;
 
@@ -60,7 +57,7 @@ const MAX_VRING_LEN: u16 = gpu::QUEUE_SIZES[0];
 #[derive(Clone)]
 struct SharedReader {
     queue: Arc<Mutex<Queue>>,
-    doorbell: Arc<Mutex<Doorbell>>,
+    doorbell: Doorbell,
 }
 
 impl gpu::QueueReader for SharedReader {
@@ -81,42 +78,16 @@ async fn run_ctrl_queue(
     reader: SharedReader,
     mem: GuestMemory,
     kick_evt: EventAsync,
-    mut timer: TimerAsync,
     state: Rc<RefCell<gpu::Frontend>>,
 ) {
     loop {
-        if state.borrow().has_pending_fences() {
-            if let Err(e) = timer.reset(gpu::FENCE_POLL_INTERVAL, None) {
-                error!("Failed to reset fence timer: {}", e);
-                break;
-            }
-
-            let kick_value = kick_evt.next_val();
-            let timer_value = timer.next_val();
-            pin_mut!(kick_value);
-            pin_mut!(timer_value);
-            match select(kick_value, timer_value).await {
-                Either::Left((res, _)) => {
-                    if let Err(e) = res {
-                        error!("Failed to read kick event for ctrl queue: {}", e);
-                        break;
-                    }
-                }
-                Either::Right((res, _)) => {
-                    if let Err(e) = res {
-                        error!("Failed to read timer for ctrl queue: {}", e);
-                        break;
-                    }
-                }
-            }
-        } else if let Err(e) = kick_evt.next_val().await {
+        if let Err(e) = kick_evt.next_val().await {
             error!("Failed to read kick event for ctrl queue: {}", e);
             break;
         }
 
         let mut state = state.borrow_mut();
         let needs_interrupt = state.process_queue(&mem, &reader);
-        state.fence_poll();
 
         if needs_interrupt {
             reader.signal_used(&mem);
@@ -160,10 +131,6 @@ async fn run_resource_bridge(tube: Box<dyn IoSourceExt<Tube>>, state: Rc<RefCell
     }
 }
 
-fn cancel_task<R: 'static>(ex: &Executor, task: Task<R>) {
-    ex.spawn_local(task.cancel()).detach()
-}
-
 struct GpuBackend {
     ex: Executor,
     gpu: Rc<RefCell<Gpu>>,
@@ -171,9 +138,9 @@ struct GpuBackend {
     acked_protocol_features: u64,
     state: Option<Rc<RefCell<gpu::Frontend>>>,
     fence_state: Arc<Mutex<gpu::FenceState>>,
-    display_worker: Option<Task<()>>,
-    workers: [Option<Task<()>>; MAX_QUEUE_NUM],
-    mapper: Option<Box<dyn SharedMemoryMapper>>,
+    display_worker: Option<AbortHandle>,
+    workers: [Option<AbortHandle>; MAX_QUEUE_NUM],
+    backend_req_conn: VhostBackendReqConnectionState,
 }
 
 impl VhostUserBackend for GpuBackend {
@@ -202,6 +169,7 @@ impl VhostUserBackend for GpuBackend {
         VhostUserProtocolFeatures::CONFIG
             | VhostUserProtocolFeatures::SLAVE_REQ
             | VhostUserProtocolFeatures::MQ
+            | VhostUserProtocolFeatures::SHARED_MEMORY_REGIONS
     }
 
     fn ack_protocol_features(&mut self, features: u64) -> anyhow::Result<()> {
@@ -229,14 +197,14 @@ impl VhostUserBackend for GpuBackend {
     fn start_queue(
         &mut self,
         idx: usize,
-        queue: Queue,
+        mut queue: Queue,
         mem: GuestMemory,
-        doorbell: Arc<Mutex<Doorbell>>,
+        doorbell: Doorbell,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
-        if let Some(task) = self.workers.get_mut(idx).and_then(Option::take) {
+        if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
             warn!("Starting new queue handler without stopping old handler");
-            cancel_task(&self.ex, task);
+            handle.abort();
         }
 
         match idx {
@@ -246,6 +214,9 @@ impl VhostUserBackend for GpuBackend {
             1 => return Ok(()),
             _ => bail!("attempted to start unknown queue: {}", idx),
         }
+
+        // Enable any virtqueue features that were negotiated (like VIRTIO_RING_F_EVENT_IDX).
+        queue.ack_features(self.acked_features());
 
         let kick_evt = EventAsync::new(kick_evt, &self.ex)
             .context("failed to create EventAsync for kick_evt")?;
@@ -260,7 +231,18 @@ impl VhostUserBackend for GpuBackend {
         } else {
             let fence_handler =
                 gpu::create_fence_handler(mem.clone(), reader.clone(), self.fence_state.clone());
-            let mapper = self.mapper.take().context("missing mapper")?;
+
+            let mapper = {
+                match &mut self.backend_req_conn {
+                    VhostBackendReqConnectionState::Connected(request) => {
+                        request.take_shmem_mapper()?
+                    }
+                    VhostBackendReqConnectionState::NoConnection => {
+                        bail!("No backend request connection found")
+                    }
+                }
+            };
+
             let state = Rc::new(RefCell::new(
                 self.gpu
                     .borrow_mut()
@@ -271,7 +253,7 @@ impl VhostUserBackend for GpuBackend {
             state
         };
 
-        // Start handling the resource bridges if we haven't already.
+        // Start handling the resource bridges, if we haven't already.
         for bridge in self.resource_bridges.lock().drain(..) {
             let tube = self
                 .ex
@@ -296,34 +278,42 @@ impl VhostUserBackend for GpuBackend {
                         .context("failed to create async WaitContext")
                 })?;
 
-            let task = self.ex.spawn_local(run_display(display, state.clone()));
-            self.display_worker = Some(task);
+            let (handle, registration) = AbortHandle::new_pair();
+            self.ex
+                .spawn_local(Abortable::new(
+                    run_display(display, state.clone()),
+                    registration,
+                ))
+                .detach();
+            self.display_worker = Some(handle);
         }
 
-        let timer = Timer::new()
-            .context("failed to create Timer")
-            .and_then(|t| TimerAsync::new(t, &self.ex).context("failed to create TimerAsync"))?;
-        let task = self
-            .ex
-            .spawn_local(run_ctrl_queue(reader, mem, kick_evt, timer, state));
+        // Start handling the control queue.
+        let (handle, registration) = AbortHandle::new_pair();
+        self.ex
+            .spawn_local(Abortable::new(
+                run_ctrl_queue(reader, mem, kick_evt, state),
+                registration,
+            ))
+            .detach();
 
-        self.workers[idx] = Some(task);
+        self.workers[idx] = Some(handle);
         Ok(())
     }
 
     fn stop_queue(&mut self, idx: usize) {
-        if let Some(task) = self.workers.get_mut(idx).and_then(Option::take) {
-            cancel_task(&self.ex, task)
+        if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
+            handle.abort();
         }
     }
 
     fn reset(&mut self) {
-        if let Some(task) = self.display_worker.take() {
-            cancel_task(&self.ex, task)
+        if let Some(handle) = self.display_worker.take() {
+            handle.abort();
         }
 
-        for task in self.workers.iter_mut().filter_map(Option::take) {
-            cancel_task(&self.ex, task)
+        for queue_num in 0..self.max_queue_num() {
+            self.stop_queue(queue_num);
         }
     }
 
@@ -331,8 +321,12 @@ impl VhostUserBackend for GpuBackend {
         self.gpu.borrow().get_shared_memory_region()
     }
 
-    fn set_shared_memory_mapper(&mut self, mapper: Box<dyn SharedMemoryMapper>) {
-        self.mapper = Some(mapper);
+    fn set_backend_req_connection(&mut self, conn: VhostBackendReqConnection) {
+        if let VhostBackendReqConnectionState::Connected(_) = &self.backend_req_conn {
+            warn!("connection already established. overwriting");
+        }
+
+        self.backend_req_conn = VhostBackendReqConnectionState::Connected(conn);
     }
 }
 
@@ -434,6 +428,8 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     let (exit_evt_wrtube, _) =
         Tube::directional_pair().context("failed to create vm event tube")?;
 
+    let (gpu_control_tube, _) = Tube::pair().context("failed to create gpu control tube")?;
+
     let mut display_backends = vec![
         virtio::DisplayBackend::X(x_display),
         virtio::DisplayBackend::Stub,
@@ -445,9 +441,6 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     // These are only used when there is an input device.
     let event_devices = Vec::new();
 
-    // This is only used in single-process mode, even for the regular gpu device.
-    let map_request = Arc::new(Mutex::new(None));
-
     // The regular gpu device sets this to true when sandboxing is enabled. Assume that we
     // are always sandboxed.
     let external_blob = true;
@@ -458,12 +451,14 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
 
     let gpu = Rc::new(RefCell::new(Gpu::new(
         exit_evt_wrtube,
+        gpu_control_tube,
         Vec::new(), // resource_bridges, handled separately by us
         display_backends,
         &gpu_parameters,
+        #[cfg(feature = "virgl_renderer_next")]
+        /* render_server_fd= */
         None,
         event_devices,
-        map_request,
         external_blob,
         base_features,
         channels,
@@ -478,7 +473,7 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
         fence_state: Default::default(),
         display_worker: None,
         workers: Default::default(),
-        mapper: None,
+        backend_req_conn: VhostBackendReqConnectionState::NoConnection,
     });
     ex.run_until(listener.run_backend(backend, &ex))?
 }

@@ -13,6 +13,7 @@ use std::convert::TryInto;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
+use base::Protection;
 use bitflags::bitflags;
 use data_model::DataInit;
 
@@ -189,8 +190,10 @@ pub enum SlaveReq {
     FS_SYNC = 10,
     /// Virtio-fs draft: perform a read/write from an fd directly to GPA.
     FS_IO = 11,
+    /// Indicates a request to map GPU memory into a shared memory region.
+    GPU_MAP = 12,
     /// Upper bound of valid commands.
-    MAX_CMD = 12,
+    MAX_CMD = 13,
 }
 
 impl From<SlaveReq> for u32 {
@@ -434,6 +437,8 @@ bitflags! {
         const CONFIGURE_MEM_SLOTS = 0x0000_8000;
         /// Support reporting status.
         const STATUS = 0x0001_0000;
+        /// Support shared memory regions.
+        const SHARED_MEMORY_REGIONS = 0x0002_0000;
     }
 }
 
@@ -455,6 +460,15 @@ impl VhostUserU64 {
 }
 
 impl VhostUserMsgValidator for VhostUserU64 {}
+
+/// A generic message for empty message.
+#[derive(Default, Clone, Copy)]
+pub struct VhostUserEmptyMessage;
+
+// Safe because it has no data
+unsafe impl DataInit for VhostUserEmptyMessage {}
+
+impl VhostUserMsgValidator for VhostUserEmptyMessage {}
 
 /// Memory region descriptor for the SET_MEM_TABLE request.
 #[repr(packed)]
@@ -863,6 +877,28 @@ bitflags! {
     }
 }
 
+impl From<Protection> for VhostUserShmemMapMsgFlags {
+    fn from(prot: Protection) -> Self {
+        let mut flags = Self::EMPTY;
+        flags.set(Self::MAP_R, prot.allows(&Protection::read()));
+        flags.set(Self::MAP_W, prot.allows(&Protection::write()));
+        flags
+    }
+}
+
+impl From<VhostUserShmemMapMsgFlags> for Protection {
+    fn from(flags: VhostUserShmemMapMsgFlags) -> Self {
+        let mut prot = Protection::from(0);
+        if flags.contains(VhostUserShmemMapMsgFlags::MAP_R) {
+            prot = prot.set_read();
+        }
+        if flags.contains(VhostUserShmemMapMsgFlags::MAP_W) {
+            prot = prot.set_write();
+        }
+        prot
+    }
+}
+
 /// Slave request message to map a file into a shared memory region.
 #[repr(C, packed)]
 #[derive(Default, Copy, Clone)]
@@ -906,6 +942,59 @@ impl VhostUserShmemMapMsg {
             shm_offset,
             fd_offset,
             len,
+        }
+    }
+}
+
+/// Slave request message to map GPU memory into a shared memory region.
+#[repr(C, packed)]
+#[derive(Default, Copy, Clone)]
+pub struct VhostUserGpuMapMsg {
+    /// Shared memory region id.
+    pub shmid: u8,
+    padding: [u8; 7],
+    /// Offset into the shared memory region.
+    pub shm_offset: u64,
+    /// Size of region to map.
+    pub len: u64,
+    /// Index of the memory type.
+    pub memory_idx: u32,
+    /// Type of share handle.
+    pub handle_type: u32,
+    /// Device UUID
+    pub device_uuid: [u8; 16],
+    /// Driver UUID
+    pub driver_uuid: [u8; 16],
+}
+// Safe because it only has data and has no implicit padding.
+unsafe impl DataInit for VhostUserGpuMapMsg {}
+
+impl VhostUserMsgValidator for VhostUserGpuMapMsg {
+    fn is_valid(&self) -> bool {
+        self.len > 0
+    }
+}
+
+impl VhostUserGpuMapMsg {
+    /// New instance of VhostUserGpuMapMsg struct
+    pub fn new(
+        shmid: u8,
+        shm_offset: u64,
+        len: u64,
+        memory_idx: u32,
+        handle_type: u32,
+        device_uuid: [u8; 16],
+        driver_uuid: [u8; 16],
+    ) -> Self {
+        Self {
+            shmid,
+            padding: [0; 7],
+            shm_offset,
+            len,
+            memory_idx,
+            handle_type,
+            device_uuid,
+            driver_uuid,
         }
     }
 }
@@ -1101,8 +1190,9 @@ impl VhostSharedMemoryRegion {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::mem;
+
+    use super::*;
 
     #[test]
     fn check_master_request_code() {

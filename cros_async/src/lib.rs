@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -70,6 +70,7 @@ mod select;
 pub mod sync;
 pub mod sys;
 pub use sys::Executor;
+pub use sys::ExecutorKind;
 mod timer;
 mod waker;
 
@@ -110,14 +111,17 @@ pub use timer::TimerAsync;
 #[sorted]
 #[derive(ThisError, Debug)]
 pub enum Error {
-    /// Error from the FD executor.
-    #[cfg(unix)]
-    #[error("Failure in the FD executor: {0}")]
-    FdExecutor(sys::unix::fd_executor::Error),
+    /// Error from EventAsync
+    #[error("Failure in EventAsync: {0}")]
+    EventAsync(base::Error),
     /// Error from the handle executor.
     #[cfg(windows)]
     #[error("Failure in the handle executor: {0}")]
     HandleExecutor(sys::windows::handle_executor::Error),
+    /// Error from the polled(FD) source, which includes error from the FD executor.
+    #[cfg(unix)]
+    #[error("An error with a poll source: {0}")]
+    PollSource(sys::unix::poll_source::Error),
     /// Error from Timer.
     #[error("Failure in Timer: {0}")]
     Timer(base::Error),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2022 The Chromium OS Authors. All rights reserved.
+# Copyright 2022 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -251,7 +251,9 @@ def update_dry_runs(
             continue
 
         last_luci_message = luci_messages[-1]
-        if "This CL passed the CQ dry run" in last_luci_message:
+        if "This CL passed the CQ dry run" in last_luci_message or (
+            "This CL has passed the run" in last_luci_message
+        ):
             dry_run.review(
                 "I think this dry run was SUCCESSFUL.",
                 {
@@ -259,7 +261,9 @@ def update_dry_runs(
                     "Bot-Commit": 0,
                 },
             )
-        elif "Failed builds" in last_luci_message:
+        elif "Failed builds" in last_luci_message or (
+            "This CL has failed the run. Reason:" in last_luci_message
+        ):
             dry_run.review(
                 "I think this dry run FAILED.",
                 {

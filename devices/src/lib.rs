@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,9 +30,10 @@ mod serial;
 pub mod serial_device;
 #[cfg(feature = "tpm")]
 mod software_tpm;
+mod suspendable;
 mod sys;
 pub mod virtio;
-#[cfg(all(feature = "tpm", feature = "chromeos", target_arch = "x86_64"))]
+#[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
 mod vtpm_proxy;
 
 cfg_if::cfg_if! {
@@ -89,6 +90,7 @@ pub use self::pci::PciInterruptPin;
 pub use self::pci::PciRoot;
 pub use self::pci::PciRootCommand;
 pub use self::pci::PciVirtualConfigMmio;
+pub use self::pci::PreferredIrq;
 pub use self::pci::StubPciDevice;
 pub use self::pci::StubPciParameters;
 pub use self::pl030::Pl030;
@@ -100,8 +102,11 @@ pub use self::serial_device::SerialParameters;
 pub use self::serial_device::SerialType;
 #[cfg(feature = "tpm")]
 pub use self::software_tpm::SoftwareTpm;
+pub use self::suspendable::DeviceState;
+pub use self::suspendable::Suspendable;
+pub use self::virtio::VirtioMmioDevice;
 pub use self::virtio::VirtioPciDevice;
-#[cfg(all(feature = "tpm", feature = "chromeos", target_arch = "x86_64"))]
+#[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
 pub use self::vtpm_proxy::VtpmProxy;
 
 mod pflash;

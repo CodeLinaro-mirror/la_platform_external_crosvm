@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -80,6 +80,7 @@ use crate::pci::pci_device::Result as PciResult;
 use crate::pci::PciAddress;
 use crate::pci::PciDeviceError;
 use crate::vfio::VfioContainer;
+use crate::Suspendable;
 use crate::UnpinRequest;
 use crate::UnpinResponse;
 
@@ -603,7 +604,7 @@ impl PinWorker {
                     Token::Pin { index } => {
                         let offset = index * mem::size_of::<u64>() as usize;
                         if let Some(event) = self.ioevents.get(index) {
-                            if let Err(e) = event.read() {
+                            if let Err(e) = event.wait() {
                                 error!(
                                     "{}: failed reading event {}: {}",
                                     self.debug_label(),
@@ -1143,7 +1144,6 @@ impl CoIommuDev {
                 descriptor,
                 offset,
                 size: size as u64,
-                gpu_blob: false,
             },
             dest: VmMemoryDestination::GuestPhysicalAddress(gpa),
             prot,
@@ -1655,7 +1655,7 @@ impl Drop for CoIommuDev {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.pin_kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
-            if kill_evt.write(1).is_ok() {
+            if kill_evt.signal().is_ok() {
                 if let Some(worker_thread) = self.pin_thread.take() {
                     let _ = worker_thread.join();
                 }
@@ -1666,7 +1666,7 @@ impl Drop for CoIommuDev {
 
         if let Some(kill_evt) = self.unpin_kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
-            if kill_evt.write(1).is_ok() {
+            if kill_evt.signal().is_ok() {
                 if let Some(worker_thread) = self.unpin_thread.take() {
                     let _ = worker_thread.join();
                 }
@@ -1676,3 +1676,5 @@ impl Drop for CoIommuDev {
         }
     }
 }
+
+impl Suspendable for CoIommuDev {}

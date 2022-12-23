@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@ use std::time::Instant;
 use sync::Mutex;
 
 use super::Event;
-use super::EventReadResult;
+use super::EventWaitResult;
 use super::FakeClock;
 use super::RawDescriptor;
 use super::Result;
@@ -88,8 +88,8 @@ impl FakeTimer {
         }
     }
 
-    /// Sets the timer to expire after `dur`.  If `interval` is not `None` it represents
-    /// the period for repeated expirations after the initial expiration.  Otherwise
+    /// Sets the timer to expire after `dur`.  If `interval` is not `None` and non-zero it
+    /// represents the period for repeated expirations after the initial expiration.  Otherwise
     /// the timer will expire just once.  Cancels any existing duration and repeating interval.
     pub fn reset(&mut self, dur: Duration, interval: Option<Duration>) -> Result<()> {
         let mut guard = self.clock.lock();
@@ -113,14 +113,14 @@ impl FakeTimer {
             if let Some(timeout) = timeout {
                 let elapsed = Instant::now() - wait_start;
                 if let Some(remaining) = elapsed.checked_sub(timeout) {
-                    if let EventReadResult::Timeout = self.event.read_timeout(remaining)? {
+                    if let EventWaitResult::TimedOut = self.event.wait_timeout(remaining)? {
                         return Ok(WaitResult::Timeout);
                     }
                 } else {
                     return Ok(WaitResult::Timeout);
                 }
             } else {
-                self.event.read()?;
+                self.event.wait()?;
             }
 
             if let Some(deadline_ns) = &mut self.deadline_ns {

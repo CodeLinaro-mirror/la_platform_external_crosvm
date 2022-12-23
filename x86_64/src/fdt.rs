@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,8 +6,8 @@ use std::fs::File;
 use std::mem;
 
 use arch::android::create_android_fdt;
-use arch::fdt::Error;
-use arch::fdt::FdtWriter;
+use cros_fdt::Error;
+use cros_fdt::FdtWriter;
 use data_model::DataInit;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -68,9 +68,10 @@ pub fn create_fdt(
     assert!(fdt_data_size as u64 <= X86_64_FDT_MAX_SIZE);
 
     let fdt_address = GuestAddress(fdt_load_offset);
-    guest_mem
-        .checked_offset(fdt_address, fdt_data_size as u64)
-        .ok_or(Error::FdtGuestMemoryWriteError)?;
+    if !guest_mem.is_valid_range(fdt_address, fdt_data_size as u64) {
+        return Err(Error::FdtGuestMemoryWriteError);
+    }
+
     guest_mem
         .write_obj_at_addr(hdr, fdt_address)
         .map_err(|_| Error::FdtGuestMemoryWriteError)?;

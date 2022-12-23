@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,7 +29,7 @@ use base::AsRawDescriptor;
 use base::Error;
 use base::Event;
 use base::EventExt;
-use base::EventReadResult;
+use base::EventWaitResult;
 use completion_handler::WinAudioActivateAudioInterfaceCompletionHandler;
 use completion_handler::ACTIVATE_AUDIO_INTERFACE_COMPLETION_EVENT;
 use metrics::event_details_proto::RecordDetails;
@@ -118,7 +118,7 @@ impl WinAudio {
 impl StreamSource for WinAudio {
     // Returns a stream control and a buffer generator object. The stream control object is not used.
     // The buffer generator object is a wrapper around WASAPI's objects that will create a buffer for
-    // CrosVM to copy audio bytes into.
+    // crosvm to copy audio bytes into.
     fn new_playback_stream(
         &mut self,
         num_channels: usize,
@@ -215,7 +215,7 @@ impl PlaybackBufferStream for WinAudioRenderer {
     }
 }
 
-// Implementation of buffer generator object. Used to get a buffer from WASAPI for CrosVM to copy audio
+// Implementation of buffer generator object. Used to get a buffer from WASAPI for crosvm to copy audio
 // bytes from the guest memory into.
 pub(crate) struct DeviceRenderer {
     audio_render_client: ComPtr<IAudioRenderClient>,
@@ -265,7 +265,7 @@ impl DeviceRenderer {
             "Audio Client Initialize() failed."
         )?;
 
-        let ready_to_read_event = Event::new_with_manual_reset(false).unwrap();
+        let ready_to_read_event = Event::new_auto_reset().unwrap();
         // Safe because `ready_to_read_event` will be initialized and also it has the same
         // lifetime as `audio_client` because they are owned by DeviceRenderer on return
         let hr = unsafe { audio_client.SetEventHandle(ready_to_read_event.as_raw_descriptor()) };
@@ -536,7 +536,7 @@ impl DeviceRenderer {
         // Safe because `factory` is guaranteed to be initialized.
         let factory = unsafe { ComPtr::from_raw(factory) };
 
-        factory.cast().map_err(|hr| RenderError::from(hr))
+        factory.cast().map_err(RenderError::from)
     }
 
     // Enables automatic audio device routing (only will work for Windows 10, version 1607+).
@@ -629,8 +629,8 @@ impl DeviceRenderer {
             .read_timeout(ACTIVATE_AUDIO_EVENT_TIMEOUT)
         {
             Ok(event_result) => match event_result {
-                EventReadResult::Count(_) => {}
-                EventReadResult::Timeout => {
+                EventWaitResult::Signaled => {}
+                EventWaitResult::TimedOut => {
                     return Err(RenderError::ActivateAudioEventTimeoutError);
                 }
             },
@@ -753,7 +753,7 @@ impl DeviceRenderer {
         };
 
         PlaybackBuffer::new(frame_size_bytes, buffer_slice, self)
-            .map_err(|e| RenderError::PlaybackBuffer(e))
+            .map_err(RenderError::PlaybackBuffer)
     }
 }
 
@@ -887,7 +887,7 @@ mod tests {
         let _shared = SERIALIZE_LOCK.lock();
         let _co_init = SafeCoInit::new_coinitialize();
         let win_audio_renderer_result = DeviceRenderer::new(2, 48000, 480);
-        assert!(!win_audio_renderer_result.is_err());
+        assert!(win_audio_renderer_result.is_ok());
         let win_audio_renderer = win_audio_renderer_result.unwrap();
         assert_eq!(
             win_audio_renderer

@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -714,7 +714,7 @@ impl SliceParameterBufferVP9 {
         slice_data_size: u32,
         slice_data_offset: u32,
         slice_data_flag: u32,
-        seg_param: [&SegmentParameterVP9; 8usize],
+        seg_param: [SegmentParameterVP9; 8usize],
     ) -> Self {
         let seg_param = seg_param.map(|param| param.0);
 
@@ -757,8 +757,8 @@ impl SliceParameterBufferH264 {
         disable_deblocking_filter_idc: u8,
         slice_alpha_c0_offset_div2: i8,
         slice_beta_offset_div2: i8,
-        ref_pic_list_0: [&PictureH264; 32usize],
-        ref_pic_list_1: [&PictureH264; 32usize],
+        ref_pic_list_0: [PictureH264; 32usize],
+        ref_pic_list_1: [PictureH264; 32usize],
         luma_log2_weight_denom: u8,
         chroma_log2_weight_denom: u8,
         luma_weight_l0_flag: u8,

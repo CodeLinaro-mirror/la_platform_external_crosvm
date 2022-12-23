@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -25,10 +25,10 @@ use base::info;
 use base::AsRawDescriptor;
 use base::Descriptor;
 use base::Event;
+use base::EventExt;
 use base::MappedRegion;
 use base::MemoryMappingBuilder;
 use base::MemoryMappingBuilderUnix;
-use base::Protection;
 use base::RawDescriptor;
 use base::SafeDescriptor;
 use cros_async::EventAsync;
@@ -66,7 +66,7 @@ impl VfioSender {
     fn send(&self, buf: Vec<u8>) -> Result<()> {
         self.sender.send(buf)?;
         // Increment the event counter as we sent one buffer.
-        self.evt.write(1).context("failed to signal event")
+        self.evt.write_count(1).context("failed to signal event")
     }
 }
 
@@ -114,8 +114,8 @@ impl VfioReceiver {
             self.offset = 0;
             // Decrement the event counter as we received one buffer.
             self.evt
-                .read()
-                .and_then(|c| self.evt.write(c - 1))
+                .read_count()
+                .and_then(|c| self.evt.write_count(c - 1))
                 .context("failed to decrease event counter")
                 .map_err(RecvIntoBufsError::Fatal)?;
         }
@@ -546,7 +546,7 @@ impl BackendChannelInner {
                 let mapping = MemoryMappingBuilder::new(msg.len as usize)
                     .from_descriptor(&file)
                     .offset(msg.fd_offset)
-                    .protection(Protection::from(msg.flags.bits() as libc::c_int))
+                    .protection(msg.flags.into())
                     .build()
                     .context("failed to map file")?;
 

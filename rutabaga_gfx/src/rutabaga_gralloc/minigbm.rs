@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,7 +18,6 @@ use std::sync::Arc;
 use base::AsRawDescriptor;
 use base::Error as BaseError;
 use base::FromRawDescriptor;
-use base::RawDescriptor;
 
 use crate::rutabaga_gralloc::formats::DrmFormat;
 use crate::rutabaga_gralloc::gralloc::Gralloc;
@@ -29,7 +28,7 @@ use crate::rutabaga_gralloc::rendernode;
 use crate::rutabaga_utils::*;
 
 struct MinigbmDeviceInner {
-    fd: File,
+    _fd: File,
     gbm: *mut gbm_device,
 }
 
@@ -75,7 +74,7 @@ impl MinigbmDevice {
         let device_name: &str = c_str.to_str()?;
 
         Ok(Box::new(MinigbmDevice {
-            minigbm_device: Arc::new(MinigbmDeviceInner { fd, gbm }),
+            minigbm_device: Arc::new(MinigbmDeviceInner { _fd: fd, gbm }),
             last_buffer: None,
             device_name,
         }))
@@ -115,13 +114,7 @@ impl Gralloc for MinigbmDevice {
         // perhaps minigbm will be deprecated by then.  Other display drivers (rockchip, mediatek,
         // amdgpu) typically use write combine memory.  We can also consider use flags too if this
         // heuristic proves insufficient.
-        //
-        // Existing qcom devices use a mix of cached and WC buffers.  We don't *yet* have a good
-        // way to differentiate, but https://patchwork.freedesktop.org/series/106847/ is a proposal
-        // to fix that.  But existing devices without the FWB feature, the resulting mapping attrs
-        // are the more restrictive of the combination for S1 and S2 mappings.  So if we map as
-        // cached in S2 pgtables, but S1 has WC, then the result will be WC.
-        if self.device_name == "i915" || self.device_name == "msm" {
+        if self.device_name == "i915" {
             reqs.map_info = RUTABAGA_MAP_CACHE_CACHED;
         } else {
             reqs.map_info = RUTABAGA_MAP_CACHE_WC;

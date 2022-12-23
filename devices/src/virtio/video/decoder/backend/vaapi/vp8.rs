@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -472,7 +472,7 @@ impl Vp8Codec {
     fn decode_frame<T: AsRef<[u8]>>(
         &mut self,
         frame: vp8::Frame<T>,
-        bitstream_id: i32,
+        timestamp: u64,
     ) -> Result<DecodedFrameHandle> {
         let context = self.metadata_state.context()?;
 
@@ -501,7 +501,7 @@ impl Vp8Codec {
         let context = self.metadata_state.context()?;
         let surface = self.metadata_state.get_surface()?;
 
-        let mut picture = Picture::new(u32::try_from(bitstream_id)?, Rc::clone(&context), surface);
+        let mut picture = Picture::new(timestamp, Rc::clone(&context), surface);
 
         // Add buffers with the parsed data.
         picture.add_buffer(iq_buffer);
@@ -559,7 +559,7 @@ impl Vp8Codec {
     fn handle_frame<T: AsRef<[u8]>>(
         &mut self,
         frame: vp8::Frame<T>,
-        bitstream_id: i32,
+        timestamp: u64,
     ) -> Result<Vec<DecodedFrameHandle>> {
         if self.wait_keyframe {
             if !frame.header.key_frame() {
@@ -579,14 +579,14 @@ impl Vp8Codec {
             self.check_stream_params(&frame.header)?;
         }
 
-        Ok(vec![(self.decode_frame(frame, bitstream_id)?)])
+        Ok(vec![(self.decode_frame(frame, timestamp)?)])
     }
 }
 
 impl VaapiCodec for Vp8Codec {
     fn decode(
         &mut self,
-        bitstream_id: i32,
+        timestamp: u64,
         resource: &GuestResourceHandle,
         offset: u32,
         bytes_used: u32,
@@ -603,12 +603,14 @@ impl VaapiCodec for Vp8Codec {
             .parse_frame(bitstream_map.as_ref())
             .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?;
 
-        self.handle_frame(frame, bitstream_id)
+        self.handle_frame(frame, timestamp)
     }
 
-    fn flush(&mut self) -> anyhow::Result<()> {
+    fn flush(&mut self) -> Result<Vec<DecodedFrameHandle>> {
         self.wait_keyframe = true;
-        Ok(())
+
+        // VP8 has no internal picture queue, so simply return nothing here.
+        Ok(vec![])
     }
 
     fn va_image_fmt(&self) -> &Option<libva::VAImageFormat> {
@@ -766,7 +768,8 @@ mod tests {
         while let Some(packet) = read_ivf_packet(&mut cursor) {
             session
                 .decode(
-                    frame_num,
+                    0,
+                    frame_num as u64,
                     build_resource(packet.as_ref()),
                     0,
                     packet.len() as u32,
@@ -838,14 +841,24 @@ mod tests {
                                     FramePlane {
                                         offset: 0,
                                         stride: TEST_25_FPS_VP8_STREAM_WIDTH as usize,
+                                        size: (TEST_25_FPS_VP8_STREAM_WIDTH
+                                            * TEST_25_FPS_VP8_STREAM_HEIGHT)
+                                            as usize,
                                     },
                                     FramePlane {
                                         offset: (TEST_25_FPS_VP8_STREAM_WIDTH
                                             * TEST_25_FPS_VP8_STREAM_HEIGHT)
                                             as usize,
                                         stride: TEST_25_FPS_VP8_STREAM_WIDTH as usize,
+                                        size: (TEST_25_FPS_VP8_STREAM_WIDTH
+                                            * TEST_25_FPS_VP8_STREAM_HEIGHT
+                                            / 2)
+                                            as usize,
                                     },
                                 ],
+                                width: TEST_25_FPS_VP8_STREAM_WIDTH as u32,
+                                height: TEST_25_FPS_VP8_STREAM_HEIGHT as u32,
+                                format: Format::NV12,
                             },
                         )
                         .unwrap();
@@ -1177,7 +1190,7 @@ mod tests {
 
             // Assume for the purposes of this test that the output buffer can
             // be reused, otherwise we are going to run out
-            let _ = session.reuse_output_buffer(frame_num % NUM_BUFS as i32);
+            let _ = session.reuse_output_buffer(frame_num as i32 % NUM_BUFS as i32);
             frame_num += 1;
         }
     }

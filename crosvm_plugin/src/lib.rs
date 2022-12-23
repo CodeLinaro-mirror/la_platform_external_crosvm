@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -1385,19 +1385,6 @@ fn to_crosvm_rc<T>(r: result::Result<T, c_int>) -> c_int {
     match r {
         Ok(_) => 0,
         Err(e) => -e,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn crosvm_get_render_server_fd() -> c_int {
-    let fd = match env::var(CROSVM_GPU_SERVER_FD_ENV) {
-        Ok(v) => v,
-        _ => return -EINVAL,
-    };
-
-    match fd.parse() {
-        Ok(v) if v >= 0 => v,
-        _ => -EINVAL,
     }
 }
 

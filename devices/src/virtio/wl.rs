@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -529,7 +529,6 @@ impl VmRequester {
             descriptor,
             offset: 0,
             size,
-            gpu_blob: false,
         };
         let alloc = Alloc::Anon(state.next_alloc);
         state.next_alloc += 1;
@@ -1307,11 +1306,11 @@ impl WlState {
     }
 
     #[cfg(feature = "gpu")]
-    fn get_info(&mut self, request: ResourceRequest) -> Option<File> {
+    fn get_info(&mut self, request: ResourceRequest) -> Option<SafeDescriptor> {
         let sock = self.resource_bridge.as_ref().unwrap();
         match get_resource_info(sock, request) {
-            Ok(ResourceInfo::Buffer(BufferInfo { file, .. })) => Some(file),
-            Ok(ResourceInfo::Fence { file }) => Some(file),
+            Ok(ResourceInfo::Buffer(BufferInfo { handle, .. })) => Some(handle),
+            Ok(ResourceInfo::Fence { handle }) => Some(handle),
             Err(ResourceBridgeError::InvalidResource(req)) => {
                 warn!("attempt to send non-existent gpu resource {}", req);
                 None
@@ -1385,9 +1384,9 @@ impl WlState {
                     match self.get_info(ResourceRequest::GetBuffer {
                         id: send_vfd_id.id().to_native(),
                     }) {
-                        Some(file) => {
-                            *descriptor = file.as_raw_descriptor();
-                            bridged_files.push(file);
+                        Some(handle) => {
+                            *descriptor = handle.as_raw_descriptor();
+                            bridged_files.push(handle.into());
                         }
                         None => return Ok(WlResp::InvalidId),
                     }
@@ -1397,9 +1396,9 @@ impl WlState {
                     match self.get_info(ResourceRequest::GetFence {
                         seqno: send_vfd_id.seqno().to_native(),
                     }) {
-                        Some(file) => {
-                            *descriptor = file.as_raw_descriptor();
-                            bridged_files.push(file);
+                        Some(handle) => {
+                            *descriptor = handle.as_raw_descriptor();
+                            bridged_files.push(handle.into());
                         }
                         None => return Ok(WlResp::InvalidId),
                     }
@@ -1412,13 +1411,7 @@ impl WlState {
                         // If the guest is sending a signaled fence, we know a fence
                         // with seqno 0 must already be signaled.
                         match self.get_info(ResourceRequest::GetFence { seqno: 0 }) {
-                            Some(file) => {
-                                // Safe since get_info returned a valid File.
-                                let safe_descriptor = unsafe {
-                                    SafeDescriptor::from_raw_descriptor(file.into_raw_descriptor())
-                                };
-                                self.signaled_fence = Some(safe_descriptor)
-                            }
+                            Some(handle) => self.signaled_fence = Some(handle),
                             None => return Ok(WlResp::InvalidId),
                         }
                     }
@@ -1894,7 +1887,7 @@ impl Worker {
             for event in &events {
                 match event.token {
                     Token::InQueue => {
-                        let _ = in_queue_evt.read();
+                        let _ = in_queue_evt.wait();
                         if !watching_state_ctx {
                             if let Err(e) =
                                 wait_ctx.modify(&self.state.wait_ctx, EventType::Read, Token::State)
@@ -1906,7 +1899,7 @@ impl Worker {
                         }
                     }
                     Token::OutQueue => {
-                        let _ = out_queue_evt.read();
+                        let _ = out_queue_evt.wait();
                         process_out_queue(
                             &self.interrupt,
                             &mut self.out_queue,
@@ -1985,7 +1978,7 @@ impl Drop for Wl {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
+            let _ = kill_evt.signal();
         }
 
         if let Some(worker_thread) = self.worker_thread.take() {

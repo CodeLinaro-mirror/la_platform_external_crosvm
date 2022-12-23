@@ -2,26 +2,30 @@ diff --git a/disk/Android.bp b/disk/Android.bp
 index e3468dba..41e84a72 100644
 --- a/disk/Android.bp
 +++ b/disk/Android.bp
-@@ -51,15 +51,22 @@ rust_library {
+@@ -52,17 +52,26 @@ rust_library {
      cargo_pkg_version: "0.1.0",
      srcs: ["src/disk.rs"],
      edition: "2021",
 +    features: [
-+        "composite-disk",  // Added manually
++        "android-sparse", // Added manually
++        "composite-disk", // Added manually
++        "qcow",
 +    ],
      rustlibs: [
          "libbase_rust",
-+        "libcrc32fast",  // Added manually
          "libcfg_if",
++        "libcrc32fast", // Added manually
          "libcros_async",
          "libdata_model",
          "libfutures",
          "liblibc",
-+        "libprotobuf",  // Added manually
-+        "libprotos",  // Added manually
++        "libprotobuf", // Added manually
++        "libprotos", // Added manually
          "libserde",
+         "libsync_rust",
          "libtempfile",
          "libthiserror",
-+        "libuuid",  // Added manually
++        "libuuid", // Added manually
          "libvm_memory",
      ],
+     proc_macros: [

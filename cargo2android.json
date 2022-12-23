@@ -1,10 +1,10 @@
 {
-  "add-module-block": "cargo2android_module.bp",
+  "add-module-block": "cargo2android_module.bp.patch",
   "add-toplevel-block": "cargo2android_defaults.bp",
   "dependencies": true,
   "dependency-blocklist": ["aarch64", "x86_64"],
   "device": true,
-  "features": "audio,balloon,usb",
+  "features": "audio,balloon,gdb,qcow,usb",
   "global_defaults": "crosvm_defaults",
   "no_presubmit": true,
   "no-pkg-vers": true,

@@ -1,6 +1,7 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 use pkg_config::Config;
 
 fn main() {
@@ -9,17 +10,17 @@ fn main() {
         return;
     }
 
-    // Match all ffmpeg 4.4 versions with which our generated bindings are compatible.
+    // Match all ffmpeg 5.0 versions with which our generated bindings are compatible.
     Config::new()
-        .range_version("58".."59")
+        .range_version("59".."60")
         .probe("libavcodec")
         .unwrap();
     Config::new()
-        .range_version("56".."57")
+        .range_version("57".."58")
         .probe("libavutil")
         .unwrap();
     Config::new()
-        .range_version("5".."6")
+        .range_version("6".."7")
         .probe("libswscale")
         .unwrap();
 }

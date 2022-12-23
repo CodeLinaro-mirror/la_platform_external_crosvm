@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,8 +16,10 @@ use base::ioctl_iowr_nr;
 pub mod vhost;
 pub mod virtio_config;
 pub mod virtio_ids;
+pub mod virtio_mmio;
 pub mod virtio_net;
 pub mod virtio_ring;
+pub use crate::virtio_mmio::*;
 
 pub const VHOST: ::std::os::raw::c_uint = 0xaf;
 

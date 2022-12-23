@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -439,7 +439,7 @@ mod test {
     use std::time::Instant;
 
     use base::AsRawDescriptor;
-    use base::EventFd;
+    use base::EventExt;
 
     use super::*;
     use crate::with_deadline;
@@ -504,7 +504,7 @@ mod test {
             .run_until(async {
                 let (s1, s2) = SeqPacket::pair().expect("failed to create socket pair");
 
-                let evt = EventFd::new().expect("failed to create eventfd");
+                let evt = base::Event::new().expect("failed to create eventfd");
                 let write_count = s1
                     .send_with_fds(&[], &[evt.as_raw_descriptor()])
                     .await
@@ -529,7 +529,7 @@ mod test {
                 file.write_all(&1203u64.to_ne_bytes())
                     .expect("failed to write to sent fd");
 
-                assert_eq!(evt.read().expect("failed to read from eventfd"), 1203);
+                assert_eq!(evt.read_count().expect("failed to read from eventfd"), 1203);
             })
             .unwrap();
     }
@@ -540,7 +540,7 @@ mod test {
             .run_until(async {
                 let (s1, s2) = SeqPacket::pair().expect("failed to create socket pair");
 
-                let evt = EventFd::new().expect("failed to create eventfd");
+                let evt = base::Event::new().expect("failed to create eventfd");
                 let (res, _) = s1
                     .send_iobuf_with_fds(OwnedIoBuf::new(vec![]), &[evt.as_raw_descriptor()])
                     .await;
@@ -564,7 +564,7 @@ mod test {
                 file.write_all(&1203u64.to_ne_bytes())
                     .expect("failed to write to sent fd");
 
-                assert_eq!(evt.read().expect("failed to read from eventfd"), 1203);
+                assert_eq!(evt.read_count().expect("failed to read from eventfd"), 1203);
             })
             .unwrap();
     }
@@ -575,7 +575,7 @@ mod test {
             .run_until(async {
                 let (s1, s2) = SeqPacket::pair().expect("failed to create socket pair");
 
-                let evt = EventFd::new().expect("failed to create eventfd");
+                let evt = base::Event::new().expect("failed to create eventfd");
                 let write_count = s1
                     .send_with_fds(&[237], &[evt.as_raw_descriptor()])
                     .await
@@ -603,7 +603,7 @@ mod test {
                 file.write_all(&1203u64.to_ne_bytes())
                     .expect("failed to write to sent fd");
 
-                assert_eq!(evt.read().expect("failed to read from eventfd"), 1203);
+                assert_eq!(evt.read_count().expect("failed to read from eventfd"), 1203);
             })
             .unwrap();
     }
@@ -614,7 +614,7 @@ mod test {
             .run_until(async {
                 let (s1, s2) = SeqPacket::pair().expect("failed to create socket pair");
 
-                let evt = EventFd::new().expect("failed to create eventfd");
+                let evt = base::Event::new().expect("failed to create eventfd");
                 let (res, _) = s1
                     .send_iobuf_with_fds(OwnedIoBuf::new(vec![237]), &[evt.as_raw_descriptor()])
                     .await;
@@ -640,7 +640,7 @@ mod test {
                 file.write_all(&1203u64.to_ne_bytes())
                     .expect("failed to write to sent fd");
 
-                assert_eq!(evt.read().expect("failed to read from eventfd"), 1203);
+                assert_eq!(evt.read_count().expect("failed to read from eventfd"), 1203);
             })
             .unwrap();
     }

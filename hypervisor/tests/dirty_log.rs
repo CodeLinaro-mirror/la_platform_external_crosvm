@@ -1,10 +1,11 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // TODO(b/237714823): Currently, only kvm is enabled for this test once LUCI can run windows.
 #![cfg(unix)]
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#![cfg(any(feature = "whpx", feature = "gvm", feature = "haxm", unix))]
 
 use base::MemoryMappingBuilder;
 use base::SharedMemory;
@@ -18,8 +19,7 @@ fn test_kvm_dirty_log() {
     use hypervisor::kvm::*;
     test_dirty_log(|guest_mem| {
         let kvm = Kvm::new().expect("failed to create kvm");
-        let vm =
-            KvmVm::new(&kvm, guest_mem, ProtectionType::Unprotected).expect("failed to create vm");
+        let vm = KvmVm::new(&kvm, guest_mem, Default::default()).expect("failed to create vm");
         (kvm, vm)
     });
 }

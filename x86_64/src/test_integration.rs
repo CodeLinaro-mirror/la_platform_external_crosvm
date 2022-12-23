@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -129,7 +129,7 @@ where
 
     let devices = vec![];
 
-    let (pci, pci_irqs, _pid_debug_label_map) = arch::generate_pci_root(
+    let (pci, pci_irqs, _pid_debug_label_map, _amls) = arch::generate_pci_root(
         devices,
         &mut irq_chip,
         mmio_bus.clone(),
@@ -137,11 +137,15 @@ where
         &mut resources,
         &mut vm,
         4,
+        None,
     )
     .unwrap();
     let pci = Arc::new(Mutex::new(pci));
     let (pcibus_exit_evt_wrtube, _) = Tube::directional_pair().unwrap();
-    let pci_bus = Arc::new(Mutex::new(PciConfigIo::new(pci, pcibus_exit_evt_wrtube)));
+    let pci_bus = Arc::new(Mutex::new(PciConfigIo::new(
+        pci.clone(),
+        pcibus_exit_evt_wrtube,
+    )));
     io_bus.insert(pci_bus, 0xcf8, 0x8).unwrap();
 
     X8664arch::setup_legacy_i8042_device(
@@ -187,6 +191,7 @@ where
     let suspend_evt = Event::new().unwrap();
     let mut resume_notify_devices = Vec::new();
     let acpi_dev_resource = X8664arch::setup_acpi_devices(
+        pci,
         &guest_mem,
         &io_bus,
         &mut resources,
@@ -222,7 +227,7 @@ where
 
     // Note that this puts the mptable at 0x9FC00 in guest physical memory.
     mptable::setup_mptable(&guest_mem, 1, &pci_irqs).expect("failed to setup mptable");
-    smbios::setup_smbios(&guest_mem, None).expect("failed to setup smbios");
+    smbios::setup_smbios(&guest_mem, None, &Vec::new()).expect("failed to setup smbios");
 
     let mut apic_ids = Vec::new();
     acpi::create_acpi_tables(

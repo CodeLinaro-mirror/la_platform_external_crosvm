@@ -1,18 +1,23 @@
 // Copyright (C) 2019 Alibaba Cloud Computing. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use base::{AsRawDescriptor, RawDescriptor};
 use std::fs::File;
 use std::mem;
 use std::slice;
 use std::sync::Mutex;
 
+use base::AsRawDescriptor;
+use base::RawDescriptor;
 use data_model::DataInit;
 
-use super::connection::{Endpoint, EndpointExt};
-use super::message::*;
-use super::{take_single_file, Error, Result};
-use crate::{MasterReqEndpoint, SystemStream};
+use crate::connection::Endpoint;
+use crate::connection::EndpointExt;
+use crate::message::*;
+use crate::take_single_file;
+use crate::Error;
+use crate::MasterReqEndpoint;
+use crate::Result;
+use crate::SystemStream;
 
 #[derive(PartialEq, Eq, Debug)]
 /// Vhost-user protocol variants used for the communication.
@@ -407,9 +412,6 @@ pub struct SlaveReqHandler<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> 
     acked_virtio_features: u64,
     protocol_features: VhostUserProtocolFeatures,
     acked_protocol_features: u64,
-
-    // whether the endpoint has encountered any failure
-    error: Option<i32>,
 }
 
 impl<S: VhostUserSlaveReqHandler> SlaveReqHandler<S, MasterReqEndpoint> {
@@ -435,22 +437,7 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> 
             acked_virtio_features: 0,
             protocol_features: VhostUserProtocolFeatures::empty(),
             acked_protocol_features: 0,
-            error: None,
         }
-    }
-
-    /// Create a new vhost-user slave endpoint.
-    ///
-    /// # Arguments
-    /// * - `path` - path of Unix domain socket listener to connect to
-    /// * - `backend` - handler for requests from the master to the slave
-    pub fn connect(path: &str, backend: S) -> Result<Self> {
-        Ok(Self::new(Endpoint::<MasterReq>::connect(path)?, backend))
-    }
-
-    /// Mark endpoint as failed with specified error code.
-    pub fn set_failed(&mut self, error: i32) {
-        self.error = Some(error);
     }
 
     /// Main entrance to request from the communication channel.
@@ -467,9 +454,6 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> 
     /// * - `Err(InvalidMessage)`: the vmm sent a illegal message.
     /// * - other errors: failed to handle a request.
     pub fn handle_request(&mut self) -> Result<()> {
-        // Return error if the endpoint is already in failed state.
-        self.check_state()?;
-
         // The underlying communication channel is a Unix domain socket in
         // stream mode, and recvmsg() is a little tricky here. To successfully
         // receive attached file descriptors, we need to receive messages and
@@ -876,13 +860,6 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> 
         self.slave_req_helper.handle_vring_fd_request(buf, files)
     }
 
-    fn check_state(&self) -> Result<()> {
-        match self.error {
-            Some(e) => Err(Error::SocketBroken(std::io::Error::from_raw_os_error(e))),
-            None => Ok(()),
-        }
-    }
-
     fn check_request_size(
         &self,
         hdr: &VhostUserMsgHeader<MasterReq>,
@@ -961,18 +938,17 @@ mod tests {
     use base::INVALID_DESCRIPTOR;
 
     use super::*;
-    use crate::{dummy_slave::DummySlaveReqHandler, MasterReqEndpoint, SystemStream};
+    use crate::dummy_slave::DummySlaveReqHandler;
+    use crate::MasterReqEndpoint;
+    use crate::SystemStream;
 
     #[test]
     fn test_slave_req_handler_new() {
         let (p1, _p2) = SystemStream::pair().unwrap();
         let endpoint = MasterReqEndpoint::from(p1);
         let backend = Mutex::new(DummySlaveReqHandler::new());
-        let mut handler = SlaveReqHandler::new(endpoint, backend);
+        let handler = SlaveReqHandler::new(endpoint, backend);
 
-        handler.check_state().unwrap();
-        handler.set_failed(libc::EAGAIN);
-        handler.check_state().unwrap_err();
         assert!(handler.as_raw_descriptor() != INVALID_DESCRIPTOR);
     }
 }

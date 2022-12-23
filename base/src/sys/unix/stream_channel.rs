@@ -1,4 +1,4 @@
-// Copyright 2022 The ChromiumOS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,6 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use libc::c_void;
-
 use serde::Deserialize;
 use serde::Serialize;
 

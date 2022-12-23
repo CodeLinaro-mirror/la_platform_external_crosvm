@@ -1,6 +1,7 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 // Based heavily on GCE VMM's pit.cc.
 
 use std::io::Error as IoError;
@@ -40,6 +41,7 @@ use crate::pci::CrosvmDeviceId;
 use crate::BusDevice;
 use crate::DeviceId;
 use crate::IrqEdgeEvent;
+use crate::Suspendable;
 
 // Bitmask for areas of standard (non-ReadBack) Control Word Format. Constant
 // names are kept the same as Intel PIT data sheet.
@@ -203,7 +205,7 @@ pub struct Pit {
 
 impl Drop for Pit {
     fn drop(&mut self) {
-        if let Err(e) = self.kill_evt.write(1) {
+        if let Err(e) = self.kill_evt.signal() {
             error!("failed to kill PIT worker threads: {}", e);
             return;
         }
@@ -378,6 +380,8 @@ impl Pit {
             .set_channel_state(&state.channels[2]);
     }
 }
+
+impl Suspendable for Pit {}
 
 // Each instance of this represents one of the PIT counters. They are used to
 // implement one-shot and repeating timer alarms. An 8254 has three counters.
@@ -1162,7 +1166,7 @@ mod tests {
         write_counter(&mut data.pit, 0, 0xffff, CommandAccess::CommandRWBoth);
         // Advance clock enough to trigger interrupt.
         advance_by_ticks(&mut data, 0xffff);
-        assert_eq!(data.irqfd.read().unwrap(), 1);
+        data.irqfd.wait().unwrap();
     }
 
     /// Tests that Rate Generator mode (mode 2) handls the interrupt properly when the timer
@@ -1179,15 +1183,15 @@ mod tests {
         write_counter(&mut data.pit, 0, 0xffff, CommandAccess::CommandRWBoth);
         // Repatedly advance clock and expect interrupt.
         advance_by_ticks(&mut data, 0xffff);
-        assert_eq!(data.irqfd.read().unwrap(), 1);
+        data.irqfd.wait().unwrap();
 
         // Repatedly advance clock and expect interrupt.
         advance_by_ticks(&mut data, 0xffff);
-        assert_eq!(data.irqfd.read().unwrap(), 1);
+        data.irqfd.wait().unwrap();
 
         // Repatedly advance clock and expect interrupt.
         advance_by_ticks(&mut data, 0xffff);
-        assert_eq!(data.irqfd.read().unwrap(), 1);
+        data.irqfd.wait().unwrap();
     }
 
     /// Tests that square wave mode advances the counter correctly.

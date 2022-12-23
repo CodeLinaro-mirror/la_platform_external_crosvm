@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,6 +12,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvError;
@@ -82,8 +83,8 @@ pub enum Error {
     PlatformNotSupported,
     #[error("{0}")]
     ProtocolError(ProtocolErrorKind),
-    #[error("Failed to connect to VioS server: {0:?}")]
-    ServerConnectionError(IOError),
+    #[error("Failed to connect to VioS server {1}: {0:?}")]
+    ServerConnectionError(IOError, PathBuf),
     #[error("Failed to communicate with VioS server: {0:?}")]
     ServerError(BaseError),
     #[error("Failed to communicate with VioS server: {0:?}")]
@@ -150,7 +151,8 @@ pub struct VioSClient {
 impl VioSClient {
     /// Create a new client given the path to the audio server's socket.
     pub fn try_new<P: AsRef<Path>>(server: P) -> Result<VioSClient> {
-        let client_socket = UnixSeqpacket::connect(server).map_err(Error::ServerConnectionError)?;
+        let client_socket = UnixSeqpacket::connect(server.as_ref())
+            .map_err(|e| Error::ServerConnectionError(e, server.as_ref().into()))?;
         let mut config: VioSConfig = Default::default();
         let mut fds: Vec<RawFd> = Vec::new();
         const NUM_FDS: usize = 5;
@@ -317,9 +319,7 @@ impl VioSClient {
             return Ok(());
         }
         self.recv_thread_state.lock().running = false;
-        self.recv_event
-            .write(1u64)
-            .map_err(Error::EventWriteError)?;
+        self.recv_event.signal().map_err(Error::EventWriteError)?;
         if let Some(handle) = self.recv_thread.lock().take() {
             return match handle.join() {
                 Ok(r) => r,
@@ -678,13 +678,13 @@ fn spawn_recv_thread(
                         let state_cpy = *state.lock();
                         if state_cpy.reporting_events {
                             event_queue.lock().push_back(evt);
-                            event_notifier.write(1).map_err(Error::EventWriteError)?;
+                            event_notifier.signal().map_err(Error::EventWriteError)?;
                         } // else just drop the events
                     }
                     Token::Notification => {
                         // Just consume the notification and check for termination on the next
                         // iteration
-                        if let Err(e) = event.read() {
+                        if let Err(e) = event.wait() {
                             error!("Failed to consume notification from recv thread: {:?}", e);
                         }
                     }

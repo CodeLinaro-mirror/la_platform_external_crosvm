@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 #![cfg(windows)]
 
 //! This IPC crate is used by the broker process to send boot data across the
-//! different CrosVm child processes on Windows.
+//! different crosvm child processes on Windows.
 
 use std::fmt;
 use std::fmt::Display;
@@ -26,6 +26,8 @@ use base::TubeError;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error as ThisError;
+
+pub mod packed_tube;
 
 pub type TransportTubeResult<T> = std::result::Result<T, TubeTransportError>;
 
@@ -189,7 +191,7 @@ mod tests {
     use base::named_pipes::BlockingMode;
     use base::named_pipes::FramingMode;
     use base::Event;
-    use base::EventReadResult;
+    use base::EventWaitResult;
     use winapi::um::processthreadsapi::GetCurrentProcessId;
 
     use super::*;
@@ -290,7 +292,7 @@ mod tests {
             duped_handle
                 .read_timeout(std::time::Duration::from_millis(2000))
                 .unwrap(),
-            EventReadResult::Count { .. }
+            EventWaitResult::Signaled
         ));
     }
 }

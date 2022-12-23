@@ -1,4 +1,4 @@
-# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Copyright 2018 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -16,7 +16,6 @@ linkat: 1
 unlinkat: 1
 renameat: 1
 pread64: 1
-lseek: 1
 getdents64: 1
 mkdirat: 1
 rmdir: 1
@@ -25,7 +24,9 @@ fdatasync: 1
 utimensat: 1
 ftruncate: 1
 fchmod: 1
+fchmodat: 1
 fchown: 1
+fchownat: 1
 fstatfs: 1
 newfstatat: 1
 prctl: arg0 == PR_SET_NAME

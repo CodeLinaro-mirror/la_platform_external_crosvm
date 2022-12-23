@@ -29,3 +29,23 @@ rust_ffi_shared {
         "//apex_available:platform",
     ],
 }
+
+rust_ffi_static {
+    name: "libcrosvm_control_static",
+    defaults: ["crosvm_defaults"],
+    stem: "libcrosvm_control",
+    host_supported: true,
+    crate_name: "crosvm_control",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
+    srcs: ["src/lib.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libbase_rust",
+        "liblibc",
+        "libvm_control",
+    ],
+    apex_available: [
+        "//apex_available:platform",
+    ],
+}

@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -712,11 +712,43 @@ impl IntoRawFd for UnixSeqpacket {
 /// Like a `UnixListener` but for accepting `UnixSeqpacket` type sockets.
 pub struct UnixSeqpacketListener {
     fd: RawFd,
+    no_path: bool,
 }
 
 impl UnixSeqpacketListener {
     /// Creates a new `UnixSeqpacketListener` bound to the given path.
     pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        if path.as_ref().starts_with("/proc/self/fd/") {
+            let fd = path
+                .as_ref()
+                .file_name()
+                .expect("Failed to get fd filename")
+                .to_str()
+                .expect("fd filename should be unicode")
+                .parse::<i32>()
+                .expect("fd should be an integer");
+            let mut result: c_int = 0;
+            let mut result_len = size_of::<c_int>() as libc::socklen_t;
+            let ret = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_ACCEPTCONN,
+                    &mut result as *mut _ as *mut libc::c_void,
+                    &mut result_len,
+                )
+            };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if result != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "specified descriptor is not a listening socket",
+                ));
+            }
+            return Ok(UnixSeqpacketListener { fd, no_path: true });
+        }
         // Safe socket initialization since we handle the returned error.
         let fd = unsafe {
             match libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) {
@@ -738,7 +770,7 @@ impl UnixSeqpacketListener {
                 return Err(io::Error::last_os_error());
             }
         }
-        Ok(UnixSeqpacketListener { fd })
+        Ok(UnixSeqpacketListener { fd, no_path: false })
     }
 
     /// Blocks for and accepts a new incoming connection and returns the socket associated with that
@@ -788,6 +820,12 @@ impl UnixSeqpacketListener {
             sun_family: libc::AF_UNIX as libc::sa_family_t,
             sun_path: [0; 108],
         };
+        if self.no_path {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socket has no path",
+            ));
+        }
         let sun_path_offset = (&addr.sun_path as *const _ as usize
             - &addr.sun_family as *const _ as usize)
             as libc::socklen_t;
@@ -849,7 +887,7 @@ impl Drop for UnixSeqpacketListener {
 impl FromRawFd for UnixSeqpacketListener {
     // Unsafe in drop function
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        Self { fd }
+        Self { fd, no_path: false }
     }
 }
 
@@ -963,6 +1001,32 @@ mod tests {
         );
         let listener_path = listener.path().expect("failed to get socket listener path");
         assert_eq!(socket_path, listener_path);
+    }
+
+    #[test]
+    fn unix_seqpacket_listener_from_fd() {
+        let mut socket_path = tmpdir();
+        socket_path.push("unix_seqpacket_listener_from_fd");
+        let listener = UnlinkUnixSeqpacketListener(
+            UnixSeqpacketListener::bind(&socket_path)
+                .expect("failed to create UnixSeqpacketListener"),
+        );
+        // UnixSeqpacketListener should succeed on a valid listening descriptor.
+        let good_dup = UnixSeqpacketListener::bind(&format!("/proc/self/fd/{}", unsafe {
+            libc::dup(listener.as_raw_fd())
+        }));
+        let good_dup_path = good_dup
+            .expect("failed to create dup UnixSeqpacketListener")
+            .path();
+        // Path of socket created by descriptor should be hidden.
+        assert!(good_dup_path.is_err());
+        // UnixSeqpacketListener must fail on an existing non-listener socket.
+        let s1 =
+            UnixSeqpacket::connect(socket_path.as_path()).expect("UnixSeqpacket::connect failed");
+        let bad_dup = UnixSeqpacketListener::bind(&format!("/proc/self/fd/{}", unsafe {
+            libc::dup(s1.as_raw_fd())
+        }));
+        assert!(bad_dup.is_err());
     }
 
     #[test]

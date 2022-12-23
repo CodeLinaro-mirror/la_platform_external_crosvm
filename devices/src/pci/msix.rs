@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -505,7 +505,7 @@ impl MsixConfig {
 
     fn inject_msix_and_clear_pba(&mut self, vector: usize) {
         if let Some(irq) = &self.irq_vec[vector] {
-            irq.irqfd.write(1).unwrap();
+            irq.irqfd.signal().unwrap();
         }
 
         // Clear the bit from PBA
@@ -531,7 +531,7 @@ impl MsixConfig {
         if self.table_entries[vector as usize].masked() || self.masked() {
             self.set_pba_bit(vector, true);
         } else if let Some(irq) = self.irq_vec.get(vector as usize).unwrap_or(&None) {
-            irq.irqfd.write(1).unwrap();
+            irq.irqfd.signal().unwrap();
         }
     }
 

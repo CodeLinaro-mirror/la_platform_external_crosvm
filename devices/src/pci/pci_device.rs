@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,7 @@ use acpi_tables::sdt::SDT;
 use anyhow::bail;
 use base::error;
 use base::Event;
+use base::MemoryMapping;
 use base::RawDescriptor;
 use hypervisor::Datamatch;
 use remain::sorted;
@@ -43,6 +44,7 @@ use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::DeviceId;
 use crate::IrqLevelEvent;
+use crate::Suspendable;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -156,6 +158,22 @@ impl PciBus {
         self.bus_num
     }
 
+    // Find all PCI buses from this PCI bus to a given PCI bus
+    pub fn path_to(&self, bus_num: u8) -> Vec<u8> {
+        if self.bus_num == bus_num {
+            return vec![self.bus_num];
+        }
+
+        for (_, child_bus) in self.child_buses.iter() {
+            let mut path = child_bus.lock().path_to(bus_num);
+            if !path.is_empty() {
+                path.insert(0, self.bus_num);
+                return path;
+            }
+        }
+        Vec::new()
+    }
+
     // Add a new child device to this pci bus tree.
     pub fn add_child_device(&mut self, add_device: PciAddress) -> Result<()> {
         if self.bus_num == add_device.bus {
@@ -244,13 +262,13 @@ impl PciBus {
         Vec::new()
     }
 
-    // Get all devices in this pci bus tree
+    // Get all devices in this pci bus tree by level-order traversal (BFS)
     pub fn get_downstream_devices(&self) -> Vec<PciAddress> {
         let mut devices = Vec::new();
+        devices.extend(self.child_devices.clone());
         for child_bus in self.child_buses.values() {
             devices.extend(child_bus.lock().get_downstream_devices());
         }
-        devices.extend(self.child_devices.clone());
         devices
     }
 
@@ -284,7 +302,13 @@ impl PciBus {
     }
 }
 
-pub trait PciDevice: Send {
+pub enum PreferredIrq {
+    None,
+    Any,
+    Fixed { pin: PciInterruptPin, gsi: u32 },
+}
+
+pub trait PciDevice: Send + Suspendable {
     /// Returns a label suitable for debug output.
     fn debug_label(&self) -> String;
 
@@ -303,11 +327,12 @@ pub trait PciDevice: Send {
     fn keep_rds(&self) -> Vec<RawDescriptor>;
 
     /// Preferred IRQ for this device.
-    /// The device may request a specific pin and IRQ number by returning a non-`None` value.
+    /// The device may request a specific pin and IRQ number by returning a `Fixed` value.
+    /// If a device does not support INTx# interrupts at all, it should return `None`.
     /// Otherwise, an appropriate IRQ will be allocated automatically.
     /// The device's `assign_irq` function will be called with its assigned IRQ either way.
-    fn preferred_irq(&self) -> Option<(PciInterruptPin, u32)> {
-        None
+    fn preferred_irq(&self) -> PreferredIrq {
+        PreferredIrq::Any
     }
 
     /// Assign a legacy PCI IRQ to this device.
@@ -377,6 +402,12 @@ pub trait PciDevice: Send {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     fn generate_acpi(&mut self, sdts: Vec<SDT>) -> Option<Vec<SDT>> {
         Some(sdts)
+    }
+
+    /// Construct customized acpi method, and return the AML code and
+    /// shared memory
+    fn generate_acpi_methods(&mut self) -> (Vec<u8>, Option<(u32, MemoryMapping)>) {
+        (Vec::new(), None)
     }
 
     /// Invoked when the device is destroyed
@@ -595,7 +626,7 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
         (**self).keep_rds()
     }
-    fn preferred_irq(&self) -> Option<(PciInterruptPin, u32)> {
+    fn preferred_irq(&self) -> PreferredIrq {
         (**self).preferred_irq()
     }
     fn assign_irq(&mut self, irq_evt: IrqLevelEvent, pin: PciInterruptPin, irq_num: u32) {
@@ -644,6 +675,10 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
         (**self).generate_acpi(sdts)
     }
 
+    fn generate_acpi_methods(&mut self) -> (Vec<u8>, Option<(u32, MemoryMapping)>) {
+        (**self).generate_acpi_methods()
+    }
+
     fn destroy_device(&mut self) {
         (**self).destroy_device();
     }
@@ -660,6 +695,24 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
         bar_ranges: &[BarRange],
     ) -> Result<Vec<BarRange>> {
         (**self).configure_bridge_window(resources, bar_ranges)
+    }
+}
+
+impl<T: PciDevice + ?Sized> Suspendable for Box<T> {
+    fn snapshot(&self) -> anyhow::Result<String> {
+        (**self).snapshot()
+    }
+
+    fn restore(&mut self, data: &str) -> anyhow::Result<()> {
+        (**self).restore(data)
+    }
+
+    fn sleep(&mut self) -> anyhow::Result<()> {
+        (**self).sleep()
+    }
+
+    fn wake(&mut self) -> anyhow::Result<()> {
+        (**self).wake()
     }
 }
 
@@ -724,6 +777,8 @@ mod tests {
             self.config_regs.get_bar_configuration(bar_num)
         }
     }
+
+    impl Suspendable for TestDev {}
 
     #[test]
     fn config_write_result() {

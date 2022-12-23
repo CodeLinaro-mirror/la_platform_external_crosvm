@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -184,7 +184,7 @@ impl CrossDomainContext {
 
             if let Some(read_pipe_id) = read_pipe_id_opt {
                 state.add_job(CrossDomainJob::AddReadPipe(read_pipe_id));
-                resample_evt.write(1)?;
+                resample_evt.signal()?;
             }
         } else {
             return Err(RutabagaError::InvalidCrossDomainState);

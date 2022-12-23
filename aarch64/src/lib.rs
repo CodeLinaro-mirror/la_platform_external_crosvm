@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium OS Authors. All rights reserved.
+// Copyright 2018 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -36,6 +36,10 @@ use devices::PciConfigMmio;
 use devices::PciDevice;
 use devices::PciRootCommand;
 use devices::Serial;
+#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+use gdbstub::arch::Arch;
+#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+use gdbstub_arch::aarch64::AArch64 as GdbArch;
 use hypervisor::CpuConfigAArch64;
 use hypervisor::DeviceKind;
 use hypervisor::Hypervisor;
@@ -82,7 +86,7 @@ const AARCH64_FDT_OFFSET_IN_BIOS_MODE: u64 = 0x0;
 const AARCH64_BIOS_OFFSET: u64 = AARCH64_FDT_MAX_SIZE;
 const AARCH64_BIOS_MAX_LEN: u64 = 1 << 20;
 
-const AARCH64_PROTECTED_VM_FW_MAX_SIZE: u64 = 0x200000;
+const AARCH64_PROTECTED_VM_FW_MAX_SIZE: u64 = 0x400000;
 const AARCH64_PROTECTED_VM_FW_START: u64 =
     AARCH64_PHYS_MEM_START - AARCH64_PROTECTED_VM_FW_MAX_SIZE;
 
@@ -166,7 +170,7 @@ pub enum Error {
     #[error("unable to make an Event: {0}")]
     CreateEvent(base::Error),
     #[error("FDT could not be created: {0}")]
-    CreateFdt(arch::fdt::Error),
+    CreateFdt(cros_fdt::Error),
     #[error("failed to create GIC: {0}")]
     CreateGICFailure(base::Error),
     #[error("failed to create a PCI root hub: {0}")]
@@ -181,8 +185,12 @@ pub enum Error {
     CreateVcpu(base::Error),
     #[error("vm created wrong kind of vcpu")]
     DowncastVcpu,
+    #[error("failed to enable singlestep execution: {0}")]
+    EnableSinglestep(base::Error),
     #[error("failed to finalize IRQ chip: {0}")]
     FinalizeIrqChip(base::Error),
+    #[error("failed to get HW breakpoint count: {0}")]
+    GetMaxHwBreakPoint(base::Error),
     #[error("failed to get PSCI version: {0}")]
     GetPsciVersion(base::Error),
     #[error("failed to get serial cmdline: {0}")]
@@ -203,6 +211,12 @@ pub enum Error {
     PvmFwLoadFailure(arch::LoadImageError),
     #[error("ramoops address is different from high_mmio_base: {0} vs {1}")]
     RamoopsAddress(u64, u64),
+    #[error("error reading guest memory: {0}")]
+    ReadGuestMemory(vm_memory::GuestMemoryError),
+    #[error("error reading CPU register: {0}")]
+    ReadReg(base::Error),
+    #[error("error reading CPU registers: {0}")]
+    ReadRegs(base::Error),
     #[error("failed to register irq fd: {0}")]
     RegisterIrqfd(base::Error),
     #[error("error registering PCI bus: {0}")]
@@ -211,6 +225,8 @@ pub enum Error {
     RegisterVsock(arch::DeviceRegistrationError),
     #[error("failed to set device attr: {0}")]
     SetDeviceAttr(base::Error),
+    #[error("failed to set a hardware breakpoint: {0}")]
+    SetHwBreakpoint(base::Error),
     #[error("failed to set register: {0}")]
     SetReg(base::Error),
     #[error("failed to set up guest memory: {0}")]
@@ -219,21 +235,32 @@ pub enum Error {
     Unsupported,
     #[error("failed to initialize VCPU: {0}")]
     VcpuInit(base::Error),
+    #[error("error writing guest memory: {0}")]
+    WriteGuestMemory(GuestMemoryError),
+    #[error("error writing CPU register: {0}")]
+    WriteReg(base::Error),
+    #[error("error writing CPU registers: {0}")]
+    WriteRegs(base::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn fdt_offset(mem_size: u64, has_bios: bool) -> u64 {
+/// Returns the address in guest memory at which the FDT should be located.
+fn fdt_address(memory_end: GuestAddress, has_bios: bool) -> GuestAddress {
     // TODO(rammuthiah) make kernel and BIOS startup use FDT from the same location. ARCVM startup
     // currently expects the kernel at 0x80080000 and the FDT at the end of RAM for unknown reasons.
     // Root cause and figure out how to fold these code paths together.
     if has_bios {
-        AARCH64_FDT_OFFSET_IN_BIOS_MODE
+        GuestAddress(AARCH64_PHYS_MEM_START + AARCH64_FDT_OFFSET_IN_BIOS_MODE)
     } else {
         // Put fdt up near the top of memory
         // TODO(sonnyrao): will have to handle this differently if there's
         // > 4GB memory
-        mem_size - AARCH64_FDT_MAX_SIZE - 0x10000
+        memory_end
+            .checked_sub(AARCH64_FDT_MAX_SIZE)
+            .expect("Not enough memory for FDT")
+            .checked_sub(0x10000)
+            .expect("Not enough memory for FDT")
     }
 }
 
@@ -251,7 +278,7 @@ impl arch::LinuxArch for AArch64 {
             vec![(GuestAddress(AARCH64_PHYS_MEM_START), components.memory_size)];
 
         // Allocate memory for the pVM firmware.
-        if components.protected_vm == ProtectionType::UnprotectedWithFirmware {
+        if components.hv_cfg.protection_type.runs_firmware() {
             memory_regions.push((
                 GuestAddress(AARCH64_PROTECTED_VM_FW_START),
                 AARCH64_PROTECTED_VM_FW_MAX_SIZE,
@@ -263,7 +290,7 @@ impl arch::LinuxArch for AArch64 {
 
     fn get_system_allocator_config<V: Vm>(vm: &V) -> SystemAllocatorConfig {
         Self::get_resource_allocator_config(
-            vm.get_memory().memory_size(),
+            vm.get_memory().end_addr(),
             vm.get_guest_phys_addr_bits(),
         )
     }
@@ -349,7 +376,7 @@ impl arch::LinuxArch for AArch64 {
                 use_pmu,
                 has_bios,
                 image_size,
-                components.protected_vm,
+                components.hv_cfg.protection_type,
             )?;
             has_pvtime &= vcpu.has_pvtime_support();
             vcpus.push(vcpu);
@@ -371,28 +398,23 @@ impl arch::LinuxArch for AArch64 {
             .map_err(Error::MapPvtimeError)?;
         }
 
-        match components.protected_vm {
-            ProtectionType::Protected => {
-                // Allocate memory for the pVM firmware and tell the hypervisor to load it.
-                vm.load_protected_vm_firmware(
-                    GuestAddress(AARCH64_PROTECTED_VM_FW_START),
-                    AARCH64_PROTECTED_VM_FW_MAX_SIZE,
-                )
-                .map_err(Error::ProtectVm)?;
-            }
-            ProtectionType::UnprotectedWithFirmware => {
-                // Load pVM firmware ourself, as the VM is not really protected.
-                // `components.pvm_fw` is safe to unwrap because `protected_vm` is
-                // `UnprotectedWithFirmware`.
-                arch::load_image(
-                    &mem,
-                    &mut components.pvm_fw.unwrap(),
-                    GuestAddress(AARCH64_PROTECTED_VM_FW_START),
-                    AARCH64_PROTECTED_VM_FW_MAX_SIZE,
-                )
-                .map_err(Error::PvmFwLoadFailure)?;
-            }
-            ProtectionType::Unprotected | ProtectionType::ProtectedWithoutFirmware => {}
+        if components.hv_cfg.protection_type.loads_firmware() {
+            arch::load_image(
+                &mem,
+                &mut components
+                    .pvm_fw
+                    .expect("pvmfw must be available if ProtectionType loads it"),
+                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
+                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+            )
+            .map_err(Error::PvmFwLoadFailure)?;
+        } else if components.hv_cfg.protection_type.runs_firmware() {
+            // Tell the hypervisor to load the pVM firmware.
+            vm.load_protected_vm_firmware(
+                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
+                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+            )
+            .map_err(Error::ProtectVm)?;
         }
 
         for (vcpu_id, vcpu) in vcpus.iter().enumerate() {
@@ -420,7 +442,7 @@ impl arch::LinuxArch for AArch64 {
             .into_iter()
             .map(|(dev, jail_orig)| (dev.into_pci_device().unwrap(), jail_orig))
             .collect();
-        let (pci, pci_irqs, mut pid_debug_label_map) = arch::generate_pci_root(
+        let (pci, pci_irqs, mut pid_debug_label_map, _amls) = arch::generate_pci_root(
             pci_devices,
             irq_chip.as_irq_chip_mut(),
             mmio_bus.clone(),
@@ -428,6 +450,7 @@ impl arch::LinuxArch for AArch64 {
             system_allocator,
             &mut vm,
             (devices::AARCH64_GIC_NR_SPIS - AARCH64_IRQ_BASE) as usize,
+            None,
         )
         .map_err(Error::CreatePciRoot)?;
 
@@ -441,13 +464,14 @@ impl arch::LinuxArch for AArch64 {
             .into_iter()
             .map(|(dev, jail_orig)| (*(dev.into_platform_device().unwrap()), jail_orig))
             .collect();
-        let mut platform_pid_debug_label_map = arch::sys::unix::generate_platform_bus(
-            platform_devices,
-            irq_chip.as_irq_chip_mut(),
-            &mmio_bus,
-            system_allocator,
-        )
-        .map_err(Error::CreatePlatformBus)?;
+        let (platform_devices, mut platform_pid_debug_label_map) =
+            arch::sys::unix::generate_platform_bus(
+                platform_devices,
+                irq_chip.as_irq_chip_mut(),
+                &mmio_bus,
+                system_allocator,
+            )
+            .map_err(Error::CreatePlatformBus)?;
         pid_debug_label_map.append(&mut platform_pid_debug_label_map);
 
         Self::add_arch_devs(
@@ -460,7 +484,7 @@ impl arch::LinuxArch for AArch64 {
         let com_evt_1_3 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         let com_evt_2_4 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         arch::add_serial_devices(
-            components.protected_vm,
+            components.hv_cfg.protection_type,
             &mmio_bus,
             com_evt_1_3.get_trigger(),
             com_evt_2_4.get_trigger(),
@@ -549,6 +573,7 @@ impl arch::LinuxArch for AArch64 {
             timeout_sec: VMWDT_DEFAULT_TIMEOUT_SEC,
         };
 
+        let memory_end = GuestAddress(AARCH64_PHYS_MEM_START + components.memory_size);
         fdt::create_fdt(
             AARCH64_FDT_MAX_SIZE as usize,
             &mem,
@@ -558,7 +583,7 @@ impl arch::LinuxArch for AArch64 {
             vcpu_count as u32,
             components.cpu_clusters,
             components.cpu_capacity,
-            fdt_offset(components.memory_size, has_bios),
+            fdt_address(memory_end, has_bios),
             cmdline.as_str(),
             initrd,
             components.android_fstab,
@@ -589,9 +614,12 @@ impl arch::LinuxArch for AArch64 {
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
             bat_control,
+            #[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+            gdb: components.gdb,
             pm: None,
             resume_notify_devices: Vec::new(),
             root_config: pci_root,
+            platform_devices,
             hotplug_bus: BTreeMap::new(),
         })
     }
@@ -623,6 +651,78 @@ impl arch::LinuxArch for AArch64 {
     }
 }
 
+#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+impl<T: VcpuAArch64> arch::GdbOps<T> for AArch64 {
+    type Error = Error;
+
+    fn read_memory(
+        _vcpu: &T,
+        guest_mem: &GuestMemory,
+        vaddr: GuestAddress,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        let mut buf = vec![0; len];
+
+        guest_mem
+            .read_exact_at_addr(&mut buf, vaddr)
+            .map_err(Error::ReadGuestMemory)?;
+
+        Ok(buf)
+    }
+
+    fn write_memory(
+        _vcpu: &T,
+        guest_mem: &GuestMemory,
+        vaddr: GuestAddress,
+        buf: &[u8],
+    ) -> Result<()> {
+        guest_mem
+            .write_all_at_addr(buf, vaddr)
+            .map_err(Error::WriteGuestMemory)
+    }
+
+    fn read_registers(vcpu: &T) -> Result<<GdbArch as Arch>::Registers> {
+        let mut regs: <GdbArch as Arch>::Registers = Default::default();
+
+        vcpu.get_gdb_registers(&mut regs).map_err(Error::ReadRegs)?;
+
+        Ok(regs)
+    }
+
+    fn write_registers(vcpu: &T, regs: &<GdbArch as Arch>::Registers) -> Result<()> {
+        vcpu.set_gdb_registers(regs).map_err(Error::WriteRegs)
+    }
+
+    fn read_register(vcpu: &T, reg_id: <GdbArch as Arch>::RegId) -> Result<Vec<u8>> {
+        let mut reg = vec![0; std::mem::size_of::<u128>()];
+        let size = vcpu
+            .get_gdb_register(reg_id, reg.as_mut_slice())
+            .map_err(Error::ReadReg)?;
+        reg.truncate(size);
+        Ok(reg)
+    }
+
+    fn write_register(vcpu: &T, reg_id: <GdbArch as Arch>::RegId, data: &[u8]) -> Result<()> {
+        vcpu.set_gdb_register(reg_id, data).map_err(Error::WriteReg)
+    }
+
+    fn enable_singlestep(vcpu: &T) -> Result<()> {
+        const SINGLE_STEP: bool = true;
+        vcpu.set_guest_debug(&[], SINGLE_STEP)
+            .map_err(Error::EnableSinglestep)
+    }
+
+    fn get_max_hw_breakpoints(vcpu: &T) -> Result<usize> {
+        vcpu.get_max_hw_bps().map_err(Error::GetMaxHwBreakPoint)
+    }
+
+    fn set_hw_breakpoints(vcpu: &T, breakpoints: &[GuestAddress]) -> Result<()> {
+        const SINGLE_STEP: bool = false;
+        vcpu.set_guest_debug(breakpoints, SINGLE_STEP)
+            .map_err(Error::SetHwBreakpoint)
+    }
+}
+
 impl AArch64 {
     /// This returns a base part of the kernel command for this architecture
     fn get_base_linux_cmdline() -> kernel_cmdline::Cmdline {
@@ -635,15 +735,15 @@ impl AArch64 {
     ///
     /// # Arguments
     ///
-    /// * `mem_size` - Size of guest memory (RAM) in bytes.
+    /// * `memory_end` - The first address beyond the end of guest memory.
     /// * `guest_phys_addr_bits` - Size of guest physical addresses (IPA) in bits.
     fn get_resource_allocator_config(
-        mem_size: u64,
+        memory_end: GuestAddress,
         guest_phys_addr_bits: u8,
     ) -> SystemAllocatorConfig {
         let guest_phys_end = 1u64 << guest_phys_addr_bits;
         // The platform MMIO region is immediately past the end of RAM.
-        let plat_mmio_base = AARCH64_PHYS_MEM_START + mem_size;
+        let plat_mmio_base = memory_end.offset();
         let plat_mmio_size = AARCH64_PLATFORM_MMIO_SIZE;
         // The high MMIO region is the rest of the address space after the platform MMIO region.
         let high_mmio_base = plat_mmio_base + plat_mmio_size;
@@ -725,7 +825,7 @@ impl AArch64 {
         use_pmu: bool,
         has_bios: bool,
         image_size: usize,
-        protected_vm: ProtectionType,
+        protection_type: ProtectionType,
     ) -> Result<()> {
         let mut features = vec![VcpuFeature::PsciV0_2];
         if use_pmu {
@@ -744,39 +844,38 @@ impl AArch64 {
 
         // Other cpus are powered off initially
         if vcpu_id == 0 {
-            let entry_addr = if has_bios {
+            let image_addr = if has_bios {
                 get_bios_addr()
             } else {
                 get_kernel_addr()
             };
-            match protected_vm {
-                ProtectionType::Protected => {
-                    vcpu.set_one_reg(VcpuRegAArch64::X(1), entry_addr.offset())
-                        .map_err(Error::SetReg)?;
-                }
-                ProtectionType::UnprotectedWithFirmware => {
-                    vcpu.set_one_reg(VcpuRegAArch64::Pc, AARCH64_PROTECTED_VM_FW_START)
-                        .map_err(Error::SetReg)?;
-                    vcpu.set_one_reg(VcpuRegAArch64::X(1), entry_addr.offset())
-                        .map_err(Error::SetReg)?;
-                }
-                ProtectionType::Unprotected | ProtectionType::ProtectedWithoutFirmware => {
-                    vcpu.set_one_reg(VcpuRegAArch64::Pc, entry_addr.offset())
-                        .map_err(Error::SetReg)?;
-                }
+
+            let entry_addr = if protection_type.loads_firmware() {
+                Some(AARCH64_PROTECTED_VM_FW_START)
+            } else if protection_type.runs_firmware() {
+                None // Initial PC value is set by the hypervisor
+            } else {
+                Some(image_addr.offset())
+            };
+
+            /* PC -- entry point */
+            if let Some(entry) = entry_addr {
+                vcpu.set_one_reg(VcpuRegAArch64::Pc, entry)
+                    .map_err(Error::SetReg)?;
             }
 
             /* X0 -- fdt address */
-            let mem_size = guest_mem.memory_size();
-            let fdt_addr = (AARCH64_PHYS_MEM_START + fdt_offset(mem_size, has_bios)) as u64;
-            vcpu.set_one_reg(VcpuRegAArch64::X(0), fdt_addr)
+            let memory_end = guest_mem.end_addr();
+            let fdt_addr = fdt_address(memory_end, has_bios);
+            vcpu.set_one_reg(VcpuRegAArch64::X(0), fdt_addr.offset())
                 .map_err(Error::SetReg)?;
 
-            /* X2 -- image size */
-            if matches!(
-                protected_vm,
-                ProtectionType::Protected | ProtectionType::UnprotectedWithFirmware
-            ) {
+            if protection_type.runs_firmware() {
+                /* X1 -- payload entry point */
+                vcpu.set_one_reg(VcpuRegAArch64::X(1), image_addr.offset())
+                    .map_err(Error::SetReg)?;
+
+                /* X2 -- image size */
                 vcpu.set_one_reg(VcpuRegAArch64::X(2), image_size as u64)
                     .map_err(Error::SetReg)?;
             }

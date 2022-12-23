@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,10 +32,10 @@ use base::MappedRegion;
 use base::MemoryMappingArena;
 use thiserror::Error as ThisError;
 
-use crate::virtio::video::decoder::backend::utils::EventQueue;
-use crate::virtio::video::decoder::backend::utils::OutputQueue;
-use crate::virtio::video::decoder::backend::utils::SyncEventQueue;
 use crate::virtio::video::decoder::backend::*;
+use crate::virtio::video::ffmpeg::GuestResourceToAvFrameError;
+use crate::virtio::video::ffmpeg::MemoryMappingAvBufferSource;
+use crate::virtio::video::ffmpeg::TryAsAvFrameExt;
 use crate::virtio::video::format::FormatDesc;
 use crate::virtio::video::format::FormatRange;
 use crate::virtio::video::format::FrameFormat;
@@ -44,14 +44,17 @@ use crate::virtio::video::format::Profile;
 use crate::virtio::video::resource::BufferHandle;
 use crate::virtio::video::resource::GuestResource;
 use crate::virtio::video::resource::GuestResourceHandle;
+use crate::virtio::video::utils::EventQueue;
+use crate::virtio::video::utils::OutputQueue;
+use crate::virtio::video::utils::SyncEventQueue;
 
 /// Structure maintaining a mapping for an encoded input buffer that can be used as a libavcodec
 /// buffer source. It also sends a `NotifyEndOfBitstreamBuffer` event when dropped.
 struct InputBuffer {
     /// Memory mapping to the encoded input data.
     mapping: MemoryMappingArena,
-    /// Bistream ID that will be sent as part of the `NotifyEndOfBitstreamBuffer` event.
-    bitstream_id: i32,
+    /// Resource ID that we will signal using `NotifyEndOfBitstreamBuffer` upon destruction.
+    resource_id: u32,
     /// Pointer to the event queue to send the `NotifyEndOfBitstreamBuffer` event to. The event will
     /// not be sent if the pointer becomes invalid.
     event_queue: Weak<SyncEventQueue<DecoderEvent>>,
@@ -63,7 +66,7 @@ impl Drop for InputBuffer {
             None => (),
             // If the event queue is still valid, send the event signaling we can be reused.
             Some(event_queue) => event_queue
-                .queue_event(DecoderEvent::NotifyEndOfBitstreamBuffer(self.bitstream_id))
+                .queue_event(DecoderEvent::NotifyEndOfBitstreamBuffer(self.resource_id))
                 .unwrap_or_else(|e| {
                     error!("cannot send end of input buffer notification: {:#}", e)
                 }),
@@ -131,6 +134,8 @@ pub struct FfmpegDecoderSession {
 enum TrySendFrameError {
     #[error("error while converting frame: {0}")]
     CannotConvertFrame(#[from] ConversionError),
+    #[error("error while constructing AvFrame: {0}")]
+    IntoAvFrame(#[from] GuestResourceToAvFrameError),
     #[error("error while sending picture ready event: {0}")]
     BrokenPipe(#[from] base::Error),
 }
@@ -287,7 +292,7 @@ impl FfmpegDecoderSession {
         };
 
         match self.context.try_receive_frame(&mut avframe) {
-            Ok(TryReceiveFrameResult::Received) => {
+            Ok(TryReceiveResult::Received) => {
                 // Now check whether the resolution of the stream has changed.
                 let new_visible_res = (avframe.width as usize, avframe.height as usize);
                 if new_visible_res != self.current_visible_res {
@@ -298,12 +303,12 @@ impl FfmpegDecoderSession {
 
                 Ok(true)
             }
-            Ok(TryReceiveFrameResult::TryAgain) => {
+            Ok(TryReceiveResult::TryAgain) => {
                 if self.is_flushing {
                     // Start flushing. `try_receive_frame` will return `FlushCompleted` when the
                     // flush is completed. `TryAgain` will not be returned again until the flush is
                     // completed.
-                    match self.context.flush() {
+                    match self.context.flush_decoder() {
                         // Call ourselves again so we can process the flush.
                         Ok(()) => self.try_receive_frame(),
                         Err(err) => {
@@ -319,10 +324,15 @@ impl FfmpegDecoderSession {
                     Ok(false)
                 }
             }
-            Ok(TryReceiveFrameResult::FlushCompleted) => {
+            Ok(TryReceiveResult::FlushCompleted) => {
                 self.is_flushing = false;
                 self.queue_event(DecoderEvent::FlushCompleted(Ok(())))?;
                 self.context.reset();
+                Ok(false)
+            }
+            // If we got invalid data, keep going in hope that we will catch a valid state later.
+            Err(AvError(AVERROR_INVALIDDATA)) => {
+                warn!("Invalid data in stream, ignoring...");
                 Ok(false)
             }
             Err(av_err) => {
@@ -376,7 +386,7 @@ impl FfmpegDecoderSession {
         let avframe_ref = avframe.as_ref();
         let picture_ready_event = DecoderEvent::PictureReady {
             picture_buffer_id: picture_buffer_id as i32,
-            bitstream_id: avframe_ref.pts as i32,
+            timestamp: avframe_ref.pts as u64,
             visible_rect: Rect {
                 left: 0,
                 top: 0,
@@ -386,7 +396,10 @@ impl FfmpegDecoderSession {
         };
 
         // Convert the frame into the target buffer and emit the picture ready event.
-        format_converter.convert(&avframe, target_buffer)?;
+        format_converter.convert(
+            &avframe,
+            &mut target_buffer.try_as_av_frame(MemoryMappingAvBufferSource::from)?,
+        )?;
         self.event_queue.queue_event(picture_ready_event)?;
 
         Ok(true)
@@ -411,10 +424,8 @@ impl DecoderSession for FfmpegDecoderSession {
             SessionState::AwaitingBufferCount | SessionState::Drc => {
                 let avcontext = self.context.as_ref();
 
-                let dst_pix_format = match format {
-                    Format::NV12 => AVPixelFormat_AV_PIX_FMT_NV12,
-                    _ => return Err(VideoError::InvalidFormat),
-                };
+                let dst_pix_format: AvPixelFormat =
+                    format.try_into().map_err(|_| VideoError::InvalidFormat)?;
 
                 self.state = SessionState::Decoding {
                     output_queue: OutputQueue::new(buffer_count),
@@ -422,7 +433,7 @@ impl DecoderSession for FfmpegDecoderSession {
                         avcontext.width as usize,
                         avcontext.height as usize,
                         avcontext.pix_fmt as i32,
-                        dst_pix_format,
+                        dst_pix_format.pix_fmt(),
                     )
                     .context("while setting output parameters")
                     .map_err(VideoError::BackendFailure)?,
@@ -437,7 +448,8 @@ impl DecoderSession for FfmpegDecoderSession {
 
     fn decode(
         &mut self,
-        bitstream_id: i32,
+        resource_id: u32,
+        timestamp: u64,
         resource: GuestResourceHandle,
         offset: u32,
         bytes_used: u32,
@@ -447,13 +459,15 @@ impl DecoderSession for FfmpegDecoderSession {
                 .get_mapping(offset as usize, bytes_used as usize)
                 .context("while mapping input buffer")
                 .map_err(VideoError::BackendFailure)?,
-            bitstream_id,
+            resource_id,
             event_queue: Arc::downgrade(&self.event_queue),
         };
 
-        let avpacket = AvPacket::new_owned(bitstream_id as i64, input_buffer)
+        let avbuffer = AvBuffer::new(input_buffer)
             .context("while creating AvPacket")
             .map_err(VideoError::BackendFailure)?;
+
+        let avpacket = AvPacket::new_owned(timestamp as i64, avbuffer);
 
         self.codec_jobs.push_back(CodecJob::Packet(avpacket));
 
@@ -744,7 +758,8 @@ impl DecoderBackend for FfmpegDecoder {
             // TODO we should use a custom `get_buffer` function that renders directly into the
             // target buffer if the output format is directly supported by libavcodec. Right now
             // libavcodec is allocating its own frame buffers, which forces us to perform a copy.
-            .open(None)
+            .build_decoder()
+            .and_then(|b| b.build())
             .context("while creating new session")
             .map_err(VideoError::BackendFailure)?;
         Ok(FfmpegDecoderSession {
@@ -949,17 +964,25 @@ mod tests {
                 decoded_frames_count += 1;
             };
 
+        // Simple value by which we will multiply the frame number to obtain a fake timestamp.
+        const TIMESTAMP_FOR_INPUT_ID_FACTOR: u64 = 1_000_000;
         for (input_id, slice) in H264NalIterator::new(H264_STREAM).enumerate() {
             let buffer_handle = input_resource_builder(&input_shm);
             input_mapping
                 .write_slice(slice, 0)
                 .expect("Failed to write stream data into input buffer.");
             session
-                .decode(input_id as i32, buffer_handle, 0, slice.len() as u32)
+                .decode(
+                    input_id as u32,
+                    input_id as u64 * TIMESTAMP_FOR_INPUT_ID_FACTOR,
+                    buffer_handle,
+                    0,
+                    slice.len() as u32,
+                )
                 .expect("Call to decode() failed.");
 
             assert!(
-                matches!(session.read_event().unwrap(), DecoderEvent::NotifyEndOfBitstreamBuffer(index) if index == input_id as i32)
+                matches!(session.read_event().unwrap(), DecoderEvent::NotifyEndOfBitstreamBuffer(index) if index == input_id as u32)
             );
 
             // After sending the first buffer we should get the initial resolution change event and
@@ -980,8 +1003,10 @@ mod tests {
                     }
                 ));
 
+                let out_format = Format::NV12;
+
                 session
-                    .set_output_parameters(NUM_OUTPUT_BUFFERS, Format::NV12)
+                    .set_output_parameters(NUM_OUTPUT_BUFFERS, out_format)
                     .unwrap();
 
                 // Pass the buffers we will decode into.
@@ -995,12 +1020,17 @@ mod tests {
                                     FramePlane {
                                         offset: 0,
                                         stride: H264_STREAM_WIDTH as usize,
+                                        size: (H264_STREAM_WIDTH * H264_STREAM_HEIGHT) as usize,
                                     },
                                     FramePlane {
                                         offset: (H264_STREAM_WIDTH * H264_STREAM_HEIGHT) as usize,
                                         stride: H264_STREAM_WIDTH as usize,
+                                        size: (H264_STREAM_WIDTH * H264_STREAM_HEIGHT) as usize,
                                     },
                                 ],
+                                width: H264_STREAM_WIDTH as _,
+                                height: H264_STREAM_HEIGHT as _,
+                                format: out_format,
                             },
                         )
                         .unwrap();

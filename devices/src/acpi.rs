@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,8 @@ use base::EventToken;
 use base::SendTube;
 use base::VmEventType;
 use base::WaitContext;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use sync::Mutex;
 use thiserror::Error;
 use vm_control::GpeNotify;
@@ -35,6 +36,7 @@ use crate::BusDevice;
 use crate::BusResumeDevice;
 use crate::DeviceId;
 use crate::IrqLevelEvent;
+use crate::Suspendable;
 
 #[derive(Error, Debug)]
 pub enum ACPIPMError {
@@ -67,7 +69,7 @@ pub(crate) struct Pm1Resource {
 pub(crate) struct GpeResource {
     pub(crate) status: [u8; ACPIPM_RESOURCE_GPE0_BLK_LEN as usize / 2],
     enable: [u8; ACPIPM_RESOURCE_GPE0_BLK_LEN as usize / 2],
-    gpe_notify: BTreeMap<u32, Vec<Arc<Mutex<dyn GpeNotify>>>>,
+    pub(crate) gpe_notify: BTreeMap<u32, Vec<Arc<Mutex<dyn GpeNotify>>>>,
 }
 
 #[cfg(feature = "direct")]
@@ -183,8 +185,11 @@ impl ACPIPMResource {
         let sci_direct_evt = self.sci_direct_evt.take();
 
         #[cfg(feature = "direct")]
-        // Direct GPEs are forwarded via direct SCI forwarding,
-        // not via ACPI netlink events.
+        // ACPI event listener is currently used only for notifying gpe_notify
+        // notifiers when a GPE is fired in the host. For direct forwarded GPEs,
+        // we notify gpe_notify in a different way, ensuring that the notifier
+        // completes synchronously before we inject the GPE into the guest.
+        // So tell ACPI event listener to ignore direct GPEs.
         let acpi_event_ignored_gpe = self.direct_gpe.iter().map(|gpe| gpe.num).collect();
 
         #[cfg(not(feature = "direct"))]
@@ -212,6 +217,8 @@ impl ACPIPMResource {
         }
     }
 }
+
+impl Suspendable for ACPIPMResource {}
 
 fn run_worker(
     sci_evt: IrqLevelEvent,
@@ -257,13 +264,7 @@ fn run_worker(
         for event in events.iter().filter(|e| e.is_readable) {
             match event.token {
                 Token::AcpiEvent => {
-                    crate::sys::acpi_event_run(
-                        &acpi_event_sock,
-                        &gpe0,
-                        &pm1,
-                        &sci_evt,
-                        &acpi_event_ignored_gpe,
-                    );
+                    crate::sys::acpi_event_run(&acpi_event_sock, &gpe0, &acpi_event_ignored_gpe);
                 }
                 Token::InterruptResample => {
                     sci_evt.clear_resample();
@@ -307,7 +308,7 @@ fn run_worker(
 impl Drop for ACPIPMResource {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.kill_evt.take() {
-            let _ = kill_evt.write(1);
+            let _ = kill_evt.signal();
         }
 
         if let Some(worker_thread) = self.worker_thread.take() {
@@ -317,7 +318,7 @@ impl Drop for ACPIPMResource {
 }
 
 impl Pm1Resource {
-    pub(crate) fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
+    fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
         if self.status & self.enable & ACPIPMFixedEvent::bitmask_all() != 0 {
             if let Err(e) = sci_evt.trigger() {
                 error!("ACPIPM: failed to trigger sci event for pm1: {}", e);
@@ -327,30 +328,8 @@ impl Pm1Resource {
 }
 
 impl GpeResource {
-    pub(crate) fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
-        let mut trigger = false;
-        for i in 0..self.status.len() {
-            let gpes = self.status[i] & self.enable[i];
-            if gpes == 0 {
-                continue;
-            }
-
-            for j in 0..8 {
-                if gpes & (1 << j) == 0 {
-                    continue;
-                }
-
-                let gpe_num: u32 = i as u32 * 8 + j;
-                if let Some(notify_devs) = self.gpe_notify.get(&gpe_num) {
-                    for notify_dev in notify_devs.iter() {
-                        notify_dev.lock().notify();
-                    }
-                }
-            }
-            trigger = true;
-        }
-
-        if trigger {
+    fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
+        if (0..self.status.len()).any(|i| self.status[i] & self.enable[i] != 0) {
             if let Err(e) = sci_evt.trigger() {
                 error!("ACPIPM: failed to trigger sci event for gpe: {}", e);
             }
@@ -889,7 +868,7 @@ impl BusDevice for ACPIPMResource {
                     #[cfg(not(feature = "direct"))]
                     match val & BITMASK_PM1CNT_SLEEP_TYPE {
                         SLEEP_TYPE_S1 => {
-                            if let Err(e) = self.suspend_evt.write(1) {
+                            if let Err(e) = self.suspend_evt.signal() {
                                 error!("ACPIPM: failed to trigger suspend event: {}", e);
                             }
                         }

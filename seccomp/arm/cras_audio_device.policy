@@ -1,11 +1,9 @@
-# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Copyright 2019 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 @include /usr/share/policy/crosvm/common_device.policy
 
-_llseek: 1
-lseek: 1
 open: return ENOENT
 openat: return ENOENT
 prlimit64: 1

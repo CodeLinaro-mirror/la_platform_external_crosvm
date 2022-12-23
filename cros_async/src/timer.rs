@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -44,8 +44,8 @@ impl TimerAsync {
         Ok(())
     }
 
-    /// Sets the timer to expire after `dur`.  If `interval` is not `None` it represents
-    /// the period for repeated expirations after the initial expiration.  Otherwise
+    /// Sets the timer to expire after `dur`.  If `interval` is not `None` and non-zero it
+    /// represents the period for repeated expirations after the initial expiration.  Otherwise
     /// the timer will expire just once.  Cancels any existing duration and repeating interval.
     pub fn reset(&mut self, dur: Duration, interval: Option<Duration>) -> SysResult<()> {
         self.io_source.as_source_mut().reset(dur, interval)

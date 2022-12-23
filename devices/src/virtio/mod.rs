@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,18 +15,20 @@ mod interrupt;
 mod iommu;
 mod queue;
 mod rng;
-#[cfg(unix)]
 mod sys;
-#[cfg(feature = "tpm")]
+#[cfg(any(feature = "tpm", feature = "vtpm"))]
 mod tpm;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 mod video;
 mod virtio_device;
+mod virtio_mmio_device;
 mod virtio_pci_common_config;
 mod virtio_pci_device;
 
 pub mod block;
 pub mod console;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod resource_bridge;
 #[cfg(feature = "audio")]
 pub mod snd;
@@ -38,30 +40,29 @@ pub use self::block::*;
 pub use self::console::*;
 pub use self::descriptor_utils::Error as DescriptorError;
 pub use self::descriptor_utils::*;
+#[cfg(feature = "gpu")]
+pub use self::gpu::*;
 pub use self::input::*;
 pub use self::interrupt::*;
 pub use self::iommu::*;
 pub use self::queue::*;
 pub use self::rng::*;
-#[cfg(feature = "tpm")]
+#[cfg(any(feature = "tpm", feature = "vtpm"))]
 pub use self::tpm::*;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 pub use self::video::*;
 pub use self::virtio_device::*;
+pub use self::virtio_mmio_device::*;
 pub use self::virtio_pci_device::*;
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
         mod p9;
         mod pmem;
-        pub mod wl;
 
+        pub mod wl;
         pub mod fs;
-        #[cfg(feature = "gpu")]
-        pub mod gpu;
         pub mod net;
 
-        #[cfg(feature = "gpu")]
-        pub use self::gpu::*;
         pub use self::iommu::sys::unix::vfio_wrapper;
         pub use self::net::*;
         pub use self::p9::*;
@@ -78,6 +79,8 @@ cfg_if::cfg_if! {
 
         #[cfg(feature = "slirp")]
         pub use self::net::*;
+        #[cfg(feature = "slirp")]
+        pub use self::sys::windows::NetExt;
         pub use self::vsock::*;
     } else {
         compile_error!("Unsupported platform");
@@ -125,8 +128,8 @@ pub enum DeviceType {
     Fs = virtio_ids::VIRTIO_ID_FS,
     Pmem = virtio_ids::VIRTIO_ID_PMEM,
     Mac80211HwSim = virtio_ids::VIRTIO_ID_MAC80211_HWSIM,
-    VideoEnc = virtio_ids::VIRTIO_ID_VIDEO_ENC,
-    VideoDec = virtio_ids::VIRTIO_ID_VIDEO_DEC,
+    VideoEnc = virtio_ids::VIRTIO_ID_VIDEO_ENCODER,
+    VideoDec = virtio_ids::VIRTIO_ID_VIDEO_DECODER,
     Wl = virtio_ids::VIRTIO_ID_WL,
     Tpm = virtio_ids::VIRTIO_ID_TPM,
     VhostUser = virtio_ids::VIRTIO_ID_VHOST_USER,
@@ -189,10 +192,10 @@ pub fn copy_config(dst: &mut [u8], dst_offset: u64, src: &[u8], src_offset: u64)
 }
 
 /// Returns the set of reserved base features common to all virtio devices.
-pub fn base_features(protected_vm: ProtectionType) -> u64 {
+pub fn base_features(protection_type: ProtectionType) -> u64 {
     let mut features: u64 = 1 << VIRTIO_F_VERSION_1 | 1 << VIRTIO_RING_F_EVENT_IDX;
 
-    if protected_vm != ProtectionType::Unprotected {
+    if protection_type != ProtectionType::Unprotected {
         features |= 1 << VIRTIO_F_ACCESS_PLATFORM;
     }
 

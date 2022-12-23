@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,8 +17,7 @@ fn test_kvm_real_run_addr() {
     use hypervisor::kvm::*;
     test_real_run_addr(|guest_mem| {
         let kvm = Kvm::new().expect("failed to create kvm");
-        let vm =
-            KvmVm::new(&kvm, guest_mem, ProtectionType::Unprotected).expect("failed to create vm");
+        let vm = KvmVm::new(&kvm, guest_mem, Default::default()).expect("failed to create vm");
         (kvm, vm)
     });
 }

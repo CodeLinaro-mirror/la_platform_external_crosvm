@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,13 +6,8 @@
 
 mod guest_address;
 pub mod guest_memory;
-
-cfg_if::cfg_if! {
-    if #[cfg(unix)] {
-        pub mod udmabuf;
-        mod udmabuf_bindings;
-    }
-}
+pub mod udmabuf;
+mod udmabuf_bindings;
 
 pub use guest_address::*;
 pub use guest_memory::Error as GuestMemoryError;

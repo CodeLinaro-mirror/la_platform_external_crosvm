@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -100,10 +100,7 @@ impl io_uring_sqe {
     }
 
     pub fn set_buf_index(&mut self, val: u16) {
-        self.__bindgen_anon_4
-            .__bindgen_anon_1
-            .__bindgen_anon_1
-            .buf_index = val;
+        self.__bindgen_anon_4.buf_index = val;
     }
 
     pub fn set_rw_flags(&mut self, val: libc::c_int) {
@@ -120,6 +117,16 @@ impl io_uring_sqe {
         };
         self.__bindgen_anon_3.poll32_events = val;
     }
+}
+
+// Convert a file offset to the raw io_uring offset format.
+// Some => explicit offset
+// None => use current file position
+fn file_offset_to_raw_offset(offset: Option<u64>) -> u64 {
+    // File offsets are interpretted as off64_t inside io_uring, with -1 representing the current
+    // file position.
+    const USE_CURRENT_FILE_POS: libc::off64_t = -1;
+    offset.unwrap_or(USE_CURRENT_FILE_POS as u64)
 }
 
 impl SubmitQueue {
@@ -187,7 +194,7 @@ impl SubmitQueue {
         ptr: *const u8,
         len: usize,
         fd: RawFd,
-        offset: u64,
+        offset: Option<u64>,
         user_data: UserData,
         op: u8,
     ) -> Result<()> {
@@ -197,7 +204,7 @@ impl SubmitQueue {
             sqe.opcode = op;
             sqe.set_addr(iovec as *const _ as *const libc::c_void as u64);
             sqe.len = 1;
-            sqe.set_off(offset);
+            sqe.set_off(file_offset_to_raw_offset(offset));
             sqe.set_buf_index(0);
             sqe.ioprio = 0;
             sqe.user_data = user_data;
@@ -330,7 +337,7 @@ impl URingContext {
         ptr: *const u8,
         len: usize,
         fd: RawFd,
-        offset: u64,
+        offset: Option<u64>,
         user_data: UserData,
     ) -> Result<()> {
         self.submit_ring
@@ -351,7 +358,7 @@ impl URingContext {
         ptr: *mut u8,
         len: usize,
         fd: RawFd,
-        offset: u64,
+        offset: Option<u64>,
         user_data: UserData,
     ) -> Result<()> {
         self.submit_ring
@@ -366,7 +373,7 @@ impl URingContext {
         &self,
         iovecs: I,
         fd: RawFd,
-        offset: u64,
+        offset: Option<u64>,
         user_data: UserData,
     ) -> Result<()>
     where
@@ -400,14 +407,14 @@ impl URingContext {
         &self,
         iovecs: Pin<Box<[IoBufMut<'static>]>>,
         fd: RawFd,
-        offset: u64,
+        offset: Option<u64>,
         user_data: UserData,
     ) -> Result<()> {
         self.submit_ring.lock().prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_WRITEV as u8;
             sqe.set_addr(iovecs.as_ptr() as *const _ as *const libc::c_void as u64);
             sqe.len = iovecs.len() as u32;
-            sqe.set_off(offset);
+            sqe.set_off(file_offset_to_raw_offset(offset));
             sqe.set_buf_index(0);
             sqe.ioprio = 0;
             sqe.user_data = user_data;
@@ -425,7 +432,7 @@ impl URingContext {
         &self,
         iovecs: I,
         fd: RawFd,
-        offset: u64,
+        offset: Option<u64>,
         user_data: UserData,
     ) -> Result<()>
     where
@@ -459,14 +466,14 @@ impl URingContext {
         &self,
         iovecs: Pin<Box<[IoBufMut<'static>]>>,
         fd: RawFd,
-        offset: u64,
+        offset: Option<u64>,
         user_data: UserData,
     ) -> Result<()> {
         self.submit_ring.lock().prep_next_sqe(|sqe, _iovec| {
             sqe.opcode = IORING_OP_READV as u8;
             sqe.set_addr(iovecs.as_ptr() as *const _ as *const libc::c_void as u64);
             sqe.len = iovecs.len() as u32;
-            sqe.set_off(offset);
+            sqe.set_off(file_offset_to_raw_offset(offset));
             sqe.set_buf_index(0);
             sqe.ioprio = 0;
             sqe.user_data = user_data;
@@ -636,18 +643,28 @@ impl URingContext {
                 self.in_flight.fetch_add(added, Ordering::Release);
             }
             Err(e) => {
-                self.submit_ring.lock().fail_submit(added);
+                // An EBUSY return means that some completed events must be processed before
+                // submitting more, so wait for some to finish without pushing the new sqes in
+                // that case.
+                // An EINTR means we successfully submitted the events but were interrupted while
+                // waiting, so just wait again.
+                // Any other error should be propagated up.
 
-                if wait_nr == 0 || e != libc::EBUSY {
+                if e != libc::EINTR {
+                    self.submit_ring.lock().fail_submit(added);
+                }
+
+                if wait_nr == 0 || (e != libc::EBUSY && e != libc::EINTR) {
                     return Err(Error::RingEnter(e));
                 }
 
-                // An ebusy return means that some completed events must be processed before
-                // submitting more, wait for some to finish without pushing the new sqes in
-                // that case.
-                unsafe {
-                    io_uring_enter(self.ring_file.as_raw_fd(), 0, wait_nr, flags)
-                        .map_err(Error::RingEnter)?;
+                loop {
+                    // Safe because the only memory modified is in the completion queue.
+                    let res =
+                        unsafe { io_uring_enter(self.ring_file.as_raw_fd(), 0, wait_nr, flags) };
+                    if res != Err(libc::EINTR) {
+                        return res.map_err(Error::RingEnter);
+                    }
                 }
             }
         }
@@ -951,7 +968,7 @@ mod tests {
         let (user_data_ret, res) = unsafe {
             // Safe because the `wait` call waits until the kernel is done with `buf`.
             uring
-                .add_read(buf.as_mut_ptr(), buf.len(), fd, offset, user_data)
+                .add_read(buf.as_mut_ptr(), buf.len(), fd, Some(offset), user_data)
                 .unwrap();
             uring.wait().unwrap().next().unwrap()
         };
@@ -975,7 +992,7 @@ mod tests {
         let (user_data_ret, res) = unsafe {
             // Safe because the `wait` call waits until the kernel is done with `buf`.
             uring
-                .add_readv_iter(io_vecs, fd, offset, user_data)
+                .add_readv_iter(io_vecs, fd, Some(offset), user_data)
                 .unwrap();
             uring.wait().unwrap().next().unwrap()
         };
@@ -1009,7 +1026,7 @@ mod tests {
                     buf[offset..].as_mut_ptr(),
                     BUF_SIZE,
                     f.as_raw_fd(),
-                    offset as u64,
+                    Some(offset as u64),
                     index,
                 ) {
                     Ok(_) => (),
@@ -1064,7 +1081,7 @@ mod tests {
         let (user_data_ret, res) = unsafe {
             // Safe because the `wait` call waits until the kernel is done with `buf`.
             uring
-                .add_readv_iter(io_vecs.into_iter(), f.as_raw_fd(), 0, 55)
+                .add_readv_iter(io_vecs.into_iter(), f.as_raw_fd(), Some(0), 55)
                 .unwrap();
             uring.wait().unwrap().next().unwrap()
         };
@@ -1083,7 +1100,7 @@ mod tests {
         unsafe {
             // Safe because the `wait` call waits until the kernel is done mutating `buf`.
             uring
-                .add_write(buf.as_mut_ptr(), buf.len(), f.as_raw_fd(), 0, 55)
+                .add_write(buf.as_mut_ptr(), buf.len(), f.as_raw_fd(), Some(0), 55)
                 .unwrap();
             let (user_data, res) = uring.wait().unwrap().next().unwrap();
             assert_eq!(user_data, 55_u64);
@@ -1109,7 +1126,7 @@ mod tests {
         unsafe {
             // Safe because the `wait` call waits until the kernel is done mutating `buf`.
             uring
-                .add_write(buf.as_mut_ptr(), buf.len(), f.as_raw_fd(), 0, 55)
+                .add_write(buf.as_mut_ptr(), buf.len(), f.as_raw_fd(), Some(0), 55)
                 .unwrap();
             uring.submit().unwrap();
             // Poll for completion with epoll.
@@ -1145,7 +1162,7 @@ mod tests {
         let (user_data_ret, res) = unsafe {
             // Safe because the `wait` call waits until the kernel is done with `buf`.
             uring
-                .add_writev_iter(io_vecs.into_iter(), f.as_raw_fd(), OFFSET, 55)
+                .add_writev_iter(io_vecs.into_iter(), f.as_raw_fd(), Some(OFFSET), 55)
                 .unwrap();
             uring.wait().unwrap().next().unwrap()
         };
@@ -1210,15 +1227,15 @@ mod tests {
         let mut pending = std::collections::BTreeSet::new();
         unsafe {
             uring
-                .add_write(buf.as_ptr(), buf.len(), f.as_raw_fd(), 0, 67)
+                .add_write(buf.as_ptr(), buf.len(), f.as_raw_fd(), Some(0), 67)
                 .unwrap();
             pending.insert(67u64);
             uring
-                .add_write(buf.as_ptr(), buf.len(), f.as_raw_fd(), 4096, 68)
+                .add_write(buf.as_ptr(), buf.len(), f.as_raw_fd(), Some(4096), 68)
                 .unwrap();
             pending.insert(68);
             uring
-                .add_write(buf.as_ptr(), buf.len(), f.as_raw_fd(), 8192, 69)
+                .add_write(buf.as_ptr(), buf.len(), f.as_raw_fd(), Some(8192), 69)
                 .unwrap();
             pending.insert(69);
         }
@@ -1323,7 +1340,13 @@ mod tests {
             let mut buf = [0u8; BUF_DATA.len()];
             unsafe {
                 uring2
-                    .add_read(buf.as_mut_ptr(), buf.len(), pipe_out.as_raw_fd(), 0, 0)
+                    .add_read(
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        pipe_out.as_raw_fd(),
+                        Some(0),
+                        0,
+                    )
                     .unwrap();
             }
 
@@ -1598,7 +1621,7 @@ mod tests {
         // wake up the completer threads may still be in the completion ring.
         assert!(uring.complete_ring.num_ready() <= NUM_COMPLETERS as u32);
         assert_eq!(
-            in_flight.lock().abs() as u32 + uring.complete_ring.num_ready(),
+            in_flight.lock().unsigned_abs() as u32 + uring.complete_ring.num_ready(),
             NUM_COMPLETERS as u32
         );
         assert_eq!(uring.submit_ring.lock().added, 0);

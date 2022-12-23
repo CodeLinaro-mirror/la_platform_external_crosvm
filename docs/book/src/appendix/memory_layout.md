@@ -58,7 +58,7 @@ These apply for all boot modes.
 | [`AARCH64_GIC_CPUI_BASE`]         | `3ffd_0000`     | `3fff_0000`     | 128 KiB    | vGIC                                                          |
 | [`AARCH64_GIC_DIST_BASE`]         | `3fff_0000`     | `4000_0000`     | 64 KiB     | vGIC                                                          |
 | [`AARCH64_AXI_BASE`]              | `4000_0000`     |                 |            | Seemingly unused? Is this hard-coded somewhere in the kernel? |
-| [`AARCH64_PROTECTED_VM_FW_START`] | `7fe0_0000`     | `8000_0000`     | 2 MiB      | pVM firmware (if running a protected VM)                      |
+| [`AARCH64_PROTECTED_VM_FW_START`] | `7fc0_0000`     | `8000_0000`     | 4 MiB      | pVM firmware (if running a protected VM)                      |
 | [`AARCH64_PHYS_MEM_START`]        | `8000_0000`     |                 | --mem size | RAM (starts at IPA = 2 GiB)                                   |
 | [`plat_mmio_base`]                | after RAM       | +0x800000       | 8 MiB      | Platform device MMIO region                                   |
 | [`high_mmio_base`]                | after plat_mmio | max phys addr   |            | High MMIO allocation area                                     |
@@ -71,7 +71,7 @@ These apply when no bootloader is passed, so crosvm boots a kernel directly.
 | ------------------------- | ----------------- | --------------- | ----- | ---------------------------- |
 | [`AARCH64_KERNEL_OFFSET`] | `8080_0000`       |                 |       | Kernel load location in RAM  |
 | [`initrd_addr`]           | after kernel      |                 |       | Linux initrd location in RAM |
-| [`fdt_offset`]            | before end of RAM |                 | 2 MiB | Flattened device tree in RAM |
+| [`fdt_address`]           | before end of RAM |                 | 2 MiB | Flattened device tree in RAM |
 
 ### Layout when booting a bootloader
 
@@ -97,6 +97,6 @@ These apply when a bootloader is passed with `--bios`.
 [`high_mmio_base`]: https://crsrc.org/o/src/platform/crosvm-upstream/aarch64/src/lib.rs;l=554?q=high_mmio_base
 [`aarch64_kernel_offset`]: https://crsrc.org/o/src/platform/crosvm-upstream/aarch64/src/lib.rs;l=35?q=AARCH64_KERNEL_OFFSET
 [`initrd_addr`]: https://crsrc.org/o/src/platform/crosvm-upstream/aarch64/src/lib.rs;l=270?q=initrd_addr
-[`fdt_offset`]: https://crsrc.org/o/src/platform/crosvm-upstream/aarch64/src/lib.rs;l=184?q=fdt_offset
+[`fdt_address`]: https://crsrc.org/o/src/platform/crosvm-upstream/aarch64/src/lib.rs;l=184?q=fdt_address
 [`aarch64_fdt_offset_in_bios_mode`]: https://crsrc.org/o/src/platform/crosvm-upstream/aarch64/src/lib.rs;l=49?q=AARCH64_FDT_OFFSET_IN_BIOS_MODE
 [`aarch64_bios_offset`]: https://crsrc.org/o/src/platform/crosvm-upstream/aarch64/src/lib.rs;l=51?q=AARCH64_BIOS_OFFSET

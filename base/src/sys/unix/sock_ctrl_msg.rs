@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -439,7 +439,7 @@ mod tests {
 
     use libc::cmsghdr;
 
-    use super::super::Event;
+    use super::super::PlatformEvent;
     use super::*;
 
     // Doing this as a macro makes it easier to see the line if it fails
@@ -502,7 +502,7 @@ mod tests {
     fn send_recv_only_fd() {
         let (s1, s2) = UnixDatagram::pair().expect("failed to create socket pair");
 
-        let evt = Event::new().expect("failed to create event");
+        let evt = PlatformEvent::new().expect("failed to create event");
         let ioslice = IoSlice::new([].as_ref());
         let write_count = s1
             .send_with_fd(&[ioslice], evt.as_raw_fd())
@@ -526,14 +526,14 @@ mod tests {
         file.write_all(unsafe { from_raw_parts(&1203u64 as *const u64 as *const u8, 8) })
             .expect("failed to write to sent fd");
 
-        assert_eq!(evt.read().expect("failed to read from event"), 1203);
+        assert_eq!(evt.read_count().expect("failed to read from event"), 1203);
     }
 
     #[test]
     fn send_recv_with_fd() {
         let (s1, s2) = UnixDatagram::pair().expect("failed to create socket pair");
 
-        let evt = Event::new().expect("failed to create event");
+        let evt = PlatformEvent::new().expect("failed to create event");
         let ioslice = IoSlice::new([237].as_ref());
         let write_count = s1
             .send_with_fds(&[ioslice], &[evt.as_raw_fd()])
@@ -560,6 +560,6 @@ mod tests {
         file.write_all(unsafe { from_raw_parts(&1203u64 as *const u64 as *const u8, 8) })
             .expect("failed to write to sent fd");
 
-        assert_eq!(evt.read().expect("failed to read from event"), 1203);
+        assert_eq!(evt.read_count().expect("failed to read from event"), 1203);
     }
 }

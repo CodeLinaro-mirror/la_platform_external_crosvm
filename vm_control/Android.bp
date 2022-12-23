@@ -19,19 +19,27 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
-    features: ["balloon"],
+    features: [
+        "balloon",
+        "gdb",
+        "gdbstub",
+        "gdbstub_arch",
+    ],
     rustlibs: [
         "libanyhow",
         "libballoon_control",
         "libbase_rust",
         "libcfg_if",
         "libdata_model",
+        "libgdbstub",
+        "libgdbstub_arch",
         "libhypervisor",
         "liblibc",
         "libresources",
         "librutabaga_gfx",
         "libserde",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libthiserror",
         "libvm_memory",
@@ -43,9 +51,12 @@ rust_library {
     target: {
         host_linux: {
             features: [
+                "gpu",
                 "gdb",
+                "gdbstub",
             ],
             rustlibs: [
+                "libgdbstub",
                 "libgdbstub_arch",
             ],
         },
@@ -67,19 +78,27 @@ rust_test {
         unit_test: true,
     },
     edition: "2021",
-    features: ["balloon"],
+    features: [
+        "balloon",
+        "gdb",
+        "gdbstub",
+        "gdbstub_arch",
+    ],
     rustlibs: [
         "libanyhow",
         "libballoon_control",
         "libbase_rust",
         "libcfg_if",
         "libdata_model",
+        "libgdbstub",
+        "libgdbstub_arch",
         "libhypervisor",
         "liblibc",
         "libresources",
         "librutabaga_gfx",
         "libserde",
         "libserde_json",
+        "libserde_keyvalue",
         "libsync_rust",
         "libthiserror",
         "libvm_memory",
@@ -88,9 +107,12 @@ rust_test {
     target: {
         host_linux: {
             features: [
+                "gpu",
                 "gdb",
+                "gdbstub",
             ],
             rustlibs: [
+                "libgdbstub",
                 "libgdbstub_arch",
             ],
         },

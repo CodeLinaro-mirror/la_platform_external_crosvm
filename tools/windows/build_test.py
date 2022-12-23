@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2017 The Chromium OS Authors. All rights reserved.
+# Copyright 2017 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -230,7 +230,7 @@ def build_or_test(
         lib64dir_pc = os.path.join(lib64dir, "pkgconfig")
 
         # This line that changes the dynamic library path is needed for upstream, but breaks
-        # downstream's CrosVM linux kokoro presubmits.
+        # downstream's crosvm linux kokoro presubmits.
         # env['LD_LIBRARY_PATH'] = libdir + ':' + lib64dir
         env["PKG_CONFIG_ALLOW_CROSS"] = "1"
         env["PKG_CONFIG_LIBDIR"] = libdir_pc + ":" + lib64dir_pc

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# Copyright 2022 The Chromium OS Authors. All rights reserved.
+# Copyright 2022 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 import functools
-from pathlib import Path
-from impl.common import GerritChange, confirm, run_commands, cmd
+import re
 import sys
+from os import chdir
+from pathlib import Path
+
+from impl.common import CROSVM_ROOT, GerritChange, cmd, confirm, run_commands
 
 USAGE = """\
 ./tools/cl [upload|rebase|status|prune]
@@ -65,8 +68,18 @@ class LocalChange(object):
             yield cls(sha_title[0], sha_title[1])
 
     @functools.cached_property
+    def change_id(self):
+        msg = git("log -1 --format=email", self.sha).stdout()
+        match = re.search("^Change-Id: (I[a-f0-9]+)", msg, re.MULTILINE)
+        if not match:
+            return None
+        return match.group(1)
+
+    @functools.cached_property
     def gerrit(self):
-        results = GerritChange.query("project:crosvm/crosvm", self.sha)
+        if not self.change_id:
+            return None
+        results = GerritChange.query("project:crosvm/crosvm", self.change_id)
         if len(results) > 1:
             raise Exception(f"Multiple gerrit changes found for commit {self.sha}: {self.title}.")
         return results[0] if results else None
@@ -126,7 +139,12 @@ def prerequisites():
 
 
 def print_branch_summary(branch: str):
-    print("Branch", branch, "tracking", get_upstream(branch))
+    upstream = get_upstream(branch)
+    if not upstream:
+        print("Branch", branch, "is not tracking an upstream branch")
+        print()
+        return
+    print("Branch", branch, "tracking", upstream)
     changes = [*LocalChange.list_changes(branch)]
     for change in changes:
         if change.gerrit:
@@ -184,17 +202,18 @@ def rebase():
     branch_name = git("branch --show-current").stdout()
     upstream_branch_name = branch_name + "-upstream"
 
-    print(f"Checking out '{upstream_branch_name}'")
-    rev = git("rev-parse", upstream_branch_name).stdout(check=False)
-    if rev:
-        print(f"Leaving behind previous revision of {upstream_branch_name}: {rev}")
-    git("checkout -B", upstream_branch_name, "origin/main").fg(quiet=True)
+    if git("rev-parse", upstream_branch_name).success():
+        print(f"Overwriting existing branch {upstream_branch_name}")
+        git("log -n1", upstream_branch_name).fg()
+
+    git("fetch -q origin main").fg()
+    git("checkout -B", upstream_branch_name, "origin/main").fg()
 
     print(f"Cherry-picking changes from {branch_name}")
     git(f"cherry-pick {branch_name}@{{u}}..{branch_name}").fg()
 
 
-def upload():
+def upload(dry_run: bool = False):
     """
     Uploads changes to the crosvm main branch.
     """
@@ -209,6 +228,10 @@ def upload():
         print(" ", change.sha, change.title)
     print()
 
+    if len(changes) > 1:
+        if not confirm("Uploading {} changes, continue?".format(len(changes))):
+            return
+
     if (remote, branch) != ("origin", "main"):
         print(f"WARNING! Your changes are based on {remote}/{branch}, not origin/main.")
         print("If gerrit rejects your changes, try `./tools/cl rebase -h`.")
@@ -217,9 +240,10 @@ def upload():
             return
         print()
 
-    git("push origin HEAD:refs/for/main").fg()
+    git("push origin HEAD:refs/for/main").fg(dry_run=dry_run)
 
 
 if __name__ == "__main__":
+    chdir(CROSVM_ROOT)
     prerequisites()
     run_commands(upload, rebase, status, prune, usage=USAGE)

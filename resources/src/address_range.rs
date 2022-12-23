@@ -1,4 +1,4 @@
-// Copyright 2022 The ChromiumOS Authors.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,6 +14,7 @@ use serde::Serialize;
 /// be an iterator as well as a range (which also means it is larger than necessary). Additionally,
 /// we would also like to implement some convenience functions for our own type.
 #[derive(Copy, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddressRange {
     pub start: u64,
     pub end: u64,

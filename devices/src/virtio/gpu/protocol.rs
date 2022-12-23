@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium OS Authors. All rights reserved.
+// Copyright 2019 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,7 +17,6 @@ use std::mem::size_of_val;
 use std::str::from_utf8;
 
 use base::Error as BaseError;
-use base::ExternalMappingError;
 use base::TubeError;
 use data_model::DataInit;
 use data_model::Le32;
@@ -311,7 +310,7 @@ pub struct virtio_gpu_display_one {
 unsafe impl DataInit for virtio_gpu_display_one {}
 
 /* VIRTIO_GPU_RESP_OK_DISPLAY_INFO */
-const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
+pub const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
 #[derive(Copy, Clone, Debug, Default)]
 #[repr(C)]
 pub struct virtio_gpu_resp_display_info {
@@ -796,7 +795,7 @@ pub struct GpuResponsePlaneInfo {
 #[derive(Debug)]
 pub enum GpuResponse {
     OkNoData,
-    OkDisplayInfo(Vec<(u32, u32)>),
+    OkDisplayInfo(Vec<(u32, u32, bool)>),
     OkCapsetInfo {
         capset_id: u32,
         version: u32,
@@ -819,7 +818,6 @@ pub enum GpuResponse {
     ErrBase(BaseError),
     ErrRutabaga(RutabagaError),
     ErrDisplay(GpuDisplayError),
-    ErrMapping(ExternalMappingError),
     ErrScanout {
         num_scanouts: u32,
     },
@@ -847,12 +845,6 @@ impl From<RutabagaError> for GpuResponse {
 impl From<GpuDisplayError> for GpuResponse {
     fn from(e: GpuDisplayError) -> GpuResponse {
         GpuResponse::ErrDisplay(e)
-    }
-}
-
-impl From<ExternalMappingError> for GpuResponse {
-    fn from(e: ExternalMappingError) -> GpuResponse {
-        GpuResponse::ErrMapping(e)
     }
 }
 
@@ -936,10 +928,11 @@ impl GpuResponse {
                     hdr,
                     pmodes: Default::default(),
                 };
-                for (disp_mode, &(width, height)) in disp_info.pmodes.iter_mut().zip(info) {
+                for (disp_mode, &(width, height, enabled)) in disp_info.pmodes.iter_mut().zip(info)
+                {
                     disp_mode.r.width = Le32::from(width);
                     disp_mode.r.height = Le32::from(height);
-                    disp_mode.enabled = Le32::from(1);
+                    disp_mode.enabled = Le32::from(enabled as u32);
                 }
                 resp.write_obj(disp_info)?;
                 size_of_val(&disp_info)
@@ -1049,7 +1042,6 @@ impl GpuResponse {
             GpuResponse::ErrBase(_) => VIRTIO_GPU_RESP_ERR_UNSPEC,
             GpuResponse::ErrRutabaga(_) => VIRTIO_GPU_RESP_ERR_UNSPEC,
             GpuResponse::ErrDisplay(_) => VIRTIO_GPU_RESP_ERR_UNSPEC,
-            GpuResponse::ErrMapping(_) => VIRTIO_GPU_RESP_ERR_UNSPEC,
             GpuResponse::ErrUdmabuf(_) => VIRTIO_GPU_RESP_ERR_UNSPEC,
             GpuResponse::ErrScanout { num_scanouts: _ } => VIRTIO_GPU_RESP_ERR_UNSPEC,
             GpuResponse::ErrEdid(_) => VIRTIO_GPU_RESP_ERR_UNSPEC,

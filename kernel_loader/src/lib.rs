@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -82,7 +82,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-/// Information about a kernel loaded with the [`load_kernel`] function.
+/// Information about a kernel loaded with the [`load_elf`] function.
 pub struct LoadedKernel {
     /// Address range containg the bounds of the loaded program headers.
     /// `address_range.start` is the start of the lowest loaded program header.

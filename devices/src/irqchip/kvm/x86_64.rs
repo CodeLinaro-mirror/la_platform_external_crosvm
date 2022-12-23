@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -512,7 +512,7 @@ impl IrqChip for KvmSplitIrqChip {
     /// from the Event that triggered the irq event).
     fn service_irq_event(&mut self, event_index: IrqEventIndex) -> Result<()> {
         if let Some(evt) = &self.irq_events.lock()[event_index] {
-            evt.event.read()?;
+            evt.event.wait()?;
             let chips = self.routes_to_chips(evt.gsi);
 
             for (chip, pin) in chips {
@@ -532,7 +532,7 @@ impl IrqChip for KvmSplitIrqChip {
                             }
                         } else {
                             self.delayed_ioapic_irq_events.lock().push(event_index);
-                            self.delayed_ioapic_irq_trigger.write(1).unwrap();
+                            self.delayed_ioapic_irq_trigger.signal().unwrap();
                         }
                     }
                     _ => {}
@@ -711,7 +711,7 @@ impl IrqChip for KvmSplitIrqChip {
             });
 
         if self.delayed_ioapic_irq_events.lock().is_empty() {
-            self.delayed_ioapic_irq_trigger.read()?;
+            self.delayed_ioapic_irq_trigger.wait()?;
         }
 
         Ok(())
@@ -810,11 +810,10 @@ impl IrqChipX86_64 for KvmSplitIrqChip {
 #[cfg(test)]
 mod tests {
 
-    use base::EventReadResult;
+    use base::EventWaitResult;
     use hypervisor::kvm::Kvm;
     use hypervisor::IoapicRedirectionTableEntry;
     use hypervisor::PitRWMode;
-    use hypervisor::ProtectionType;
     use hypervisor::TriggerMode;
     use hypervisor::Vm;
     use hypervisor::VmX86_64;
@@ -833,8 +832,7 @@ mod tests {
     fn get_kernel_chip() -> KvmKernelIrqChip {
         let kvm = Kvm::new().expect("failed to instantiate Kvm");
         let mem = GuestMemory::new(&[]).unwrap();
-        let vm =
-            KvmVm::new(&kvm, mem, ProtectionType::Unprotected).expect("failed tso instantiate vm");
+        let vm = KvmVm::new(&kvm, mem, Default::default()).expect("failed tso instantiate vm");
 
         let mut chip = KvmKernelIrqChip::new(vm.try_clone().expect("failed to clone vm"), 1)
             .expect("failed to instantiate KvmKernelIrqChip");
@@ -850,8 +848,7 @@ mod tests {
     fn get_split_chip() -> KvmSplitIrqChip {
         let kvm = Kvm::new().expect("failed to instantiate Kvm");
         let mem = GuestMemory::new(&[]).unwrap();
-        let vm =
-            KvmVm::new(&kvm, mem, ProtectionType::Unprotected).expect("failed tso instantiate vm");
+        let vm = KvmVm::new(&kvm, mem, Default::default()).expect("failed tso instantiate vm");
 
         let (_, device_tube) = Tube::pair().expect("failed to create irq tube");
 
@@ -1111,9 +1108,9 @@ mod tests {
         let resample_evt = evt.get_resample().try_clone().unwrap();
         assert_eq!(
             resample_evt
-                .read_timeout(std::time::Duration::from_secs(1))
+                .wait_timeout(std::time::Duration::from_secs(1))
                 .expect("failed to read_timeout"),
-            EventReadResult::Count(1)
+            EventWaitResult::Signaled
         );
 
         // setup a ioapic redirection table entry 14
@@ -1223,9 +1220,9 @@ mod tests {
         // resample event should not be written to
         assert_eq!(
             evt.get_resample()
-                .read_timeout(std::time::Duration::from_millis(10))
+                .wait_timeout(std::time::Duration::from_millis(10))
                 .expect("failed to read_timeout"),
-            EventReadResult::Timeout
+            EventWaitResult::TimedOut
         );
 
         // irq line 1 should be asserted
@@ -1242,9 +1239,9 @@ mod tests {
         // resample event should be written to by ioapic
         assert_eq!(
             evt.get_resample()
-                .read_timeout(std::time::Duration::from_millis(10))
+                .wait_timeout(std::time::Duration::from_millis(10))
                 .expect("failed to read_timeout"),
-            EventReadResult::Count(1)
+            EventWaitResult::Signaled
         );
     }
 }

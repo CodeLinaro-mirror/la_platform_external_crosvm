@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,8 +18,8 @@ use super::named_pipes;
 use super::named_pipes::PipeConnection;
 use super::stream_channel::BlockingMode;
 use super::stream_channel::FramingMode;
-use super::Event;
 use super::MultiProcessMutex;
+use super::PlatformEvent;
 use super::RawDescriptor;
 use super::Result;
 use crate::descriptor::AsRawDescriptor;
@@ -59,9 +59,9 @@ pub const DEFAULT_BUFFER_SIZE: usize = 50 * 1024;
 #[derive(Deserialize, Debug)]
 pub struct StreamChannel {
     pipe_conn: named_pipes::PipeConnection,
-    write_notify: Event,
-    read_notify: Event,
-    pipe_closed: Event,
+    write_notify: PlatformEvent,
+    read_notify: PlatformEvent,
+    pipe_closed: PlatformEvent,
 
     // Held when reading on this end, to prevent additional writes from corrupting notification
     // state.
@@ -138,7 +138,7 @@ impl Serialize for StreamChannel {
 impl Drop for StreamChannel {
     fn drop(&mut self) {
         if *self.is_channel_closed_on_drop.borrow() {
-            if let Err(e) = self.pipe_closed.write(0) {
+            if let Err(e) = self.pipe_closed.signal() {
                 warn!("failed to notify on channel drop: {}", e);
             }
         }
@@ -206,7 +206,7 @@ impl StreamChannel {
             if byte_count > 0 {
                 // It's always safe to set the read notifier here because we know there is data in the
                 // pipe, and no one else could read it out from under us.
-                self.read_notify.write(0).map_err(|e| {
+                self.read_notify.signal().map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::Other,
                         format!("failed to write to read notifier: {:?}", e),
@@ -239,7 +239,7 @@ impl StreamChannel {
                 let byte_count = self.get_readable_byte_count()?;
                 if byte_count > 0 {
                     // Safe because no one else can be reading from the pipe.
-                    self.read_notify.write(0).map_err(|e| {
+                    self.read_notify.signal().map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::Other,
                             format!("failed to write to read notifier: {:?}", e),
@@ -288,7 +288,7 @@ impl StreamChannel {
         //      2) a read has completed and is blocked on the lock. The notification state is
         //         already correct, and the read's resync won't change that.
         if res.is_ok() {
-            self.write_notify.write(0).map_err(|e| {
+            self.write_notify.signal().map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::Other,
                     format!("failed to write to read notifier: {:?}", e),
@@ -305,8 +305,8 @@ impl StreamChannel {
         pipe_b: PipeConnection,
         send_buffer_size: usize,
     ) -> Result<(StreamChannel, StreamChannel)> {
-        let (notify_a_write, notify_b_write) = (Event::new()?, Event::new()?);
-        let pipe_closed = Event::new()?;
+        let (notify_a_write, notify_b_write) = (PlatformEvent::new()?, PlatformEvent::new()?);
+        let pipe_closed = PlatformEvent::new()?;
 
         let write_lock_a = MultiProcessMutex::new()?;
         let write_lock_b = MultiProcessMutex::new()?;

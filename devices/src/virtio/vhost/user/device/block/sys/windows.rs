@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,14 +16,11 @@ use base::RawDescriptor;
 use broker_ipc::common_child_setup;
 use broker_ipc::CommonChildStartupArgs;
 use cros_async::Executor;
-use disk::async_ok;
-use disk::AsyncDisk;
-use disk::SingleFileDisk;
+use crosvm_cli::sys::windows::exit::Exit;
+use crosvm_cli::sys::windows::exit::ExitContext;
+use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
 use hypervisor::ProtectionType;
-use tracing;
 use tube_transporter::TubeToken;
-use winapi::um::winnt::FILE_SHARE_READ;
-use winapi::um::winnt::FILE_SHARE_WRITE;
 
 use crate::virtio::base_features;
 use crate::virtio::block::block::DiskOption;
@@ -33,45 +30,6 @@ use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
 use crate::virtio::vhost::user::device::VhostUserDevice;
 use crate::virtio::vhost::user::VhostUserBackend;
 use crate::virtio::BlockAsync;
-
-impl BlockBackend {
-    pub(in crate::virtio::vhost::user::device::block) fn new_from_files(
-        ex: &Executor,
-        files: Vec<File>,
-        base_features: u64,
-        read_only: bool,
-        sparse: bool,
-        block_size: u32,
-    ) -> anyhow::Result<Box<dyn VhostUserBackend>> {
-        // Safe because the executor is initialized in main() below.
-        let disk = Box::new(SingleFileDisk::new_from_files(files, ex)?).into_inner();
-        Box::new(BlockAsync::new(
-            base_features,
-            disk,
-            read_only,
-            sparse,
-            block_size,
-            None,
-            None,
-        )?)
-        .into_backend(ex)
-    }
-}
-
-/// Opens a disk image for use by the backend.
-fn open_disk_file(disk_option: &DiskOption, take_write_lock: bool) -> anyhow::Result<File> {
-    let share_flags = if take_write_lock {
-        FILE_SHARE_READ
-    } else {
-        FILE_SHARE_READ | FILE_SHARE_WRITE
-    };
-    OpenOptions::new()
-        .read(true)
-        .write(!disk_option.read_only)
-        .share_mode(share_flags)
-        .open(&disk_option.path)
-        .context("Failed to open disk file")
-}
 
 #[derive(FromArgs, Debug)]
 #[argh(subcommand, name = "block", description = "")]
@@ -85,7 +43,7 @@ pub struct Options {
 }
 
 pub fn start_device(opts: Options) -> anyhow::Result<()> {
-    tracing::init();
+    cros_tracing::init();
 
     let raw_transport_tube = opts.bootstrap as RawDescriptor;
 
@@ -108,31 +66,22 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
 
     info!("using {} IO handles.", disk_option.io_concurrency.get());
 
-    // We can only take the write lock if a single handle is used (otherwise we can't open multiple
-    // handles).
-    let take_write_lock = disk_option.io_concurrency.get() == 1;
-
-    let mut files = Vec::new();
-    for _ in 0..disk_option.io_concurrency.get() {
-        files.push(open_disk_file(&disk_option, take_write_lock)?);
-    }
-
-    if !async_ok(&files[0])? {
-        bail!("found non-raw image; only raw images are supported.");
-    }
-
-    let base_features = base_features(ProtectionType::Unprotected);
-
     let ex = Executor::new().context("failed to create executor")?;
 
-    let block = BlockBackend::new_from_files(
-        &ex,
-        files,
-        base_features,
+    let block = Box::new(BlockAsync::new(
+        base_features(ProtectionType::Unprotected),
+        disk_option
+            .open()
+            .exit_context(Exit::OpenDiskImage, "failed to open disk image")?,
         disk_option.read_only,
         disk_option.sparse,
         disk_option.block_size,
-    )?;
+        None,
+        None,
+        None,
+        None,
+    )?)
+    .into_backend(&ex)?;
 
     // TODO(b/213170185): Uncomment once sandbox is upstreamed.
     //     if sandbox::is_sandbox_target() {

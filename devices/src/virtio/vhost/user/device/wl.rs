@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Copyright 2021 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -32,19 +31,19 @@ use futures::future::Abortable;
 use hypervisor::ProtectionType;
 #[cfg(feature = "minigbm")]
 use rutabaga_gfx::RutabagaGralloc;
-use sync::Mutex;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
 
 use crate::virtio::base_features;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
+use crate::virtio::vhost::user::device::handler::VhostBackendReqConnection;
+use crate::virtio::vhost::user::device::handler::VhostBackendReqConnectionState;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
 use crate::virtio::vhost::user::device::listener::sys::VhostUserListener;
 use crate::virtio::vhost::user::device::listener::VhostUserListenerTrait;
 use crate::virtio::wl;
 use crate::virtio::Queue;
-use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
 
 const MAX_QUEUE_NUM: usize = wl::QUEUE_SIZES.len();
@@ -53,7 +52,7 @@ const MAX_VRING_LEN: u16 = wl::QUEUE_SIZE;
 async fn run_out_queue(
     mut queue: Queue,
     mem: GuestMemory,
-    doorbell: Arc<Mutex<Doorbell>>,
+    doorbell: Doorbell,
     kick_evt: EventAsync,
     wlstate: Rc<RefCell<wl::WlState>>,
 ) {
@@ -70,7 +69,7 @@ async fn run_out_queue(
 async fn run_in_queue(
     mut queue: Queue,
     mem: GuestMemory,
-    doorbell: Arc<Mutex<Doorbell>>,
+    doorbell: Doorbell,
     kick_evt: EventAsync,
     wlstate: Rc<RefCell<wl::WlState>>,
     wlstate_ctx: Box<dyn IoSourceExt<AsyncWrapper<SafeDescriptor>>>,
@@ -98,7 +97,6 @@ async fn run_in_queue(
 struct WlBackend {
     ex: Executor,
     wayland_paths: Option<BTreeMap<String, PathBuf>>,
-    mapper: Option<Box<dyn SharedMemoryMapper>>,
     resource_bridge: Option<Tube>,
     use_transition_flags: bool,
     use_send_vfd_v2: bool,
@@ -107,6 +105,7 @@ struct WlBackend {
     acked_features: u64,
     wlstate: Option<Rc<RefCell<wl::WlState>>>,
     workers: [Option<AbortHandle>; MAX_QUEUE_NUM],
+    backend_req_conn: VhostBackendReqConnectionState,
 }
 
 impl WlBackend {
@@ -123,7 +122,6 @@ impl WlBackend {
         WlBackend {
             ex: ex.clone(),
             wayland_paths: Some(wayland_paths),
-            mapper: None,
             resource_bridge,
             use_transition_flags: false,
             use_send_vfd_v2: false,
@@ -132,6 +130,7 @@ impl WlBackend {
             acked_features: 0,
             wlstate: None,
             workers: Default::default(),
+            backend_req_conn: VhostBackendReqConnectionState::NoConnection,
         }
     }
 }
@@ -175,12 +174,20 @@ impl VhostUserBackend for WlBackend {
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
-        VhostUserProtocolFeatures::SLAVE_REQ
+        VhostUserProtocolFeatures::SLAVE_REQ | VhostUserProtocolFeatures::SHARED_MEMORY_REGIONS
     }
 
     fn ack_protocol_features(&mut self, features: u64) -> anyhow::Result<()> {
-        if features != VhostUserProtocolFeatures::SLAVE_REQ.bits() {
-            Err(anyhow!("Unexpected protocol features: {:#x}", features))
+        if features & self.protocol_features().bits() != self.protocol_features().bits() {
+            Err(anyhow!(
+                "Acked features {:#x} missing required protocol features",
+                features
+            ))
+        } else if features & !self.protocol_features().bits() != 0 {
+            Err(anyhow!(
+                "Acked features {:#x} contains unexpected features",
+                features
+            ))
         } else {
             Ok(())
         }
@@ -197,7 +204,7 @@ impl VhostUserBackend for WlBackend {
         idx: usize,
         mut queue: Queue,
         mem: GuestMemory,
-        doorbell: Arc<Mutex<Doorbell>>,
+        doorbell: Doorbell,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
         if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
@@ -219,29 +226,42 @@ impl VhostUserBackend for WlBackend {
         // think we're borrowing all of `self` in the closure below.
         let WlBackend {
             ref mut wayland_paths,
-            ref mut mapper,
             ref mut resource_bridge,
             ref use_transition_flags,
             ref use_send_vfd_v2,
             ..
         } = self;
+
         #[cfg(feature = "minigbm")]
         let gralloc = RutabagaGralloc::new().context("Failed to initailize gralloc")?;
-        let wlstate = self
-            .wlstate
-            .get_or_insert_with(|| {
-                Rc::new(RefCell::new(wl::WlState::new(
+        let wlstate = match &self.wlstate {
+            None => {
+                let mapper = {
+                    match &mut self.backend_req_conn {
+                        VhostBackendReqConnectionState::Connected(request) => {
+                            request.take_shmem_mapper()?
+                        }
+                        VhostBackendReqConnectionState::NoConnection => {
+                            bail!("No backend request connection found")
+                        }
+                    }
+                };
+
+                let wlstate = Rc::new(RefCell::new(wl::WlState::new(
                     wayland_paths.take().expect("WlState already initialized"),
-                    mapper.take().expect("WlState already initialized"),
+                    mapper,
                     *use_transition_flags,
                     *use_send_vfd_v2,
                     resource_bridge.take(),
                     #[cfg(feature = "minigbm")]
                     gralloc,
                     None, /* address_offset */
-                )))
-            })
-            .clone();
+                )));
+                self.wlstate = Some(wlstate.clone());
+                wlstate
+            }
+            Some(state) => state.clone(),
+        };
         let (handle, registration) = AbortHandle::new_pair();
         match idx {
             0 => {
@@ -296,8 +316,12 @@ impl VhostUserBackend for WlBackend {
         })
     }
 
-    fn set_shared_memory_mapper(&mut self, mapper: Box<dyn SharedMemoryMapper>) {
-        self.mapper = Some(mapper);
+    fn set_backend_req_connection(&mut self, conn: VhostBackendReqConnection) {
+        if let VhostBackendReqConnectionState::Connected(_) = &self.backend_req_conn {
+            warn!("connection already established. Overwriting");
+        }
+
+        self.backend_req_conn = VhostBackendReqConnectionState::Connected(conn);
     }
 }
 

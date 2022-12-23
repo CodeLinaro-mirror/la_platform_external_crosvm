@@ -13,6 +13,7 @@ package {
 rust_test {
     name: "devices_test_src_lib",
     defaults: ["crosvm_defaults"],
+    // has rustc warnings
     host_supported: true,
     crate_name: "devices",
     cargo_env_compat: true,
@@ -43,6 +44,8 @@ rust_test {
         "libchrono",
         "libcrc32fast",
         "libcros_async",
+        "libcros_tracing",
+        "libcrosvm_cli",
         "libdata_model",
         "libdisk",
         "libfuse_rust",
@@ -51,7 +54,6 @@ rust_test {
         "libkvm_sys",
         "liblibc",
         "liblinux_input_sys",
-        "liblog_rust",
         "libmemoffset",
         "libminijail_rust",
         "libnet_sys",
@@ -62,6 +64,7 @@ rust_test {
         "libpower_monitor",
         "librand",
         "libresources",
+        "librutabaga_gfx",
         "libserde",
         "libserde_json",
         "libserde_keyvalue",
@@ -69,7 +72,6 @@ rust_test {
         "libsync_rust",
         "libtempfile",
         "libthiserror",
-        "libtracing",
         "libusb_util",
         "libuuid",
         "libvfio_sys",
@@ -88,6 +90,8 @@ rust_test {
             features: [
                 "gfxstream",
                 "gpu",
+                "gpu_display",
+                "virgl_renderer_next",
             ],
             rustlibs: [
                 "libgpu_display",
@@ -96,11 +100,13 @@ rust_test {
             shared_libs: ["libgfxstream_backend"],
         },
     },
+
 }
 
 rust_library {
     name: "libdevices",
     defaults: ["crosvm_defaults"],
+    // has rustc warnings
     host_supported: true,
     crate_name: "devices",
     cargo_env_compat: true,
@@ -124,6 +130,8 @@ rust_library {
         "libcfg_if",
         "libchrono",
         "libcros_async",
+        "libcros_tracing",
+        "libcrosvm_cli",
         "libdata_model",
         "libdisk",
         "libfuse_rust",
@@ -132,7 +140,6 @@ rust_library {
         "libkvm_sys",
         "liblibc",
         "liblinux_input_sys",
-        "liblog_rust",
         "libmemoffset",
         "libminijail_rust",
         "libnet_sys",
@@ -143,13 +150,13 @@ rust_library {
         "libpower_monitor",
         "librand",
         "libresources",
+        "librutabaga_gfx",
         "libserde",
         "libserde_json",
         "libserde_keyvalue",
         "libsmallvec",
         "libsync_rust",
         "libthiserror",
-        "libtracing",
         "libusb_util",
         "libuuid",
         "libvfio_sys",
@@ -171,6 +178,8 @@ rust_library {
             features: [
                 "gfxstream",
                 "gpu",
+                "gpu_display",
+                "virgl_renderer_next",
             ],
             rustlibs: [
                 "libgpu_display",
@@ -179,4 +188,5 @@ rust_library {
             shared_libs: ["libgfxstream_backend"],
         },
     },
+
 }

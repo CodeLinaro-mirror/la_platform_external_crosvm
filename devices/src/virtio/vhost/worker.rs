@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -94,7 +94,7 @@ impl<T: Vhost> Worker<T> {
 
         for (queue_index, queue) in self.queues.iter().enumerate() {
             self.vhost_handle
-                .set_vring_num(queue_index, queue.max_size)
+                .set_vring_num(queue_index, queue.actual_size())
                 .map_err(Error::VhostSetVringNum)?;
 
             self.vhost_handle
@@ -162,7 +162,7 @@ impl<T: Vhost> Worker<T> {
                 match event.token {
                     Token::VhostIrqi { index } => {
                         self.vhost_interrupt[index]
-                            .read()
+                            .wait()
                             .map_err(Error::VhostIrqRead)?;
                         self.interrupt
                             .signal_used_queue(self.queues[index].vector());
@@ -171,7 +171,7 @@ impl<T: Vhost> Worker<T> {
                         self.interrupt.interrupt_resample();
                     }
                     Token::Kill => {
-                        let _ = self.kill_evt.read();
+                        let _ = self.kill_evt.wait();
                         break 'wait;
                     }
                     Token::ControlNotify => {

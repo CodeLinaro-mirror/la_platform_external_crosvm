@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.,
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,10 +6,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+#[cfg(feature = "gpu")]
+use devices::virtio::GpuDisplayMode;
+#[cfg(feature = "gpu")]
+use devices::virtio::GpuDisplayParameters;
 #[cfg(feature = "gfxstream")]
 use devices::virtio::GpuMode;
 #[cfg(feature = "gpu")]
-use devices::virtio::{GpuDisplayParameters, GpuParameters};
+use devices::virtio::GpuParameters;
 use devices::IommuDevType;
 use devices::PciAddress;
 use devices::SerialParameters;
@@ -76,28 +80,23 @@ pub fn parse_gpu_render_server_options(
     }
 }
 
-#[cfg(feature = "audio_cras")]
+#[cfg(feature = "audio")]
 pub fn parse_ac97_options(
-    ac97_params: &mut devices::Ac97Parameters,
+    #[allow(unused_variables)] ac97_params: &mut devices::Ac97Parameters,
     key: &str,
     #[allow(unused_variables)] value: &str,
 ) -> Result<(), String> {
     match key {
-        "client_type" => {
-            ac97_params
-                .set_client_type(value)
-                .map_err(|e| crate::crosvm::config::invalid_value_err(value, e))?;
-        }
-        "socket_type" => {
-            ac97_params
-                .set_socket_type(value)
-                .map_err(|e| crate::crosvm::config::invalid_value_err(value, e))?;
-        }
-        _ => {
-            return Err(format!("unknown ac97 parameter {}", key));
-        }
-    };
-    Ok(())
+        #[cfg(feature = "audio_cras")]
+        "client_type" => ac97_params
+            .set_client_type(value)
+            .map_err(|e| crate::crosvm::config::invalid_value_err(value, e)),
+        #[cfg(feature = "audio_cras")]
+        "socket_type" => ac97_params
+            .set_socket_type(value)
+            .map_err(|e| crate::crosvm::config::invalid_value_err(value, e)),
+        _ => Err(format!("unknown ac97 parameter {}", key)),
+    }
 }
 
 #[cfg(feature = "gfxstream")]
@@ -111,7 +110,6 @@ pub fn check_serial_params(_serial_params: &SerialParameters) -> Result<(), Stri
 }
 
 pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
-    crate::crosvm::check_opt_path!(cfg.vhost_vsock_device);
     if cfg.host_ip.is_some() || cfg.netmask.is_some() || cfg.mac_address.is_some() {
         if cfg.host_ip.is_none() {
             return Err("`host-ip` missing from network config".to_string());
@@ -136,11 +134,8 @@ pub fn parse_gpu_options(s: &str) -> Result<GpuParameters, String> {
         gpu_params.__width_compat.take(),
         gpu_params.__height_compat.take(),
     ) {
-        let display_param = GpuDisplayParameters {
-            width,
-            height,
-            ..Default::default()
-        };
+        let display_param =
+            GpuDisplayParameters::default_with_mode(GpuDisplayMode::Windowed(width, height));
         gpu_params.display_params.push(display_param);
     }
 
@@ -177,9 +172,7 @@ pub(crate) fn validate_gpu_config(cfg: &mut Config) -> Result<(), String> {
         if gpu_parameters.display_params.is_empty() {
             gpu_parameters.display_params.push(Default::default());
         }
-
-        let width = gpu_parameters.display_params[0].width;
-        let height = gpu_parameters.display_params[0].height;
+        let (width, height) = gpu_parameters.display_params[0].get_virtual_display_size();
 
         if let Some(virtio_multi_touch) = cfg.virtio_multi_touch.first_mut() {
             virtio_multi_touch.set_default_size(width, height);
@@ -349,9 +342,10 @@ mod tests {
 
     #[test]
     fn parse_coiommu_options() {
+        use std::time::Duration;
+
         use devices::CoIommuParameters;
         use devices::CoIommuUnpinPolicy;
-        use std::time::Duration;
 
         // unpin_policy
         let coiommu_params = from_key_values::<CoIommuParameters>("unpin_policy=off").unwrap();
@@ -452,8 +446,11 @@ mod tests {
         let gpu_params: GpuParameters = from_key_values("backend=virglrenderer").unwrap();
         assert_eq!(gpu_params.mode, GpuMode::ModeVirglRenderer);
 
-        let gpu_params: GpuParameters = from_key_values("backend=gfxstream").unwrap();
-        assert_eq!(gpu_params.mode, GpuMode::ModeGfxstream);
+        #[cfg(feature = "gfxstream")]
+        {
+            let gpu_params: GpuParameters = from_key_values("backend=gfxstream").unwrap();
+            assert_eq!(gpu_params.mode, GpuMode::ModeGfxstream);
+        }
     }
 
     #[cfg(feature = "gpu")]
@@ -504,13 +501,13 @@ mod tests {
     #[test]
     fn parse_gpu_options_default_vulkan_support() {
         {
-            let gpu_params: GpuParameters = from_key_values("backend=virglrenderer").unwrap();
+            let gpu_params: GpuParameters = parse_gpu_options("backend=virglrenderer").unwrap();
             assert_eq!(gpu_params.use_vulkan, None);
         }
 
         #[cfg(feature = "gfxstream")]
         {
-            let gpu_params: GpuParameters = from_key_values("backend=gfxstream").unwrap();
+            let gpu_params: GpuParameters = parse_gpu_options("backend=gfxstream").unwrap();
             assert_eq!(gpu_params.use_vulkan, Some(true));
         }
     }
@@ -562,6 +559,10 @@ mod tests {
         let gpu_params: GpuParameters = parse_gpu_options("backend=virglrenderer,wsi=vk").unwrap();
         assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
 
+        let gpu_params: GpuParameters =
+            parse_gpu_options("backend=virglrenderer,wsi=vulkan").unwrap();
+        assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
+
         let gpu_params: GpuParameters = parse_gpu_options("wsi=vk,backend=virglrenderer").unwrap();
         assert!(matches!(gpu_params.wsi, Some(RutabagaWsi::Vulkan)));
 
@@ -603,28 +604,41 @@ mod tests {
     #[cfg(feature = "gpu")]
     #[test]
     fn parse_gpu_display_options_valid() {
-        {
-            let gpu_params: GpuDisplayParameters = from_key_values("width=500,height=600").unwrap();
-            assert_eq!(gpu_params.width, 500);
-            assert_eq!(gpu_params.height, 600);
-        }
-    }
+        // Default values.
+        let gpu_params: GpuDisplayParameters = from_key_values("").unwrap();
+        assert_eq!(gpu_params, GpuDisplayParameters::default());
 
-    #[cfg(feature = "gpu")]
-    #[test]
-    fn parse_gpu_display_options_invalid() {
-        {
-            assert!(from_key_values::<GpuDisplayParameters>("width=500").is_err());
-        }
-        {
-            assert!(from_key_values::<GpuDisplayParameters>("height=500").is_err());
-        }
-        {
-            assert!(from_key_values::<GpuDisplayParameters>("width").is_err());
-        }
-        {
-            assert!(from_key_values::<GpuDisplayParameters>("blah").is_err());
-        }
+        let gpu_params: GpuDisplayParameters = from_key_values("mode=windowed[800,600]").unwrap();
+        assert_eq!(
+            gpu_params,
+            GpuDisplayParameters {
+                mode: GpuDisplayMode::Windowed(800, 600),
+                ..Default::default()
+            }
+        );
+
+        assert!(from_key_values::<GpuDisplayParameters>("mode=invalid").is_err());
+
+        let gpu_params: GpuDisplayParameters = from_key_values("hidden,refresh-rate=100").unwrap();
+        assert_eq!(
+            gpu_params,
+            GpuDisplayParameters {
+                hidden: true,
+                refresh_rate: 100,
+                ..Default::default()
+            }
+        );
+
+        let gpu_params: GpuDisplayParameters =
+            from_key_values("horizontal-dpi=320,vertical-dpi=25").unwrap();
+        assert_eq!(
+            gpu_params,
+            GpuDisplayParameters {
+                horizontal_dpi: 320,
+                vertical_dpi: 25,
+                ..Default::default()
+            }
+        );
     }
 
     #[cfg(feature = "gpu")]
@@ -637,7 +651,7 @@ mod tests {
                     "--gpu",
                     "2D,width=500,height=600",
                     "--gpu-display",
-                    "width=700,height=800",
+                    "mode=windowed[700,800]",
                     "/dev/null",
                 ],
             )
@@ -648,10 +662,14 @@ mod tests {
             let gpu_params = config.gpu_parameters.unwrap();
 
             assert_eq!(gpu_params.display_params.len(), 2);
-            assert_eq!(gpu_params.display_params[0].width, 500);
-            assert_eq!(gpu_params.display_params[0].height, 600);
-            assert_eq!(gpu_params.display_params[1].width, 700);
-            assert_eq!(gpu_params.display_params[1].height, 800);
+            assert_eq!(
+                gpu_params.display_params[0].get_virtual_display_size(),
+                (500, 600),
+            );
+            assert_eq!(
+                gpu_params.display_params[1].get_virtual_display_size(),
+                (700, 800),
+            );
         }
         {
             let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
@@ -660,7 +678,7 @@ mod tests {
                     "--gpu",
                     "2D",
                     "--gpu-display",
-                    "width=700,height=800",
+                    "mode=windowed[700,800]",
                     "/dev/null",
                 ],
             )
@@ -671,8 +689,10 @@ mod tests {
             let gpu_params = config.gpu_parameters.unwrap();
 
             assert_eq!(gpu_params.display_params.len(), 1);
-            assert_eq!(gpu_params.display_params[0].width, 700);
-            assert_eq!(gpu_params.display_params[0].height, 800);
+            assert_eq!(
+                gpu_params.display_params[0].get_virtual_display_size(),
+                (700, 800),
+            );
         }
     }
 

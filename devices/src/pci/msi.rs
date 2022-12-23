@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -251,7 +251,7 @@ impl MsiConfig {
 
     pub fn trigger(&self) {
         if let Some(irqfd) = self.irqfd.as_ref() {
-            irqfd.write(1).unwrap();
+            irqfd.signal().unwrap();
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Copyright 2017 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -1757,7 +1757,7 @@ impl BlockedSignal {
 
 impl Drop for BlockedSignal {
     fn drop(&mut self) {
-        let _ = unblock_signal(self.signal_num).expect("failed to restore signal mask");
+        unblock_signal(self.signal_num).expect("failed to restore signal mask");
     }
 }
 

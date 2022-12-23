@@ -1,4 +1,4 @@
-# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Copyright 2021 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 # for gpu.
 brk: 1
 clock_gettime: 1
+clone3: 1
 close: 1
 dup2: 1
 dup: 1

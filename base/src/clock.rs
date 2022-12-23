@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium OS Authors. All rights reserved.
+// Copyright 2022 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -66,7 +66,7 @@ impl FakeClock {
         self.deadlines.retain(|(ns, descriptor)| {
             let expired = *ns <= time;
             if expired {
-                descriptor.write(1).unwrap();
+                descriptor.signal().unwrap();
             }
             !expired
         });
