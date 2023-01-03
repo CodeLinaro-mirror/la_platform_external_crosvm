@@ -117,6 +117,28 @@ enum PayloadType {
     Kernel(LoadedKernel),
 }
 
+impl PayloadType {
+    fn entry(&self) -> GuestAddress {
+        match self {
+            Self::Bios {
+                entry,
+                image_size: _,
+            } => *entry,
+            Self::Kernel(k) => k.entry,
+        }
+    }
+
+    fn size(&self) -> u64 {
+        match self {
+            Self::Bios {
+                entry: _,
+                image_size,
+            } => *image_size,
+            Self::Kernel(k) => k.size,
+        }
+    }
+}
+
 fn get_kernel_addr() -> GuestAddress {
     GuestAddress(AARCH64_PHYS_MEM_START + AARCH64_KERNEL_OFFSET)
 }
@@ -343,9 +365,12 @@ impl arch::LinuxArch for AArch64 {
                 }
             }
             VmImage::Kernel(ref mut kernel_image) => {
-                let loaded_kernel = if let Ok(elf_kernel) =
-                    kernel_loader::load_elf64(&mem, get_kernel_addr(), kernel_image)
-                {
+                let loaded_kernel = if let Ok(elf_kernel) = kernel_loader::load_elf64(
+                    &mem,
+                    get_kernel_addr(),
+                    kernel_image,
+                    AARCH64_PHYS_MEM_START,
+                ) {
                     elf_kernel
                 } else {
                     kernel_loader::load_arm64_kernel(&mem, get_kernel_addr(), kernel_image)
@@ -606,6 +631,7 @@ impl arch::LinuxArch for AArch64 {
             components.cpu_capacity,
             fdt_offset,
             cmdline.as_str(),
+            (payload.entry(), payload.size() as usize),
             initrd,
             components.android_fstab,
             irq_chip.get_vgic_version() == DeviceKind::ArmVgicV3,
@@ -640,6 +666,7 @@ impl arch::LinuxArch for AArch64 {
             root_config: pci_root,
             platform_devices,
             hotplug_bus: BTreeMap::new(),
+            devices_thread: None,
         })
     }
 
@@ -864,17 +891,12 @@ impl AArch64 {
 
         // Other cpus are powered off initially
         if vcpu_id == 0 {
-            let (image_addr, image_size) = match payload {
-                PayloadType::Bios { entry, image_size } => (*entry, *image_size),
-                PayloadType::Kernel(loaded_kernel) => (loaded_kernel.entry, loaded_kernel.size),
-            };
-
             let entry_addr = if protection_type.loads_firmware() {
                 Some(AARCH64_PROTECTED_VM_FW_START)
             } else if protection_type.runs_firmware() {
                 None // Initial PC value is set by the hypervisor
             } else {
-                Some(image_addr.offset())
+                Some(payload.entry().offset())
             };
 
             /* PC -- entry point */
@@ -887,10 +909,10 @@ impl AArch64 {
 
             if protection_type.runs_firmware() {
                 /* X1 -- payload entry point */
-                regs.insert(VcpuRegAArch64::X(1), image_addr.offset());
+                regs.insert(VcpuRegAArch64::X(1), payload.entry().offset());
 
                 /* X2 -- image size */
-                regs.insert(VcpuRegAArch64::X(2), image_size as u64);
+                regs.insert(VcpuRegAArch64::X(2), payload.size());
             }
         }
 

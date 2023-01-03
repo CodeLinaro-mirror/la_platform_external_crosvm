@@ -1,9 +1,0 @@
-{
-  "add_workspace": true,
-  "device": true,
-  "global_defaults": "crosvm_defaults",
-  "no_pkg_vers": true,
-  "no_presubmit": true,
-  "run": true,
-  "tests": true
-}

@@ -317,7 +317,7 @@ pub const X86_64_SCI_IRQ: u32 = 5;
 pub const X86_64_IRQ_BASE: u32 = 9;
 const ACPI_HI_RSDP_WINDOW_BASE: u64 = 0x000E_0000;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CpuManufacturer {
     Intel,
     Amd,
@@ -894,6 +894,7 @@ impl arch::LinuxArch for X8664arch {
             #[cfg(unix)]
             platform_devices: Vec::new(),
             hotplug_bus: BTreeMap::new(),
+            devices_thread: None,
         })
     }
 
@@ -1413,7 +1414,7 @@ impl X8664arch {
         kernel_image: &mut File,
     ) -> Result<(boot_params, u64, GuestAddress)> {
         let kernel_start = GuestAddress(KERNEL_START_OFFSET);
-        match kernel_loader::load_elf64(mem, kernel_start, kernel_image) {
+        match kernel_loader::load_elf64(mem, kernel_start, kernel_image, 0) {
             Ok(loaded_kernel) => {
                 // ELF kernels don't contain a `boot_params` structure, so synthesize a default one.
                 let boot_params = Default::default();

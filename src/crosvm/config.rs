@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use arch::set_default_serial_parameters;
+use arch::CpuSet;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrAction;
 use arch::MsrConfig;
@@ -21,6 +22,10 @@ use arch::Pstore;
 use arch::VcpuAffinity;
 use base::debug;
 use base::pagesize;
+#[cfg(windows)]
+use base::RecvTube;
+#[cfg(windows)]
+use base::SendTube;
 use cros_async::ExecutorKind;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
@@ -31,6 +36,10 @@ use devices::virtio::device_constants::video::VideoDeviceConfig;
 use devices::virtio::gpu::GpuParameters;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
+#[cfg(all(windows, feature = "gpu"))]
+use devices::virtio::vhost::user::device::gpu::sys::windows::GpuBackendConfig;
+#[cfg(all(windows, feature = "gpu"))]
+use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
 use devices::virtio::NetParameters;
 #[cfg(feature = "audio")]
 use devices::Ac97Backend;
@@ -39,7 +48,6 @@ use devices::Ac97Parameters;
 #[cfg(feature = "direct")]
 use devices::BusRange;
 use devices::PciAddress;
-use devices::PciClassCode;
 use devices::PflashParameters;
 use devices::StubPciParameters;
 use hypervisor::ProtectionType;
@@ -52,7 +60,6 @@ use vm_control::BatteryType;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use x86_64::set_enable_pnp_data_msr_config;
 
-use super::argument::parse_hex_or_decimal;
 pub(crate) use super::sys::HypervisorKind;
 
 cfg_if::cfg_if! {
@@ -91,6 +98,25 @@ pub enum Executable {
     Kernel(PathBuf),
     /// Path to a plugin executable that is forked by crosvm.
     Plugin(PathBuf),
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct CpuOptions {
+    /// Number of CPU cores.
+    #[serde(default)]
+    pub num_cores: Option<usize>,
+    /// Vector of CPU ids to be grouped into the same cluster.
+    #[serde(default)]
+    pub clusters: Vec<CpuSet>,
+}
+
+#[derive(Debug, Default, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct MemOptions {
+    /// Amount of guest memory in MiB.
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -133,7 +159,7 @@ impl FromStr for VhostUserFsOption {
 }
 
 /// Options for virtio-vhost-user proxy device.
-#[derive(Serialize, Deserialize, Debug, PartialEq, serde_keyvalue::FromKeyValues)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, serde_keyvalue::FromKeyValues)]
 pub struct VvuOption {
     pub socket: PathBuf,
     pub addr: Option<PciAddress>,
@@ -522,7 +548,7 @@ fn jail_config_default_pivot_root() -> PathBuf {
     PathBuf::from(option_env!("DEFAULT_PIVOT_ROOT").unwrap_or("/var/empty"))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, serde_keyvalue::FromKeyValues)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, serde_keyvalue::FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct JailConfig {
     #[serde(default = "jail_config_default_pivot_root")]
@@ -543,6 +569,18 @@ impl Default for JailConfig {
             seccomp_log_failures: false,
         }
     }
+}
+
+fn parse_hex_or_decimal(maybe_hex_string: &str) -> Result<u64, String> {
+    // Parse string starting with 0x as hex and others as numbers.
+    if let Some(hex_string) = maybe_hex_string.strip_prefix("0x") {
+        u64::from_str_radix(hex_string, 16)
+    } else if let Some(hex_string) = maybe_hex_string.strip_prefix("0X") {
+        u64::from_str_radix(hex_string, 16)
+    } else {
+        u64::from_str(maybe_hex_string)
+    }
+    .map_err(|e| format!("invalid numeric value {}: {}", maybe_hex_string, e))
 }
 
 pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
@@ -567,59 +605,40 @@ pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[derive(Deserialize, Serialize, serde_keyvalue::FromKeyValues)]
+#[serde(deny_unknown_fields)]
+struct UserspaceMsrOptions {
+    pub index: u32,
+    #[serde(rename = "type")]
+    pub rw_type: MsrRWType,
+    pub action: MsrAction,
+    #[serde(default = "default_msr_value_from")]
+    pub from: MsrValueFrom,
+    #[serde(default = "default_msr_filter")]
+    pub filter: MsrFilter,
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn default_msr_value_from() -> MsrValueFrom {
+    MsrValueFrom::RWFromRunningCPU
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn default_msr_filter() -> MsrFilter {
+    MsrFilter::Default
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub fn parse_userspace_msr_options(value: &str) -> Result<(u32, MsrConfig), String> {
-    let mut rw_type: Option<MsrRWType> = None;
-    let mut action: Option<MsrAction> = None;
-    let mut from = MsrValueFrom::RWFromRunningCPU;
-    let mut filter = MsrFilter::Default;
-
-    let mut options = super::argument::parse_key_value_options("userspace-msr", value, ',');
-    let index: u32 = options
-        .next()
-        .ok_or(String::from("userspace-msr: expected index"))?
-        .key_numeric()
-        .map_err(|e| e.to_string())?;
-
-    for opt in options {
-        match opt.key() {
-            "type" => match opt.value().map_err(|e| e.to_string())? {
-                "r" => rw_type = Some(MsrRWType::ReadOnly),
-                "w" => rw_type = Some(MsrRWType::WriteOnly),
-                "rw" | "wr" => rw_type = Some(MsrRWType::ReadWrite),
-                _ => {
-                    return Err(String::from("bad type"));
-                }
-            },
-            "action" => match opt.value().map_err(|e| e.to_string())? {
-                "pass" => action = Some(MsrAction::MsrPassthrough),
-                "emu" => action = Some(MsrAction::MsrEmulate),
-                _ => return Err(String::from("bad action")),
-            },
-            "from" => match opt.value().map_err(|e| e.to_string())? {
-                "cpu0" => from = MsrValueFrom::RWFromCPU0,
-                _ => return Err(String::from("bad from")),
-            },
-            "filter" => match opt.value().map_err(|e| e.to_string())? {
-                "yes" => filter = MsrFilter::Override,
-                "no" => filter = MsrFilter::Default,
-                _ => return Err(String::from("bad filter")),
-            },
-
-            _ => return Err(opt.invalid_key_err().to_string()),
-        }
-    }
-
-    let rw_type = rw_type.ok_or(String::from("userspace-msr: type is required"))?;
-
-    let action = action.ok_or(String::from("userspace-msr: action is required"))?;
+    let options: UserspaceMsrOptions = from_key_values(value)?;
 
     Ok((
-        index,
+        options.index,
         MsrConfig {
-            rw_type,
-            action,
-            from,
-            filter,
+            rw_type: options.rw_type,
+            action: options.action,
+            from: options.from,
+            filter: options.filter,
         },
     ))
 }
@@ -882,39 +901,6 @@ pub fn parse_cpu_capacity(s: &str) -> Result<BTreeMap<usize, u32>, String> {
     Ok(cpu_capacity)
 }
 
-/// Parse a comma-separated list of CPU numbers and ranges and convert it to a Vec of CPU numbers.
-pub fn parse_cpu_set(s: &str) -> Result<Vec<usize>, String> {
-    let mut cpuset = Vec::new();
-    for part in s.split(',') {
-        let range: Vec<&str> = part.split('-').collect();
-        if range.is_empty() || range.len() > 2 {
-            return Err(invalid_value_err(part, "invalid list syntax"));
-        }
-        let first_cpu: usize = range[0]
-            .parse()
-            .map_err(|_| invalid_value_err(part, "CPU index must be a non-negative integer"))?;
-        let last_cpu: usize = if range.len() == 2 {
-            range[1]
-                .parse()
-                .map_err(|_| invalid_value_err(part, "CPU index must be a non-negative integer"))?
-        } else {
-            first_cpu
-        };
-
-        if last_cpu < first_cpu {
-            return Err(invalid_value_err(
-                part,
-                "CPU ranges must be from low to high",
-            ));
-        }
-
-        for cpu in first_cpu..=last_cpu {
-            cpuset.push(cpu);
-        }
-    }
-    Ok(cpuset)
-}
-
 pub fn from_key_values<'a, T: Deserialize<'a>>(value: &'a str) -> Result<T, String> {
     serde_keyvalue::from_key_values(value).map_err(|e| e.to_string())
 }
@@ -922,7 +908,7 @@ pub fn from_key_values<'a, T: Deserialize<'a>>(value: &'a str) -> Result<T, Stri
 /// Parse a list of guest to host CPU mappings.
 ///
 /// Each mapping consists of a single guest CPU index mapped to one or more host CPUs in the form
-/// accepted by `parse_cpu_set`:
+/// accepted by `CpuSet::from_str`:
 ///
 ///  `<GUEST-CPU>=<HOST-CPU-SET>[:<GUEST-CPU>=<HOST-CPU-SET>[:...]]`
 pub fn parse_cpu_affinity(s: &str) -> Result<VcpuAffinity, String> {
@@ -939,14 +925,14 @@ pub fn parse_cpu_affinity(s: &str) -> Result<VcpuAffinity, String> {
             let guest_cpu = assignment[0].parse().map_err(|_| {
                 invalid_value_err(assignment[0], "CPU index must be a non-negative integer")
             })?;
-            let host_cpu_set = parse_cpu_set(assignment[1])?;
+            let host_cpu_set = CpuSet::from_str(assignment[1])?;
             if affinity_map.insert(guest_cpu, host_cpu_set).is_some() {
                 return Err(invalid_value_err(cpu_pair, "VCPU index must be unique"));
             }
         }
         Ok(VcpuAffinity::PerVcpu(affinity_map))
     } else {
-        Ok(VcpuAffinity::Global(parse_cpu_set(s)?))
+        Ok(VcpuAffinity::Global(CpuSet::from_str(s)?))
     }
 }
 
@@ -996,58 +982,6 @@ pub fn parse_direct_io_options(s: &str) -> Result<DirectIoOption, String> {
 
 pub fn executable_is_plugin(executable: &Option<Executable>) -> bool {
     matches!(executable, Some(Executable::Plugin(_)))
-}
-
-pub fn parse_stub_pci_parameters(s: &str) -> Result<StubPciParameters, String> {
-    let mut options = super::argument::parse_key_value_options("stub-pci-device", s, ',');
-    let addr = options
-        .next()
-        .ok_or(String::from("stub-pci-device: expected device address"))?
-        .key();
-    let mut params = StubPciParameters {
-        address: PciAddress::from_str(addr).map_err(|e| {
-            invalid_value_err(
-                addr,
-                format!("stub-pci-device: expected PCI address: {}", e),
-            )
-        })?,
-        vendor_id: 0,
-        device_id: 0,
-        class: PciClassCode::Other,
-        subclass: 0,
-        programming_interface: 0,
-        subsystem_device_id: 0,
-        subsystem_vendor_id: 0,
-        revision_id: 0,
-    };
-    for opt in options {
-        match opt.key() {
-            "vendor" => params.vendor_id = opt.parse_numeric::<u16>().map_err(|e| e.to_string())?,
-            "device" => params.device_id = opt.parse_numeric::<u16>().map_err(|e| e.to_string())?,
-            "class" => {
-                let class = opt.parse_numeric::<u32>().map_err(|e| e.to_string())?;
-                params.class = PciClassCode::try_from((class >> 16) as u8)
-                    .map_err(|_| String::from("Unknown class code"))?;
-                params.subclass = (class >> 8) as u8;
-                params.programming_interface = class as u8;
-            }
-            "multifunction" => {} // Ignore but allow the multifunction option for compatibility.
-            "subsystem_vendor" => {
-                params.subsystem_vendor_id =
-                    opt.parse_numeric::<u16>().map_err(|e| e.to_string())?
-            }
-            "subsystem_device" => {
-                params.subsystem_device_id =
-                    opt.parse_numeric::<u16>().map_err(|e| e.to_string())?
-            }
-            "revision" => {
-                params.revision_id = opt.parse_numeric::<u8>().map_err(|e| e.to_string())?
-            }
-            _ => return Err(opt.invalid_key_err().to_string()),
-        }
-    }
-
-    Ok(params)
 }
 
 pub fn parse_pflash_parameters(s: &str) -> Result<PflashParameters, String> {
@@ -1113,7 +1047,7 @@ pub struct Config {
     #[cfg(unix)]
     pub coiommu_param: Option<devices::CoIommuParameters>,
     pub cpu_capacity: BTreeMap<usize, u32>, // CPU index -> capacity
-    pub cpu_clusters: Vec<Vec<usize>>,
+    pub cpu_clusters: Vec<CpuSet>,
     #[cfg(feature = "crash-report")]
     pub crash_pipe_name: Option<String>,
     #[cfg(feature = "crash-report")]
@@ -1146,10 +1080,14 @@ pub struct Config {
     pub force_s2idle: bool,
     #[cfg(feature = "gdb")]
     pub gdb: Option<u32>,
+    #[cfg(all(windows, feature = "gpu"))]
+    pub gpu_backend_config: Option<GpuBackendConfig>,
     #[cfg(feature = "gpu")]
     pub gpu_parameters: Option<GpuParameters>,
     #[cfg(all(unix, feature = "gpu"))]
     pub gpu_render_server_parameters: Option<GpuRenderServerParameters>,
+    #[cfg(all(windows, feature = "gpu"))]
+    pub gpu_vmm_config: Option<GpuVmmConfig>,
     pub host_cpu_topology: bool,
     #[cfg(windows)]
     pub host_guid: Option<String>,
@@ -1219,8 +1157,9 @@ pub struct Config {
     pub pvclock: bool,
     /// Must be `Some` iff `protection_type == ProtectionType::UnprotectedWithFirmware`.
     pub pvm_fw: Option<PathBuf>,
+    pub restore_path: Option<PathBuf>,
     pub rng: bool,
-    pub rt_cpus: Vec<usize>,
+    pub rt_cpus: CpuSet,
     #[serde(with = "serde_serial_params")]
     pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
     #[cfg(feature = "kiwi")]
@@ -1285,6 +1224,10 @@ pub struct Config {
     pub virtio_snds: Vec<SndParameters>,
     pub virtio_switches: Vec<PathBuf>,
     pub virtio_trackpad: Vec<TouchDeviceOption>,
+    #[cfg(windows)]
+    pub vm_evt_rdtube: Option<RecvTube>,
+    #[cfg(windows)]
+    pub vm_evt_wrtube: Option<SendTube>,
     #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     pub vtpm_proxy: bool,
     pub vvu_proxy: Vec<VvuOption>,
@@ -1348,10 +1291,14 @@ impl Default for Config {
             force_s2idle: false,
             #[cfg(feature = "gdb")]
             gdb: None,
+            #[cfg(all(windows, feature = "gpu"))]
+            gpu_backend_config: None,
             #[cfg(feature = "gpu")]
             gpu_parameters: None,
             #[cfg(all(unix, feature = "gpu"))]
             gpu_render_server_parameters: None,
+            #[cfg(all(windows, feature = "gpu"))]
+            gpu_vmm_config: None,
             host_cpu_topology: false,
             #[cfg(windows)]
             host_guid: None,
@@ -1424,8 +1371,9 @@ impl Default for Config {
             #[cfg(windows)]
             pvclock: false,
             pvm_fw: None,
+            restore_path: None,
             rng: true,
-            rt_cpus: Vec::new(),
+            rt_cpus: Default::default(),
             serial_parameters: BTreeMap::new(),
             #[cfg(feature = "kiwi")]
             service_pipe_name: None,
@@ -1487,6 +1435,10 @@ impl Default for Config {
             virtio_snds: Vec::new(),
             virtio_switches: Vec::new(),
             virtio_trackpad: Vec::new(),
+            #[cfg(windows)]
+            vm_evt_rdtube: None,
+            #[cfg(windows)]
+            vm_evt_wrtube: None,
             #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
             vtpm_proxy: false,
             vvu_proxy: Vec::new(),
@@ -1541,7 +1493,7 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
             None => {
                 let mut affinity_map = BTreeMap::new();
                 for cpu_id in 0..cfg.vcpu_count.unwrap() {
-                    affinity_map.insert(cpu_id, vec![cpu_id]);
+                    affinity_map.insert(cpu_id, CpuSet::new([cpu_id]));
                 }
                 cfg.vcpu_affinity = Some(VcpuAffinity::PerVcpu(affinity_map));
             }
@@ -1668,81 +1620,170 @@ fn validate_file_backed_mapping(mapping: &mut FileBackedMappingParameters) -> Re
 #[cfg(test)]
 mod tests {
     use argh::FromArgs;
+    use devices::PciClassCode;
+    use devices::StubPciParameters;
 
     use super::*;
 
     #[test]
+    fn parse_cpu_opts() {
+        let res: CpuOptions = from_key_values("").unwrap();
+        assert_eq!(res, CpuOptions::default());
+
+        // num_cores
+        let res: CpuOptions = from_key_values("12").unwrap();
+        assert_eq!(
+            res,
+            CpuOptions {
+                num_cores: Some(12),
+                ..Default::default()
+            }
+        );
+
+        let res: CpuOptions = from_key_values("num-cores=16").unwrap();
+        assert_eq!(
+            res,
+            CpuOptions {
+                num_cores: Some(16),
+                ..Default::default()
+            }
+        );
+
+        // clusters
+        let res: CpuOptions = from_key_values("clusters=[[0],[1],[2],[3]]").unwrap();
+        assert_eq!(
+            res,
+            CpuOptions {
+                clusters: vec![
+                    CpuSet::new([0]),
+                    CpuSet::new([1]),
+                    CpuSet::new([2]),
+                    CpuSet::new([3])
+                ],
+                ..Default::default()
+            }
+        );
+
+        let res: CpuOptions = from_key_values("clusters=[[0-3]]").unwrap();
+        assert_eq!(
+            res,
+            CpuOptions {
+                clusters: vec![CpuSet::new([0, 1, 2, 3])],
+                ..Default::default()
+            }
+        );
+
+        let res: CpuOptions = from_key_values("clusters=[[0,2],[1,3],[4-7,12]]").unwrap();
+        assert_eq!(
+            res,
+            CpuOptions {
+                clusters: vec![
+                    CpuSet::new([0, 2]),
+                    CpuSet::new([1, 3]),
+                    CpuSet::new([4, 5, 6, 7, 12])
+                ],
+                ..Default::default()
+            }
+        );
+
+        // All together
+        let res: CpuOptions = from_key_values("16,clusters=[[0],[4-6],[7]]").unwrap();
+        assert_eq!(
+            res,
+            CpuOptions {
+                num_cores: Some(16),
+                clusters: vec![CpuSet::new([0]), CpuSet::new([4, 5, 6]), CpuSet::new([7])],
+            }
+        );
+
+        let res: CpuOptions = from_key_values("clusters=[[0-7],[30-31]],num-cores=32").unwrap();
+        assert_eq!(
+            res,
+            CpuOptions {
+                num_cores: Some(32),
+                clusters: vec![CpuSet::new([0, 1, 2, 3, 4, 5, 6, 7]), CpuSet::new([30, 31])],
+            }
+        );
+    }
+
+    #[test]
     fn parse_cpu_set_single() {
-        assert_eq!(parse_cpu_set("123").expect("parse failed"), vec![123]);
+        assert_eq!(
+            CpuSet::from_str("123").expect("parse failed"),
+            CpuSet::new([123])
+        );
     }
 
     #[test]
     fn parse_cpu_set_list() {
         assert_eq!(
-            parse_cpu_set("0,1,2,3").expect("parse failed"),
-            vec![0, 1, 2, 3]
+            CpuSet::from_str("0,1,2,3").expect("parse failed"),
+            CpuSet::new([0, 1, 2, 3])
         );
     }
 
     #[test]
     fn parse_cpu_set_range() {
         assert_eq!(
-            parse_cpu_set("0-3").expect("parse failed"),
-            vec![0, 1, 2, 3]
+            CpuSet::from_str("0-3").expect("parse failed"),
+            CpuSet::new([0, 1, 2, 3])
         );
     }
 
     #[test]
     fn parse_cpu_set_list_of_ranges() {
         assert_eq!(
-            parse_cpu_set("3-4,7-9,18").expect("parse failed"),
-            vec![3, 4, 7, 8, 9, 18]
+            CpuSet::from_str("3-4,7-9,18").expect("parse failed"),
+            CpuSet::new([3, 4, 7, 8, 9, 18])
         );
     }
 
     #[test]
     fn parse_cpu_set_repeated() {
         // For now, allow duplicates - they will be handled gracefully by the vec to cpu_set_t conversion.
-        assert_eq!(parse_cpu_set("1,1,1").expect("parse failed"), vec![1, 1, 1]);
+        assert_eq!(
+            CpuSet::from_str("1,1,1").expect("parse failed"),
+            CpuSet::new([1, 1, 1])
+        );
     }
 
     #[test]
     fn parse_cpu_set_negative() {
         // Negative CPU numbers are not allowed.
-        parse_cpu_set("-3").expect_err("parse should have failed");
+        CpuSet::from_str("-3").expect_err("parse should have failed");
     }
 
     #[test]
     fn parse_cpu_set_reverse_range() {
         // Ranges must be from low to high.
-        parse_cpu_set("5-2").expect_err("parse should have failed");
+        CpuSet::from_str("5-2").expect_err("parse should have failed");
     }
 
     #[test]
     fn parse_cpu_set_open_range() {
-        parse_cpu_set("3-").expect_err("parse should have failed");
+        CpuSet::from_str("3-").expect_err("parse should have failed");
     }
 
     #[test]
     fn parse_cpu_set_extra_comma() {
-        parse_cpu_set("0,1,2,").expect_err("parse should have failed");
+        CpuSet::from_str("0,1,2,").expect_err("parse should have failed");
     }
 
     #[test]
     fn parse_cpu_affinity_global() {
         assert_eq!(
             parse_cpu_affinity("0,5-7,9").expect("parse failed"),
-            VcpuAffinity::Global(vec![0, 5, 6, 7, 9]),
+            VcpuAffinity::Global(CpuSet::new([0, 5, 6, 7, 9])),
         );
     }
 
     #[test]
     fn parse_cpu_affinity_per_vcpu_one_to_one() {
         let mut expected_map = BTreeMap::new();
-        expected_map.insert(0, vec![0]);
-        expected_map.insert(1, vec![1]);
-        expected_map.insert(2, vec![2]);
-        expected_map.insert(3, vec![3]);
+        expected_map.insert(0, CpuSet::new([0]));
+        expected_map.insert(1, CpuSet::new([1]));
+        expected_map.insert(2, CpuSet::new([2]));
+        expected_map.insert(3, CpuSet::new([3]));
         assert_eq!(
             parse_cpu_affinity("0=0:1=1:2=2:3=3").expect("parse failed"),
             VcpuAffinity::PerVcpu(expected_map),
@@ -1752,13 +1793,25 @@ mod tests {
     #[test]
     fn parse_cpu_affinity_per_vcpu_sets() {
         let mut expected_map = BTreeMap::new();
-        expected_map.insert(0, vec![0, 1, 2]);
-        expected_map.insert(1, vec![3, 4, 5]);
-        expected_map.insert(2, vec![6, 7, 8]);
+        expected_map.insert(0, CpuSet::new([0, 1, 2]));
+        expected_map.insert(1, CpuSet::new([3, 4, 5]));
+        expected_map.insert(2, CpuSet::new([6, 7, 8]));
         assert_eq!(
             parse_cpu_affinity("0=0,1,2:1=3-5:2=6,7-8").expect("parse failed"),
             VcpuAffinity::PerVcpu(expected_map),
         );
+    }
+
+    #[test]
+    fn parse_mem_opts() {
+        let res: MemOptions = from_key_values("").unwrap();
+        assert_eq!(res.size, None);
+
+        let res: MemOptions = from_key_values("1024").unwrap();
+        assert_eq!(res.size, Some(1024));
+
+        let res: MemOptions = from_key_values("size=0x4000").unwrap();
+        assert_eq!(res.size, Some(16384));
     }
 
     #[cfg(feature = "audio_cras")]
@@ -1950,18 +2003,18 @@ mod tests {
 
     #[test]
     fn parse_stub_pci() {
-        let params = parse_stub_pci_parameters("0000:01:02.3,vendor=0xfffe,device=0xfffd,class=0xffc1c2,subsystem_vendor=0xfffc,subsystem_device=0xfffb,revision=0xa").unwrap();
+        let params = from_key_values::<StubPciParameters>("0000:01:02.3,vendor=0xfffe,device=0xfffd,class=0xffc1c2,subsystem_vendor=0xfffc,subsystem_device=0xfffb,revision=0xa").unwrap();
         assert_eq!(params.address.bus, 1);
         assert_eq!(params.address.dev, 2);
         assert_eq!(params.address.func, 3);
-        assert_eq!(params.vendor_id, 0xfffe);
-        assert_eq!(params.device_id, 0xfffd);
-        assert_eq!(params.class as u8, PciClassCode::Other as u8);
-        assert_eq!(params.subclass, 0xc1);
-        assert_eq!(params.programming_interface, 0xc2);
-        assert_eq!(params.subsystem_vendor_id, 0xfffc);
-        assert_eq!(params.subsystem_device_id, 0xfffb);
-        assert_eq!(params.revision_id, 0xa);
+        assert_eq!(params.vendor, 0xfffe);
+        assert_eq!(params.device, 0xfffd);
+        assert_eq!(params.class.class as u8, PciClassCode::Other as u8);
+        assert_eq!(params.class.subclass, 0xc1);
+        assert_eq!(params.class.programming_interface, 0xc2);
+        assert_eq!(params.subsystem_vendor, 0xfffc);
+        assert_eq!(params.subsystem_device, 0xfffb);
+        assert_eq!(params.revision, 0xa);
     }
 
     #[cfg(feature = "direct")]

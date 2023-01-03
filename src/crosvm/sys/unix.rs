@@ -26,6 +26,7 @@ use std::iter;
 use std::mem;
 use std::ops::RangeInclusive;
 use std::os::unix::prelude::OpenOptionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process;
 use std::sync::mpsc;
@@ -47,7 +48,6 @@ use arch::VcpuAffinity;
 use arch::VirtioDeviceStub;
 use arch::VmComponents;
 use arch::VmImage;
-use base::sys::WaitStatus;
 #[cfg(feature = "balloon")]
 use base::UnixSeqpacket;
 use base::UnixSeqpacketListener;
@@ -55,6 +55,7 @@ use base::UnlinkUnixSeqpacketListener;
 use base::*;
 use cros_async::Executor;
 use device_helpers::*;
+use devices::create_devices_worker_thread;
 use devices::serial_device::SerialHardware;
 use devices::vfio::VfioCommonSetup;
 use devices::vfio::VfioCommonTrait;
@@ -1903,6 +1904,7 @@ where
     };
 
     let gralloc = RutabagaGralloc::new().context("failed to create gralloc")?;
+
     run_control(
         linux,
         sys_allocator,
@@ -2094,7 +2096,6 @@ fn add_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
 fn remove_hotplug_bridge<V: VmArch, Vcpu: VcpuArch>(
     linux: &RunnableLinuxVm<V, Vcpu>,
     sys_allocator: &mut SystemAllocator,
-    hp_control_tube: &mpsc::Sender<PciRootCommand>,
     buses_to_remove: &mut Vec<u8>,
     host_key: HostHotPlugKey,
     child_bus: u8,
@@ -2110,7 +2111,6 @@ fn remove_hotplug_bridge<V: VmArch, Vcpu: VcpuArch>(
                     remove_hotplug_bridge(
                         linux,
                         sys_allocator,
-                        hp_control_tube,
                         buses_to_remove,
                         hotplug_key,
                         *bus_num,
@@ -2131,7 +2131,6 @@ fn remove_hotplug_bridge<V: VmArch, Vcpu: VcpuArch>(
 fn remove_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
     linux: &mut RunnableLinuxVm<V, Vcpu>,
     sys_allocator: &mut SystemAllocator,
-    hp_control_tube: &mpsc::Sender<PciRootCommand>,
     iommu_host_tube: &Option<Tube>,
     device: &HotPlugDeviceInfo,
 ) -> Result<()> {
@@ -2201,7 +2200,6 @@ fn remove_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
                     remove_hotplug_bridge(
                         linux,
                         sys_allocator,
-                        hp_control_tube,
                         &mut buses_to_remove,
                         hotplug_key,
                         bus_num,
@@ -2225,7 +2223,6 @@ fn remove_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
                             remove_hotplug_bridge(
                                 linux,
                                 sys_allocator,
-                                hp_control_tube,
                                 &mut buses_to_remove,
                                 hotplug_key.unwrap(),
                                 *simbling_bus_num,
@@ -2314,13 +2311,7 @@ fn handle_hotplug_command<V: VmArch, Vcpu: VcpuArch>(
             device,
         )
     } else {
-        remove_hotplug_device(
-            linux,
-            sys_allocator,
-            hp_control_tube,
-            iommu_host_tube,
-            device,
-        )
+        remove_hotplug_device(linux, sys_allocator, iommu_host_tube, device)
     };
 
     match ret {
@@ -2421,6 +2412,26 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     } else {
         (None, None)
     };
+
+    let (device_ctrl_tube, device_ctrl_resp) = Tube::pair().context("failed to create tube")?;
+    // Create devices thread, and restore if a restore file exists.
+    linux.devices_thread = match create_devices_worker_thread(
+        linux.io_bus.clone(),
+        linux.mmio_bus.clone(),
+        device_ctrl_resp,
+    ) {
+        Ok(join_handle) => Some(join_handle),
+        Err(e) => {
+            return Err(anyhow!("Failed to start devices thread: {}", e));
+        }
+    };
+    if let Some(path) = cfg.restore_path.clone() {
+        if let Err(e) =
+            device_ctrl_tube.send(&DeviceControlCommand::RestoreDevices { restore_path: path })
+        {
+            error!("fail to send command to devices control socket: {}", e);
+        };
+    }
 
     let mut vcpu_handles = Vec::with_capacity(linux.vcpu_count);
     let vcpu_thread_barrier = Arc::new(Barrier::new(linux.vcpu_count + 1));
@@ -2735,6 +2746,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 cfg.force_s2idle,
                                                 #[cfg(feature = "swap")]
                                                 swap_controller.as_ref(),
+                                                &device_ctrl_tube,
                                             );
 
                                             // For non s2idle guest suspension we are done
@@ -3251,18 +3263,17 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
             Err(e) => panic!("error waiting for child process to complete: {:#}", e),
             Ok((Some(pid), wait_status)) => match devices_jails.remove_entry(&pid) {
                 Some((_, info)) => {
-                    match wait_status {
-                        WaitStatus::Exited(status) => info!(
+                    if let Some(status) = wait_status.code() {
+                        info!(
                             "process for device {} (PID {}) exited with code {}",
                             &info.name, pid, status
-                        ),
-                        WaitStatus::Signaled(signal) => warn!(
+                        );
+                    } else if let Some(signal) = wait_status.signal() {
+                        warn!(
                             "process for device {} (PID {}) has been killed by signal {:?}",
                             &info.name, pid, signal,
-                        ),
-                        // We are only interested in processes that actually terminate.
-                        WaitStatus::Stopped(_) | WaitStatus::Continued | WaitStatus::Running => (),
-                    };
+                        );
+                    }
                 }
                 None => error!("pid {} is not one of our device processes", pid),
             },

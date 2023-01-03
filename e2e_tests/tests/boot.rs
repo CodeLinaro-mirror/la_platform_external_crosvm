@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 pub mod fixture;
-use fixture::Config;
-use fixture::TestVm;
+use fixture::vm::Config;
+use fixture::vm::TestVm;
 
 #[test]
 fn boot_test_vm() {
@@ -15,6 +15,12 @@ fn boot_test_vm() {
 #[test]
 fn boot_test_vm_odirect() {
     let mut vm = TestVm::new(Config::new().o_direct()).unwrap();
+    assert_eq!(vm.exec_in_guest("echo 42").unwrap().trim(), "42");
+}
+
+#[test]
+fn boot_test_vm_config_file() {
+    let mut vm = TestVm::new_with_config_file(Config::new()).unwrap();
     assert_eq!(vm.exec_in_guest("echo 42").unwrap().trim(), "42");
 }
 

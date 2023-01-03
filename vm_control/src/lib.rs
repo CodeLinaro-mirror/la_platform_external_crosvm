@@ -114,7 +114,7 @@ pub enum VcpuControl {
 }
 
 /// Mode of execution for the VM.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmRunMode {
     /// The default run mode indicating the VCPUs are running.
     Running,
@@ -263,6 +263,44 @@ impl Display for UsbControlResult {
             FailedToInitHostDevice => write!(f, "failed_to_init_host_device"),
         }
     }
+}
+
+/// Commands for snapshot feature
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SnapshotCommand {
+    Take { snapshot_path: PathBuf },
+}
+
+/// Response for [SnapshotCommand]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum SnapshotControlResult {
+    /// The request is accepted successfully.
+    Ok,
+    /// The command fails.
+    Failed(String),
+    /// Request VM shut down in case of major failures.
+    Shutdown,
+}
+/// Commands for restore feature
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RestoreCommand {
+    Apply { restore_path: PathBuf },
+}
+
+/// Response for [RestoreCommand]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RestoreControlResult {
+    /// The request is accepted successfully.
+    Ok,
+    /// The command fails.
+    Failed(String),
+}
+
+/// Commands for actions on devices and the devices control thread.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum DeviceControlCommand {
+    SnapshotDevices { snapshot_path: PathBuf },
+    RestoreDevices { restore_path: PathBuf },
 }
 
 /// Source of a `VmMemoryRequest::RegisterMemory` mapping.
@@ -706,7 +744,7 @@ impl Display for BatControlResult {
     }
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum BatteryType {
     Goldfish,
@@ -910,6 +948,7 @@ pub enum PvClockCommandResponse {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SwapCommand {
     Enable,
+    Disable,
     Status,
     StartPageFaultLogging,
 }
@@ -965,6 +1004,10 @@ pub enum VmRequest {
         device: HotPlugDeviceInfo,
         add: bool,
     },
+    /// Command to Snapshot devices
+    Snapshot(SnapshotCommand),
+    /// Command to Restore devices
+    Restore(RestoreCommand),
 }
 
 pub fn handle_disk_command(command: &DiskControlCommand, disk_host_tube: &Tube) -> VmResponse {
@@ -1024,6 +1067,7 @@ impl VmRequest {
         vcpu_handles: &[(JoinHandle<()>, mpsc::Sender<VcpuControl>)],
         force_s2idle: bool,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        device_control_tube: &Tube,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1059,6 +1103,19 @@ impl VmRequest {
                         Ok(()) => VmResponse::Ok,
                         Err(e) => {
                             error!("swap enable failed: {}", e);
+                            VmResponse::Err(SysError::new(EINVAL))
+                        }
+                    };
+                }
+                VmResponse::Err(SysError::new(ENOTSUP))
+            }
+            VmRequest::Swap(SwapCommand::Disable) => {
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    return match swap_controller.disable() {
+                        Ok(()) => VmResponse::Ok,
+                        Err(e) => {
+                            error!("swap disable failed: {}", e);
                             VmResponse::Err(SysError::new(EINVAL))
                         }
                     };
@@ -1261,6 +1318,40 @@ impl VmRequest {
                 }
             }
             VmRequest::HotPlugCommand { device: _, add: _ } => VmResponse::Ok,
+            VmRequest::Snapshot(SnapshotCommand::Take { ref snapshot_path }) => {
+                let res = device_control_tube.send(&DeviceControlCommand::SnapshotDevices {
+                    snapshot_path: snapshot_path.clone(),
+                });
+                if let Err(e) = res {
+                    error!("fail to send command to devices control socket: {}", e);
+                    return VmResponse::Err(SysError::new(EIO));
+                };
+
+                match device_control_tube.recv() {
+                    Ok(response) => VmResponse::SnapshotResponse(response),
+                    Err(e) => {
+                        error!("fail to recv command from device control socket: {}", e);
+                        VmResponse::Err(SysError::new(EIO))
+                    }
+                }
+            }
+            VmRequest::Restore(RestoreCommand::Apply { ref restore_path }) => {
+                let res = device_control_tube.send(&DeviceControlCommand::RestoreDevices {
+                    restore_path: restore_path.clone(),
+                });
+                if let Err(e) = res {
+                    error!("fail to send command to devices control socket: {}", e);
+                    return VmResponse::Err(SysError::new(EIO));
+                };
+
+                match device_control_tube.recv() {
+                    Ok(response) => VmResponse::RestoreResponse(response),
+                    Err(e) => {
+                        error!("fail to recv command from device control socket: {}", e);
+                        VmResponse::Err(SysError::new(EIO))
+                    }
+                }
+            }
         }
     }
 }
@@ -1291,6 +1382,10 @@ pub enum VmResponse {
     BatResponse(BatControlResult),
     /// Results of swap status command.
     SwapStatus(SwapStatus),
+    /// Results of snapshot commands.
+    SnapshotResponse(SnapshotControlResult),
+    /// Results of restore commands.
+    RestoreResponse(RestoreControlResult),
 }
 
 impl Display for VmResponse {
@@ -1329,6 +1424,8 @@ impl Display for VmResponse {
                         .unwrap_or_else(|_| "invalid_response".to_string()),
                 )
             }
+            SnapshotResponse(result) => write!(f, "snapshot control request result {:?}", result),
+            RestoreResponse(result) => write!(f, "restore control request result {:?}", result),
         }
     }
 }

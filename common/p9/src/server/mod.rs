@@ -257,6 +257,16 @@ impl<'a, T> Deref for MaybeOwned<'a, T> {
     }
 }
 
+impl<'a, T> AsRef<T> for MaybeOwned<'a, T> {
+    fn as_ref(&self) -> &T {
+        use MaybeOwned::*;
+        match self {
+            Borrowed(borrowed) => borrowed,
+            Owned(ref owned) => owned,
+        }
+    }
+}
+
 fn ebadf() -> io::Error {
     io::Error::from_raw_os_error(libc::EBADF)
 }
@@ -300,27 +310,30 @@ fn lookup(parent: &File, name: &CStr) -> io::Result<File> {
 fn do_walk(
     proc: &File,
     wnames: Vec<String>,
-    start: File,
+    start: &File,
     ascii_casefold: bool,
     mds: &mut Vec<libc::stat64>,
 ) -> io::Result<File> {
-    let mut current = start;
+    let mut current = MaybeOwned::Borrowed(start);
 
     for wname in wnames {
         let name = string_to_cstring(wname)?;
-        current = lookup(&current, &name).or_else(|e| {
+        current = MaybeOwned::Owned(lookup(current.as_ref(), &name).or_else(|e| {
             if ascii_casefold {
                 if let Some(libc::ENOENT) = e.raw_os_error() {
-                    return ascii_casefold_lookup(proc, &current, name.to_bytes());
+                    return ascii_casefold_lookup(proc, current.as_ref(), name.to_bytes());
                 }
             }
 
             Err(e)
-        })?;
+        })?);
         mds.push(stat(&current)?);
     }
 
-    Ok(current)
+    match current {
+        MaybeOwned::Owned(owned) => Ok(owned),
+        MaybeOwned::Borrowed(borrowed) => borrowed.try_clone(),
+    }
 }
 
 fn open_fid(proc: &File, path: &File, p9_flags: u32) -> io::Result<File> {
@@ -544,11 +557,7 @@ impl Server {
         }
 
         // We need to walk the tree.  First get the starting path.
-        let start = self
-            .fids
-            .get(&walk.fid)
-            .ok_or_else(ebadf)
-            .and_then(|fid| fid.path.try_clone())?;
+        let start = &self.fids.get(&walk.fid).ok_or_else(ebadf)?.path;
 
         // Now walk the tree and break on the first error, if any.
         let expected_len = walk.wnames.len();
@@ -740,9 +749,24 @@ impl Server {
         Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP))
     }
 
-    fn readlink(&mut self, _readlink: &Treadlink) -> io::Result<Rreadlink> {
-        // symlinks are not allowed
-        Err(io::Error::from_raw_os_error(libc::EACCES))
+    fn readlink(&mut self, readlink: &Treadlink) -> io::Result<Rreadlink> {
+        let fid = self.fids.get(&readlink.fid).ok_or_else(ebadf)?;
+
+        let mut link = vec![0; libc::PATH_MAX as usize];
+
+        // Safe because this will only modify `link` and we check the return value.
+        let len = syscall!(unsafe {
+            libc::readlinkat(
+                fid.path.as_raw_fd(),
+                [0].as_ptr(),
+                link.as_mut_ptr() as *mut libc::c_char,
+                link.len(),
+            )
+        })? as usize;
+        link.truncate(len);
+        let target = String::from_utf8(link)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(Rreadlink { target })
     }
 
     fn get_attr(&mut self, get_attr: &Tgetattr) -> io::Result<Rgetattr> {

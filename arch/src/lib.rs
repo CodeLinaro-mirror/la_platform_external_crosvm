@@ -17,7 +17,9 @@ use std::io;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::ops::Deref;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::mpsc;
 use std::sync::mpsc::SendError;
 use std::sync::Arc;
@@ -94,6 +96,7 @@ use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
+use serde::de::Visitor;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
@@ -116,23 +119,186 @@ pub enum VmImage {
     Bios(File),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, FromKeyValues, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, FromKeyValues, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Pstore {
     pub path: PathBuf,
     pub size: u32,
 }
 
+/// Set of CPU cores.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CpuSet(Vec<usize>);
+
+impl CpuSet {
+    pub fn new<I: IntoIterator<Item = usize>>(cpus: I) -> Self {
+        CpuSet(cpus.into_iter().collect())
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, usize> {
+        self.0.iter()
+    }
+}
+
+fn parse_cpu_range(s: &str, cpuset: &mut Vec<usize>) -> Result<(), String> {
+    fn parse_cpu(s: &str) -> Result<usize, String> {
+        s.parse().map_err(|_| {
+            format!(
+                "invalid CPU index {} - index must be a non-negative integer",
+                s
+            )
+        })
+    }
+
+    let (first_cpu, last_cpu) = match s.split_once('-') {
+        Some((first_cpu, last_cpu)) => {
+            let first_cpu = parse_cpu(first_cpu)?;
+            let last_cpu = parse_cpu(last_cpu)?;
+
+            if last_cpu < first_cpu {
+                return Err(format!(
+                    "invalid CPU range {} - ranges must be from low to high",
+                    s
+                ));
+            }
+            (first_cpu, last_cpu)
+        }
+        None => {
+            let cpu = parse_cpu(s)?;
+            (cpu, cpu)
+        }
+    };
+
+    cpuset.extend(first_cpu..=last_cpu);
+
+    Ok(())
+}
+
+impl FromStr for CpuSet {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut cpuset = Vec::new();
+        for part in s.split(',') {
+            parse_cpu_range(part, &mut cpuset)?;
+        }
+        Ok(CpuSet::new(cpuset))
+    }
+}
+
+impl Deref for CpuSet {
+    type Target = Vec<usize>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl IntoIterator for CpuSet {
+    type Item = usize;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// Deserializes a `CpuSet` from a sequence which elements can either be integers, or strings
+/// representing CPU ranges (e.g. `5-8`).
+impl<'de> Deserialize<'de> for CpuSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CpuSetVisitor;
+        impl<'de> Visitor<'de> for CpuSetVisitor {
+            type Value = CpuSet;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("CpuSet")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(untagged)]
+                enum CpuSetValue<'a> {
+                    Single(usize),
+                    Range(&'a str),
+                }
+
+                let mut cpus = Vec::new();
+                while let Some(cpuset) = seq.next_element::<CpuSetValue>()? {
+                    match cpuset {
+                        CpuSetValue::Single(cpu) => cpus.push(cpu),
+                        CpuSetValue::Range(range) => {
+                            parse_cpu_range(range, &mut cpus).map_err(serde::de::Error::custom)?;
+                        }
+                    }
+                }
+
+                Ok(CpuSet::new(cpus))
+            }
+        }
+
+        deserializer.deserialize_seq(CpuSetVisitor)
+    }
+}
+
+/// Serializes a `CpuSet` into a sequence of integers and strings representing CPU ranges.
+impl Serialize for CpuSet {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+
+        let mut seq = serializer.serialize_seq(None)?;
+
+        // Factorize ranges into "a-b" strings.
+        let mut serialize_range = |start: usize, end: usize| -> Result<(), S::Error> {
+            if start == end {
+                seq.serialize_element(&start)?;
+            } else {
+                seq.serialize_element(&format!("{}-{}", start, end))?;
+            }
+
+            Ok(())
+        };
+
+        // Current range.
+        let mut range = None;
+        for core in &self.0 {
+            range = match range {
+                None => Some((core, core)),
+                Some((start, end)) if *end == *core - 1 => Some((start, core)),
+                Some((start, end)) => {
+                    serialize_range(*start, *end)?;
+                    Some((core, core))
+                }
+            };
+        }
+
+        if let Some((start, end)) = range {
+            serialize_range(*start, *end)?;
+        }
+
+        seq.end()
+    }
+}
+
 /// Mapping of guest VCPU threads to host CPU cores.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum VcpuAffinity {
     /// All VCPU threads will be pinned to the same set of host CPU cores.
-    Global(Vec<usize>),
+    Global(CpuSet),
     /// Each VCPU may be pinned to a set of host CPU cores.
     /// The map key is a guest VCPU index, and the corresponding value is the set of
     /// host CPU indices that the VCPU thread will be allowed to run on.
     /// If a VCPU index is not present in the map, its affinity will not be set.
-    PerVcpu(BTreeMap<usize, Vec<usize>>),
+    PerVcpu(BTreeMap<usize, CpuSet>),
 }
 
 /// Holds the pieces needed to build a VM. Passed to `build_vm` in the `LinuxArch` trait below to
@@ -142,7 +308,7 @@ pub struct VmComponents {
     pub acpi_sdts: Vec<SDT>,
     pub android_fstab: Option<File>,
     pub cpu_capacity: BTreeMap<usize, u32>,
-    pub cpu_clusters: Vec<Vec<usize>>,
+    pub cpu_clusters: Vec<CpuSet>,
     pub delay_rt: bool,
     #[cfg(feature = "direct")]
     pub direct_fixed_evts: Vec<devices::ACPIPMFixedEvent>,
@@ -175,7 +341,7 @@ pub struct VmComponents {
     /// A file to load as pVM firmware. Must be `Some` iff
     /// `hv_cfg.protection_type == ProtectionType::UnprotectedWithFirmware`.
     pub pvm_fw: Option<File>,
-    pub rt_cpus: Vec<usize>,
+    pub rt_cpus: CpuSet,
     pub swiotlb: Option<u64>,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_count: usize,
@@ -187,6 +353,7 @@ pub struct VmComponents {
 pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub bat_control: Option<BatControl>,
     pub delay_rt: bool,
+    pub devices_thread: Option<std::thread::JoinHandle<()>>,
     #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     pub gdb: Option<(u32, Tube)>,
     pub has_bios: bool,
@@ -202,7 +369,7 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     /// Devices to be notified before the system resumes from the S3 suspended state.
     pub resume_notify_devices: Vec<Arc<Mutex<dyn BusResumeDevice>>>,
     pub root_config: Arc<Mutex<PciRoot>>,
-    pub rt_cpus: Vec<usize>,
+    pub rt_cpus: CpuSet,
     pub suspend_evt: Event,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_count: usize,
@@ -562,7 +729,7 @@ pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
     Ok(pci_address)
 }
 
-/// Creates a Virtio MMIO devices for use by this Vm.
+/// Creates Virtio MMIO devices for use by this Vm.
 pub fn generate_virtio_mmio_bus(
     devices: Vec<(VirtioMmioDevice, Option<Minijail>)>,
     irq_chip: &mut dyn IrqChip,
@@ -885,6 +1052,7 @@ pub fn generate_pci_root(
             .partition(|(_, (_, jail))| jail.is_some());
         sandboxed.into_iter().chain(non_sandboxed.into_iter())
     };
+
     let mut amls = BTreeMap::new();
     for (dev_idx, dev_value) in devices {
         #[cfg(unix)]
@@ -1063,44 +1231,53 @@ where
 /// Read and write permissions setting
 ///
 /// Wrap read_allow and write_allow to store them in MsrHandlers level.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum MsrRWType {
+    #[serde(rename = "r")]
     ReadOnly,
+    #[serde(rename = "w")]
     WriteOnly,
+    #[serde(rename = "rw", alias = "wr")]
     ReadWrite,
 }
 
 /// Handler types for userspace-msr
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum MsrAction {
     /// Read and write from host directly, and the control of MSR will
     /// take effect on host.
+    #[serde(rename = "pass")]
     MsrPassthrough,
     /// Store the dummy value for msr (copy from host or custom values),
     /// and the control(WRMSR) of MSR won't take effect on host.
+    #[serde(rename = "emu")]
     MsrEmulate,
 }
 
 /// Source CPU of MSR value
 ///
 /// Indicate which CPU that user get/set MSRs from/to.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum MsrValueFrom {
     /// Read/write MSR value from/into CPU 0.
     /// The MSR source CPU always be CPU 0.
+    #[serde(rename = "cpu0")]
     RWFromCPU0,
     /// Read/write MSR value from/into the running CPU.
     /// If vCPU migrates to another pcpu, the MSR source CPU will also change.
+    #[serde(skip)]
     RWFromRunningCPU,
 }
 
 /// Whether to force KVM-filtered MSRs.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum MsrFilter {
     /// Leave it to hypervisor (KVM) default.
+    #[serde(rename = "no")]
     Default,
     /// Don't let KVM do the default thing and use our userspace MSR
     /// implementation.
+    #[serde(rename = "yes")]
     Override,
 }
 
@@ -1152,5 +1329,38 @@ mod tests {
 
         let res = from_key_values::<Pstore>("");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn deserialize_cpuset_serde_kv() {
+        let res: CpuSet = from_key_values("[0,4,7]").unwrap();
+        assert_eq!(res, CpuSet::new(vec![0, 4, 7]));
+
+        let res: CpuSet = from_key_values("[9-12]").unwrap();
+        assert_eq!(res, CpuSet::new(vec![9, 10, 11, 12]));
+
+        let res: CpuSet = from_key_values("[0,4,7,9-12,15]").unwrap();
+        assert_eq!(res, CpuSet::new(vec![0, 4, 7, 9, 10, 11, 12, 15]));
+    }
+
+    #[test]
+    fn deserialize_serialize_cpuset_json() {
+        let json_str = "[0,4,7]";
+        let cpuset = CpuSet::new(vec![0, 4, 7]);
+        let res: CpuSet = serde_json::from_str(json_str).unwrap();
+        assert_eq!(res, cpuset);
+        assert_eq!(serde_json::to_string(&cpuset).unwrap(), json_str);
+
+        let json_str = r#"["9-12"]"#;
+        let cpuset = CpuSet::new(vec![9, 10, 11, 12]);
+        let res: CpuSet = serde_json::from_str(json_str).unwrap();
+        assert_eq!(res, cpuset);
+        assert_eq!(serde_json::to_string(&cpuset).unwrap(), json_str);
+
+        let json_str = r#"[0,4,7,"9-12",15]"#;
+        let cpuset = CpuSet::new(vec![0, 4, 7, 9, 10, 11, 12, 15]);
+        let res: CpuSet = serde_json::from_str(json_str).unwrap();
+        assert_eq!(res, cpuset);
+        assert_eq!(serde_json::to_string(&cpuset).unwrap(), json_str);
     }
 }

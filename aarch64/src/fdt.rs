@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 
+use arch::CpuSet;
 use arch::SERIAL_ADDR;
 use cros_fdt::Error;
 use cros_fdt::FdtWriter;
@@ -100,7 +101,7 @@ fn create_resv_memory_node(fdt: &mut FdtWriter, resv_size: Option<u64>) -> Resul
 fn create_cpu_nodes(
     fdt: &mut FdtWriter,
     num_cpus: u32,
-    cpu_clusters: Vec<Vec<usize>>,
+    cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
 ) -> Result<()> {
     let cpus_node = fdt.begin_node("cpus")?;
@@ -295,6 +296,21 @@ fn create_chosen_node(
         fdt.property_u32("linux,initrd-end", initrd_end)?;
     }
     fdt.end_node(chosen_node)?;
+
+    Ok(())
+}
+
+fn create_config_node(fdt: &mut FdtWriter, (addr, size): (GuestAddress, usize)) -> Result<()> {
+    let addr = addr
+        .offset()
+        .try_into()
+        .map_err(|_| Error::PropertyValueTooLarge)?;
+    let size = size.try_into().map_err(|_| Error::PropertyValueTooLarge)?;
+
+    let config_node = fdt.begin_node("config")?;
+    fdt.property_u32("kernel-address", addr)?;
+    fdt.property_u32("kernel-size", size)?;
+    fdt.end_node(config_node)?;
 
     Ok(())
 }
@@ -522,10 +538,11 @@ pub fn create_fdt(
     pci_cfg: PciConfigRegion,
     pci_ranges: &[PciRange],
     num_cpus: u32,
-    cpu_clusters: Vec<Vec<usize>>,
+    cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
     fdt_address: GuestAddress,
     cmdline: &str,
+    image: (GuestAddress, usize),
     initrd: Option<(GuestAddress, usize)>,
     android_fstab: Option<File>,
     is_gicv3: bool,
@@ -547,6 +564,7 @@ pub fn create_fdt(
         arch::android::create_android_fdt(&mut fdt, android_fstab)?;
     }
     create_chosen_node(&mut fdt, cmdline, initrd)?;
+    create_config_node(&mut fdt, image)?;
     create_memory_node(&mut fdt, guest_mem)?;
     let dma_pool_phandle = create_resv_memory_node(&mut fdt, swiotlb)?;
     create_cpu_nodes(&mut fdt, num_cpus, cpu_clusters, cpu_capacity)?;

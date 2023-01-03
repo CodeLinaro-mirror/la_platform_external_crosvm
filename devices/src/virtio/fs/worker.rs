@@ -144,7 +144,7 @@ pub struct Worker<F: FileSystem + Sync> {
     mem: GuestMemory,
     queue: Queue,
     server: Arc<fuse::Server<F>>,
-    irq: Arc<Interrupt>,
+    irq: Interrupt,
     tube: Arc<Mutex<Tube>>,
     slot: u32,
 }
@@ -167,7 +167,7 @@ pub fn process_fs_queue<I: SignalableInterrupt, F: FileSystem + Sync>(
         let total = server.handle_message(reader, writer, &mapper)?;
 
         queue.add_used(mem, avail_desc.index, total as u32);
-        queue.trigger_interrupt(mem, &*interrupt);
+        queue.trigger_interrupt(mem, interrupt);
     }
 
     Ok(())
@@ -178,7 +178,7 @@ impl<F: FileSystem + Sync> Worker<F> {
         mem: GuestMemory,
         queue: Queue,
         server: Arc<fuse::Server<F>>,
-        irq: Arc<Interrupt>,
+        irq: Interrupt,
         tube: Arc<Mutex<Tube>>,
         slot: u32,
     ) -> Worker<F> {
@@ -248,7 +248,7 @@ impl<F: FileSystem + Sync> Worker<F> {
                         queue_evt.wait().map_err(Error::ReadQueueEvent)?;
                         if let Err(e) = process_fs_queue(
                             &self.mem,
-                            &*self.irq,
+                            &self.irq,
                             &mut self.queue,
                             &self.server,
                             &self.tube,
