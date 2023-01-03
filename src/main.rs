@@ -5,8 +5,7 @@
 //! Runs a virtual machine
 //!
 //! ## Feature flags
-// TODO(b/255384162) Enable this again once the third party lib is imported
-//#![doc = document_features::document_features!()]
+#![cfg_attr(feature = "document-features", doc = document_features::document_features!())]
 
 #[cfg(any(feature = "composite-disk", feature = "qcow"))]
 use std::fs::OpenOptions;
@@ -28,6 +27,8 @@ use crosvm::cmdline;
 use crosvm::config::executable_is_plugin;
 use crosvm::config::Config;
 use devices::virtio::vhost::user::device::run_block_device;
+#[cfg(feature = "gpu")]
+use devices::virtio::vhost::user::device::run_gpu_device;
 #[cfg(unix)]
 use devices::virtio::vhost::user::device::run_net_device;
 #[cfg(feature = "composite-disk")]
@@ -69,6 +70,8 @@ use vm_control::BalloonControlCommand;
 use vm_control::DiskControlCommand;
 use vm_control::HotPlugDeviceInfo;
 use vm_control::HotPlugDeviceType;
+use vm_control::RestoreCommand;
+use vm_control::SnapshotCommand;
 use vm_control::SwapCommand;
 use vm_control::UsbControlResult;
 use vm_control::VmRequest;
@@ -173,16 +176,19 @@ fn suspend_vms(cmd: cmdline::SuspendCommand) -> std::result::Result<(), ()> {
 
 fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
     use cmdline::SwapSubcommands::*;
-    match cmd.nested {
-        Enable(params) => {
-            let req = VmRequest::Swap(SwapCommand::Enable);
-            vms_request(&req, &Path::new(&params.socket_path))
-        }
-        Status(params) => do_swap_status(&Path::new(&params.socket_path)),
-        LogPageFault(params) => {
-            let req = VmRequest::Swap(SwapCommand::StartPageFaultLogging);
-            vms_request(&req, &Path::new(&params.socket_path))
-        }
+    let (req, path) = match &cmd.nested {
+        Enable(params) => (VmRequest::Swap(SwapCommand::Enable), &params.socket_path),
+        Disable(params) => (VmRequest::Swap(SwapCommand::Disable), &params.socket_path),
+        Status(params) => (VmRequest::Swap(SwapCommand::Status), &params.socket_path),
+        LogPageFault(params) => (
+            VmRequest::Swap(SwapCommand::StartPageFaultLogging),
+            &params.socket_path,
+        ),
+    };
+    if let VmRequest::Swap(SwapCommand::Status) = req {
+        do_swap_status(path)
+    } else {
+        vms_request(&req, path)
     }
 }
 
@@ -286,7 +292,7 @@ fn create_composite(cmd: cmdline::CreateCompositeCommand) -> std::result::Result
         .read(true)
         .write(true)
         .truncate(true)
-        .open(&composite_image_path)
+        .open(composite_image_path)
         .map_err(|e| {
             error!(
                 "Failed opening composite disk image file at '{}': {}",
@@ -424,6 +430,8 @@ fn start_device(opts: cmdline::DeviceCommand) -> std::result::Result<(), ()> {
     let result = match opts.command {
         cmdline::DeviceSubcommand::CrossPlatform(command) => match command {
             CrossPlatformDevicesCommands::Block(cfg) => run_block_device(cfg),
+            #[cfg(feature = "gpu")]
+            CrossPlatformDevicesCommands::Gpu(cfg) => run_gpu_device(cfg),
             #[cfg(unix)]
             CrossPlatformDevicesCommands::Net(cfg) => run_net_device(cfg),
         },
@@ -517,6 +525,35 @@ fn modify_usb(cmd: cmdline::UsbCommand) -> std::result::Result<(), ()> {
             Err(())
         }
     }
+}
+
+fn snapshot_vm(cmd: cmdline::SnapshotCommand) -> std::result::Result<(), ()> {
+    use cmdline::SnapshotSubCommands::*;
+    let (socket_path, request) = match cmd.snapshot_command {
+        Take(path) => {
+            let req = VmRequest::Snapshot(SnapshotCommand::Take {
+                snapshot_path: path.snapshot_path,
+            });
+            (path.socket_path, req)
+        }
+    };
+    let socket_path = Path::new(&socket_path);
+    vms_request(&request, socket_path)
+}
+
+fn restore_vm(cmd: cmdline::RestoreCommand) -> std::result::Result<(), ()> {
+    use cmdline::RestoreSubCommands::*;
+    let (socket_path, request) = match cmd.restore_command {
+        Apply(cmd) => {
+            let file_path = cmd.restore_path;
+            let req = VmRequest::Restore(RestoreCommand::Apply {
+                restore_path: file_path,
+            });
+            (cmd.socket_path, req)
+        }
+    };
+    let socket_path = Path::new(&socket_path);
+    vms_request(&request, socket_path)
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -694,6 +731,12 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
                     CrossPlatformCommands::Vfio(cmd) => {
                         modify_vfio(cmd).map_err(|_| anyhow!("vfio subcommand failed"))
                     }
+                    CrossPlatformCommands::Snapshot(cmd) => {
+                        snapshot_vm(cmd).map_err(|_| anyhow!("snapshot subcommand failed"))
+                    }
+                    CrossPlatformCommands::Restore(cmd) => {
+                        restore_vm(cmd).map_err(|_| anyhow!("restore subcommand failed"))
+                    }
                 }
                 .map(|_| CommandStatus::SuccessOrVmStop)
             }
@@ -753,8 +796,6 @@ mod tests {
         assert!(!is_flag("no-leading-dash"));
     }
 
-    // TODO(b/238361778) this doesn't work on Windows because is_flag isn't called yet.
-    #[cfg(unix)]
     #[test]
     fn args_split_long() {
         assert_eq!(
@@ -765,8 +806,6 @@ mod tests {
         );
     }
 
-    // TODO(b/238361778) this doesn't work on Windows because is_flag isn't called yet.
-    #[cfg(unix)]
     #[test]
     fn args_split_short() {
         assert_eq!(

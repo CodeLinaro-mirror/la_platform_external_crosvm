@@ -79,7 +79,7 @@ use super::VirtioDevice;
 use super::Writer;
 use crate::Suspendable;
 
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GpuMode {
     #[serde(rename = "2d", alias = "2D")]
     Mode2D,
@@ -143,14 +143,14 @@ pub trait QueueReader {
 
 struct LocalQueueReader {
     queue: RefCell<Queue>,
-    interrupt: Arc<Interrupt>,
+    interrupt: Interrupt,
 }
 
 impl LocalQueueReader {
-    fn new(queue: Queue, interrupt: &Arc<Interrupt>) -> Self {
+    fn new(queue: Queue, interrupt: Interrupt) -> Self {
         Self {
             queue: RefCell::new(queue),
-            interrupt: interrupt.clone(),
+            interrupt,
         }
     }
 }
@@ -167,21 +167,21 @@ impl QueueReader for LocalQueueReader {
     fn signal_used(&self, mem: &GuestMemory) {
         self.queue
             .borrow_mut()
-            .trigger_interrupt(mem, &*self.interrupt);
+            .trigger_interrupt(mem, &self.interrupt);
     }
 }
 
 #[derive(Clone)]
 struct SharedQueueReader {
     queue: Arc<Mutex<Queue>>,
-    interrupt: Arc<Interrupt>,
+    interrupt: Interrupt,
 }
 
 impl SharedQueueReader {
-    fn new(queue: Queue, interrupt: &Arc<Interrupt>) -> Self {
+    fn new(queue: Queue, interrupt: Interrupt) -> Self {
         Self {
             queue: Arc::new(Mutex::new(queue)),
-            interrupt: interrupt.clone(),
+            interrupt,
         }
     }
 }
@@ -196,7 +196,7 @@ impl QueueReader for SharedQueueReader {
     }
 
     fn signal_used(&self, mem: &GuestMemory) {
-        self.queue.lock().trigger_interrupt(mem, &*self.interrupt);
+        self.queue.lock().trigger_interrupt(mem, &self.interrupt);
     }
 }
 
@@ -213,7 +213,6 @@ fn build(
     udmabuf: bool,
     fence_handler: RutabagaFenceHandler,
     #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
-    #[cfg(feature = "kiwi")] gpu_device_service_tube: Tube,
 ) -> Option<VirtioGpu> {
     let mut display_opt = None;
     for display_backend in display_backends {
@@ -249,8 +248,6 @@ fn build(
         fence_handler,
         #[cfg(feature = "virgl_renderer_next")]
         render_server_fd,
-        #[cfg(feature = "kiwi")]
-        gpu_device_service_tube,
     )
 }
 
@@ -773,7 +770,7 @@ impl Frontend {
     }
 }
 
-#[derive(EventToken, PartialEq, Clone, Copy, Debug)]
+#[derive(EventToken, PartialEq, Eq, Clone, Copy, Debug)]
 enum WorkerToken {
     CtrlQueue,
     CursorQueue,
@@ -831,7 +828,7 @@ impl<'a> EventManager<'a> {
 }
 
 struct Worker {
-    interrupt: Arc<Interrupt>,
+    interrupt: Interrupt,
     exit_evt_wrtube: SendTube,
     #[cfg(unix)]
     gpu_control_tube: Tube,
@@ -1096,8 +1093,6 @@ pub struct Gpu {
     udmabuf: bool,
     #[cfg(feature = "virgl_renderer_next")]
     render_server_fd: Option<SafeDescriptor>,
-    #[cfg(feature = "kiwi")]
-    gpu_device_service_tube: Option<Tube>,
     context_mask: u64,
 }
 
@@ -1113,7 +1108,6 @@ impl Gpu {
         external_blob: bool,
         base_features: u64,
         channels: BTreeMap<String, PathBuf>,
-        #[cfg(feature = "kiwi")] gpu_device_service_tube: Option<Tube>,
         #[cfg(windows)] wndproc_thread: WindowProcedureThread,
     ) -> Gpu {
         let mut display_params = gpu_parameters.display_params.clone();
@@ -1192,8 +1186,6 @@ impl Gpu {
             udmabuf: gpu_parameters.udmabuf,
             #[cfg(feature = "virgl_renderer_next")]
             render_server_fd,
-            #[cfg(feature = "kiwi")]
-            gpu_device_service_tube,
             context_mask: gpu_parameters.context_mask,
         }
     }
@@ -1209,8 +1201,6 @@ impl Gpu {
         #[cfg(feature = "virgl_renderer_next")]
         let render_server_fd = self.render_server_fd.take();
         let event_devices = self.event_devices.split_off(0);
-        #[cfg(feature = "kiwi")]
-        let gpu_device_service_tube = self.gpu_device_service_tube.take()?;
 
         build(
             &self.display_backends,
@@ -1226,8 +1216,6 @@ impl Gpu {
             fence_handler,
             #[cfg(feature = "virgl_renderer_next")]
             render_server_fd,
-            #[cfg(feature = "kiwi")]
-            gpu_device_service_tube,
         )
         .map(|vgpu| Frontend::new(vgpu, fence_state))
     }
@@ -1272,6 +1260,13 @@ impl Gpu {
             num_scanouts: Le32::from(VIRTIO_GPU_MAX_SCANOUTS as u32),
             num_capsets: Le32::from(num_capsets),
         }
+    }
+
+    /// Send a request to exit the process to VMM.
+    pub fn send_exit_evt(&self) -> anyhow::Result<()> {
+        self.exit_evt_wrtube
+            .send::<VmEventType>(&VmEventType::Exit)
+            .context("failed to send exit event")
     }
 }
 
@@ -1418,10 +1413,9 @@ impl VirtioDevice for Gpu {
             }
         };
 
-        let irq = Arc::new(interrupt);
-        let ctrl_queue = SharedQueueReader::new(queues.remove(0), &irq);
+        let ctrl_queue = SharedQueueReader::new(queues.remove(0), interrupt.clone());
         let ctrl_evt = queue_evts.remove(0);
-        let cursor_queue = LocalQueueReader::new(queues.remove(0), &irq);
+        let cursor_queue = LocalQueueReader::new(queues.remove(0), interrupt.clone());
         let cursor_evt = queue_evts.remove(0);
         let display_backends = self.display_backends.clone();
         let display_params = self.display_params.clone();
@@ -1439,51 +1433,47 @@ impl VirtioDevice for Gpu {
         if let (Some(mapper), Some(rutabaga_builder)) =
             (self.mapper.take(), self.rutabaga_builder.take())
         {
-            let worker_result =
-                thread::Builder::new()
-                    .name("virtio_gpu".to_string())
-                    .spawn(move || {
-                        let fence_handler = create_fence_handler(
-                            mem.clone(),
-                            ctrl_queue.clone(),
-                            fence_state.clone(),
-                        );
+            let worker_result = thread::Builder::new()
+                .name("v_gpu".to_string())
+                .spawn(move || {
+                    let fence_handler =
+                        create_fence_handler(mem.clone(), ctrl_queue.clone(), fence_state.clone());
 
-                        let virtio_gpu = match build(
-                            &display_backends,
-                            display_params,
-                            display_event,
-                            rutabaga_builder,
-                            event_devices,
-                            mapper,
-                            external_blob,
-                            #[cfg(windows)]
-                            &mut wndproc_thread,
-                            udmabuf,
-                            fence_handler,
-                            #[cfg(feature = "virgl_renderer_next")]
-                            render_server_fd,
-                        ) {
-                            Some(backend) => backend,
-                            None => return,
-                        };
+                    let virtio_gpu = match build(
+                        &display_backends,
+                        display_params,
+                        display_event,
+                        rutabaga_builder,
+                        event_devices,
+                        mapper,
+                        external_blob,
+                        #[cfg(windows)]
+                        &mut wndproc_thread,
+                        udmabuf,
+                        fence_handler,
+                        #[cfg(feature = "virgl_renderer_next")]
+                        render_server_fd,
+                    ) {
+                        Some(backend) => backend,
+                        None => return,
+                    };
 
-                        Worker {
-                            interrupt: irq,
-                            exit_evt_wrtube,
-                            #[cfg(unix)]
-                            gpu_control_tube,
-                            mem,
-                            ctrl_queue: ctrl_queue.clone(),
-                            ctrl_evt,
-                            cursor_queue,
-                            cursor_evt,
-                            resource_bridges,
-                            kill_evt,
-                            state: Frontend::new(virtio_gpu, fence_state),
-                        }
-                        .run()
-                    });
+                    Worker {
+                        interrupt,
+                        exit_evt_wrtube,
+                        #[cfg(unix)]
+                        gpu_control_tube,
+                        mem,
+                        ctrl_queue: ctrl_queue.clone(),
+                        ctrl_evt,
+                        cursor_queue,
+                        cursor_evt,
+                        resource_bridges,
+                        kill_evt,
+                        state: Frontend::new(virtio_gpu, fence_state),
+                    }
+                    .run()
+                });
 
             self.worker_thread = match worker_result {
                 Err(e) => {

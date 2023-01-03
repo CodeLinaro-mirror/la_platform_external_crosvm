@@ -7,16 +7,27 @@ use devices::virtio::GpuDisplayParameters;
 #[cfg(feature = "gfxstream")]
 use devices::virtio::GpuMode;
 use devices::virtio::GpuParameters;
+use vm_control::gpu::DEFAULT_DPI;
 
+use crate::crosvm::cmdline::FixedGpuDisplayParameters;
 use crate::crosvm::cmdline::FixedGpuParameters;
 use crate::crosvm::config::Config;
 
 #[cfg(feature = "gfxstream")]
 fn default_use_vulkan() -> bool {
-    !cfg!(window)
+    !cfg!(windows)
 }
 
-pub fn fixup_gpu_options(mut gpu_params: GpuParameters) -> Result<FixedGpuParameters, String> {
+pub(crate) fn fixup_gpu_options(
+    mut gpu_params: GpuParameters,
+) -> Result<FixedGpuParameters, String> {
+    // Fix up `gpu_params.display_params` parsed from command-line.
+    gpu_params.display_params = gpu_params
+        .display_params
+        .into_iter()
+        .map(|p| fixup_gpu_display_options(p).map(|p| p.0))
+        .collect::<Result<Vec<_>, _>>()?;
+
     match (
         gpu_params.__width_compat.take(),
         gpu_params.__height_compat.take(),
@@ -57,6 +68,36 @@ pub fn fixup_gpu_options(mut gpu_params: GpuParameters) -> Result<FixedGpuParame
     }
 
     Ok(FixedGpuParameters(gpu_params))
+}
+
+/// Fixes `GpuDisplayParameters` after parsing using serde.
+///
+/// The `dpi` field is guaranteed to be populated after this is called.
+pub(crate) fn fixup_gpu_display_options(
+    mut display_params: GpuDisplayParameters,
+) -> Result<FixedGpuDisplayParameters, String> {
+    let (horizontal_dpi_compat, vertical_dpi_compat) = (
+        display_params.__horizontal_dpi_compat.take(),
+        display_params.__vertical_dpi_compat.take(),
+    );
+    // Make sure `display_params.dpi` is always populated.
+    display_params.dpi = Some(match display_params.dpi {
+        Some(dpi) => {
+            if horizontal_dpi_compat.is_some() || vertical_dpi_compat.is_some() {
+                return Err(
+                    "if 'dpi' is supplied, 'horizontal-dpi' and 'vertical-dpi' must not be supplied"
+                        .to_string(),
+                );
+            }
+            dpi
+        }
+        None => (
+            horizontal_dpi_compat.unwrap_or(DEFAULT_DPI),
+            vertical_dpi_compat.unwrap_or(DEFAULT_DPI),
+        ),
+    });
+
+    Ok(FixedGpuDisplayParameters(display_params))
 }
 
 pub(crate) fn validate_gpu_config(cfg: &mut Config) -> Result<(), String> {
@@ -518,41 +559,196 @@ mod tests {
 
     #[test]
     fn parse_gpu_display_options_dpi() {
-        const HORIZONTAL_DPI: u32 = 320;
+        const HORIZONTAL_DPI: u32 = 160;
         const VERTICAL_DPI: u32 = 25;
 
-        let display_params = parse_gpu_display_options(
-            format!(
-                "horizontal-dpi={},vertical-dpi={}",
-                HORIZONTAL_DPI, VERTICAL_DPI
-            )
-            .as_str(),
+        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--gpu-display",
+                format!("dpi=[{},{}]", HORIZONTAL_DPI, VERTICAL_DPI).as_str(),
+                "/dev/null",
+            ],
         )
+        .unwrap()
+        .try_into()
         .unwrap();
-        assert_eq!(display_params.horizontal_dpi, HORIZONTAL_DPI);
-        assert_eq!(display_params.vertical_dpi, VERTICAL_DPI);
+
+        let gpu_params = config.gpu_parameters.unwrap();
+
+        assert_eq!(gpu_params.display_params.len(), 1);
+        assert_eq!(
+            gpu_params.display_params[0].horizontal_dpi(),
+            HORIZONTAL_DPI
+        );
+        assert_eq!(gpu_params.display_params[0].vertical_dpi(), VERTICAL_DPI);
+    }
+
+    #[test]
+    fn parse_gpu_display_options_default_dpi() {
+        {
+            let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--gpu-display", "mode=windowed[800,600]", "/dev/null"],
+            )
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+            let gpu_params = config.gpu_parameters.unwrap();
+
+            assert_eq!(gpu_params.display_params.len(), 1);
+            assert_eq!(gpu_params.display_params[0].horizontal_dpi(), DEFAULT_DPI);
+            assert_eq!(gpu_params.display_params[0].vertical_dpi(), DEFAULT_DPI);
+        }
+
+        {
+            let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--gpu", "displays=[[mode=windowed[800,600]]]", "/dev/null"],
+            )
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+            let gpu_params = config.gpu_parameters.unwrap();
+
+            assert_eq!(gpu_params.display_params.len(), 1);
+            assert_eq!(gpu_params.display_params[0].horizontal_dpi(), DEFAULT_DPI);
+            assert_eq!(gpu_params.display_params[0].vertical_dpi(), DEFAULT_DPI);
+        }
+    }
+
+    #[test]
+    fn parse_gpu_display_options_dpi_compat() {
+        const HORIZONTAL_DPI: u32 = 160;
+        const VERTICAL_DPI: u32 = 25;
+
+        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--gpu-display",
+                format!(
+                    "horizontal-dpi={},vertical-dpi={}",
+                    HORIZONTAL_DPI, VERTICAL_DPI
+                )
+                .as_str(),
+                "/dev/null",
+            ],
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+        let gpu_params = config.gpu_parameters.unwrap();
+
+        assert_eq!(gpu_params.display_params.len(), 1);
+        assert_eq!(
+            gpu_params.display_params[0].horizontal_dpi(),
+            HORIZONTAL_DPI
+        );
+        assert_eq!(gpu_params.display_params[0].vertical_dpi(), VERTICAL_DPI);
     }
 
     #[test]
     fn parse_gpu_display_options_dpi_duplicated() {
-        assert!(parse_gpu_display_options("horizontal-dpi=160,horizontal-dpi=320").is_err());
-        assert!(parse_gpu_display_options("vertical-dpi=25,vertical-dpi=50").is_err());
+        assert!(crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--gpu-display",
+                "horizontal-dpi=160,horizontal-dpi=320",
+                "/dev/null",
+            ],
+        )
+        .is_err());
+
+        assert!(crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--gpu-display",
+                "vertical-dpi=25,vertical-dpi=50",
+                "/dev/null",
+            ],
+        )
+        .is_err());
+
+        assert!(crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--gpu-display",
+                "dpi=[160,320],horizontal-dpi=160,vertical-dpi=25",
+                "/dev/null",
+            ],
+        )
+        .is_err());
     }
 
     #[test]
-    fn parse_gpu_options_and_gpu_display_options_valid() {
-        const WIDTH: u32 = 1720;
-        const HEIGHT: u32 = 1800;
-        const EXPECTED_DISPLAY_MODE: GpuDisplayMode = GpuDisplayMode::Windowed(WIDTH, HEIGHT);
+    fn parse_gpu_options_single_display() {
+        {
+            let gpu_params = parse_gpu_options("displays=[[mode=windowed[800,600]]]").unwrap();
+            assert_eq!(gpu_params.display_params.len(), 1);
+            assert_eq!(
+                gpu_params.display_params[0].mode,
+                GpuDisplayMode::Windowed(800, 600)
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let gpu_params = parse_gpu_options("displays=[[mode=borderless_full_screen]]").unwrap();
+            assert_eq!(gpu_params.display_params.len(), 1);
+            assert!(matches!(
+                gpu_params.display_params[0].mode,
+                GpuDisplayMode::BorderlessFullScreen(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_gpu_options_multi_display() {
+        {
+            let gpu_params =
+                parse_gpu_options("displays=[[mode=windowed[500,600]],[mode=windowed[700,800]]]")
+                    .unwrap();
+            assert_eq!(gpu_params.display_params.len(), 2);
+            assert_eq!(
+                gpu_params.display_params[0].mode,
+                GpuDisplayMode::Windowed(500, 600)
+            );
+            assert_eq!(
+                gpu_params.display_params[1].mode,
+                GpuDisplayMode::Windowed(700, 800)
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let gpu_params = parse_gpu_options(
+                "displays=[[mode=windowed[800,600]],[mode=borderless_full_screen]]",
+            )
+            .unwrap();
+            assert_eq!(gpu_params.display_params.len(), 2);
+            assert_eq!(
+                gpu_params.display_params[0].mode,
+                GpuDisplayMode::Windowed(800, 600)
+            );
+            assert!(matches!(
+                gpu_params.display_params[1].mode,
+                GpuDisplayMode::BorderlessFullScreen(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_gpu_options_single_display_compat() {
         const BACKEND: &str = get_backend_name();
 
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
             &[
                 "--gpu",
-                format!("backend={}", BACKEND).as_str(),
-                "--gpu-display",
-                format!("windowed[{},{}]", WIDTH, HEIGHT).as_str(),
+                format!("backend={},width=500,height=600", BACKEND,).as_str(),
                 "/dev/null",
             ],
         )
@@ -563,14 +759,18 @@ mod tests {
         let gpu_params = config.gpu_parameters.unwrap();
 
         assert_eq!(gpu_params.display_params.len(), 1);
-        assert_eq!(gpu_params.display_params[0].mode, EXPECTED_DISPLAY_MODE);
+        assert_eq!(
+            gpu_params.display_params[0].mode,
+            GpuDisplayMode::Windowed(500, 600)
+        );
 
-        // `width` and `height` in GPU options are supported for CLI backward compatibility.
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
             &[
                 "--gpu",
-                format!("backend={},width={},height={}", BACKEND, WIDTH, HEIGHT).as_str(),
+                format!("backend={}", BACKEND,).as_str(),
+                "--gpu-display",
+                "mode=windowed[700,800]",
                 "/dev/null",
             ],
         )
@@ -581,7 +781,10 @@ mod tests {
         let gpu_params = config.gpu_parameters.unwrap();
 
         assert_eq!(gpu_params.display_params.len(), 1);
-        assert_eq!(gpu_params.display_params[0].mode, EXPECTED_DISPLAY_MODE);
+        assert_eq!(
+            gpu_params.display_params[0].mode,
+            GpuDisplayMode::Windowed(700, 800)
+        );
     }
 
     #[cfg(unix)]
@@ -592,9 +795,13 @@ mod tests {
                 &[],
                 &[
                     "--gpu",
-                    format!("backend={},width=500,height=600", get_backend_name()).as_str(),
+                    format!(
+                        "backend={},width=500,height=600,displays=[[mode=windowed[700,800]]]",
+                        get_backend_name()
+                    )
+                    .as_str(),
                     "--gpu-display",
-                    "mode=windowed[700,800]",
+                    "mode=windowed[900,1000]",
                     "/dev/null",
                 ],
             )
@@ -604,14 +811,18 @@ mod tests {
 
             let gpu_params = config.gpu_parameters.unwrap();
 
-            assert_eq!(gpu_params.display_params.len(), 2);
+            assert_eq!(gpu_params.display_params.len(), 3);
             assert_eq!(
-                gpu_params.display_params[0].get_virtual_display_size(),
-                (500, 600),
+                gpu_params.display_params[0].mode,
+                GpuDisplayMode::Windowed(700, 800)
             );
             assert_eq!(
-                gpu_params.display_params[1].get_virtual_display_size(),
-                (700, 800),
+                gpu_params.display_params[1].mode,
+                GpuDisplayMode::Windowed(500, 600)
+            );
+            assert_eq!(
+                gpu_params.display_params[2].mode,
+                GpuDisplayMode::Windowed(900, 1000)
             );
         }
     }
@@ -639,6 +850,30 @@ mod tests {
                 "width=1280,height=720",
                 "--gpu-display",
                 "mode=borderless_full_screen",
+                "/dev/null",
+            ],
+        )
+        .unwrap();
+        assert!(Config::try_from(command).is_err());
+
+        let command = crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--gpu",
+                "displays=[[mode=windowed[1280,720]]]",
+                "--gpu-display",
+                "mode=borderless_full_screen",
+                "/dev/null",
+            ],
+        )
+        .unwrap();
+        assert!(Config::try_from(command).is_err());
+
+        let command = crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--gpu",
+                "displays=[[mode=windowed[500,600]],[mode=windowed[700,800]]]",
                 "/dev/null",
             ],
         )

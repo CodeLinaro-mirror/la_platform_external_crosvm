@@ -48,6 +48,7 @@ fi
 
 source $ANDROID_BUILD_TOP/build/envsetup.sh
 m blueprint_tools
+m cargo_embargo
 m crosvm
 repo start merge
 git merge --log aosp/upstream-main

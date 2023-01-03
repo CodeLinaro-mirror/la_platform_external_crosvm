@@ -788,7 +788,7 @@ impl GpuCommand {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct GpuResponsePlaneInfo {
     pub stride: u32,
     pub offset: u32,
@@ -805,7 +805,7 @@ pub enum GpuResponse {
         size: u32,
     },
     OkCapset(Vec<u8>),
-    OkEdid(EdidBytes),
+    OkEdid(Box<EdidBytes>),
     OkResourcePlaneInfo {
         format_modifier: u64,
         plane_info: Vec<GpuResponsePlaneInfo>,
