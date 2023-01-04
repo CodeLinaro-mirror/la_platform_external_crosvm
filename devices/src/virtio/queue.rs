@@ -482,6 +482,8 @@ impl Queue {
             return None;
         }
 
+        fence(Ordering::SeqCst);
+
         let desc_idx_addr_offset = 4 + (u64::from(self.next_avail.0 % queue_size) * 2);
         let desc_idx_addr = self.avail_ring.checked_add(desc_idx_addr_offset)?;
 
