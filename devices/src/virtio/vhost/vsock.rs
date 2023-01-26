@@ -29,6 +29,7 @@ use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::VirtioDevice;
+use crate::Suspendable;
 
 pub const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 3;
@@ -176,6 +177,8 @@ impl VirtioDevice for Vsock {
         self.acked_features |= v;
     }
 
+    // Allow error! and early return anywhere in function
+    #[allow(clippy::needless_return)]
     fn activate(
         &mut self,
         mem: GuestMemory,
@@ -246,6 +249,8 @@ impl VirtioDevice for Vsock {
         }
     }
 }
+
+impl Suspendable for Vsock {}
 
 #[cfg(test)]
 mod tests {

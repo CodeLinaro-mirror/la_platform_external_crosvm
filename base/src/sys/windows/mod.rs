@@ -30,15 +30,12 @@ mod sched;
 mod shm;
 mod shm_platform;
 mod stream_channel;
-mod stream_channel_platform;
 mod timer;
 mod wait;
 
 pub mod thread;
 
 mod write_zeroes;
-
-use std::cell::Cell;
 
 pub use console::*;
 pub use descriptor::*;
@@ -91,9 +88,6 @@ pub type Pid = pid_t;
 pub type Uid = uid_t;
 pub type Gid = gid_t;
 pub type Mode = mode_t;
-
-/// Used to mark types as !Sync.
-pub type UnsyncMarker = std::marker::PhantomData<Cell<usize>>;
 
 /// Uses the system's page size in bytes to round the given value up to the nearest page boundary.
 #[inline(always)]

@@ -11,9 +11,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
 
-pub use crate::sys::DisplayMode;
-
 pub use crate::sys::handle_request;
+pub use crate::sys::DisplayMode;
 pub use crate::*;
 
 pub const DEFAULT_DISPLAY_WIDTH: u32 = 1280;
@@ -105,7 +104,7 @@ pub enum GpuControlCommand {
     RemoveDisplays { display_ids: Vec<u32> },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GpuControlResult {
     DisplaysUpdated,
     DisplayList {

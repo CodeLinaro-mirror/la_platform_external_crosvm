@@ -29,5 +29,11 @@ sync = { path = "../common/sync" }
 thiserror = "*"
 vm_memory = { path = "../vm_memory" }
 
+[target.'cfg(target_os="linux")'.dependencies]
+swap = { path = "../swap", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 winapi = "*"
+
+[patch.crates-io]
+minijail = { path = "../../minijail/rust/minijail" }

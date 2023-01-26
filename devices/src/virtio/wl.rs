@@ -131,6 +131,7 @@ use super::SharedMemoryRegion;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
 use super::Writer;
+use crate::Suspendable;
 
 const VIRTWL_SEND_MAX_ALLOCS: usize = 28;
 const VIRTIO_WL_CMD_VFD_NEW: u32 = 256;
@@ -2097,14 +2098,12 @@ impl VirtioDevice for Wl {
                         .run(queue_evts, kill_evt);
                     });
 
-            match worker_result {
+            self.worker_thread = match worker_result {
                 Err(e) => {
                     error!("failed to spawn virtio_wl worker: {}", e);
                     return;
                 }
-                Ok(join_handle) => {
-                    self.worker_thread = Some(join_handle);
-                }
+                Ok(join_handle) => Some(join_handle),
             }
         }
     }
@@ -2124,3 +2123,5 @@ impl VirtioDevice for Wl {
         self.mapper = Some(mapper);
     }
 }
+
+impl Suspendable for Wl {}

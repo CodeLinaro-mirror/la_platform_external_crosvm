@@ -10,11 +10,10 @@ use base::open_file;
 use remain::sorted;
 use thiserror::Error;
 
-pub use crate::sys::handle_request;
-pub use crate::*;
-
 #[cfg(feature = "gpu")]
 pub use crate::gpu::*;
+pub use crate::sys::handle_request;
+pub use crate::*;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -122,6 +121,12 @@ pub fn do_modify_battery<T: AsRef<Path> + std::fmt::Debug>(
             Err(())
         }
     }
+}
+
+pub fn do_swap_status<T: AsRef<Path> + std::fmt::Debug>(socket_path: T) -> VmsRequestResult {
+    let response = handle_request(&VmRequest::Swap(SwapCommand::Status), socket_path)?;
+    println!("{}", response);
+    Ok(())
 }
 
 pub type HandleRequestResult = std::result::Result<VmResponse, ()>;

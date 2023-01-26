@@ -4,13 +4,7 @@
 # https://github.com/rust-lang/cargo/issues/5034
 [target.'cfg(all())']
 rustflags = [
-    # TODO(b/181763000): Fail builds on warnings
-    # "-Dwarnings",
-
     # TODO(crbug/908640): To be resolved.
-    "-Aclippy::needless_return",
-    "-Aclippy::needless_doctest_main",
-    "-Aclippy::blocks_in_if_conditions",
     "-Aclippy::missing_safety_doc", # 26 errors
 
     # We don't care about these lints. Okay to remain suppressed globally.

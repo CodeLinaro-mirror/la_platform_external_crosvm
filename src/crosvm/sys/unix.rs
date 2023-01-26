@@ -31,8 +31,6 @@ use std::process;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Barrier;
-#[cfg(any(target_arch = "x86_64", feature = "gdb"))]
-use std::thread;
 #[cfg(feature = "balloon")]
 use std::time::Duration;
 
@@ -122,8 +120,6 @@ use devices::VirtioPciDevice;
 #[cfg(feature = "usb")]
 use devices::XhciController;
 #[cfg(feature = "gpu")]
-pub use gpu::GpuRenderServerParameters;
-#[cfg(feature = "gpu")]
 use gpu::*;
 use hypervisor::kvm::Kvm;
 use hypervisor::kvm::KvmVcpu;
@@ -151,6 +147,8 @@ use resources::Alloc;
 use resources::Error as ResourceError;
 use resources::SystemAllocator;
 use rutabaga_gfx::RutabagaGralloc;
+#[cfg(feature = "swap")]
+use swap::SwapController;
 use sync::Condvar;
 use sync::Mutex;
 use vm_control::*;
@@ -237,22 +235,28 @@ fn create_virtio_devices(
     }
 
     #[cfg(feature = "video-decoder")]
-    let video_dec_cfg = if let Some(config) = &cfg.video_dec {
-        let (video_tube, gpu_tube) = Tube::pair().context("failed to create tube")?;
-        resource_bridges.push(gpu_tube);
-        Some((video_tube, config.backend_type))
-    } else {
-        None
-    };
+    let video_dec_cfg = cfg
+        .video_dec
+        .iter()
+        .map(|config| {
+            let (video_tube, gpu_tube) =
+                Tube::pair().expect("failed to create tube for video decoder");
+            resource_bridges.push(gpu_tube);
+            (video_tube, config.backend)
+        })
+        .collect::<Vec<_>>();
 
     #[cfg(feature = "video-encoder")]
-    let video_enc_cfg = if let Some(config) = &cfg.video_enc {
-        let (video_tube, gpu_tube) = Tube::pair().context("failed to create tube")?;
-        resource_bridges.push(gpu_tube);
-        Some((video_tube, config.backend_type))
-    } else {
-        None
-    };
+    let video_enc_cfg = cfg
+        .video_enc
+        .iter()
+        .map(|config| {
+            let (video_tube, gpu_tube) =
+                Tube::pair().expect("failed to create tube for video encoder");
+            resource_bridges.push(gpu_tube);
+            (video_tube, config.backend)
+        })
+        .collect::<Vec<_>>();
 
     #[cfg(feature = "gpu")]
     {
@@ -587,18 +591,18 @@ fn create_virtio_devices(
 
     #[cfg(feature = "video-decoder")]
     {
-        if let Some((video_dec_tube, video_dec_backend)) = video_dec_cfg {
+        for (tube, backend) in video_dec_cfg {
             register_video_device(
-                video_dec_backend,
+                backend,
                 &mut devs,
-                video_dec_tube,
+                tube,
                 cfg.protection_type,
                 &cfg.jail_config,
                 VideoDeviceType::Decoder,
             )?;
         }
     }
-    if let Some(socket_path) = &cfg.vhost_user_video_dec {
+    for socket_path in &cfg.vhost_user_video_dec {
         devs.push(create_vhost_user_video_device(
             cfg.protection_type,
             socket_path,
@@ -608,11 +612,11 @@ fn create_virtio_devices(
 
     #[cfg(feature = "video-encoder")]
     {
-        if let Some((video_enc_tube, video_enc_backend)) = video_enc_cfg {
+        for (tube, backend) in video_enc_cfg {
             register_video_device(
-                video_enc_backend,
+                backend,
                 &mut devs,
-                video_enc_tube,
+                tube,
                 cfg.protection_type,
                 &cfg.jail_config,
                 VideoDeviceType::Encoder,
@@ -789,20 +793,20 @@ fn create_devices(
         }
 
         if !coiommu_attached_endpoints.is_empty() || !iommu_attached_endpoints.is_empty() {
-            let mut buf = mem::MaybeUninit::<libc::rlimit>::zeroed();
-            let res = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, buf.as_mut_ptr()) };
+            let mut buf = mem::MaybeUninit::<libc::rlimit64>::zeroed();
+            let res = unsafe { libc::getrlimit64(libc::RLIMIT_MEMLOCK, buf.as_mut_ptr()) };
             if res == 0 {
                 let limit = unsafe { buf.assume_init() };
                 let rlim_new = limit
                     .rlim_cur
-                    .saturating_add(vm.get_memory().memory_size() as libc::rlim_t);
+                    .saturating_add(vm.get_memory().memory_size());
                 let rlim_max = max(limit.rlim_max, rlim_new);
                 if limit.rlim_cur < rlim_new {
-                    let limit_arg = libc::rlimit {
-                        rlim_cur: rlim_new as libc::rlim_t,
-                        rlim_max: rlim_max as libc::rlim_t,
+                    let limit_arg = libc::rlimit64 {
+                        rlim_cur: rlim_new,
+                        rlim_max: rlim_max,
                     };
-                    let res = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit_arg) };
+                    let res = unsafe { libc::setrlimit64(libc::RLIMIT_MEMLOCK, &limit_arg) };
                     if res != 0 {
                         bail!("Set rlimit failed");
                     }
@@ -1305,7 +1309,12 @@ fn punch_holes_in_guest_mem_layout_for_mappings(
         .collect()
 }
 
-fn run_kvm(cfg: Config, components: VmComponents, guest_mem: GuestMemory) -> Result<ExitState> {
+fn run_kvm(
+    cfg: Config,
+    components: VmComponents,
+    guest_mem: GuestMemory,
+    #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
+) -> Result<ExitState> {
     let kvm = Kvm::new_with_path(&cfg.kvm_device_path).with_context(|| {
         format!(
             "failed to open KVM device {}",
@@ -1379,7 +1388,15 @@ fn run_kvm(cfg: Config, components: VmComponents, guest_mem: GuestMemory) -> Res
         )
     };
 
-    run_vm::<KvmVcpu, KvmVm>(cfg, components, vm, irq_chip.as_mut(), ioapic_host_tube)
+    run_vm::<KvmVcpu, KvmVm>(
+        cfg,
+        components,
+        vm,
+        irq_chip.as_mut(),
+        ioapic_host_tube,
+        #[cfg(feature = "swap")]
+        swap_controller,
+    )
 }
 
 fn get_default_hypervisor() -> Result<HypervisorKind> {
@@ -1387,6 +1404,11 @@ fn get_default_hypervisor() -> Result<HypervisorKind> {
 }
 
 pub fn run_config(cfg: Config) -> Result<ExitState> {
+    if let Some(async_executor) = cfg.async_executor {
+        Executor::set_default_executor_kind(async_executor)
+            .context("Failed to set the default async executor")?;
+    }
+
     let components = setup_vm_components(&cfg)?;
 
     let guest_mem_layout =
@@ -1406,13 +1428,28 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
     }
     guest_mem.set_memory_policy(mem_policy);
 
+    // Setup page fault handlers for vmm-swap.
+    // This should be called before device processes are forked.
+    #[cfg(feature = "swap")]
+    let swap_controller = cfg
+        .swap_dir
+        .as_ref()
+        .map(|swap_dir| SwapController::launch(guest_mem.clone(), swap_dir.clone()))
+        .transpose()?;
+
     let default_hypervisor = get_default_hypervisor().context("no enabled hypervisor")?;
     let hypervisor = cfg.hypervisor.unwrap_or(default_hypervisor);
 
     debug!("creating {:?} hypervisor", hypervisor);
 
     match hypervisor {
-        HypervisorKind::Kvm => run_kvm(cfg, components, guest_mem),
+        HypervisorKind::Kvm => run_kvm(
+            cfg,
+            components,
+            guest_mem,
+            #[cfg(feature = "swap")]
+            swap_controller,
+        ),
     }
 }
 
@@ -1422,6 +1459,7 @@ fn run_vm<Vcpu, V>(
     mut vm: V,
     irq_chip: &mut dyn IrqChipArch,
     ioapic_host_tube: Option<Tube>,
+    #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
 ) -> Result<ExitState>
 where
     Vcpu: VcpuArch + 'static,
@@ -1831,7 +1869,7 @@ where
         }
 
         let pci_root = linux.root_config.clone();
-        thread::Builder::new()
+        std::thread::Builder::new()
             .name("pci_root".to_string())
             .spawn(move || start_pci_root_worker(pci_root, hp_worker_tube))?;
     }
@@ -1886,6 +1924,8 @@ where
         iommu_host_tube,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         hp_control_tube,
+        #[cfg(feature = "swap")]
+        swap_controller,
     )
 }
 
@@ -2207,6 +2247,46 @@ fn remove_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
     ))
 }
 
+pub fn trigger_vm_suspend_and_wait_for_entry(
+    guest_suspended_cvar: Arc<(Mutex<bool>, Condvar)>,
+    tube: &SendTube,
+    response: vm_control::VmResponse,
+    suspend_evt: Event,
+    pm: Option<Arc<Mutex<dyn PmResource + Send>>>,
+) {
+    let (lock, cvar) = &*guest_suspended_cvar;
+    let mut guest_suspended = lock.lock();
+
+    *guest_suspended = false;
+
+    // During suspend also emulate sleepbtn, which allows to suspend VM (if running e.g. acpid and
+    // reacts on sleep button events)
+    if let Some(pm) = pm {
+        pm.lock().slpbtn_evt();
+    } else {
+        error!("generating sleepbtn during suspend not supported");
+    }
+
+    // Wait for notification about guest suspension, if not received after 15sec,
+    // proceed anyway.
+    let result = cvar.wait_timeout(guest_suspended, std::time::Duration::from_secs(15));
+    guest_suspended = result.0;
+
+    if result.1.timed_out() {
+        warn!("Guest suspension timeout - proceeding anyway");
+    } else if *guest_suspended {
+        info!("Guest suspended");
+    }
+
+    if let Err(e) = suspend_evt.signal() {
+        error!("failed to trigger suspend event: {}", e);
+    }
+    // Now we ready to send response over the tube and communicate that VM suspend has finished
+    if let Err(e) = tube.send(&response) {
+        error!("failed to send VmResponse: {}", e);
+    }
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn handle_hotplug_command<V: VmArch, Vcpu: VcpuArch>(
     linux: &mut RunnableLinuxVm<V, Vcpu>,
@@ -2272,6 +2352,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] hp_control_tube: mpsc::Sender<
         PciRootCommand,
     >,
+    #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
 ) -> Result<ExitState> {
     #[derive(EventToken)]
     enum Token {
@@ -2461,7 +2542,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             to_vcpu_channels,
             from_vcpu_channel.unwrap(), // Must succeed to unwrap()
         );
-        thread::Builder::new()
+        std::thread::Builder::new()
             .name("gdb".to_owned())
             .spawn(move || gdb_thread(target, gdb_port_num))
             .context("failed to spawn GDB thread")?;
@@ -2535,7 +2616,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     );
                 }
                 Token::ChildSignal => {
-                    // Print all available siginfo structs, then exit the loop.
+                    // Print all available siginfo structs, then exit the loop if child process has
+                    // been exited except CLD_STOPPED and CLD_CONTINUED. the two should be ignored
+                    // here since they are used by the vmm-swap feature.
+                    let mut do_exit = false;
                     while let Some(siginfo) =
                         sigchld_fd.read().context("failed to create signalfd")?
                     {
@@ -2544,12 +2628,24 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             Some(label) => format!("{} (pid {})", label, pid),
                             None => format!("pid {}", pid),
                         };
+
+                        // TODO(kawasin): this is a temporary exception until device suspension.
+                        #[cfg(feature = "swap")]
+                        if siginfo.ssi_code == libc::CLD_STOPPED
+                            || siginfo.ssi_code == libc::CLD_CONTINUED
+                        {
+                            continue;
+                        }
+
                         error!(
-                            "child {} died: signo {}, status {}, code {}",
+                            "child {} exited: signo {}, status {}, code {}",
                             pid_label, siginfo.ssi_signo, siginfo.ssi_status, siginfo.ssi_code
                         );
+                        do_exit = true;
                     }
-                    break 'wait;
+                    if do_exit {
+                        break 'wait;
+                    }
                 }
                 Token::IrqFd { index } => {
                     if let Err(e) = linux.irq_chip.service_irq_event(index) {
@@ -2588,6 +2684,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                         match socket {
                             TaggedControlTube::Vm(tube) => match tube.recv::<VmRequest>() {
                                 Ok(request) => {
+                                    let mut suspend_requested = false;
                                     let mut run_mode_opt = None;
                                     let response = match request {
                                         VmRequest::HotPlugCommand { device, add } => {
@@ -2612,32 +2709,78 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 target_arch = "x86",
                                                 target_arch = "x86_64"
                                             )))]
-                                            VmResponse::Ok
+                                            {
+                                                // Suppress warnings.
+                                                let _ = (device, add);
+                                                VmResponse::Ok
+                                            }
                                         }
-                                        _ => request.execute(
-                                            &mut run_mode_opt,
-                                            #[cfg(feature = "balloon")]
-                                            balloon_host_tube.as_ref(),
-                                            #[cfg(feature = "balloon")]
-                                            &mut balloon_stats_id,
-                                            disk_host_tubes,
-                                            &mut linux.pm,
-                                            #[cfg(feature = "gpu")]
-                                            &gpu_control_tube,
-                                            #[cfg(feature = "usb")]
-                                            Some(&usb_control_tube),
-                                            #[cfg(not(feature = "usb"))]
-                                            None,
-                                            &mut linux.bat_control,
-                                            &vcpu_handles,
-                                            cfg.force_s2idle,
-                                            guest_suspended_cvar.clone(),
-                                        ),
+                                        _ => {
+                                            let response = request.execute(
+                                                &mut run_mode_opt,
+                                                #[cfg(feature = "balloon")]
+                                                balloon_host_tube.as_ref(),
+                                                #[cfg(feature = "balloon")]
+                                                &mut balloon_stats_id,
+                                                disk_host_tubes,
+                                                &mut linux.pm,
+                                                #[cfg(feature = "gpu")]
+                                                &gpu_control_tube,
+                                                #[cfg(feature = "usb")]
+                                                Some(&usb_control_tube),
+                                                #[cfg(not(feature = "usb"))]
+                                                None,
+                                                &mut linux.bat_control,
+                                                &vcpu_handles,
+                                                cfg.force_s2idle,
+                                                #[cfg(feature = "swap")]
+                                                swap_controller.as_ref(),
+                                            );
+
+                                            // For non s2idle guest suspension we are done
+                                            if let VmRequest::Suspend = request {
+                                                if cfg.force_s2idle {
+                                                    suspend_requested = true;
+
+                                                    // Spawn s2idle wait thread.
+                                                    let send_tube =
+                                                        tube.try_clone_send_tube().unwrap();
+                                                    let suspend_evt =
+                                                        linux.suspend_evt.try_clone().unwrap();
+                                                    let guest_suspended_cvar =
+                                                        guest_suspended_cvar.clone();
+                                                    let delayed_response = response.clone();
+                                                    let pm = linux.pm.clone();
+
+                                                    std::thread::Builder::new()
+                                                        .name("s2idle_wait".to_owned())
+                                                        .spawn(move || {
+                                                            trigger_vm_suspend_and_wait_for_entry(
+                                                                guest_suspended_cvar,
+                                                                &send_tube,
+                                                                delayed_response,
+                                                                suspend_evt,
+                                                                pm,
+                                                            )
+                                                        })
+                                                        .context(
+                                                            "failed to spawn s2idle_wait thread",
+                                                        )?;
+                                                }
+                                            }
+                                            response
+                                        }
                                     };
 
-                                    if let Err(e) = tube.send(&response) {
-                                        error!("failed to send VmResponse: {}", e);
+                                    // If suspend requested skip that step since it will be
+                                    // performed by s2idle_wait thread when suspension actually
+                                    // happens.
+                                    if !suspend_requested {
+                                        if let Err(e) = tube.send(&response) {
+                                            error!("failed to send VmResponse: {}", e);
+                                        }
                                     }
+
                                     if let Some(run_mode) = run_mode_opt {
                                         info!("control socket changed run mode to {}", run_mode);
                                         match run_mode {
@@ -2650,11 +2793,16 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                         dev.lock().resume_imminent();
                                                     }
                                                 }
-                                                vcpu::kick_all_vcpus(
-                                                    &vcpu_handles,
-                                                    linux.irq_chip.as_irq_chip(),
-                                                    VcpuControl::RunState(other),
-                                                );
+                                                // If suspend requested skip that step since it
+                                                // will be performed by s2idle_wait thread when
+                                                // needed.
+                                                if !suspend_requested {
+                                                    vcpu::kick_all_vcpus(
+                                                        &vcpu_handles,
+                                                        linux.irq_chip.as_irq_chip(),
+                                                        VcpuControl::RunState(other),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -2861,6 +3009,14 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         }
     }
 
+    #[cfg(feature = "swap")]
+    // Stop the snapshot monitor process
+    if let Some(swap_controller) = swap_controller {
+        if let Err(e) = swap_controller.exit() {
+            error!("failed to exit snapshot monitor process: {:?}", e);
+        }
+    }
+
     // Stop pci root worker thread
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let _ = hp_control_tube.send(PciRootCommand::Kill);
@@ -2915,6 +3071,8 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
         .or_else(|_| Minijail::new())
         .with_context(|| format!("failed to create empty jail for {}", name))?;
 
+    let tz = std::env::var("TZ").unwrap_or_default();
+
     // Safe because we are keeping all the descriptors needed for the child to function.
     match unsafe { jail.fork(Some(&keep_rds)).context("error while forking")? } {
         0 => {
@@ -2936,6 +3094,9 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
             // Safe because we trimmed the name to 15 characters (and pthread_setname_np will return
             // an error if we don't anyway).
             let _ = unsafe { libc::pthread_setname_np(libc::pthread_self(), thread_name.as_ptr()) };
+
+            // Preserve TZ for `chrono::Local` (b/257987535).
+            std::env::set_var("TZ", tz);
 
             // Run the device loop and terminate the child process once it exits.
             let res = match listener.run_device(device) {
@@ -3005,6 +3166,11 @@ fn start_vhost_user_control_server(
 }
 
 pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
+    if let Some(async_executor) = opts.async_executor {
+        Executor::set_default_executor_kind(async_executor)
+            .context("Failed to set the default async executor")?;
+    }
+
     struct DeviceJailInfo {
         // Unique name for the device, in the form `foomatic-0`.
         name: String,

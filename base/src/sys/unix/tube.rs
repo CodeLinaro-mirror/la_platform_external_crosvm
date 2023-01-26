@@ -4,7 +4,6 @@
 
 use std::io::IoSlice;
 use std::io::IoSliceMut;
-use std::marker::PhantomData;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::prelude::RawFd;
 use std::time::Duration;
@@ -29,7 +28,6 @@ use crate::ReadNotifier;
 use crate::ScmSocket;
 use crate::StreamChannel;
 use crate::UnixSeqpacket;
-use crate::UnsyncMarker;
 
 // This size matches the inline buffer size of CmsgBuffer.
 const TUBE_MAX_FDS: usize = 32;
@@ -38,10 +36,6 @@ const TUBE_MAX_FDS: usize = 32;
 #[derive(Serialize, Deserialize)]
 pub struct Tube {
     socket: StreamChannel,
-
-    // Windows is !Sync. We share that characteristic to prevent writing cross-platform incompatible
-    // code.
-    _unsync_marker: UnsyncMarker,
 }
 
 impl Tube {
@@ -60,10 +54,7 @@ impl Tube {
     /// underlying socket type), otherwise, this method returns an error.
     pub fn new(socket: StreamChannel) -> Result<Tube> {
         match socket.get_framing_mode() {
-            FramingMode::Message => Ok(Tube {
-                socket,
-                _unsync_marker: PhantomData,
-            }),
+            FramingMode::Message => Ok(Tube { socket }),
             FramingMode::Byte => Err(Error::InvalidFramingMode),
         }
     }
@@ -73,7 +64,6 @@ impl Tube {
     pub fn new_from_unix_seqpacket(sock: UnixSeqpacket) -> Tube {
         Tube {
             socket: StreamChannel::from_unix_seqpacket(sock),
-            _unsync_marker: PhantomData,
         }
     }
 
@@ -175,7 +165,6 @@ impl FromRawDescriptor for Tube {
     unsafe fn from_raw_descriptor(rd: RawDescriptor) -> Self {
         Self {
             socket: StreamChannel::from_unix_seqpacket(UnixSeqpacket::from_raw_descriptor(rd)),
-            _unsync_marker: PhantomData,
         }
     }
 }
@@ -189,95 +178,5 @@ impl AsRawDescriptor for SendTube {
 impl AsRawDescriptor for RecvTube {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.0.as_raw_descriptor()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::time;
-
-    use super::*;
-    use crate::EventContext;
-    use crate::EventToken;
-    use crate::ReadNotifier;
-
-    #[derive(EventToken, Debug, Eq, PartialEq, Copy, Clone)]
-    enum Token {
-        ReceivedData,
-    }
-
-    const EVENT_WAIT_TIME: time::Duration = time::Duration::from_secs(10);
-
-    #[test]
-    fn test_serialize_tube_new() {
-        let (sock_send, sock_recv) =
-            StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Message).unwrap();
-        let tube_send = Tube::new(sock_send).unwrap();
-        let tube_recv = Tube::new(sock_recv).unwrap();
-
-        // Serialize the Tube
-        let msg_serialize = SerializeDescriptors::new(&tube_send);
-        let serialized = serde_json::to_vec(&msg_serialize).unwrap();
-        let msg_descriptors = msg_serialize.into_descriptors();
-
-        // Deserialize the Tube
-        let mut msg_descriptors_safe = msg_descriptors
-            .into_iter()
-            .map(|v| Some(unsafe { SafeDescriptor::from_raw_descriptor(v) }))
-            .collect();
-        let tube_deserialized: Tube = deserialize_with_descriptors(
-            || serde_json::from_slice(&serialized),
-            &mut msg_descriptors_safe,
-        )
-        .unwrap();
-
-        // Send a message through deserialized Tube
-        tube_deserialized.send(&"hi".to_string()).unwrap();
-
-        // Wait for the message to arrive
-        let event_ctx: EventContext<Token> =
-            EventContext::build_with(&[(tube_recv.get_read_notifier(), Token::ReceivedData)])
-                .unwrap();
-        let events = event_ctx.wait_timeout(EVENT_WAIT_TIME).unwrap();
-        let tokens: Vec<Token> = events
-            .iter()
-            .filter(|e| e.is_readable)
-            .map(|e| e.token)
-            .collect();
-        assert_eq!(tokens, vec! {Token::ReceivedData});
-
-        assert_eq!(tube_recv.recv::<String>().unwrap(), "hi");
-    }
-
-    #[test]
-    fn test_send_recv_new_from_seqpacket() {
-        let (sock_send, sock_recv) = UnixSeqpacket::pair().unwrap();
-        let tube_send = Tube::new_from_unix_seqpacket(sock_send);
-        let tube_recv = Tube::new_from_unix_seqpacket(sock_recv);
-
-        tube_send.send(&"hi".to_string()).unwrap();
-
-        // Wait for the message to arrive
-        let event_ctx: EventContext<Token> =
-            EventContext::build_with(&[(tube_recv.get_read_notifier(), Token::ReceivedData)])
-                .unwrap();
-        let events = event_ctx.wait_timeout(EVENT_WAIT_TIME).unwrap();
-        let tokens: Vec<Token> = events
-            .iter()
-            .filter(|e| e.is_readable)
-            .map(|e| e.token)
-            .collect();
-        assert_eq!(tokens, vec! {Token::ReceivedData});
-
-        assert_eq!(tube_recv.recv::<String>().unwrap(), "hi");
-    }
-
-    #[test]
-    fn test_tube_new_byte_mode_error() {
-        let (sock_byte_mode, _) =
-            StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte).unwrap();
-        let tube_error = Tube::new(sock_byte_mode);
-
-        assert!(tube_error.is_err());
     }
 }

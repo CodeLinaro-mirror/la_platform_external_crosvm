@@ -20,10 +20,10 @@ rust_library {
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
-        "libassertions",
         "libbase_rust",
         "libdata_model",
         "liblibc",
+        "libstatic_assertions",
         "libthiserror",
         "libusb_sys",
     ],
@@ -48,10 +48,10 @@ rust_test {
     },
     edition: "2021",
     rustlibs: [
-        "libassertions",
         "libbase_rust",
         "libdata_model",
         "liblibc",
+        "libstatic_assertions",
         "libthiserror",
         "libusb_sys",
     ],

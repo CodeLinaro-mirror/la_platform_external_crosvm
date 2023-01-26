@@ -55,6 +55,7 @@ use vm_control::client::do_gpu_display_list;
 #[cfg(feature = "gpu")]
 use vm_control::client::do_gpu_display_remove;
 use vm_control::client::do_modify_battery;
+use vm_control::client::do_swap_status;
 use vm_control::client::do_usb_attach;
 use vm_control::client::do_usb_detach;
 use vm_control::client::do_usb_list;
@@ -68,6 +69,7 @@ use vm_control::BalloonControlCommand;
 use vm_control::DiskControlCommand;
 use vm_control::HotPlugDeviceInfo;
 use vm_control::HotPlugDeviceType;
+use vm_control::SwapCommand;
 use vm_control::UsbControlResult;
 use vm_control::VmRequest;
 #[cfg(feature = "balloon")]
@@ -111,31 +113,14 @@ impl CommandStatus {
     }
 }
 
-fn to_command_status(result: Result<sys::ExitState>) -> Result<CommandStatus> {
-    match result {
-        Ok(sys::ExitState::Stop) => {
-            info!("crosvm has exited normally");
-            Ok(CommandStatus::SuccessOrVmStop)
-        }
-        Ok(sys::ExitState::Reset) => {
-            info!("crosvm has exited normally due to reset request");
-            Ok(CommandStatus::VmReset)
-        }
-        Ok(sys::ExitState::Crash) => {
-            info!("crosvm has exited due to a VM crash");
-            Ok(CommandStatus::VmCrash)
-        }
-        Ok(sys::ExitState::GuestPanic) => {
-            info!("crosvm has exited due to a kernel panic in guest");
-            Ok(CommandStatus::GuestPanic)
-        }
-        Ok(sys::ExitState::WatchdogReset) => {
-            info!("crosvm has exited due to watchdog reboot");
-            Ok(CommandStatus::WatchdogReset)
-        }
-        Err(e) => {
-            error!("crosvm has exited with error: {:#}", e);
-            Err(e)
+impl From<sys::ExitState> for CommandStatus {
+    fn from(result: sys::ExitState) -> CommandStatus {
+        match result {
+            sys::ExitState::Stop => CommandStatus::SuccessOrVmStop,
+            sys::ExitState::Reset => CommandStatus::VmReset,
+            sys::ExitState::Crash => CommandStatus::VmCrash,
+            sys::ExitState::GuestPanic => CommandStatus::GuestPanic,
+            sys::ExitState::WatchdogReset => CommandStatus::WatchdogReset,
         }
     }
 }
@@ -174,8 +159,8 @@ where
     metrics::setup_metrics_reporting()?;
 
     init_log(log_config, &cfg)?;
-    let exit_state = crate::sys::run_config(cfg);
-    to_command_status(exit_state)
+    let exit_state = crate::sys::run_config(cfg)?;
+    Ok(CommandStatus::from(exit_state))
 }
 
 fn stop_vms(cmd: cmdline::StopCommand) -> std::result::Result<(), ()> {
@@ -184,6 +169,21 @@ fn stop_vms(cmd: cmdline::StopCommand) -> std::result::Result<(), ()> {
 
 fn suspend_vms(cmd: cmdline::SuspendCommand) -> std::result::Result<(), ()> {
     vms_request(&VmRequest::Suspend, cmd.socket_path)
+}
+
+fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
+    use cmdline::SwapSubcommands::*;
+    match cmd.nested {
+        Enable(params) => {
+            let req = VmRequest::Swap(SwapCommand::Enable);
+            vms_request(&req, &Path::new(&params.socket_path))
+        }
+        Status(params) => do_swap_status(&Path::new(&params.socket_path)),
+        LogPageFault(params) => {
+            let req = VmRequest::Swap(SwapCommand::StartPageFaultLogging);
+            vms_request(&req, &Path::new(&params.socket_path))
+        }
+    }
 }
 
 fn resume_vms(cmd: cmdline::ResumeCommand) -> std::result::Result<(), ()> {
@@ -416,6 +416,11 @@ fn create_qcow2(cmd: cmdline::CreateQcow2Command) -> std::result::Result<(), ()>
 }
 
 fn start_device(opts: cmdline::DeviceCommand) -> std::result::Result<(), ()> {
+    if let Some(async_executor) = opts.async_executor {
+        cros_async::Executor::set_default_executor_kind(async_executor)
+            .map_err(|e| error!("Failed to set the default async executor: {:#}", e))?;
+    }
+
     let result = match opts.command {
         cmdline::DeviceSubcommand::CrossPlatform(command) => match command {
             CrossPlatformDevicesCommands::Block(cfg) => run_block_device(cfg),
@@ -591,7 +596,7 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
             return Ok(CommandStatus::SuccessOrVmStop);
         }
         Err(e) => {
-            eprintln!("arg parsing failed: {}", e.output);
+            error!("arg parsing failed: {}", e.output);
             return Ok(CommandStatus::InvalidArgs);
         }
     };
@@ -605,11 +610,6 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
         syslog: !args.no_syslog,
         ..Default::default()
     };
-
-    if let Some(async_executor) = args.async_executor {
-        cros_async::Executor::set_default_executor_kind(async_executor)
-            .context("Failed to set the default async executor")?;
-    }
 
     let ret = match args.command {
         Command::CrossPlatform(command) => {
@@ -673,6 +673,9 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
                     CrossPlatformCommands::Suspend(cmd) => {
                         suspend_vms(cmd).map_err(|_| anyhow!("suspend subcommand failed"))
                     }
+                    CrossPlatformCommands::Swap(cmd) => {
+                        swap_vms(cmd).map_err(|_| anyhow!("swap subcommand failed"))
+                    }
                     CrossPlatformCommands::Powerbtn(cmd) => {
                         powerbtn_vms(cmd).map_err(|_| anyhow!("powerbtn subcommand failed"))
                     }
@@ -730,7 +733,7 @@ fn main() {
         }
         Err(e) => {
             let exit_code = error_to_exit_code(&res);
-            error!("exiting with error {}:{:?}", exit_code, e);
+            error!("exiting with error {}: {:?}", exit_code, e);
             exit_code
         }
     };

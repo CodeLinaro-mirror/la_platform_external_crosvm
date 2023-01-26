@@ -4,6 +4,8 @@
   "device": true,
   "tests": true,
   "global_defaults": "crosvm_defaults",
+  "no_pkg_vers": true,
+  "no-pkg-vers": true,
   "add_workspace": true,
   "patch": "patches/Android.bp.patch"
 }

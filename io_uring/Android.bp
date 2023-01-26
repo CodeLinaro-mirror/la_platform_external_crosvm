@@ -11,13 +11,12 @@ package {
 }
 
 rust_test {
-    name: "io_uring_test_src_lib",
+    name: "io_uring_test_tests_uring",
     defaults: ["crosvm_defaults"],
     host_supported: true,
-    crate_name: "io_uring",
+    crate_name: "uring",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.1",
-    srcs: ["src/lib.rs"],
+    srcs: ["tests/uring.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -27,6 +26,7 @@ rust_test {
     rustlibs: [
         "libbase_rust",
         "libdata_model",
+        "libio_uring",
         "liblibc",
         "libsync_rust",
         "libtempfile",
@@ -41,7 +41,6 @@ rust_library {
     host_supported: true,
     crate_name: "io_uring",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.1",
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [

@@ -5,11 +5,13 @@
 use std::future::Future;
 
 use async_task::Task;
+use base::debug;
 use base::warn;
 use base::AsRawDescriptors;
 use base::RawDescriptor;
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error as ThisError;
 
 use super::poll_source::Error as PollError;
@@ -161,7 +163,9 @@ pub enum Executor {
 }
 
 /// An enum to express the kind of the backend of `Executor`
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde_keyvalue::FromKeyValues)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, serde_keyvalue::FromKeyValues,
+)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub enum ExecutorKind {
     Uring,
@@ -221,6 +225,7 @@ impl Executor {
             }
         }
 
+        debug!("setting the default executor to {:?}", executor_kind);
         DEFAULT_EXECUTOR_KIND.set(executor_kind).map_err(|_|
             // `expect` succeeds since this closure runs only when DEFAULT_EXECUTOR_KIND is set.
             SetDefaultExecutorKindError::SetMoreThanOnce(

@@ -43,6 +43,7 @@ use super::Reader;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
 use super::Writer;
+use crate::Suspendable;
 
 const EVENT_QUEUE_SIZE: u16 = 64;
 const STATUS_QUEUE_SIZE: u16 = 64;
@@ -451,6 +452,8 @@ impl<T: EventSource> Worker<T> {
         Ok(needs_interrupt)
     }
 
+    // Allow error! and early return anywhere in function
+    #[allow(clippy::needless_return)]
     fn run(&mut self, event_queue_evt: Event, status_queue_evt: Event, kill_evt: Event) {
         if let Err(e) = self.event_source.init() {
             error!("failed initializing event source: {}", e);
@@ -674,6 +677,8 @@ where
         false
     }
 }
+
+impl<T> Suspendable for Input<T> where T: 'static + EventSource + Send {}
 
 /// Creates a new virtio input device from an event device node
 pub fn new_evdev<T>(source: T, virtio_features: u64) -> Result<Input<EvdevEventSource<T>>>

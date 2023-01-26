@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// TODO(247548758): Remove this once all the wanrning are fixed.
+#![allow(clippy::await_holding_lock)]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
@@ -63,6 +66,7 @@ use crate::virtio::SignalableInterrupt;
 use crate::virtio::VirtioDevice;
 use crate::virtio::Writer;
 use crate::virtio::TYPE_STREAM_SOCKET;
+use crate::Suspendable;
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -201,6 +205,8 @@ impl VirtioDevice for Vsock {
         self.features &= value;
     }
 
+    // Allow error! and early return anywhere in function
+    #[allow(clippy::needless_return)]
     fn activate(
         &mut self,
         mem: GuestMemory,
@@ -260,6 +266,8 @@ impl VirtioDevice for Vsock {
         }
     }
 }
+
+impl Suspendable for Vsock {}
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub struct PortPair {
@@ -872,7 +880,7 @@ impl Worker {
         mut rx_queue_evt: EventAsync,
         ex: &Executor,
     ) -> PortPair {
-        while let Some((header, mut data)) = packet_recv_queue.next().await {
+        while let Some((header, data)) = packet_recv_queue.next().await {
             if !self
                 .handle_tx_packet(header, &data, send_queue, &mut rx_queue_evt, ex)
                 .await
@@ -985,8 +993,7 @@ impl Worker {
                     )
                     .await
                     .expect("vsock: failed to write to queue");
-                    let _ = self
-                        .connection_event
+                    self.connection_event
                         .signal()
                         .expect("vsock: failed to write to event");
                 } else {
