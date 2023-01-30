@@ -74,6 +74,7 @@ rust_binary {
         "liblibc",
         "liblibcras",
         "liblog_rust",
+        "libmerge",
         "libmetrics",
         "libminijail_rust",
         "libnet_util",
@@ -120,19 +121,7 @@ rust_binary {
                 "libprocessgroup",
             ],
         },
-        darwin: {
-            enabled: false,
-        },
         host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
             shared_libs: [
                 "libprocessgroup",
             ],
@@ -203,6 +192,7 @@ rust_test {
         "liblibc",
         "liblibcras",
         "liblog_rust",
+        "libmerge",
         "libmetrics",
         "libminijail_rust",
         "libnet_util",
@@ -250,15 +240,6 @@ rust_test {
             ],
         },
         host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
             shared_libs: [
                 "libprocessgroup",
             ],

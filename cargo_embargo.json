@@ -103,9 +103,6 @@
     "aarch64": {
       "add_module_block": "aarch64/cargo2android_arch.bp"
     },
-    "arch": {
-      "add_module_block": "arch/cargo2android_gdb.bp.patch"
-    },
     "base": {
       "patch": "base/patches/Android.bp.patch"
     },
@@ -172,7 +169,7 @@
     },
     "x86_64": {
       "no_presubmit": true,
-      "add_module_block": "x86_64/cargo2android_gdb.bp"
+      "add_module_block": "x86_64/cargo2android_gdb.bp.patch"
     }
   }
 }

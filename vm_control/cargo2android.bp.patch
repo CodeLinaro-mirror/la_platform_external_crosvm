@@ -2,12 +2,6 @@ target: {
     host_linux: {
         features: [
             "gpu",
-            "gdb",
-            "gdbstub",
-        ],
-        rustlibs: [
-            "libgdbstub",
-            "libgdbstub_arch",
         ],
     },
 }

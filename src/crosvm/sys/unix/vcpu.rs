@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use std::thread;
 use std::thread::JoinHandle;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::time::Duration;
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use aarch64::AArch64 as Arch;
@@ -63,6 +65,8 @@ use x86_64::msr::MsrHandlers;
 use x86_64::X8664arch as Arch;
 
 use super::ExitState;
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+use crate::crosvm::ratelimit::Ratelimit;
 
 pub fn setup_vcpu_signal_handler<T: Vcpu>(use_hypervisor_signals: bool) -> Result<()> {
     if use_hypervisor_signals {
@@ -392,6 +396,8 @@ fn vcpu_loop<V>(
     guest_mem: GuestMemory,
     msr_handlers: MsrHandlers,
     guest_suspended_cvar: Arc<(Mutex<bool>, Condvar)>,
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+    bus_lock_ratelimit_ctrl: Arc<Mutex<Ratelimit>,>,
 ) -> ExitState
 where
     V: VcpuArch + 'static,
@@ -577,6 +583,11 @@ where
                         run_mode = VmRunMode::Breakpoint;
                     }
                 }
+                #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+                Ok(VcpuExit::BusLock) => {
+                    let delay_ns: u64 = bus_lock_ratelimit_ctrl.lock().ratelimit_calculate_delay(1);
+                    thread::sleep(Duration::from_nanos(delay_ns));
+                }
                 Ok(r) => warn!("unexpected vcpu exit: {:?}", r),
                 Err(e) => match e.errno() {
                     libc::EINTR => interrupted_by_signal = true,
@@ -636,6 +647,8 @@ pub fn run_vcpu<V>(
     vcpu_cgroup_tasks_file: Option<File>,
     userspace_msr: BTreeMap<u32, MsrConfig>,
     guest_suspended_cvar: Arc<(Mutex<bool>, Condvar)>,
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+    bus_lock_ratelimit_ctrl: Arc<Mutex<Ratelimit>,>,
 ) -> Result<JoinHandle<()>>
 where
     V: VcpuArch + 'static,
@@ -732,6 +745,8 @@ where
                     guest_mem,
                     msr_handlers,
                     guest_suspended_cvar,
+                    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+                    bus_lock_ratelimit_ctrl,
                 )
             };
 

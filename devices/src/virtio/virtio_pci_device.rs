@@ -31,6 +31,7 @@ use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER_OK;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FAILED;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FEATURES_OK;
+use virtio_sys::virtio_config::VIRTIO_CONFIG_S_NEEDS_RESET;
 use vm_control::MemSlot;
 use vm_control::VmMemoryDestination;
 use vm_control::VmMemoryRequest;
@@ -400,14 +401,6 @@ impl VirtioPciDevice {
         self.common_config.driver_status == DEVICE_RESET as u8
     }
 
-    fn are_queues_valid(&mut self) -> bool {
-        // All queues marked as ready must be valid.
-        self.queues
-            .iter_mut()
-            .filter(|q| q.ready())
-            .all(|q| q.is_valid(&self.mem))
-    }
-
     fn add_settings_pci_capabilities(
         &mut self,
         settings_bar: u8,
@@ -515,8 +508,12 @@ impl VirtioPciDevice {
                     self.device.set_iommu(iommu);
                 }
 
-                self.device.activate(mem, interrupt, queues, queue_evts);
-                self.device_activated = true;
+                if let Err(e) = self.device.activate(mem, interrupt, queues, queue_evts) {
+                    error!("{} activate failed: {:#}", self.debug_label(), e);
+                    self.common_config.driver_status |= VIRTIO_CONFIG_S_NEEDS_RESET as u8;
+                } else {
+                    self.device_activated = true;
+                }
             }
             Err(e) => {
                 bail!(
@@ -901,10 +898,8 @@ impl PciDevice for VirtioPciDevice {
                 }
             }
 
-            if self.are_queues_valid() {
-                if let Err(e) = self.activate() {
-                    error!("failed to activate device: {:#}", e);
-                }
+            if let Err(e) = self.activate() {
+                error!("failed to activate device: {:#}", e);
             }
         }
 

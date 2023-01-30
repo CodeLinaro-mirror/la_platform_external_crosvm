@@ -13,7 +13,6 @@ package {
 rust_test {
     name: "base_test_src_lib",
     defaults: ["crosvm_defaults"],
-    // has rustc warnings
     host_supported: false, // Can't seem to access syslog in TH host tests.
     crate_name: "base",
     cargo_env_compat: true,
@@ -110,7 +109,6 @@ rust_test {
 rust_test {
     name: "base_test_tests_unix_main",
     defaults: ["crosvm_defaults"],
-    // has rustc warnings
     host_supported: false, // Can't seem to access syslog in TH host tests.
     crate_name: "unix",
     cargo_env_compat: true,

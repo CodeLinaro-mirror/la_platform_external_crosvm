@@ -48,16 +48,6 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    target: {
-        host_linux: {
-            features: [
-                "gdb",
-            ],
-            rustlibs: [
-                "libgdbstub_arch",
-            ],
-        },
-    },
     // Exclude arm family manually
     arch: {
         arm: {
@@ -112,16 +102,6 @@ rust_test {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    target: {
-        host_linux: {
-            features: [
-                "gdb",
-            ],
-            rustlibs: [
-                "libgdbstub_arch",
-            ],
-        },
-    },
     // Exclude arm family manually
     arch: {
         arm: {
@@ -177,16 +157,6 @@ rust_test {
         "libx86_64_rust",
     ],
     proc_macros: ["libremain"],
-    target: {
-        host_linux: {
-            features: [
-                "gdb",
-            ],
-            rustlibs: [
-                "libgdbstub_arch",
-            ],
-        },
-    },
     // Exclude arm family manually
     arch: {
         arm: {
@@ -242,16 +212,6 @@ rust_test {
         "libx86_64_rust",
     ],
     proc_macros: ["libremain"],
-    target: {
-        host_linux: {
-            features: [
-                "gdb",
-            ],
-            rustlibs: [
-                "libgdbstub_arch",
-            ],
-        },
-    },
     // Exclude arm family manually
     arch: {
         arm: {

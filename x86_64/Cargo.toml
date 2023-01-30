@@ -32,4 +32,4 @@ vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
 
 [target.'cfg(unix)'.dependencies]
-minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
+minijail = "*"
