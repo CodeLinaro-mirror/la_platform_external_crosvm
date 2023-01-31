@@ -847,6 +847,7 @@ pub fn create_tap_net_device_from_fd(
     vq_pairs: u16,
     vcpu_count: usize,
     tap_fd: RawDescriptor,
+    mac_addr: Option<MacAddress>,
 ) -> DeviceResult {
     create_net_device(
         protection_type,
@@ -863,7 +864,8 @@ pub fn create_tap_net_device_from_fd(
                 .context("failed to create tap device")?
             };
 
-            virtio::Net::from(features, tap, vq_pairs).context("failed to create tap net device")
+            virtio::Net::from(features, tap, vq_pairs, mac_addr)
+                .context("failed to create tap net device")
         },
     )
 }
@@ -875,6 +877,7 @@ pub fn create_tap_net_device_from_name(
     vq_pairs: u16,
     vcpu_count: usize,
     tap_name: &[u8],
+    mac_addr: Option<MacAddress>,
 ) -> DeviceResult {
     create_net_device(
         protection_type,
@@ -883,7 +886,7 @@ pub fn create_tap_net_device_from_name(
         vcpu_count,
         "net_device",
         |features, vq_pairs| {
-            virtio::Net::<Tap>::new_from_name(features, tap_name, vq_pairs)
+            virtio::Net::<Tap>::new_from_name(features, tap_name, vq_pairs, mac_addr)
                 .context("failed to create configured virtio network device")
         },
     )

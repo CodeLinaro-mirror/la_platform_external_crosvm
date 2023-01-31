@@ -2,17 +2,16 @@ diff --git a/base/Android.bp b/base/Android.bp
 index 734ab7c1..20f48f53 100644
 --- a/base/Android.bp
 +++ b/base/Android.bp
-@@ -13,7 +13,8 @@ package {
+@@ -13,7 +13,7 @@ package {
  rust_test {
      name: "base_test_src_lib",
      defaults: ["crosvm_defaults"],
 -    host_supported: true,
-+    // has rustc warnings
 +    host_supported: false, // Can't seem to access syslog in TH host tests.
      crate_name: "base",
      cargo_env_compat: true,
      srcs: ["src/lib.rs"],
-@@ -44,6 +45,25 @@ rust_test {
+@@ -44,6 +44,25 @@ rust_test {
          "libbase_event_token_derive",
          "libremain",
      ],
@@ -38,17 +37,16 @@ index 734ab7c1..20f48f53 100644
  }
  
  rust_test {
-@@ -86,7 +106,8 @@ rust_test {
+@@ -86,7 +106,7 @@ rust_test {
  rust_test {
      name: "base_test_tests_unix_main",
      defaults: ["crosvm_defaults"],
 -    host_supported: true,
-+    // has rustc warnings
 +    host_supported: false, // Can't seem to access syslog in TH host tests.
      crate_name: "unix",
      cargo_env_compat: true,
      srcs: ["tests/unix/main.rs"],
-@@ -118,6 +139,25 @@ rust_test {
+@@ -118,6 +138,25 @@ rust_test {
          "libbase_event_token_derive",
          "libremain",
      ],
@@ -74,7 +72,7 @@ index 734ab7c1..20f48f53 100644
  }
  
  rust_library {
-@@ -153,4 +193,23 @@ rust_library {
+@@ -153,4 +192,23 @@ rust_library {
      apex_available: [
          "//apex_available:platform",
      ],

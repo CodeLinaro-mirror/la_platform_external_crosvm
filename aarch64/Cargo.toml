@@ -21,7 +21,7 @@ kvm = { path = "../kvm" }
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"
 memoffset = "0.6"
-minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
+minijail = "*"
 remain = "*"
 resources = { path = "../resources" }
 sync = { path = "../common/sync" }

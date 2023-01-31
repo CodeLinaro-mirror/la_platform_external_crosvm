@@ -33,7 +33,8 @@ argh = "0.1.7"
 async-task = "4"
 acpi_tables = {path = "../acpi_tables" }
 anyhow = "*"
-audio_streams = { path = "../common/audio_streams" }
+async-trait = "0.1.36"
+audio_streams = "*"
 balloon_control = { path = "../common/balloon_control" }
 base = { path = "../base" }
 bit_field = { path = "../bit_field" }
@@ -85,10 +86,9 @@ vm_memory = { path = "../vm_memory" }
 
 [target.'cfg(unix)'.dependencies]
 fuse = {path = "../fuse" }
-gpu_display = { path = "../gpu_display", optional = true }
-libcras = { path = "../libcras_stub", optional = true }
-minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
-p9 = { path = "../common/p9" }
+libcras = { version = "*", optional = true }
+minijail = "*"
+p9 = "*"
 power_monitor = { path = "../power_monitor" }
 usb_util = { path = "../usb_util" }
 vfio_sys = { path = "../vfio_sys" }

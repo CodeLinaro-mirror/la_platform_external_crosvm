@@ -29,7 +29,7 @@ thiserror = "1.0.20"
 uuid = { version = "0.8.2", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
+minijail = "*"
 
 [target.'cfg(windows)'.dependencies]
 rand = "0.8"

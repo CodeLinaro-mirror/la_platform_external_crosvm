@@ -34,6 +34,3 @@ swap = { path = "../swap", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = "*"
-
-[patch.crates-io]
-minijail = { path = "../../minijail/rust/minijail" }

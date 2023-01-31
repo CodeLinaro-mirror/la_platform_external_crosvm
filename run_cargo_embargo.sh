@@ -4,10 +4,20 @@
 
 set -e -u
 
-if [ "$#" -ne 0 ]; then
-  echo "Usage: $0"
-  exit 1
-fi
+function usage() { echo "$0 [-r]" && exit 1; }
+
+REUSE=""
+while getopts 'r' FLAG; do
+  case ${FLAG} in
+    r)
+      REUSE="--reuse-cargo-out"
+      ;;
+    ?)
+      echo "unknown flag."
+      usage
+      ;;
+  esac
+done
 
 if ! [ -x "$(command -v bpfmt)" ]; then
   echo 'Error: bpfmt not found.' >&2
@@ -25,15 +35,19 @@ rustup which --toolchain $RUST_TOOLCHAIN cargo || \
   rustup toolchain install $RUST_TOOLCHAIN
 CARGO_BIN="$(dirname $(rustup which --toolchain $RUST_TOOLCHAIN cargo))"
 
-rm -f cargo.out cargo.metadata
-rm -rf target.tmp || /bin/true
+if [ ! "$REUSE" ]; then
+  rm -f cargo.out cargo.metadata
+  rm -rf target.tmp || /bin/true
+fi
 
 set -x
-cargo_embargo --cfg cargo_embargo.json --cargo-bin "$CARGO_BIN"
+cargo_embargo --cfg cargo_embargo.json $REUSE --cargo-bin "$CARGO_BIN"
 set +x
 
-rm -f cargo.out cargo.metadata
-rm -rf target.tmp || /bin/true
+if [ ! "$REUSE" ]; then
+  rm -f cargo.out cargo.metadata
+  rm -rf target.tmp || /bin/true
+fi
 
 # Revert changes to Cargo.lock caused by cargo_embargo.
 #

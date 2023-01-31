@@ -53,19 +53,6 @@ rust_test {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    target: {
-        host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-            ],
-        },
-    },
-
 }
 
 rust_library {
@@ -105,17 +92,4 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    target: {
-        host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-            ],
-        },
-    },
-
 }

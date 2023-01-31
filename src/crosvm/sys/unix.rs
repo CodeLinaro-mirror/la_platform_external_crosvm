@@ -174,6 +174,8 @@ use crate::crosvm::config::SharedDirKind;
 use crate::crosvm::gdb::gdb_thread;
 #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 use crate::crosvm::gdb::GdbStub;
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+use crate::crosvm::ratelimit::Ratelimit;
 use crate::crosvm::sys::cmdline::DevicesCommand;
 use crate::crosvm::sys::config::VfioType;
 
@@ -477,22 +479,24 @@ fn create_virtio_devices(
 
     for opt in &cfg.net {
         match &opt.mode {
-            NetParametersMode::TapName { tap_name } => {
+            NetParametersMode::TapName { tap_name, mac } => {
                 devs.push(create_tap_net_device_from_name(
                     cfg.protection_type,
                     &cfg.jail_config,
                     cfg.net_vq_pairs.unwrap_or(1),
                     cfg.vcpu_count.unwrap_or(1),
                     tap_name.as_bytes(),
+                    *mac,
                 )?);
             }
-            NetParametersMode::TapFd { tap_fd } => {
+            NetParametersMode::TapFd { tap_fd, mac } => {
                 devs.push(create_tap_net_device_from_fd(
                     cfg.protection_type,
                     &cfg.jail_config,
                     cfg.net_vq_pairs.unwrap_or(1),
                     cfg.vcpu_count.unwrap_or(1),
                     *tap_fd,
+                    *mac,
                 )?);
             }
             NetParametersMode::RawConfig {
@@ -532,6 +536,7 @@ fn create_virtio_devices(
             cfg.net_vq_pairs.unwrap_or(1),
             cfg.vcpu_count.unwrap_or(1),
             *tap_fd,
+            None,
         )?);
     }
 
@@ -564,6 +569,7 @@ fn create_virtio_devices(
             cfg.net_vq_pairs.unwrap_or(1),
             cfg.vcpu_count.unwrap_or(1),
             tap_name.as_bytes(),
+            None,
         )?);
     }
 
@@ -2468,6 +2474,25 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             Some(f)
         }
     };
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+    let bus_lock_ratelimit_ctrl: Arc<Mutex<Ratelimit>> = Arc::new(Mutex::new(Ratelimit::new()));
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+    if cfg.bus_lock_ratelimit > 0 {
+        let bus_lock_ratelimit = cfg.bus_lock_ratelimit;
+        if linux.vm.check_capability(VmCap::BusLockDetect) {
+            info!("Hypervisor support bus lock detect");
+            linux
+                .vm
+                .enable_capability(VmCap::BusLockDetect, 0)
+                .expect("kvm: Failed to enable bus lock detection cap");
+            info!("Hypervisor enabled bus lock detect");
+            bus_lock_ratelimit_ctrl
+                .lock()
+                .ratelimit_set_speed(bus_lock_ratelimit);
+        } else {
+            bail!("Kvm: bus lock detection unsuported");
+        }
+    }
 
     #[cfg(target_os = "android")]
     android::set_process_profiles(&cfg.task_profiles)?;
@@ -2495,6 +2520,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             cfg.no_smt,
             cfg.itmt,
         ));
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+        let bus_lock_ratelimit_ctrl = Arc::clone(&bus_lock_ratelimit_ctrl);
 
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         let cpu_config = None;
@@ -2537,6 +2564,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             },
             cfg.userspace_msr.clone(),
             guest_suspended_cvar.clone(),
+            #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+            bus_lock_ratelimit_ctrl,
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }

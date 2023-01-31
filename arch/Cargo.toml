@@ -31,7 +31,7 @@ vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
 
 [target.'cfg(unix)'.dependencies]
-minijail = { path = "../../minijail/rust/minijail" } # provided by ebuild
+minijail = "*" # provided by ebuild
 power_monitor = { path = "../power_monitor" }
 
 [target.'cfg(windows)'.dependencies]

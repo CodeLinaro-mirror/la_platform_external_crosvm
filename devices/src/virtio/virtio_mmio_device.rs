@@ -27,6 +27,7 @@ use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER_OK;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FAILED;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FEATURES_OK;
+use virtio_sys::virtio_config::VIRTIO_CONFIG_S_NEEDS_RESET;
 use virtio_sys::virtio_mmio::*;
 use vm_memory::GuestMemory;
 
@@ -132,14 +133,6 @@ impl VirtioMmioDevice {
         self.driver_status == DEVICE_RESET as u8
     }
 
-    fn are_queues_valid(&mut self) -> bool {
-        // All queues marked as ready must be valid.
-        self.queues
-            .iter_mut()
-            .filter(|q| q.ready())
-            .all(|q| q.is_valid(&self.mem))
-    }
-
     fn clone_queue_evts(&self) -> Result<Vec<Event>> {
         self.queue_evts.iter().map(|e| e.try_clone()).collect()
     }
@@ -172,8 +165,12 @@ impl VirtioMmioDevice {
                     .filter(|(q, _)| q.ready())
                     .unzip();
 
-                self.device.activate(mem, interrupt, queues, queue_evts);
-                self.device_activated = true;
+                if let Err(e) = self.device.activate(mem, interrupt, queues, queue_evts) {
+                    error!("{} activate failed: {:#}", self.debug_label(), e);
+                    self.driver_status |= VIRTIO_CONFIG_S_NEEDS_RESET as u8;
+                } else {
+                    self.device_activated = true;
+                }
             }
             Err(e) => {
                 bail!(
@@ -214,7 +211,7 @@ impl VirtioMmioDevice {
                     0
                 }
             }
-            VIRTIO_MMIO_QUEUE_NUM_MAX => self.with_queue(|q| q.max_size).unwrap_or(0).into(),
+            VIRTIO_MMIO_QUEUE_NUM_MAX => self.with_queue(|q| q.max_size()).unwrap_or(0).into(),
             VIRTIO_MMIO_QUEUE_PFN => {
                 warn!(
                     "{}: read from legacy register {}, in non-legacy mode",
@@ -346,10 +343,8 @@ impl VirtioMmioDevice {
                 }
             }
 
-            if self.are_queues_valid() {
-                if let Err(e) = self.activate() {
-                    error!("failed to activate device: {:#}", e);
-                }
+            if let Err(e) = self.activate() {
+                error!("failed to activate device: {:#}", e);
             }
         }
 
