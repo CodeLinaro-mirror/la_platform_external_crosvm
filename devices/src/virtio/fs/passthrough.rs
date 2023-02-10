@@ -747,29 +747,31 @@ impl PassthroughFs {
         self.open_fd(inode.as_raw_descriptor(), flags)
     }
 
+    // Increases the inode refcount and returns the inode.
+    fn increase_inode_refcount(&self, inode_data: &InodeData) -> Inode {
+        // Matches with the release store in `forget`.
+        inode_data.refcount.fetch_add(1, Ordering::Acquire);
+        inode_data.inode
+    }
+
     // Creates a new entry for `f` or increases the refcount of the existing entry for `f`.
+    // The inodes mutex lock must not be already taken by the same thread otherwise this
+    // will deadlock.
     fn add_entry(&self, f: File, st: libc::stat64, open_flags: libc::c_int) -> Entry {
+        let mut inodes = self.inodes.lock();
+
         let altkey = InodeAltKey {
             ino: st.st_ino,
             dev: st.st_dev,
         };
-        let data = self.inodes.lock().get_alt(&altkey).map(Arc::clone);
 
-        let inode = if let Some(data) = data {
-            // Matches with the release store in `forget`.
-            data.refcount.fetch_add(1, Ordering::Acquire);
-            data.inode
+        let inode = if let Some(data) = inodes.get_alt(&altkey) {
+            self.increase_inode_refcount(data)
         } else {
-            // There is a possible race here where 2 threads end up adding the same file
-            // into the inode list.  However, since each of those will get a unique Inode
-            // value and unique file descriptors this shouldn't be that much of a problem.
             let inode = self.next_inode.fetch_add(1, Ordering::Relaxed);
-            self.inodes.lock().insert(
+            inodes.insert(
                 inode,
-                InodeAltKey {
-                    ino: st.st_ino,
-                    dev: st.st_dev,
-                },
+                altkey,
                 Arc::new(InodeData {
                     inode,
                     file: Mutex::new((f, open_flags)),
@@ -813,22 +815,64 @@ impl PassthroughFs {
     fn do_lookup(&self, parent: &InodeData, name: &CStr) -> io::Result<Entry> {
         let st = statat(parent, name)?;
 
+        let altkey = InodeAltKey {
+            ino: st.st_ino,
+            dev: st.st_dev,
+        };
+
+        // Check if we already have an entry before opening a new file.
+        if let Some(data) = self.inodes.lock().get_alt(&altkey) {
+            // Return the same inode with the reference counter increased.
+            return Ok(Entry {
+                inode: self.increase_inode_refcount(data),
+                generation: 0,
+                attr: st,
+                attr_timeout: self.cfg.attr_timeout,
+                entry_timeout: self.cfg.entry_timeout,
+            });
+        }
+
+        // Open a regular file with O_RDONLY to store in `InodeData` so explicit open requests can
+        // be skipped later if the ZERO_MESSAGE_{OPEN,OPENDIR} features are enabled.
+        // If the crosvm process doesn't have a read permission, fall back to O_PATH below.
         let mut flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         match FileType::from(st.st_mode) {
             FileType::Regular => {}
             FileType::Directory => flags |= libc::O_DIRECTORY,
             FileType::Other => flags |= libc::O_PATH,
-        }
+        };
 
         // Safe because this doesn't modify any memory and we check the return value.
-        let f = unsafe {
-            File::from_raw_descriptor(syscall!(libc::openat64(
+        let fd = match unsafe {
+            syscall!(libc::openat64(
                 parent.as_raw_descriptor(),
                 name.as_ptr(),
                 flags
-            ))?)
+            ))
+        } {
+            Ok(fd) => fd,
+            Err(e) if e.errno() == libc::EACCES => {
+                // fallback to O_PATH for the unreadable file.
+                flags |= libc::O_PATH;
+                // Safe because this doesn't modify any memory and we check the return value.
+                unsafe {
+                    syscall!(libc::openat64(
+                        parent.as_raw_descriptor(),
+                        name.as_ptr(),
+                        flags
+                    ))
+                }?
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
         };
 
+        // Safe because we own the fd.
+        let f = unsafe { File::from_raw_descriptor(fd) };
+        // We made sure the lock acquired for `self.inodes` is released automatically when
+        // the if block above is exited, so a call to `self.add_entry()` should not cause a deadlock
+        // here. This would not be the case if this were executed in an else block instead.
         Ok(self.add_entry(f, st, flags))
     }
 

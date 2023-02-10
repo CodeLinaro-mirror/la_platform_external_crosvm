@@ -78,6 +78,8 @@ const DEFAULT_MODEM_CONTROL: u8 = MCR_OUT2_BIT;
 const DEFAULT_MODEM_STATUS: u8 = MSR_DSR_BIT | MSR_CTS_BIT | MSR_DCD_BIT;
 const DEFAULT_BAUD_DIVISOR: u16 = 12; // 9600 bps
 
+const TIMESTAMP_PREFIX_FMT: &str = "[ %F %T%.9f ]: ";
+
 /// Emulates serial COM ports commonly seen on x86 I/O ports 0x3f8/0x2f8/0x3e8/0x2e8.
 ///
 /// This can optionally write the guest's output to a Write trait object. To send input to the
@@ -100,6 +102,8 @@ pub struct Serial {
     in_channel: Option<Receiver<u8>>,
     input: Option<Box<dyn SerialInput>>,
     out: Option<Box<dyn io::Write + Send>>,
+    out_timestamp: bool,
+    last_write_was_newline: bool,
     #[cfg(windows)]
     pub system_params: sys::windows::SystemSerialParams,
     device_state: DeviceState,
@@ -111,6 +115,7 @@ impl Serial {
         interrupt_evt: Event,
         input: Option<Box<dyn SerialInput>>,
         out: Option<Box<dyn io::Write + Send>>,
+        out_timestamp: bool,
         #[cfg(windows)] system_params: sys::windows::SystemSerialParams,
     ) -> Serial {
         Serial {
@@ -127,6 +132,8 @@ impl Serial {
             in_channel: None,
             input,
             out,
+            out_timestamp,
+            last_write_was_newline: true,
             #[cfg(windows)]
             system_params,
             device_state: DeviceState::Awake,
@@ -368,7 +375,7 @@ impl Serial {
                         self.trigger_recv_interrupt()?;
                     }
                 } else {
-                    self.system_handle_write(v)?;
+                    self.handle_write_data(v)?;
                     self.trigger_thr_empty()?;
                 }
             }
@@ -380,6 +387,24 @@ impl Serial {
             SCR => self.scratch = v,
             _ => {}
         }
+        Ok(())
+    }
+
+    // Write a single byte of data to `self.out`.
+    fn handle_write_data(&mut self, v: u8) -> Result<()> {
+        let out = match self.out.as_mut() {
+            Some(out) => out,
+            None => return Ok(()),
+        };
+
+        if self.out_timestamp && self.last_write_was_newline {
+            write!(out, "{}", chrono::Local::now().format(TIMESTAMP_PREFIX_FMT))?;
+        }
+
+        self.last_write_was_newline = v == b'\n';
+
+        out.write_all(&[v])?;
+        out.flush()?;
         Ok(())
     }
 }
@@ -485,10 +510,12 @@ struct SerialSnapshot {
 
     has_input: bool,
     has_output: bool,
+
+    last_write_was_newline: bool,
 }
 
 impl Suspendable for Serial {
-    fn snapshot(&self) -> anyhow::Result<String> {
+    fn snapshot(&self) -> anyhow::Result<serde_json::Value> {
         let snap = SerialSnapshot {
             interrupt_enable: self.interrupt_enable.load(Ordering::SeqCst),
             interrupt_identification: self.interrupt_identification,
@@ -501,15 +528,16 @@ impl Suspendable for Serial {
             in_buffer: self.in_buffer.clone(),
             has_input: self.input.is_some(),
             has_output: self.out.is_some(),
+            last_write_was_newline: self.last_write_was_newline,
         };
 
-        let serialized = serde_json::to_string(&snap).context("error serializing")?;
+        let serialized = serde_json::to_value(&snap).context("error serializing")?;
         Ok(serialized)
     }
 
-    fn restore(&mut self, data: &str) -> anyhow::Result<()> {
+    fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
         let serial_snapshot: SerialSnapshot =
-            serde_json::from_str(data).context("error deserializing")?;
+            serde_json::from_value(data).context("error deserializing")?;
         self.interrupt_enable = Arc::new(AtomicU8::new(serial_snapshot.interrupt_enable));
         self.interrupt_identification = serial_snapshot.interrupt_identification;
         self.line_control = serial_snapshot.line_control;
@@ -525,6 +553,7 @@ impl Suspendable for Serial {
         if serial_snapshot.has_output && self.out.is_none() {
             warn!("Restore serial out missing when restore expected an out");
         }
+        self.last_write_was_newline = serial_snapshot.last_write_was_newline;
         Ok(())
     }
 
@@ -700,7 +729,7 @@ mod tests {
         let snap_res = serial.snapshot();
         match snap_res {
             Ok(snap) => {
-                let restore_res = serial.restore(&snap);
+                let restore_res = serial.restore(snap);
                 match restore_res {
                     Ok(_rest) => (),
                     Err(e) => println!("{}", e),
@@ -742,19 +771,12 @@ mod tests {
         serial.read(serial_bus_address(DATA), &mut data[..]);
         assert_eq!(data[0], b'a');
         // Take snapshot after reading b'a'. Serial still contains b'b' and b'c'.
-        let snap_res = serial.snapshot();
-        let snap = match snap_res {
-            Ok(res) => res,
-            Err(e) => {
-                println!("Error snapshotting: {}", e);
-                "Error".to_string()
-            }
-        };
+        let snap = serial.snapshot().expect("failed to snapshot serial");
         serial.read(serial_bus_address(DATA), &mut data[..]);
         assert_eq!(data[0], b'b');
         // Restore snapshot taken after reading b'a'. New reading should give us b'b' since it was
         // the saved state at the moment of taking a snapshot.
-        let restore_res = serial.restore(&snap);
+        let restore_res = serial.restore(snap);
         match restore_res {
             Ok(()) => (),
             Err(e) => println!("Error: {}", e),
@@ -788,14 +810,7 @@ mod tests {
         serial.read(serial_bus_address(DATA), &mut data[..]);
         assert_eq!(data[0], b'a');
         // Take snapshot after reading b'a'. Serial still contains b'b' and b'c'.
-        let snap_res = serial.snapshot();
-        let snap = match snap_res {
-            Ok(res) => res,
-            Err(e) => {
-                println!("Error snapshotting: {}", e);
-                "Error".to_string()
-            }
-        };
+        let snap = serial.snapshot().expect("failed to snapshot serial");
         serial.clear_in_buffer();
         serial.queue_input_bytes(&[b'a', b'b', b'c']).unwrap();
         serial.read(serial_bus_address(DATA), &mut data[..]);
@@ -806,7 +821,7 @@ mod tests {
         assert_eq!(data[0], b'c');
         // Restore snapshot taken after reading b'a'. New reading should give us b'b' since it was
         // the saved state at the moment of taking a snapshot.
-        let restore_res = serial.restore(&snap);
+        let restore_res = serial.restore(snap);
         match restore_res {
             Ok(()) => (),
             Err(e) => println!("Error: {}", e),
@@ -917,8 +932,14 @@ mod tests {
         assert_eq!(data[0], b'c');
     }
 
-    suspendable_tests! {
-        serial: Serial::new(
+    fn modify_device(serial: &mut Serial) {
+        serial.clear_in_buffer();
+        serial.queue_input_bytes(&[b'a', b'b', b'c']).unwrap();
+    }
+
+    suspendable_tests!(
+        serial,
+        Serial::new(
             ProtectionType::Unprotected,
             Event::new().unwrap(),
             None,
@@ -927,5 +948,53 @@ mod tests {
             false,
             Vec::new(),
         ),
+        modify_device
+    );
+
+    fn assert_timestamp_is_present(data: &[u8], serial_message: &str) {
+        const TIMESTAMP_START: &str = "[";
+        const TIMESTAMP_END: &str = "]: ";
+
+        let data_str = std::str::from_utf8(data).unwrap();
+        let timestamp_bracket = data_str
+            .find(TIMESTAMP_END)
+            .expect("missing timestamp end bracket");
+        let (timestamp, message) = data_str.split_at(timestamp_bracket + TIMESTAMP_END.len());
+
+        assert!(timestamp.starts_with(TIMESTAMP_START));
+        assert!(timestamp.ends_with(TIMESTAMP_END));
+
+        assert_eq!(message.trim_end(), serial_message);
+    }
+
+    #[test]
+    fn serial_output_timestamp() {
+        let intr_evt = Event::new().unwrap();
+        let serial_out = SharedBuffer::new();
+
+        let mut serial = Serial::new(
+            ProtectionType::Unprotected,
+            intr_evt,
+            None,
+            Some(Box::new(serial_out.clone())),
+            None,
+            true,
+            Vec::new(),
+        );
+
+        serial.write(serial_bus_address(DATA), &[b'a']);
+        serial.write(serial_bus_address(DATA), &[b'\n']);
+        assert_timestamp_is_present(serial_out.buf.lock().as_slice(), "a");
+        serial_out.buf.lock().clear();
+
+        serial.write(serial_bus_address(DATA), &[b'b']);
+        serial.write(serial_bus_address(DATA), &[b'\n']);
+        assert_timestamp_is_present(serial_out.buf.lock().as_slice(), "b");
+        serial_out.buf.lock().clear();
+
+        serial.write(serial_bus_address(DATA), &[b'c']);
+        serial.write(serial_bus_address(DATA), &[b'\n']);
+        assert_timestamp_is_present(serial_out.buf.lock().as_slice(), "c");
+        serial_out.buf.lock().clear();
     }
 }

@@ -19,6 +19,7 @@
   "workspace_excludes": [
     "audio_streams_conformance_test",
     "baremetal",
+    "catapult_converter",
     "cros_asyncv2",
     "cros_fuzz",
     "crosvm-fuzz",
@@ -153,6 +154,9 @@
     },
     "net_util": {
       "no_presubmit": true
+    },
+    "power_monitor": {
+      "copy_out": true
     },
     "protos": {
       "add_toplevel_block": "protos/cargo2android_protobuf.bp",

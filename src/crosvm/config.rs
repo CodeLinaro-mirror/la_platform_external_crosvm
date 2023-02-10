@@ -1043,7 +1043,7 @@ pub struct Config {
     pub block_vhost_user_tube: Vec<Tube>,
     #[cfg(windows)]
     pub broker_shutdown_event: Option<Event>,
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
     pub bus_lock_ratelimit: u64,
     pub cid: Option<u64>,
     #[cfg(unix)]
@@ -1164,7 +1164,7 @@ pub struct Config {
     pub rt_cpus: CpuSet,
     #[serde(with = "serde_serial_params")]
     pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
-    #[cfg(feature = "kiwi")]
+    #[cfg(windows)]
     pub service_pipe_name: Option<String>,
     #[cfg(unix)]
     #[serde(skip)]
@@ -1194,7 +1194,7 @@ pub struct Config {
     pub vcpu_cgroup_path: Option<PathBuf>,
     pub vcpu_count: Option<usize>,
     #[cfg(unix)]
-    pub vfio: Vec<super::sys::config::VfioCommand>,
+    pub vfio: Vec<super::sys::config::VfioOption>,
     #[cfg(unix)]
     pub vfio_isolate_hotplug: bool,
     pub vhost_net: bool,
@@ -1256,7 +1256,7 @@ impl Default for Config {
             block_vhost_user_tube: Vec::new(),
             #[cfg(windows)]
             broker_shutdown_event: None,
-            #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+            #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
             bus_lock_ratelimit: 0,
             cid: None,
             #[cfg(unix)]
@@ -1379,7 +1379,7 @@ impl Default for Config {
             rng: true,
             rt_cpus: Default::default(),
             serial_parameters: BTreeMap::new(),
-            #[cfg(feature = "kiwi")]
+            #[cfg(windows)]
             service_pipe_name: None,
             #[cfg(unix)]
             shared_dirs: Vec::new(),

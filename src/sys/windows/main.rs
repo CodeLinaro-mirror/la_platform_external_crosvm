@@ -37,7 +37,7 @@ use crate::crosvm::sys::cmdline::DeviceSubcommand;
 use crate::crosvm::sys::cmdline::RunMainCommand;
 #[cfg(all(feature = "slirp"))]
 use crate::crosvm::sys::cmdline::RunSlirpCommand;
-use crate::metrics::run_metrics;
+use crate::sys::windows::product::run_metrics;
 use crate::CommandStatus;
 use crate::Config;
 
@@ -97,7 +97,7 @@ pub fn initialize_sandbox() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "kiwi")]
+#[cfg(feature = "sandbox")]
 pub fn sandbox_lower_token() -> Result<()> {
     if let Some(mut target) = sandbox::TargetServices::get()
         .exit_context(Exit::SandboxError, "sandbox operation failed")?

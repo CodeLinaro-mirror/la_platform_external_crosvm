@@ -9,9 +9,7 @@ cfg_if::cfg_if! {
         use base::RawDescriptor;
         use devices::virtio::vhost::user::device::parse_wayland_sock;
 
-        use super::sys::config::{
-            VfioCommand, parse_vfio, parse_vfio_platform,
-        };
+        use super::sys::config::VfioOption;
         use super::config::SharedDir;
     } else if #[cfg(windows)] {
         use crate::crosvm::sys::config::IrqChipKind;
@@ -464,7 +462,6 @@ pub enum CrossPlatformDevicesCommands {
     Block(device::BlockOptions),
     #[cfg(feature = "gpu")]
     Gpu(device::GpuOptions),
-    #[cfg(unix)]
     Net(device::NetOptions),
 }
 
@@ -717,8 +714,6 @@ fn overwrite<T>(left: &mut T, right: T) {
     let _ = std::mem::replace(left, right);
 }
 
-/// Start a new crosvm instance
-///
 /// Each field of this structure has a dual use:
 ///
 /// 1) As a command-line parameter, controlled by the `#[argh]` helper attribute.
@@ -754,7 +749,7 @@ fn overwrite<T>(left: &mut T, right: T) {
 #[remain::sorted]
 #[argh_helpers::pad_description_for_argh]
 #[derive(FromArgs, Deserialize, merge::Merge)]
-#[argh(subcommand, name = "run")]
+#[argh(subcommand, name = "run", description = "Start a new crosvm instance")]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct RunCommand {
     #[cfg(feature = "audio")]
@@ -859,7 +854,7 @@ pub struct RunCommand {
     /// ratelimit enforced on detected bus locks in guest.
     /// The default value of the bus_lock_ratelimit is 0 per second,
     /// which means no limitation on the guest's bus locks.
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
     #[argh(option)]
     pub bus_lock_ratelimit: Option<u64>,
 
@@ -1348,24 +1343,35 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(
         option,
-        arg_name = "tap_name=TAP_NAME,mac=MAC_ADDRESS|tap_fd=TAP_FD,mac=MAC_ADDRESS|host_ip=IP,netmask=NETMASK,mac=MAC_ADDRESS"
+        arg_name = "(tap-name=TAP_NAME,mac=MAC_ADDRESS|tap-fd=TAP_FD,mac=MAC_ADDRESS|host-ip=IP,netmask=NETMASK,mac=MAC_ADDRESS),vhost-net=VHOST_NET"
     )]
     #[serde(default)]
     #[merge(strategy = append)]
     /// comma separated key=value pairs for setting up a network
     /// device.
     /// Possible key values:
-    ///     tap-name=STRING - name of a configured persistent TAP
-    ///        interface to use for networking.
-    ///     mac=STRING - MAC address for VM. [Optional]
-    /// OR
-    ///     tap-fd=INT - File descriptor for configured tap device.
-    ///     mac=STRING - MAC address for VM. [Optional]
-    /// OR
-    ///     host-ip=STRING - IP address to assign to
-    ///         host tap interface.
-    ///     netmask=STRING - Netmask for VM subnet.
-    ///     mac=STRING - MAC address for VM.
+    ///   (
+    ///      tap-name=STRING - name of a configured persistent TAP
+    ///                          interface to use for networking.
+    ///      mac=STRING      - MAC address for VM. [Optional]
+    ///    OR
+    ///      tap-fd=INT      - File descriptor for configured tap
+    ///                          device.
+    ///      mac=STRING      - MAC address for VM. [Optional]
+    ///    OR
+    ///      (
+    ///         host-ip=STRING  - IP address to assign to host tap
+    ///                             interface.
+    ///       AND
+    ///         netmask=STRING  - Netmask for VM subnet.
+    ///       AND
+    ///         mac=STRING      - MAC address for VM.
+    ///      )
+    ///   )
+    /// AND
+    ///   vhost-net=BOOL  - whether enable vhost_net or not.
+    ///                       Default: false.  [Optional]
+    ///
     /// Either one tap_name, one tap_fd or a triplet of host_ip,
     /// netmask and mac must be specified.
     pub net: Vec<NetParameters>,
@@ -1730,7 +1736,7 @@ pub struct RunCommand {
     ///        port if not provided.
     pub serial: Vec<SerialParameters>,
 
-    #[cfg(feature = "kiwi")]
+    #[cfg(windows)]
     #[argh(option, arg_name = "PIPE_NAME")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1943,20 +1949,19 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(
         option,
-        arg_name = "PATH[,guest-address=auto|<BUS:DEVICE.FUNCTION>][,iommu=on|off]",
-        from_str_fn(parse_vfio)
+        arg_name = "PATH[,guest-address=<BUS:DEVICE.FUNCTION>][,iommu=viommu|coiommu|off]"
     )]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(default)]
     #[merge(strategy = append)]
-    /// path to sysfs of PCI pass through or mdev device.
-    ///     guest-address=auto|<BUS:DEVICE.FUNCTION> - PCI address
-    ///        that the device will be assigned in the guest
-    ///        (default: auto).  When set to "auto", the device will
-    ///        be assigned an address that mirrors its address in
-    ///        the host.
-    ///     iommu=on|off - indicates whether to enable virtio IOMMU
-    ///        for this device
-    pub vfio: Vec<VfioCommand>,
+    /// path to sysfs of VFIO device.
+    ///     guest-address=<BUS:DEVICE.FUNCTION> - PCI address
+    ///        that the device will be assigned in the guest.
+    ///        If not specified, the device will be assigned an
+    ///        address that mirrors its address in the host.
+    ///        Only valid for PCI devices.
+    ///     iommu=viommu|coiommu|off - indicates which type of IOMMU
+    ///        to use for this device.
+    pub vfio: Vec<VfioOption>,
 
     #[cfg(unix)]
     #[argh(switch)]
@@ -1966,11 +1971,11 @@ pub struct RunCommand {
     pub vfio_isolate_hotplug: bool,
 
     #[cfg(unix)]
-    #[argh(option, arg_name = "PATH", from_str_fn(parse_vfio_platform))]
-    #[serde(skip)] // TODO(b/255223604)
+    #[argh(option, arg_name = "PATH")]
+    #[serde(skip)] // Deprecated - use `vfio` instead.
     #[merge(strategy = append)]
     /// path to sysfs of platform pass through
-    pub vfio_platform: Vec<VfioCommand>,
+    pub vfio_platform: Vec<VfioOption>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -2200,7 +2205,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.async_executor = cmd.async_executor;
 
-        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_family = "unix"))]
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
         if let Some(p) = cmd.bus_lock_ratelimit {
             cfg.bus_lock_ratelimit = p;
         }
@@ -2412,7 +2417,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                 cfg.process_invariants_data_size = cmd.process_invariants_size;
             }
             cfg.pvclock = cmd.pvclock;
-            #[cfg(feature = "kiwi")]
+            #[cfg(windows)]
             {
                 cfg.service_pipe_name = cmd.service_pipe_name;
             }

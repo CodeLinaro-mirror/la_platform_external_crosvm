@@ -1087,6 +1087,7 @@ impl Gpu {
         #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
         event_devices: Vec<EventDevice>,
         external_blob: bool,
+        system_blob: bool,
         base_features: u64,
         channels: BTreeMap<String, PathBuf>,
         #[cfg(windows)] wndproc_thread: WindowProcedureThread,
@@ -1138,6 +1139,7 @@ impl Gpu {
             .set_use_vulkan(gpu_parameters.use_vulkan.unwrap_or_default())
             .set_wsi(gpu_parameters.wsi.as_ref())
             .set_use_external_blob(external_blob)
+            .set_use_system_blob(system_blob)
             .set_use_render_server(use_render_server);
 
         #[cfg(feature = "gfxstream")]
@@ -1353,10 +1355,9 @@ impl VirtioDevice for Gpu {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
-        mut queue_evts: Vec<Event>,
+        mut queues: Vec<(Queue, Event)>,
     ) -> anyhow::Result<()> {
-        if queues.len() != QUEUE_SIZES.len() || queue_evts.len() != QUEUE_SIZES.len() {
+        if queues.len() != QUEUE_SIZES.len() {
             return Err(anyhow!(
                 "expected {} queues, got {}",
                 QUEUE_SIZES.len(),
@@ -1385,10 +1386,10 @@ impl VirtioDevice for Gpu {
             .take()
             .context("resource_bridges is none")?;
 
-        let ctrl_queue = SharedQueueReader::new(queues.remove(0), interrupt.clone());
-        let ctrl_evt = queue_evts.remove(0);
-        let cursor_queue = LocalQueueReader::new(queues.remove(0), interrupt.clone());
-        let cursor_evt = queue_evts.remove(0);
+        let (ctrl_queue, ctrl_evt) = queues.remove(0);
+        let ctrl_queue = SharedQueueReader::new(ctrl_queue, interrupt.clone());
+        let (cursor_queue, cursor_evt) = queues.remove(0);
+        let cursor_queue = LocalQueueReader::new(cursor_queue, interrupt.clone());
         let display_backends = self.display_backends.clone();
         let display_params = self.display_params.clone();
         let display_event = self.display_event.clone();

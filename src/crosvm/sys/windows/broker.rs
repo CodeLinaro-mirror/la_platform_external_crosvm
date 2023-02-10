@@ -89,6 +89,7 @@ use win_util::ProcessType;
 use winapi::shared::winerror::ERROR_ACCESS_DENIED;
 use winapi::um::processthreadsapi::TerminateProcess;
 
+use crate::sys::windows::get_gpu_product_configs;
 use crate::Config;
 
 const KILL_CHILD_EXIT_CODE: u32 = 1;
@@ -616,25 +617,22 @@ fn run_internal(mut cfg: Config) -> Result<()> {
     {
         let broker_metrics = metrics_tube_pair(&mut metric_tubes)?;
         metrics::initialize(broker_metrics);
-        #[cfg(feature = "kiwi")]
-        {
-            let use_vulkan = if cfg!(feature = "gpu") {
-                match &cfg.gpu_parameters {
-                    Some(params) => Some(params.use_vulkan),
-                    None => {
-                        warn!("No GPU parameters set on crosvm config.");
-                        None
-                    }
+        let use_vulkan = if cfg!(feature = "gpu") {
+            match &cfg.gpu_parameters {
+                Some(params) => Some(params.use_vulkan),
+                None => {
+                    warn!("No GPU parameters set on crosvm config.");
+                    None
                 }
-            } else {
-                None
-            };
-            anti_tamper::setup_common_metric_invariants(
-                &cfg.product_version,
-                &cfg.product_channel,
-                &use_vulkan,
-            );
-        }
+            }
+        } else {
+            None
+        };
+        anti_tamper::setup_common_metric_invariants(
+            &cfg.product_version,
+            &cfg.product_channel,
+            &use_vulkan.unwrap_or_default(),
+        );
     }
 
     // We have all the metrics tubes from other children, so give them to the metrics controller
@@ -808,10 +806,7 @@ impl Supervisor {
     }
 
     fn all_non_metrics_processes_exited(&self) -> bool {
-        #[cfg(not(feature = "kiwi"))]
-        return self.children.len() == 0;
-        #[cfg(feature = "kiwi")]
-        return self.children.len() == 0 || self.is_only_metrics_process_running();
+        self.children.len() == 0 || self.is_only_metrics_process_running()
     }
 
     fn start_exit_timer(&mut self, timeout_token: Token) -> Result<()> {
@@ -1139,7 +1134,7 @@ where
         )
         .exit_context(Exit::SandboxError, "sandbox operation failed")?;
     policy
-        .set_job_level(process_policy.job_level, 0)
+        .set_job_level(process_policy.job_level, process_policy.ui_exceptions)
         .exit_context(Exit::SandboxError, "sandbox operation failed")?;
     policy
         .set_integrity_level(process_policy.integrity_level)
@@ -1442,6 +1437,9 @@ fn platform_create_gpu(
         .try_clone()
         .exit_context(Exit::CloneEvent, "failed to clone event")?;
 
+    let (backend_config_product, vmm_config_product) =
+        get_gpu_product_configs(cfg, main_child.alias_pid)?;
+
     let backend_config = GpuBackendConfig {
         device_vhost_user_tube: None,
         exit_event,
@@ -1452,12 +1450,15 @@ fn platform_create_gpu(
             .as_ref()
             .expect("missing GpuParameters in config")
             .clone(),
+        product_config: backend_config_product,
     };
+
     let vmm_config = GpuVmmConfig {
         main_vhost_user_tube: None,
         input_event_multi_touch_pipes,
         input_event_mouse_pipes,
         input_event_keyboard_pipes,
+        product_config: vmm_config_product,
     };
 
     Ok((backend_config, vmm_config))

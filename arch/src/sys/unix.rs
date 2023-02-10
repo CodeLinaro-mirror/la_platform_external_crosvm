@@ -73,7 +73,7 @@ pub fn add_goldfish_battery(
     let create_monitor = Some(Box::new(power_monitor::powerd::DBusMonitor::connect)
         as Box<dyn power_monitor::CreatePowerMonitorFn>);
 
-    #[cfg(all(not(feature = "power-monitor-powerd"), unix))]
+    #[cfg(not(feature = "power-monitor-powerd"))]
     let create_monitor = None;
 
     let irq_evt = devices::IrqLevelEvent::new().map_err(DeviceRegistrationError::EventCreate)?;
@@ -85,7 +85,6 @@ pub fn add_goldfish_battery(
             .try_clone()
             .map_err(DeviceRegistrationError::EventClone)?,
         response_tube,
-        #[cfg(unix)]
         create_monitor,
     )
     .map_err(DeviceRegistrationError::RegisterBattery)?;
@@ -104,6 +103,7 @@ pub fn add_goldfish_battery(
         Some(jail) => {
             let mut keep_rds = goldfish_bat.keep_rds();
             syslog::push_descriptors(&mut keep_rds);
+            cros_tracing::push_descriptors!(&mut keep_rds);
             mmio_bus
                 .insert(
                     Arc::new(Mutex::new(
@@ -150,6 +150,7 @@ pub fn generate_platform_bus(
 
         let mut keep_rds = device.keep_rds();
         syslog::push_descriptors(&mut keep_rds);
+        cros_tracing::push_descriptors!(&mut keep_rds);
 
         let irqs = device
             .get_platform_irqs()

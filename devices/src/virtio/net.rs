@@ -156,8 +156,6 @@ pub enum NetParametersMode {
     },
     #[serde(rename_all = "kebab-case")]
     RawConfig {
-        #[serde(default)]
-        vhost_net: bool,
         host_ip: Ipv4Addr,
         netmask: Ipv4Addr,
         mac: MacAddress,
@@ -165,9 +163,12 @@ pub enum NetParametersMode {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "kebab-case")]
 pub struct NetParameters {
     #[serde(flatten)]
     pub mode: NetParametersMode,
+    #[serde(default)]
+    pub vhost_net: bool,
 }
 
 impl FromStr for NetParameters {
@@ -464,61 +465,26 @@ pub fn build_config(vq_pairs: u16, mtu: u16, mac: Option<[u8; 6]>) -> VirtioNetC
 }
 
 pub struct Net<T: TapT + ReadNotifier> {
-    pub(super) guest_mac: Option<[u8; 6]>,
-    pub(super) queue_sizes: Box<[u16]>,
-    pub(super) workers_kill_evt: Vec<Event>,
-    pub(super) kill_evts: Vec<Event>,
-    pub(super) worker_threads: Vec<thread::JoinHandle<Worker<T>>>,
-    pub(super) taps: Vec<T>,
-    pub(super) avail_features: u64,
-    pub(super) acked_features: u64,
-    pub(super) mtu: u16,
+    guest_mac: Option<[u8; 6]>,
+    queue_sizes: Box<[u16]>,
+    workers_kill_evt: Vec<Event>,
+    kill_evts: Vec<Event>,
+    worker_threads: Vec<thread::JoinHandle<Worker<T>>>,
+    taps: Vec<T>,
+    avail_features: u64,
+    acked_features: u64,
+    mtu: u16,
     #[cfg(windows)]
-    pub(super) slirp_kill_evt: Option<Event>,
+    slirp_kill_evt: Option<Event>,
 }
 
 impl<T> Net<T>
 where
     T: TapT + ReadNotifier,
 {
-    /// Create a new virtio network device with the given IP address and
-    /// netmask.
-    pub fn new(
-        base_features: u64,
-        ip_addr: Ipv4Addr,
-        netmask: Ipv4Addr,
-        mac_addr: MacAddress,
-        vq_pairs: u16,
-    ) -> Result<Net<T>, NetError> {
-        let multi_queue = vq_pairs > 1;
-        let tap: T = T::new(true, multi_queue).map_err(NetError::TapOpen)?;
-        tap.set_ip_addr(ip_addr).map_err(NetError::TapSetIp)?;
-        tap.set_netmask(netmask).map_err(NetError::TapSetNetmask)?;
-        tap.set_mac_address(mac_addr)
-            .map_err(NetError::TapSetMacAddress)?;
-
-        tap.enable().map_err(NetError::TapEnable)?;
-
-        Net::from(base_features, tap, vq_pairs, None)
-    }
-
-    /// Try to open the already-configured TAP interface `name` and to create a network device from
-    /// it.
-    pub fn new_from_name(
-        base_features: u64,
-        name: &[u8],
-        vq_pairs: u16,
-        mac: Option<MacAddress>,
-    ) -> Result<Net<T>, NetError> {
-        let multi_queue = vq_pairs > 1;
-        let tap: T = T::new_with_name(name, true, multi_queue).map_err(NetError::TapOpen)?;
-
-        Net::from(base_features, tap, vq_pairs, mac)
-    }
-
     /// Creates a new virtio network device from a tap device that has already been
     /// configured.
-    pub fn from(
+    pub fn new(
         base_features: u64,
         tap: T,
         vq_pairs: u16,
@@ -560,6 +526,23 @@ where
             avail_features |= 1 << virtio_net::VIRTIO_NET_F_MAC;
         }
 
+        Self::new_internal(
+            taps,
+            avail_features,
+            mtu,
+            mac_addr,
+            #[cfg(windows)]
+            None,
+        )
+    }
+
+    pub(crate) fn new_internal(
+        taps: Vec<T>,
+        avail_features: u64,
+        mtu: u16,
+        mac_addr: Option<MacAddress>,
+        #[cfg(windows)] slirp_kill_evt: Option<Event>,
+    ) -> Result<Self, NetError> {
         let mut kill_evts: Vec<Event> = Vec::new();
         let mut workers_kill_evt: Vec<Event> = Vec::new();
         for _ in 0..taps.len() {
@@ -569,9 +552,9 @@ where
             workers_kill_evt.push(worker_kill_evt);
         }
 
-        Ok(Net {
+        Ok(Self {
             guest_mac: mac_addr.map(|mac| mac.octets()),
-            queue_sizes: vec![QUEUE_SIZE; (vq_pairs * 2 + 1) as usize].into_boxed_slice(),
+            queue_sizes: vec![QUEUE_SIZE; (taps.len() * 2 + 1) as usize].into_boxed_slice(),
             workers_kill_evt,
             kill_evts,
             worker_threads: Vec::new(),
@@ -720,15 +703,13 @@ where
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
-        mut queue_evts: Vec<Event>,
+        mut queues: Vec<(Queue, Event)>,
     ) -> anyhow::Result<()> {
-        if queues.len() != self.queue_sizes.len() || queue_evts.len() != self.queue_sizes.len() {
+        if queues.len() != self.queue_sizes.len() {
             return Err(anyhow!(
-                "net: expected {} queues, got {} queues and {} evts",
+                "net: expected {} queues, got {} queues",
                 self.queue_sizes.len(),
                 queues.len(),
-                queue_evts.len()
             ));
         }
 
@@ -754,21 +735,15 @@ where
             let memory = mem.clone();
             let kill_evt = self.workers_kill_evt.remove(0);
             // Queues alternate between rx0, tx0, rx1, tx1, ..., rxN, txN, ctrl.
-            let rx_queue = queues.remove(0);
-            let tx_queue = queues.remove(0);
-            let ctrl_queue = if i == 0 {
-                Some(queues.remove(queues.len() - 1))
+            let (rx_queue, rx_queue_evt) = queues.remove(0);
+            let (tx_queue, tx_queue_evt) = queues.remove(0);
+            let (ctrl_queue, ctrl_queue_evt) = if i == 0 {
+                let (queue, evt) = queues.remove(queues.len() - 1);
+                (Some(queue), Some(evt))
             } else {
-                None
+                (None, None)
             };
             let pairs = vq_pairs as u16;
-            let rx_queue_evt = queue_evts.remove(0);
-            let tx_queue_evt = queue_evts.remove(0);
-            let ctrl_queue_evt = if i == 0 {
-                Some(queue_evts.remove(queue_evts.len() - 1))
-            } else {
-                None
-            };
             #[cfg(windows)]
             let overlapped_wrapper = OverlappedWrapper::new(true).unwrap();
             self.worker_threads.push(
@@ -859,6 +834,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
+                vhost_net: false,
                 mode: NetParametersMode::TapName {
                     tap_name: "tap".to_string(),
                     mac: None
@@ -870,6 +846,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
+                vhost_net: false,
                 mode: NetParametersMode::TapName {
                     tap_name: "tap".to_string(),
                     mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
@@ -881,6 +858,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
+                vhost_net: false,
                 mode: NetParametersMode::TapFd {
                     tap_fd: 12,
                     mac: None
@@ -892,6 +870,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
+                vhost_net: false,
                 mode: NetParametersMode::TapFd {
                     tap_fd: 12,
                     mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
@@ -906,11 +885,11 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
+                vhost_net: false,
                 mode: NetParametersMode::RawConfig {
                     host_ip: Ipv4Addr::from_str("192.168.10.1").unwrap(),
                     netmask: Ipv4Addr::from_str("255.255.255.0").unwrap(),
                     mac: MacAddress::from_str("3d:70:eb:61:1a:91").unwrap(),
-                    vhost_net: false
                 }
             }
         );
@@ -925,11 +904,60 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
+                vhost_net: true,
                 mode: NetParametersMode::RawConfig {
                     host_ip: Ipv4Addr::from_str("192.168.10.1").unwrap(),
                     netmask: Ipv4Addr::from_str("255.255.255.0").unwrap(),
                     mac: MacAddress::from_str("3d:70:eb:61:1a:91").unwrap(),
-                    vhost_net: true
+                }
+            }
+        );
+
+        let params = from_net_arg("tap-fd=3,vhost-net=true").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vhost_net: true,
+                mode: NetParametersMode::TapFd {
+                    tap_fd: 3,
+                    mac: None
+                }
+            }
+        );
+
+        let params = from_net_arg("tap-fd=4,vhost-net=false,mac=\"3d:70:eb:61:1a:91\"").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vhost_net: false,
+                mode: NetParametersMode::TapFd {
+                    tap_fd: 4,
+                    mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
+                }
+            }
+        );
+
+        let params = from_net_arg("vhost-net=true,tap-name=crosvm_tap").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vhost_net: true,
+                mode: NetParametersMode::TapName {
+                    tap_name: "crosvm_tap".to_owned(),
+                    mac: None
+                }
+            }
+        );
+
+        let params =
+            from_net_arg("vhost-net=true,mac=\"3d:70:eb:61:1a:91\",tap-name=crosvm_tap").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vhost_net: true,
+                mode: NetParametersMode::TapName {
+                    tap_name: "crosvm_tap".to_owned(),
+                    mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
                 }
             }
         );

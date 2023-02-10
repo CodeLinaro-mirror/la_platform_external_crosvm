@@ -83,6 +83,7 @@ dependencies = [
  "base",
  "cfg-if",
  "cros_fdt",
+ "cros_tracing",
  "devices",
  "gdbstub",
  "gdbstub_arch",
@@ -305,6 +306,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0b3de4a0c5e67e16066a0715723abd91edc2f9001d09c46e1dca929351e130e"
 
 [[package]]
+name = "catapult_converter"
+version = "0.1.0"
+dependencies = [
+ "argh",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "cbindgen"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -503,6 +514,12 @@ dependencies = [
 [[package]]
 name = "cros_tracing"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base",
+ "cfg-if",
+ "once_cell",
+]
 
 [[package]]
 name = "crossbeam-utils"
@@ -560,7 +577,6 @@ dependencies = [
  "net_util",
  "once_cell",
  "p9",
- "prebuilts",
  "protobuf",
  "protos",
  "rand",
@@ -736,7 +752,6 @@ dependencies = [
  "protobuf",
  "protos",
  "rand",
- "regex",
  "remain",
  "resources",
  "rutabaga_gfx",
@@ -1281,34 +1296,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "libudev"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea626d3bdf40a1c5aee3bcd4f40826970cae8d80a8fec934c82a63840094dcfe"
-dependencies = [
- "libc",
- "libudev-sys",
-]
-
-[[package]]
-name = "libudev-sys"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c8469b4a23b962c1396b9b451dda50ef5b283e8dd309d69033475fa9b334324"
-dependencies = [
- "libc",
- "pkg-config",
-]
-
-[[package]]
 name = "libva"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base",
  "bitflags",
  "crc32fast",
- "libudev",
+ "log",
  "pkg-config",
 ]
 
@@ -1627,8 +1621,8 @@ version = "0.1.0"
 dependencies = [
  "base",
  "dbus",
+ "proto_build_tools",
  "protobuf",
- "protoc-rust",
  "remain",
  "thiserror",
 ]
@@ -2011,6 +2005,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base",
+ "cros_tracing",
  "data_model",
  "libc",
  "minijail",
