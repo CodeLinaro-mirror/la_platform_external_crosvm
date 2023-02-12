@@ -20,6 +20,7 @@ use anyhow::Context;
 use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::json;
 use sync::Mutex;
 use thiserror::Error;
 
@@ -141,14 +142,14 @@ pub trait BusDevice: Send + Suspendable {
 pub trait BusDeviceSync: BusDevice + Sync {
     fn read(&self, offset: BusAccessInfo, data: &mut [u8]);
     fn write(&self, offset: BusAccessInfo, data: &[u8]);
-    fn snapshot_sync(&self) -> anyhow::Result<String> {
+    fn snapshot_sync(&self) -> anyhow::Result<serde_json::Value> {
         Err(anyhow!(
             "snapshot_sync not implemented for {}",
             std::any::type_name::<Self>()
         ))
     }
     /// Load a saved snapshot of an image.
-    fn restore_sync(&self, _data: &str) -> anyhow::Result<()> {
+    fn restore_sync(&self, _data: serde_json::Value) -> anyhow::Result<()> {
         Err(anyhow!(
             "restore_sync not implemented for {}",
             std::any::type_name::<Self>()
@@ -321,12 +322,6 @@ enum BusDeviceEntry {
     InnerSync(Arc<dyn BusDeviceSync>),
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct SerializedDevice {
-    pub device_id: u32,
-    pub serialized_device: String,
-}
-
 /// A device container for routing reads and writes over some address space.
 ///
 /// This doesn't have any restrictions on what kind of device or address space this applies to. The
@@ -414,30 +409,29 @@ impl Bus {
         Ok(())
     }
 
-    pub fn snapshot_devices(&self, devices_vec: &mut Vec<SerializedDevice>) -> anyhow::Result<()> {
+    pub fn snapshot_devices(&self, devices_vec: &mut Vec<serde_json::Value>) -> anyhow::Result<()> {
         let devices_lock = &(self.devices).lock();
         for (_, device_entry) in devices_lock.iter() {
             let (device_id, serialized_device, device_label) = match &(device_entry.device) {
                 BusDeviceEntry::OuterSync(dev) => {
                     let device_lock = (*dev).lock();
                     (
-                        u32::from((&device_lock).device_id()),
+                        u32::from(device_lock.device_id()),
                         (*device_lock).snapshot(),
                         (*device_lock).debug_label(),
                     )
                 }
                 BusDeviceEntry::InnerSync(dev) => (
                     u32::from((dev).device_id()),
-                    (&**dev).snapshot_sync(),
-                    (&**dev).debug_label(),
+                    (**dev).snapshot_sync(),
+                    (**dev).debug_label(),
                 ),
             };
             match serialized_device {
-                Ok(device) => {
-                    let serialized_dev = SerializedDevice {
-                        device_id,
-                        serialized_device: device,
-                    };
+                Ok(snapshot) => {
+                    let serialized_dev = json! ({
+                        device_id.to_string(): snapshot,
+                    });
                     devices_vec.push(serialized_dev);
                 }
                 Err(e) => {
@@ -452,20 +446,22 @@ impl Bus {
 
     pub fn restore_devices(
         &self,
-        devices_map: &mut HashMap<u32, VecDeque<String>>,
+        devices_map: &mut HashMap<u32, VecDeque<serde_json::Value>>,
     ) -> anyhow::Result<()> {
         let devices_lock = &(self.devices).lock();
         for (_, device_entry) in devices_lock.iter() {
             match &(device_entry.device) {
                 BusDeviceEntry::OuterSync(dev) => {
                     let mut device_lock = (*dev).lock();
-                    let device_id = u32::from((&device_lock).device_id());
+                    let device_id = u32::from(device_lock.device_id());
                     let device_data = devices_map.get_mut(&device_id);
                     match device_data {
                         Some(dev_dq) => {
                             match dev_dq.pop_front() {
-                                Some(dev_data) => (*device_lock).restore(&dev_data).context("device failed to restore snapshot")?,
-                                None => {},
+                                Some(dev_data) => {
+                                    (*device_lock).restore(dev_data).context("device failed to restore snapshot")?;
+                                }
+                                None => base::info!("no data found in snapshot for {}", device_lock.debug_label()),
                             }
                         },
                         None => base::info!("device {} does not have stored data in the snapshot. Device data will not change.", (*device_lock).debug_label()),
@@ -477,8 +473,10 @@ impl Bus {
                     match device_data {
                         Some(dev_dq) => {
                             match dev_dq.pop_front() {
-                                Some(dev_data) => (**dev).restore_sync(&dev_data).context("device failed to restore snapshot")?,
-                                None => {},
+                                Some(dev_data) => {
+                                    (**dev).restore_sync(dev_data).context("device failed to restore snapshot")?;
+                                }
+                                None => base::info!("no data found in snapshot for {}", (**dev).debug_label()),
                             }
                         },
                         None => base::info!("device {} does not have stored data in the snapshot. Device data will not change.", dev.debug_label()),
@@ -724,12 +722,12 @@ mod tests {
     }
 
     impl Suspendable for DummyDevice {
-        fn snapshot(&self) -> AnyhowResult<String> {
-            serde_json::to_string_pretty(&self).context("error serializing")
+        fn snapshot(&self) -> AnyhowResult<serde_json::Value> {
+            serde_json::to_value(self).context("error serializing")
         }
 
-        fn restore(&mut self, data: &str) -> AnyhowResult<()> {
-            *self = serde_json::from_str(data).context("error deserializing")?;
+        fn restore(&mut self, data: serde_json::Value) -> AnyhowResult<()> {
+            *self = serde_json::from_value(data).context("error deserializing")?;
             Ok(())
         }
 
@@ -780,12 +778,12 @@ mod tests {
     }
 
     impl Suspendable for ConstantDevice {
-        fn snapshot(&self) -> AnyhowResult<String> {
-            serde_json::to_string_pretty(&self).context("error serializing")
+        fn snapshot(&self) -> AnyhowResult<serde_json::Value> {
+            serde_json::to_value(self).context("error serializing")
         }
 
-        fn restore(&mut self, data: &str) -> AnyhowResult<()> {
-            *self = serde_json::from_str(data).context("error deserializing")?;
+        fn restore(&mut self, data: serde_json::Value) -> AnyhowResult<()> {
+            *self = serde_json::from_value(data).context("error deserializing")?;
             Ok(())
         }
 
@@ -796,6 +794,10 @@ mod tests {
         fn wake(&mut self) -> AnyhowResult<()> {
             Ok(())
         }
+    }
+
+    fn modify_constant_device(constant: &mut ConstantDevice) {
+        constant.uses_full_addr = !constant.uses_full_addr;
     }
 
     #[test]
@@ -883,15 +885,21 @@ mod tests {
         assert!(bus.write(0x15, &values));
     }
 
-    suspendable_tests! {
-        dummy_device: DummyDevice,
-        constant_device_true: ConstantDevice {
+    suspendable_tests!(
+        constant_device_true,
+        ConstantDevice {
             uses_full_addr: true,
         },
-        constant_device_false: ConstantDevice {
+        modify_constant_device
+    );
+
+    suspendable_tests!(
+        constant_device_false,
+        ConstantDevice {
             uses_full_addr: false,
         },
-    }
+        modify_constant_device
+    );
 
     #[test]
     fn bus_range_contains() {

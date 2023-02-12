@@ -47,9 +47,7 @@ then
 fi
 
 source $ANDROID_BUILD_TOP/build/envsetup.sh
-m blueprint_tools
-m cargo_embargo
-m crosvm
+m blueprint_tools cargo_embargo crosvm
 repo start merge
 git merge --log aosp/upstream-main
 $ANDROID_BUILD_TOP/external/crosvm/tools/install-deps

@@ -132,6 +132,10 @@ use super::SharedMemoryRegion;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
 use super::Writer;
+use crate::virtio::device_constants::wl::QUEUE_SIZES;
+use crate::virtio::device_constants::wl::VIRTIO_WL_F_SEND_FENCES;
+use crate::virtio::device_constants::wl::VIRTIO_WL_F_TRANS_FLAGS;
+use crate::virtio::device_constants::wl::VIRTIO_WL_F_USE_SHMEM;
 use crate::Suspendable;
 
 const VIRTWL_SEND_MAX_ALLOCS: usize = 28;
@@ -164,12 +168,6 @@ const VIRTIO_WL_VFD_READ: u32 = 0x2;
 const VIRTIO_WL_VFD_MAP: u32 = 0x2;
 const VIRTIO_WL_VFD_CONTROL: u32 = 0x4;
 const VIRTIO_WL_VFD_FENCE: u32 = 0x8;
-pub const VIRTIO_WL_F_TRANS_FLAGS: u32 = 0x01;
-pub const VIRTIO_WL_F_SEND_FENCES: u32 = 0x02;
-pub const VIRTIO_WL_F_USE_SHMEM: u32 = 0x03;
-
-pub const QUEUE_SIZE: u16 = 256;
-pub const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE, QUEUE_SIZE];
 
 const NEXT_VFD_ID_BASE: u32 = 0x40000000;
 const VFD_ID_HOST_MASK: u32 = NEXT_VFD_ID_BASE;
@@ -1796,7 +1794,9 @@ struct Worker {
     interrupt: Interrupt,
     mem: GuestMemory,
     in_queue: Queue,
+    in_queue_evt: Event,
     out_queue: Queue,
+    out_queue_evt: Event,
     state: WlState,
 }
 
@@ -1804,8 +1804,8 @@ impl Worker {
     fn new(
         mem: GuestMemory,
         interrupt: Interrupt,
-        in_queue: Queue,
-        out_queue: Queue,
+        in_queue: (Queue, Event),
+        out_queue: (Queue, Event),
         wayland_paths: Map<String, PathBuf>,
         mapper: Box<dyn SharedMemoryMapper>,
         use_transition_flags: bool,
@@ -1817,8 +1817,10 @@ impl Worker {
         Worker {
             interrupt,
             mem,
-            in_queue,
-            out_queue,
+            in_queue: in_queue.0,
+            in_queue_evt: in_queue.1,
+            out_queue: out_queue.0,
+            out_queue_evt: out_queue.1,
             state: WlState::new(
                 wayland_paths,
                 mapper,
@@ -1832,9 +1834,7 @@ impl Worker {
         }
     }
 
-    fn run(&mut self, mut queue_evts: Vec<Event>, kill_evt: Event) {
-        let in_queue_evt = queue_evts.remove(0);
-        let out_queue_evt = queue_evts.remove(0);
+    fn run(&mut self, kill_evt: Event) {
         #[derive(EventToken)]
         enum Token {
             InQueue,
@@ -1845,8 +1845,8 @@ impl Worker {
         }
 
         let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
-            (&in_queue_evt, Token::InQueue),
-            (&out_queue_evt, Token::OutQueue),
+            (&self.in_queue_evt, Token::InQueue),
+            (&self.out_queue_evt, Token::OutQueue),
             (&kill_evt, Token::Kill),
             (&self.state.wait_ctx, Token::State),
         ]) {
@@ -1879,7 +1879,7 @@ impl Worker {
             for event in &events {
                 match event.token {
                     Token::InQueue => {
-                        let _ = in_queue_evt.wait();
+                        let _ = self.in_queue_evt.wait();
                         if !watching_state_ctx {
                             if let Err(e) =
                                 wait_ctx.modify(&self.state.wait_ctx, EventType::Read, Token::State)
@@ -1891,7 +1891,7 @@ impl Worker {
                         }
                     }
                     Token::OutQueue => {
-                        let _ = out_queue_evt.wait();
+                        let _ = self.out_queue_evt.wait();
                         process_out_queue(
                             &self.interrupt,
                             &mut self.out_queue,
@@ -2037,10 +2037,9 @@ impl VirtioDevice for Wl {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
-        queue_evts: Vec<Event>,
+        mut queues: Vec<(Queue, Event)>,
     ) -> anyhow::Result<()> {
-        if queues.len() != QUEUE_SIZES.len() || queue_evts.len() != QUEUE_SIZES.len() {
+        if queues.len() != QUEUE_SIZES.len() {
             return Err(anyhow!(
                 "expected {} queues, got {}",
                 QUEUE_SIZES.len(),
@@ -2086,7 +2085,7 @@ impl VirtioDevice for Wl {
                     gralloc,
                     address_offset,
                 )
-                .run(queue_evts, kill_evt);
+                .run(kill_evt);
             })
             .context("failed to spawn virtio_wl worker")?;
 

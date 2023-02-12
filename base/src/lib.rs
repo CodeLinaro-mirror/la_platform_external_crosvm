@@ -89,7 +89,7 @@ cfg_if::cfg_if! {
         };
 
         pub use platform::{
-            chown, drop_capabilities, iov_max, kernel_has_memfd, pipe, read_raw_stdin
+            chown, drop_capabilities, iov_max, pipe, read_raw_stdin
         };
         pub use platform::{enable_core_scheduling, set_rt_prio_limit, set_rt_round_robin};
         pub use platform::{flock, FlockOperation};
@@ -117,7 +117,6 @@ cfg_if::cfg_if! {
             deserialize_and_recv, serialize_and_send, set_alias_pid, set_duplicate_handle_tube,
             DuplicateHandleRequest, DuplicateHandleResponse, DuplicateHandleTube
         };
-        #[cfg(feature = "kiwi")]
         pub use tube::ProtoTube;
         pub use platform::{set_audio_thread_priorities, thread};
     } else {

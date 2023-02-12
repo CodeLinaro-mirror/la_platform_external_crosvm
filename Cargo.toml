@@ -1,7 +1,7 @@
 [package]
 name = "crosvm"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 edition = "2021"
 default-run = "crosvm"
 # b:223855233
@@ -24,7 +24,7 @@ overflow-checks = true
 inherits = 'release'
 panic = 'unwind'
 
-# Reproduces the options used when building crosvm for Chrome OS.
+# Reproduces the options used when building crosvm for ChromeOS.
 [profile.chromeos]
 inherits = "release"
 opt-level = "s"
@@ -93,6 +93,7 @@ members = [
     "swap",
     "system_api",
     "third_party/vmm_vhost",
+    "tools/impl/catapult_converter",
     "tpm2-sys",
     "tpm2",
     "usb_sys",
@@ -123,8 +124,9 @@ default = ["audio", "balloon", "config-file", "document-features", "gpu", "qcow"
 ## Enables cross-platform audio devices
 audio = ["devices/audio"]
 
-## Enables the virtio-balloon device which allows dynamic scaling of memory via vm_control commands.
-## See [Balloon Device](https://crosvm.dev/book/devices/balloon.html) for more information.
+## Enables the virtio-balloon device which allows dynamic scaling of memory via `vm_control`
+## commands. See [Balloon Device](https://crosvm.dev/book/devices/balloon.html) for more
+## information.
 balloon = ["devices/balloon", "vm_control/balloon"]
 
 ## Enables the composite-disk format, which adds protobufs as a dependency of the build. This format
@@ -132,10 +134,14 @@ balloon = ["devices/balloon", "vm_control/balloon"]
 ## concatenate large file system images into a single disk image.
 composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
 
-## Enables support for JSON configuration files that can be specified using `--cfg`.
+## Enables support for JSON configuration files that can be specified using `--cfg`. See
+## [Configuration Files](https://crosvm.dev/book/running_crosvm/options.html#configuration-files)
+## for more information.
 config-file = []
 
-## Enables using gdb to debug the guest kernel.
+## Enables using gdb to debug the guest kernel. See
+## [GDB Support](https://crosvm.dev/book/running_crosvm/advanced_usage.html#gdb-support) for more
+## information.
 gdb = [
     "aarch64/gdb",
     "arch/gdb",
@@ -145,7 +151,7 @@ gdb = [
     "x86_64/gdb",
 ]
 
-## Enables a panic handler that writes panic info to the RUST_PANIC_SIG memfd.
+## Enables a panic handler that writes panic info to the `RUST_PANIC_SIG` memfd.
 panic-memfd = []
 
 ## Enables the use of the qcow format for block devices.
@@ -212,6 +218,13 @@ ffmpeg = ["devices/ffmpeg"]
 # Enables the VAAPI backend of video devices.
 vaapi = ["devices/vaapi"]
 
+#! ### Linux-specific feature flags
+
+## Enables the Linux trace_marker backend for cros_tracing. This backend is only
+## supported on Linux systems. It sends all cros_tracing tracepoints to the tracefs
+## filesystem if mounted, for easier debugging with tools like trace-cmd.
+trace_marker = ["cros_tracing/trace_marker"]
+
 #! ### Windows-specific feature flags
 #!
 #! These feature flags are only available on Windows builds of crosvm.
@@ -225,13 +238,12 @@ whpx = ["devices/whpx", "hypervisor/whpx"]
 ## Enables a libslirp based network device. Currently only supported on Windows.
 slirp = ["devices/slirp", "net_util/slirp"]
 
-
 #! ### Non-additive feature flags
 #!
 #! These feature flags change the behavior of crosvm instead of adding functionality.
 #! This is deprecated and will be phased out.
 
-## Run crosvm with --disable-sandbox by default.
+## Run crosvm with `--disable-sandbox` by default.
 default-no-sandbox = []
 
 ## Special build of crosvm for ChromeOS that only supports direct device passthrough.
@@ -268,10 +280,10 @@ libvda-stub = ["devices/libvda-stub"]
 plugin = ["protos/plugin", "crosvm_plugin", "kvm", "kvm_sys", "protobuf"]
 
 ## Enables battery reporting via the ChromeOS powerd. Requires access to the
-## org.chromium.PowerManager dbus service.
+## `org.chromium.PowerManager` dbus service.
 power-monitor-powerd = ["arch/power-monitor-powerd"]
 
-## Enables a virtualized TPM device that uses the org.chromium.Vtpm dbus service.
+## Enables a virtualized TPM device that uses the `org.chromium.Vtpm` dbus service.
 vtpm = ["devices/vtpm"]
 
 #! #### Windows-future
@@ -304,6 +316,7 @@ all-aarch64 = [
     "power-monitor-powerd",
     "slirp",
     "swap",
+    "trace_marker",
     "tpm",
     "vaapi",
     "video-decoder",
@@ -352,6 +365,7 @@ broker_ipc = { path = "broker_ipc" }
 cfg-if = "1.0.0"
 crash_report = { path = "crash_report", optional = true }
 cros_async = { path = "cros_async" }
+cros_tracing = { path = "cros_tracing" }
 crosvm_cli = { path = "crosvm_cli" }
 crosvm_plugin = { path = "crosvm_plugin", optional = true }
 data_model = "*"
@@ -427,8 +441,6 @@ which = "4"
 
 [dev-dependencies]
 base = "*"
-# ANDROID: Not needed, should delete upstream.
-# prebuilts = { path = "prebuilts" }
 
 [patch.crates-io]
 audio_streams = { path = "common/audio_streams" }

@@ -10,6 +10,13 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
+genrule {
+    name: "copy_power_monitor_build_out",
+    srcs: ["out/*"],
+    cmd: "cp $(in) $(genDir)",
+    out: ["generated.rs"],
+}
+
 rust_library {
     name: "libpower_monitor",
     defaults: ["crosvm_defaults"],
@@ -17,10 +24,14 @@ rust_library {
     crate_name: "power_monitor",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    srcs: [
+        "src/lib.rs",
+        ":copy_power_monitor_build_out",
+    ],
     edition: "2021",
     rustlibs: [
         "libbase_rust",
+        "libprotobuf",
         "libthiserror",
     ],
     proc_macros: ["libremain"],

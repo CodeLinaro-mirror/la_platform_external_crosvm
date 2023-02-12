@@ -136,7 +136,7 @@ fn serial_parameters_default_debugcon_port() -> u16 {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromKeyValues)]
-#[serde(deny_unknown_fields, default)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
 pub struct SerialParameters {
     #[serde(rename = "type")]
     pub type_: SerialType,
@@ -148,8 +148,12 @@ pub struct SerialParameters {
     pub console: bool,
     pub earlycon: bool,
     pub stdin: bool,
+    #[serde(alias = "out_timestamp")]
     pub out_timestamp: bool,
-    #[serde(default = "serial_parameters_default_debugcon_port")]
+    #[serde(
+        alias = "debugcon_port",
+        default = "serial_parameters_default_debugcon_port"
+    )]
     pub debugcon_port: u16,
 }
 
@@ -168,6 +172,7 @@ impl SerialParameters {
     ) -> std::result::Result<T, Error> {
         let evt = evt.try_clone().map_err(Error::CloneEvent)?;
         keep_rds.push(evt.as_raw_descriptor());
+        cros_tracing::push_descriptors!(keep_rds);
         let input: Option<Box<dyn SerialInput>> = if let Some(input_path) = &self.input {
             let input_path = input_path.as_path();
 
@@ -333,17 +338,23 @@ mod tests {
         let params = from_serial_arg("stdin=foobar");
         assert!(params.is_err());
 
-        // out_timestamp parameter
-        let params = from_serial_arg("out_timestamp").unwrap();
+        // out-timestamp parameter
+        let params = from_serial_arg("out-timestamp").unwrap();
         assert!(params.out_timestamp);
+        let params = from_serial_arg("out-timestamp=true").unwrap();
+        assert!(params.out_timestamp);
+        let params = from_serial_arg("out-timestamp=false").unwrap();
+        assert!(!params.out_timestamp);
+        let params = from_serial_arg("out-timestamp=foobar");
+        assert!(params.is_err());
+        // backward compatibility
         let params = from_serial_arg("out_timestamp=true").unwrap();
         assert!(params.out_timestamp);
-        let params = from_serial_arg("out_timestamp=false").unwrap();
-        assert!(!params.out_timestamp);
-        let params = from_serial_arg("out_timestamp=foobar");
-        assert!(params.is_err());
 
-        // debugcon port parameter
+        // debugcon-port parameter
+        let params = from_serial_arg("debugcon-port=1026").unwrap();
+        assert_eq!(params.debugcon_port, 1026);
+        // backward compatibility
         let params = from_serial_arg("debugcon_port=1026").unwrap();
         assert_eq!(params.debugcon_port, 1026);
 
