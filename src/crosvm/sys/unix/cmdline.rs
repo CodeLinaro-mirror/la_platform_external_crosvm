@@ -23,8 +23,6 @@ pub enum DeviceSubcommand {
     #[cfg(feature = "audio")]
     Snd(device::SndOptions),
     Fs(device::FsOptions),
-    #[cfg(feature = "gpu")]
-    Gpu(device::GpuOptions),
     Vsock(device::VsockOptions),
     Wl(device::WlOptions),
 }
@@ -95,7 +93,14 @@ pub struct DevicesCommand {
     pub serial: Vec<VhostUserParams<SerialParameters>>,
 
     #[argh(option, arg_name = "block options")]
-    /// start a block device (see help from run command for options)
+    /// start a block device.
+    /// The value must be a comma separated key-value pairs in the
+    /// form of `vhost=PATH[,block options]`.
+    /// Possible key values:
+    ///     vhost=PATH - Path to a vhost-user endpoint to listen to.
+    ///        This parameter must be given in first position.
+    ///     block options:
+    ///        See help from `crosvm run` command.
     pub block: Vec<VhostUserParams<DiskOption>>,
 
     #[argh(option, short = 's', arg_name = "PATH")]

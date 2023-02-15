@@ -118,7 +118,7 @@ exclude = [
 
 [features]
 ## Default features of crosvm. This selection is somewhat arbitrary for historical reasons.
-default = ["audio", "balloon", "gpu", "qcow", "usb"]
+default = ["audio", "balloon", "config-file", "document-features", "gpu", "qcow", "usb"]
 
 ## Enables cross-platform audio devices
 audio = ["devices/audio"]
@@ -131,6 +131,9 @@ balloon = ["devices/balloon", "vm_control/balloon"]
 ## is intended to speed up crosvm's usage in CI environments that might otherwise have to
 ## concatenate large file system images into a single disk image.
 composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
+
+## Enables support for JSON configuration files that can be specified using `--cfg`.
+config-file = []
 
 ## Enables using gdb to debug the guest kernel.
 gdb = [
@@ -354,7 +357,7 @@ crosvm_plugin = { path = "crosvm_plugin", optional = true }
 data_model = "*"
 devices = { path = "devices" }
 disk = { path = "disk" }
-document-features = "0.2"
+document-features = { version = "0.2", optional = true }
 enumn = "0.1.0"
 gdbstub = { version = "0.6.3", optional = true }
 gdbstub_arch = { version = "0.2.4", optional = true }
@@ -368,6 +371,7 @@ libc = "0.2.93"
 libcras = "*"
 # Compile out trace statements in release builds
 log = { version = "0", features = ["release_max_level_debug"]}
+# merge = "0.1.0"  # ANDROID: Disabled until imported. b/260616729
 metrics = { path = "metrics" }
 net_util = { path = "net_util" }
 once_cell = "1.7"
@@ -423,7 +427,8 @@ which = "4"
 
 [dev-dependencies]
 base = "*"
-prebuilts = { path = "prebuilts" }
+# ANDROID: Not needed, should delete upstream.
+# prebuilts = { path = "prebuilts" }
 
 [patch.crates-io]
 audio_streams = { path = "common/audio_streams" }

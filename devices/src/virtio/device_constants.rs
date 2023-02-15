@@ -110,7 +110,7 @@ pub mod gpu {
 
     // First queue is for virtio gpu commands. Second queue is for cursor commands, which we expect
     // there to be fewer of.
-    pub const QUEUE_SIZES: &[u16] = &[256, 16];
+    pub const QUEUE_SIZES: &[u16] = &[512, 16];
 
     pub const VIRTIO_GPU_F_VIRGL: u32 = 0;
     pub const VIRTIO_GPU_F_EDID: u32 = 1;
@@ -180,7 +180,7 @@ pub mod video {
         Encoder,
     }
 
-    #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+    #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
     #[serde(rename_all = "kebab-case")]
     pub enum VideoBackendType {
         #[cfg(feature = "libvda")]

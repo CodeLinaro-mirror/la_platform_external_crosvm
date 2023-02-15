@@ -54,6 +54,9 @@
   "imports": [
     {
       "path": "packages/modules/Virtualization"
+    },
+    {
+      "path": "device/google/cuttlefish"
     }
   ]
 }

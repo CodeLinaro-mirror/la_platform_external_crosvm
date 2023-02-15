@@ -701,7 +701,7 @@ pub struct Balloon {
 }
 
 /// Operation mode of the balloon.
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 pub enum BalloonMode {
     /// The driver can access pages in the balloon (i.e. F_DEFLATE_ON_OOM)
     Relaxed,
@@ -865,7 +865,7 @@ impl VirtioDevice for Balloon {
         let release_memory_tube = self.release_memory_tube.take();
         let acked_features = self.acked_features;
         let worker_result = thread::Builder::new()
-            .name("virtio_balloon".to_string())
+            .name("v_balloon".to_string())
             .spawn(move || {
                 run_worker(
                     queue_evts,

@@ -24,7 +24,7 @@ virgl_renderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
 virgl_renderer_next = ["gpu", "rutabaga_gfx/virgl_renderer_next"]
 vtpm = ["system_api", "protobuf", "dbus"]
 gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
-slirp = []
+slirp = ["net_util/slirp"]
 stats = []
 whpx = []
 
