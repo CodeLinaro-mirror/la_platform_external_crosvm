@@ -4,6 +4,7 @@
 
 //! Track memory regions that are mapped to the guest VM.
 
+use anyhow::bail;
 use std::convert::AsRef;
 use std::convert::TryFrom;
 use std::fs::File;
@@ -11,9 +12,9 @@ use std::io::Read;
 use std::io::Write;
 use std::marker::Send;
 use std::marker::Sync;
-use std::mem::size_of;
 use std::result;
 use std::sync::Arc;
+use zerocopy::AsBytes;
 
 use base::pagesize;
 use base::AsRawDescriptor;
@@ -28,9 +29,9 @@ use base::SharedMemory;
 use cros_async::mem;
 use cros_async::BackingMemory;
 use data_model::volatile_memory::*;
-use data_model::DataInit;
 use remain::sorted;
 use thiserror::Error;
+use zerocopy::FromBytes;
 
 use crate::guest_address::GuestAddress;
 
@@ -509,15 +510,11 @@ impl GuestMemory {
     }
 
     /// Reads an object from guest memory at the given guest address.
-    /// Reading from a volatile area isn't strictly safe as it could change
-    /// mid-read.  However, as long as the type T is plain old data and can
-    /// handle random initialization, everything will be OK.
     ///
     /// # Examples
     /// * Read a u64 from two areas of guest memory backed by separate mappings.
     ///
     /// ```
-    /// # use base::MemoryMapping;
     /// # use vm_memory::{GuestAddress, GuestMemory};
     /// # fn test_read_u64() -> Result<u64, ()> {
     /// #     let start_addr1 = GuestAddress(0x0);
@@ -529,10 +526,41 @@ impl GuestMemory {
     /// #     Ok(num1 + num2)
     /// # }
     /// ```
-    pub fn read_obj_from_addr<T: DataInit>(&self, guest_addr: GuestAddress) -> Result<T> {
+    pub fn read_obj_from_addr<T: FromBytes>(&self, guest_addr: GuestAddress) -> Result<T> {
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .read_obj(offset)
+            .map_err(|e| Error::MemoryAccess(guest_addr, e))
+    }
+
+    /// Reads an object from guest memory at the given guest address.
+    /// Reading from a volatile area isn't strictly safe as it could change
+    /// mid-read.  However, as long as the type T is plain old data and can
+    /// handle random initialization, everything will be OK.
+    ///
+    /// The read operation will be volatile, i.e. it will not be reordered by
+    /// the compiler and is suitable for I/O, but must be aligned. When reading
+    /// from regular memory, prefer [`GuestMemory::read_obj_from_addr`].
+    ///
+    /// # Examples
+    /// * Read a u64 from two areas of guest memory backed by separate mappings.
+    ///
+    /// ```
+    /// # use vm_memory::{GuestAddress, GuestMemory};
+    /// # fn test_read_u64() -> Result<u64, ()> {
+    /// #     let start_addr1 = GuestAddress(0x0);
+    /// #     let start_addr2 = GuestAddress(0x400);
+    /// #     let mut gm = GuestMemory::new(&vec![(start_addr1, 0x400), (start_addr2, 0x400)])
+    /// #         .map_err(|_| ())?;
+    ///       let num1: u64 = gm.read_obj_from_addr_volatile(GuestAddress(32)).map_err(|_| ())?;
+    ///       let num2: u64 = gm.read_obj_from_addr_volatile(GuestAddress(0x400+32)).map_err(|_| ())?;
+    /// #     Ok(num1 + num2)
+    /// # }
+    /// ```
+    pub fn read_obj_from_addr_volatile<T: FromBytes>(&self, guest_addr: GuestAddress) -> Result<T> {
+        let (mapping, offset, _) = self.find_region(guest_addr)?;
+        mapping
+            .read_obj_volatile(offset)
             .map_err(|e| Error::MemoryAccess(guest_addr, e))
     }
 
@@ -543,7 +571,6 @@ impl GuestMemory {
     /// * Write a u64 at guest address 0x1100.
     ///
     /// ```
-    /// # use base::MemoryMapping;
     /// # use vm_memory::{GuestAddress, GuestMemory};
     /// # fn test_write_u64() -> Result<(), ()> {
     /// #   let start_addr = GuestAddress(0x1000);
@@ -552,10 +579,39 @@ impl GuestMemory {
     ///         .map_err(|_| ())
     /// # }
     /// ```
-    pub fn write_obj_at_addr<T: DataInit>(&self, val: T, guest_addr: GuestAddress) -> Result<()> {
+    pub fn write_obj_at_addr<T: AsBytes>(&self, val: T, guest_addr: GuestAddress) -> Result<()> {
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .write_obj(val, offset)
+            .map_err(|e| Error::MemoryAccess(guest_addr, e))
+    }
+
+    /// Writes an object to the memory region at the specified guest address.
+    /// Returns Ok(()) if the object fits, or Err if it extends past the end.
+    ///
+    /// The write operation will be volatile, i.e. it will not be reordered by
+    /// the compiler and is suitable for I/O, but must be aligned. When writing
+    /// to regular memory, prefer [`GuestMemory::write_obj_at_addr`].
+    /// # Examples
+    /// * Write a u64 at guest address 0x1100.
+    ///
+    /// ```
+    /// # use vm_memory::{GuestAddress, GuestMemory};
+    /// # fn test_write_u64() -> Result<(), ()> {
+    /// #   let start_addr = GuestAddress(0x1000);
+    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    ///     gm.write_obj_at_addr_volatile(55u64, GuestAddress(0x1100))
+    ///         .map_err(|_| ())
+    /// # }
+    /// ```
+    pub fn write_obj_at_addr_volatile<T: AsBytes>(
+        &self,
+        val: T,
+        guest_addr: GuestAddress,
+    ) -> Result<()> {
+        let (mapping, offset, _) = self.find_region(guest_addr)?;
+        mapping
+            .write_obj_volatile(val, offset)
             .map_err(|e| Error::MemoryAccess(guest_addr, e))
     }
 
@@ -589,31 +645,6 @@ impl GuestMemory {
                     .get_slice(addr.offset_from(region.start()) as usize, len)
                     .map_err(Error::VolatileMemoryAccess)
             })
-    }
-
-    /// Returns a `VolatileRef` to an object at `addr`. Returns Ok(()) if the object fits, or Err if
-    /// it extends past the end.
-    ///
-    /// # Examples
-    /// * Get a &u64 at offset 0x1010.
-    ///
-    /// ```
-    /// # use base::MemoryMapping;
-    /// # use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
-    /// # fn test_ref_u64() -> Result<(), GuestMemoryError> {
-    /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)])?;
-    ///     gm.write_obj_at_addr(47u64, GuestAddress(0x1010))?;
-    ///     let vref = gm.get_ref_at_addr::<u64>(GuestAddress(0x1010))?;
-    ///     assert_eq!(vref.load(), 47u64);
-    /// #   Ok(())
-    /// # }
-    /// ```
-    pub fn get_ref_at_addr<T: DataInit>(&self, addr: GuestAddress) -> Result<VolatileRef<T>> {
-        let buf = self.get_slice_at_addr(addr, size_of::<T>())?;
-        // Safe because we have know that `buf` is at least `size_of::<T>()` bytes and that the
-        // returned reference will not outlive this `GuestMemory`.
-        Ok(unsafe { VolatileRef::new(buf.as_mut_ptr() as *mut T) })
     }
 
     /// Reads data from a file descriptor and writes it to guest memory.
@@ -838,6 +869,74 @@ impl GuestMemory {
             .ok_or(Error::InvalidGuestAddress(guest_addr))
             .map(|region| region.obj_offset + guest_addr.offset_from(region.start()))
     }
+
+    /// Copy all guest memory into `w`.
+    ///
+    /// Assumes exclusive access to the guest memory for the duration of the call (e.g. all vCPUs
+    /// and devices must be stopped).
+    ///
+    /// Returns a JSON object that contains metadata about the underlying memory regions to allow
+    /// validation checks at restore time.
+    pub fn snapshot(&self, w: &mut std::fs::File) -> anyhow::Result<serde_json::Value> {
+        let mut metadata = MemorySnapshotMetadata {
+            regions: Vec::new(),
+        };
+
+        for region in self.regions.iter() {
+            metadata
+                .regions
+                .push((region.guest_base.0, region.mapping.size()));
+            self.write_from_memory(region.guest_base, w, region.mapping.size())?;
+        }
+
+        Ok(serde_json::to_value(metadata)?)
+    }
+
+    /// Restore the guest memory using the bytes from `r`.
+    ///
+    /// Assumes exclusive access to the guest memory for the duration of the call (e.g. all vCPUs
+    /// and devices must be stopped).
+    ///
+    /// Returns an error if `metadata` doesn't match the configuration of the `GuestMemory` or if
+    /// `r` doesn't produce exactly as many bytes as needed.
+    pub fn restore(
+        &self,
+        metadata: serde_json::Value,
+        r: &mut std::fs::File,
+    ) -> anyhow::Result<()> {
+        let metadata: MemorySnapshotMetadata = serde_json::from_value(metadata)?;
+        if self.regions.len() != metadata.regions.len() {
+            bail!(
+                "snapshot expected {} memory regions but VM has {}",
+                metadata.regions.len(),
+                self.regions.len()
+            );
+        }
+        for (region, (guest_base, size)) in self.regions.iter().zip(metadata.regions.iter()) {
+            if region.guest_base.0 != *guest_base || region.mapping.size() != *size {
+                bail!("snapshot memory regions don't match VM memory regions");
+            }
+        }
+
+        for region in self.regions.iter() {
+            self.read_to_memory(region.guest_base, r, region.mapping.size())?;
+        }
+
+        // Should always be at EOF at this point.
+        let mut buf = [0];
+        if r.read(&mut buf)? != 0 {
+            bail!("too many bytes");
+        }
+
+        Ok(())
+    }
+}
+
+// TODO: Consider storing a hash of memory contents and validating it on restore.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MemorySnapshotMetadata {
+    // Guest base and size for each memory region.
+    regions: Vec<(u64, usize)>,
 }
 
 // It is safe to implement BackingMemory because GuestMemory can be mutated any time already.
@@ -853,9 +952,6 @@ unsafe impl BackingMemory for GuestMemory {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use base::kernel_has_memfd;
-
     use super::*;
 
     #[test]
@@ -941,44 +1037,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ref_load_u64() {
-        let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x10000);
-        let gm = GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x10000)]).unwrap();
-
-        let val1: u64 = 0xaa55aa55aa55aa55;
-        let val2: u64 = 0x55aa55aa55aa55aa;
-        gm.write_obj_at_addr(val1, GuestAddress(0x500)).unwrap();
-        gm.write_obj_at_addr(val2, GuestAddress(0x10000 + 32))
-            .unwrap();
-        let num1: u64 = gm.get_ref_at_addr(GuestAddress(0x500)).unwrap().load();
-        let num2: u64 = gm
-            .get_ref_at_addr(GuestAddress(0x10000 + 32))
-            .unwrap()
-            .load();
-        assert_eq!(val1, num1);
-        assert_eq!(val2, num2);
-    }
-
-    #[test]
-    fn test_ref_store_u64() {
-        let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x10000);
-        let gm = GuestMemory::new(&[(start_addr1, 0x10000), (start_addr2, 0x10000)]).unwrap();
-
-        let val1: u64 = 0xaa55aa55aa55aa55;
-        let val2: u64 = 0x55aa55aa55aa55aa;
-        gm.get_ref_at_addr(GuestAddress(0x500)).unwrap().store(val1);
-        gm.get_ref_at_addr(GuestAddress(0x1000 + 32))
-            .unwrap()
-            .store(val2);
-        let num1: u64 = gm.read_obj_from_addr(GuestAddress(0x500)).unwrap();
-        let num2: u64 = gm.read_obj_from_addr(GuestAddress(0x1000 + 32)).unwrap();
-        assert_eq!(val1, num1);
-        assert_eq!(val2, num2);
-    }
-
-    #[test]
     fn test_memory_size() {
         let start_region1 = GuestAddress(0x0);
         let size_region1 = 0x10000;
@@ -1042,15 +1100,6 @@ mod tests {
 
     #[test]
     fn shm_offset() {
-        #[cfg(unix)]
-        {
-            // This is simply a sanity check on linux platforms to ensure the tests
-            // won't run on old kernels that don't support memfd_create.
-            if !kernel_has_memfd() {
-                return;
-            }
-        }
-
         let start_region1 = GuestAddress(0x0);
         let size_region1 = 0x10000;
         let start_region2 = GuestAddress(0x10000);

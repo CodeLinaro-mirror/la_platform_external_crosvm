@@ -145,7 +145,7 @@ class CrosvmApi(recipe_api.RecipeApi):
         """
         Runs a luci step inside the crosvm dev container.
         """
-        self.m.step(
+        return self.m.step(
             step_name,
             [
                 "vpython3",
@@ -236,6 +236,7 @@ class CrosvmApi(recipe_api.RecipeApi):
 
             ensure_file = self.m.cipd.EnsureFile()
             ensure_file.add_package("crosvm/protoc/${platform}", "latest")
+            ensure_file.add_package("crosvm/cargo-nextest/${platform}", "latest")
             self.m.cipd.ensure(self.local_bin, ensure_file)
 
     def __sync_submodules(self):
@@ -277,12 +278,7 @@ class CrosvmApi(recipe_api.RecipeApi):
                 s.url = CROSVM_REPO_URL
                 s.name = "crosvm"
                 gclient_config.got_revision_mapping[s.name] = "got_revision"
-                # By default bot_update will soft reset to 'main' after patching in gerrit revisions
-                # for try jobs. We do not want to do that as it will prevent us from testing infra
-                # jobs like the merge bot, which does not work with a dirty working directory.
-                self.m.bot_update.ensure_checkout(
-                    gclient_config=gclient_config, gerrit_no_reset=True
-                )
+                self.m.bot_update.ensure_checkout(gclient_config=gclient_config)
 
                 self.__sync_submodules()
 

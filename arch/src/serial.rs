@@ -9,10 +9,10 @@ use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
 use devices::serial_device::SerialType;
 use devices::Bus;
-#[cfg(windows)]
-use devices::Minijail;
 use devices::Serial;
 use hypervisor::ProtectionType;
+#[cfg(windows)]
+use jail::FakeMinijailStub as Minijail;
 #[cfg(unix)]
 use minijail::Minijail;
 use remain::sorted;
@@ -97,6 +97,7 @@ pub fn add_serial_devices(
     com_evt_2_4: &Event,
     serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
     #[cfg_attr(windows, allow(unused_variables))] serial_jail: Option<Minijail>,
+    #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
 ) -> std::result::Result<(), DeviceRegistrationError> {
     for com_num in 0..=3 {
         let com_evt = match com_num {
@@ -138,6 +139,8 @@ pub fn add_serial_devices(
             serial_jail,
             preserved_descriptors,
             io_bus,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )?;
     }
 

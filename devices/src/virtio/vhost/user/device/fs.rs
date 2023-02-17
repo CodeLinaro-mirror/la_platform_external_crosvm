@@ -19,7 +19,6 @@ use base::RawDescriptor;
 use base::Tube;
 use cros_async::EventAsync;
 use cros_async::Executor;
-use data_model::DataInit;
 use data_model::Le32;
 use fuse::Server;
 use futures::future::AbortHandle;
@@ -31,6 +30,7 @@ use virtio_sys::virtio_fs::virtio_fs_config;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
+use zerocopy::AsBytes;
 
 use crate::virtio;
 use crate::virtio::copy_config;
@@ -160,7 +160,7 @@ impl VhostUserBackend for FsBackend {
             tag: self.tag,
             num_request_queues: Le32::from(1),
         };
-        copy_config(data, 0, config.as_slice(), offset);
+        copy_config(data, 0, config.as_bytes(), offset);
     }
 
     fn reset(&mut self) {
@@ -172,7 +172,7 @@ impl VhostUserBackend for FsBackend {
     fn start_queue(
         &mut self,
         idx: usize,
-        mut queue: virtio::Queue,
+        queue: virtio::Queue,
         mem: GuestMemory,
         doorbell: Doorbell,
         kick_evt: Event,
@@ -181,9 +181,6 @@ impl VhostUserBackend for FsBackend {
             warn!("Starting new queue handler without stopping old handler");
             handle.abort();
         }
-
-        // Enable any virtqueue features that were negotiated (like VIRTIO_RING_F_EVENT_IDX).
-        queue.ack_features(self.acked_features);
 
         let kick_evt = EventAsync::new(kick_evt, &self.ex)
             .context("failed to create EventAsync for kick_evt")?;

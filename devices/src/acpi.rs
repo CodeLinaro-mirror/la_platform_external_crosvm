@@ -16,6 +16,7 @@ use std::thread;
 use acpi_tables::aml;
 use acpi_tables::aml::Aml;
 use anyhow::Context;
+use base::custom_serde::serialize_arc_mutex;
 use base::error;
 use base::warn;
 use base::Error as SysError;
@@ -30,7 +31,9 @@ use sync::Mutex;
 use thiserror::Error;
 use vm_control::GpeNotify;
 use vm_control::PmResource;
+use vm_control::PmeNotify;
 
+use crate::ac_adapter::AcAdapter;
 use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
@@ -51,6 +54,8 @@ pub enum ACPIPMError {
     AcpiMcGroupError,
     #[error("Failed to create and bind NETLINK_GENERIC socket for acpi_mc_group: {0}")]
     AcpiEventSockError(base::Error),
+    #[error("GPE {0} is out of bound")]
+    GpeOutOfBound(u32),
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -61,19 +66,25 @@ pub enum ACPIPMFixedEvent {
     RTC,
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct Pm1Resource {
     pub(crate) status: u16,
     enable: u16,
     control: u16,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct GpeResource {
     pub(crate) status: [u8; ACPIPM_RESOURCE_GPE0_BLK_LEN as usize / 2],
     enable: [u8; ACPIPM_RESOURCE_GPE0_BLK_LEN as usize / 2],
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) gpe_notify: BTreeMap<u32, Vec<Arc<Mutex<dyn GpeNotify>>>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct PciResource {
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) pme_notify: BTreeMap<u8, Vec<Arc<Mutex<dyn PmeNotify>>>>,
 }
 
 #[cfg(feature = "direct")]
@@ -94,42 +105,43 @@ struct DirectFixedEvent {
 
 /// ACPI PM resource for handling OS suspend/resume request
 #[allow(dead_code)]
+#[derive(Serialize)]
 pub struct ACPIPMResource {
     // This is SCI interrupt that will be raised in the VM.
+    #[serde(skip_serializing)]
     sci_evt: IrqLevelEvent,
     // This is the host SCI that is being handled by crosvm.
     #[cfg(feature = "direct")]
+    #[serde(skip_serializing)]
     sci_direct_evt: Option<IrqLevelEvent>,
     #[cfg(feature = "direct")]
+    #[serde(skip_serializing)]
     direct_gpe: Vec<DirectGpe>,
     #[cfg(feature = "direct")]
+    #[serde(skip_serializing)]
     direct_fixed_evts: Vec<DirectFixedEvent>,
+    #[serde(skip_serializing)]
     kill_evt: Option<Event>,
+    #[serde(skip_serializing)]
     worker_thread: Option<thread::JoinHandle<()>>,
+    #[serde(skip_serializing)]
     suspend_evt: Event,
+    #[serde(skip_serializing)]
     exit_evt_wrtube: SendTube,
+    #[serde(serialize_with = "serialize_arc_mutex")]
     pm1: Arc<Mutex<Pm1Resource>>,
+    #[serde(serialize_with = "serialize_arc_mutex")]
     gpe0: Arc<Mutex<GpeResource>>,
+    #[serde(serialize_with = "serialize_arc_mutex")]
+    pci: Arc<Mutex<PciResource>>,
+    #[serde(skip_serializing)]
+    acdc: Option<Arc<Mutex<AcAdapter>>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct ACPIPMResrourceSnapshot {
+#[derive(Deserialize)]
+struct ACPIPMResrourceSerializable {
     pm1: Pm1Resource,
     gpe0: GpeResource,
-}
-
-impl ACPIPMResrourceSnapshot {
-    fn new(pm1: Arc<Mutex<Pm1Resource>>, gpe0: Arc<Mutex<GpeResource>>) -> ACPIPMResrourceSnapshot {
-        let gpe_lock = &*gpe0.lock();
-        ACPIPMResrourceSnapshot {
-            pm1: *pm1.lock(),
-            gpe0: GpeResource {
-                status: gpe_lock.status,
-                enable: gpe_lock.enable,
-                gpe_notify: BTreeMap::new(),
-            },
-        }
-    }
 }
 
 impl ACPIPMResource {
@@ -149,6 +161,7 @@ impl ACPIPMResource {
         )>,
         suspend_evt: Event,
         exit_evt_wrtube: SendTube,
+        acdc: Option<Arc<Mutex<AcAdapter>>>,
     ) -> ACPIPMResource {
         let pm1 = Pm1Resource {
             status: 0,
@@ -159,6 +172,9 @@ impl ACPIPMResource {
             status: Default::default(),
             enable: Default::default(),
             gpe_notify: BTreeMap::new(),
+        };
+        let pci = PciResource {
+            pme_notify: BTreeMap::new(),
         };
 
         #[cfg(feature = "direct")]
@@ -188,6 +204,8 @@ impl ACPIPMResource {
             exit_evt_wrtube,
             pm1: Arc::new(Mutex::new(pm1)),
             gpe0: Arc::new(Mutex::new(gpe0)),
+            pci: Arc::new(Mutex::new(pci)),
+            acdc,
         }
     }
 
@@ -204,6 +222,7 @@ impl ACPIPMResource {
         let sci_evt = self.sci_evt.try_clone().expect("failed to clone event");
         let pm1 = self.pm1.clone();
         let gpe0 = self.gpe0.clone();
+        let acdc = self.acdc.clone();
 
         #[cfg(feature = "direct")]
         let sci_direct_evt = self.sci_direct_evt.take();
@@ -230,6 +249,7 @@ impl ACPIPMResource {
                     acpi_event_ignored_gpe,
                     #[cfg(feature = "direct")]
                     sci_direct_evt,
+                    acdc,
                 ) {
                     error!("{}", e);
                 }
@@ -244,16 +264,22 @@ impl ACPIPMResource {
 
 impl Suspendable for ACPIPMResource {
     fn snapshot(&self) -> anyhow::Result<serde_json::Value> {
-        let snap_ready_acpi = ACPIPMResrourceSnapshot::new(self.pm1.clone(), self.gpe0.clone());
-        let serialized = serde_json::to_value(&snap_ready_acpi).context("error serializing")?;
-        Ok(serialized)
+        serde_json::to_value(self)
+            .with_context(|| format!("error serializing {}", self.debug_label()))
     }
 
     fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
-        let acpi_snapshot: ACPIPMResrourceSnapshot =
-            serde_json::from_value(data).context("error deserializing")?;
-        self.pm1 = Arc::new(Mutex::new(acpi_snapshot.pm1));
-        self.gpe0 = Arc::new(Mutex::new(acpi_snapshot.gpe0));
+        let acpi_snapshot: ACPIPMResrourceSerializable = serde_json::from_value(data)
+            .with_context(|| format!("error deserializing {}", self.debug_label()))?;
+        {
+            let mut pm1 = self.pm1.lock();
+            *pm1 = acpi_snapshot.pm1;
+        }
+        {
+            let mut gpe0 = self.gpe0.lock();
+            gpe0.status = acpi_snapshot.gpe0.status;
+            gpe0.enable = acpi_snapshot.gpe0.enable;
+        }
         Ok(())
     }
 
@@ -281,6 +307,7 @@ fn run_worker(
     gpe0: Arc<Mutex<GpeResource>>,
     acpi_event_ignored_gpe: Vec<u32>,
     #[cfg(feature = "direct")] sci_direct_evt: Option<IrqLevelEvent>,
+    arced_ac_adapter: Option<Arc<Mutex<AcAdapter>>>,
 ) -> Result<(), ACPIPMError> {
     let acpi_event_sock = crate::sys::get_acpi_event_sock()?;
     #[derive(EventToken)]
@@ -318,7 +345,13 @@ fn run_worker(
         for event in events.iter().filter(|e| e.is_readable) {
             match event.token {
                 Token::AcpiEvent => {
-                    crate::sys::acpi_event_run(&acpi_event_sock, &gpe0, &acpi_event_ignored_gpe);
+                    crate::sys::acpi_event_run(
+                        &sci_evt,
+                        &acpi_event_sock,
+                        &gpe0,
+                        &acpi_event_ignored_gpe,
+                        &arced_ac_adapter,
+                    );
                 }
                 Token::InterruptResample => {
                     sci_evt.clear_resample();
@@ -382,12 +415,21 @@ impl Pm1Resource {
 }
 
 impl GpeResource {
-    fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
+    pub fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
         if (0..self.status.len()).any(|i| self.status[i] & self.enable[i] != 0) {
             if let Err(e) = sci_evt.trigger() {
                 error!("ACPIPM: failed to trigger sci event for gpe: {}", e);
             }
         }
+    }
+
+    pub fn set_active(&mut self, gpe: u32) -> Result<(), ACPIPMError> {
+        if let Some(status_byte) = self.status.get_mut(gpe as usize / 8) {
+            *status_byte |= 1 << (gpe % 8);
+        } else {
+            return Err(ACPIPMError::GpeOutOfBound(gpe));
+        }
+        Ok(())
     }
 }
 
@@ -574,6 +616,9 @@ pub const ACPIPM_RESOURCE_CONTROLBLK_LEN: u8 = 2;
 pub const ACPIPM_RESOURCE_GPE0_BLK_LEN: u8 = 64;
 pub const ACPIPM_RESOURCE_LEN: u8 = ACPIPM_RESOURCE_EVENTBLK_LEN + 4 + ACPIPM_RESOURCE_GPE0_BLK_LEN;
 
+// Should be in sync with gpe_allocator range
+pub const ACPIPM_GPE_MAX: u16 = ACPIPM_RESOURCE_GPE0_BLK_LEN as u16 / 2 * 8 - 1;
+
 /// ACPI PM register value definitions
 
 /// 4.8.4.1.1 PM1 Status Registers, ACPI Spec Version 6.4
@@ -682,13 +727,20 @@ impl PmResource for ACPIPMResource {
     fn gpe_evt(&mut self, gpe: u32) {
         let mut gpe0 = self.gpe0.lock();
 
-        let byte = gpe as usize / 8;
-        if byte >= gpe0.status.len() {
-            error!("gpe_evt: GPE register {} does not exist", byte);
-            return;
+        match gpe0.set_active(gpe) {
+            Ok(_) => gpe0.trigger_sci(&self.sci_evt),
+            Err(e) => error!("{}", e),
         }
-        gpe0.status[byte] |= 1 << (gpe % 8);
-        gpe0.trigger_sci(&self.sci_evt);
+    }
+
+    fn pme_evt(&mut self, requester_id: u16) {
+        let bus = ((requester_id >> 8) & 0xFF) as u8;
+        let mut pci = self.pci.lock();
+        if let Some(root_ports) = pci.pme_notify.get_mut(&bus) {
+            for root_port in root_ports {
+                root_port.lock().notify(requester_id);
+            }
+        }
     }
 
     fn register_gpe_notify_dev(&mut self, gpe: u32, notify_dev: Arc<Mutex<dyn GpeNotify>>) {
@@ -697,6 +749,16 @@ impl PmResource for ACPIPMResource {
             Some(v) => v.push(notify_dev),
             None => {
                 gpe0.gpe_notify.insert(gpe, vec![notify_dev]);
+            }
+        }
+    }
+
+    fn register_pme_notify_dev(&mut self, bus: u8, notify_dev: Arc<Mutex<dyn PmeNotify>>) {
+        let mut pci = self.pci.lock();
+        match pci.pme_notify.get_mut(&bus) {
+            Some(v) => v.push(notify_dev),
+            None => {
+                pci.pme_notify.insert(bus, vec![notify_dev]);
             }
         }
     }
@@ -1019,4 +1081,47 @@ impl Aml for ACPIPMResource {
         )
         .to_aml_bytes(bytes);
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::suspendable_tests;
+    use base::SendTube;
+    use base::Tube;
+
+    fn get_evt_tube() -> SendTube {
+        let (vm_evt_wrtube, _) = Tube::directional_pair().unwrap();
+        vm_evt_wrtube
+    }
+
+    fn get_irq_evt() -> IrqLevelEvent {
+        match crate::IrqLevelEvent::new() {
+            Ok(evt) => evt,
+            Err(e) => panic!(
+                "failed to create irqlevelevt: {} - panic. Can't test ACPI",
+                e
+            ),
+        }
+    }
+
+    fn modify_device(acpi: &mut ACPIPMResource) {
+        {
+            let mut pm1 = acpi.pm1.lock();
+            pm1.enable += 1;
+        }
+    }
+
+    suspendable_tests!(
+        acpi,
+        ACPIPMResource::new(
+            get_irq_evt(),
+            #[cfg(feature = "direct")]
+            None,
+            Event::new().unwrap(),
+            get_evt_tube(),
+            None,
+        ),
+        modify_device
+    );
 }

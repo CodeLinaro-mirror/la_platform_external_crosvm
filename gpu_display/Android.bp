@@ -18,7 +18,7 @@ package {
 
 rust_library {
     name: "libgpu_display",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "gpu_display",
     cargo_env_compat: true,
@@ -34,6 +34,7 @@ rust_library {
         "liblinux_input_sys",
         "libserde",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     static_libs: ["libdisplay_wl"],

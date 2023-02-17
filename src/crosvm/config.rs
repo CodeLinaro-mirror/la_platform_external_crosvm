@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::arch::x86_64::__cpuid;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::arch::x86_64::__cpuid_count;
 use std::collections::BTreeMap;
 use std::net;
 use std::path::Path;
@@ -22,10 +26,6 @@ use arch::Pstore;
 use arch::VcpuAffinity;
 use base::debug;
 use base::pagesize;
-#[cfg(windows)]
-use base::RecvTube;
-#[cfg(windows)]
-use base::SendTube;
 use cros_async::ExecutorKind;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
@@ -50,7 +50,10 @@ use devices::BusRange;
 use devices::PciAddress;
 use devices::PflashParameters;
 use devices::StubPciParameters;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use hypervisor::CpuHybridType;
 use hypervisor::ProtectionType;
+use jail::JailConfig;
 use resources::AddressRange;
 use serde::Deserialize;
 use serde::Serialize;
@@ -58,7 +61,11 @@ use serde_keyvalue::FromKeyValues;
 use uuid::Uuid;
 use vm_control::BatteryType;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use x86_64::check_host_hybrid_support;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use x86_64::set_enable_pnp_data_msr_config;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use x86_64::CpuIdCall;
 
 pub(crate) use super::sys::HypervisorKind;
 
@@ -100,6 +107,17 @@ pub enum Executable {
     Plugin(PathBuf),
 }
 
+/// The core types in hybrid architecture.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct CpuCoreType {
+    /// Intel Atom.
+    pub atom: CpuSet,
+    /// Intel Core.
+    pub core: CpuSet,
+}
+
 #[derive(Debug, Default, PartialEq, Eq, Deserialize, FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CpuOptions {
@@ -109,6 +127,9 @@ pub struct CpuOptions {
     /// Vector of CPU ids to be grouped into the same cluster.
     #[serde(default)]
     pub clusters: Vec<CpuSet>,
+    /// Core Type of CPUs.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub core_types: Option<CpuCoreType>,
 }
 
 #[derive(Debug, Default, Deserialize, FromKeyValues)]
@@ -542,33 +563,6 @@ pub struct FileBackedMappingParameters {
 pub struct HostPcieRootPortParameters {
     pub host_path: PathBuf,
     pub hp_gpe: Option<u32>,
-}
-
-fn jail_config_default_pivot_root() -> PathBuf {
-    PathBuf::from(option_env!("DEFAULT_PIVOT_ROOT").unwrap_or("/var/empty"))
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, serde_keyvalue::FromKeyValues)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct JailConfig {
-    #[serde(default = "jail_config_default_pivot_root")]
-    pub pivot_root: PathBuf,
-    #[cfg(unix)]
-    #[serde(default)]
-    pub seccomp_policy_dir: Option<PathBuf>,
-    #[serde(default)]
-    pub seccomp_log_failures: bool,
-}
-
-impl Default for JailConfig {
-    fn default() -> Self {
-        JailConfig {
-            pivot_root: jail_config_default_pivot_root(),
-            #[cfg(unix)]
-            seccomp_policy_dir: None,
-            seccomp_log_failures: false,
-        }
-    }
 }
 
 fn parse_hex_or_decimal(maybe_hex_string: &str) -> Result<u64, String> {
@@ -1027,6 +1021,8 @@ mod serde_serial_params {
 #[derive(Serialize, Deserialize)]
 #[remain::sorted]
 pub struct Config {
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    pub ac_adapter: bool,
     #[cfg(feature = "audio")]
     pub ac97_parameters: Vec<Ac97Parameters>,
     pub acpi_tables: Vec<PathBuf>,
@@ -1072,6 +1068,7 @@ pub struct Config {
     pub display_window_keyboard: bool,
     pub display_window_mouse: bool,
     pub dmi_path: Option<PathBuf>,
+    pub dump_device_tree_blob: Option<PathBuf>,
     pub enable_hwp: bool,
     pub enable_pnp_data: bool,
     pub executable_path: Option<Executable>,
@@ -1164,7 +1161,7 @@ pub struct Config {
     pub rt_cpus: CpuSet,
     #[serde(with = "serde_serial_params")]
     pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
-    #[cfg(feature = "kiwi")]
+    #[cfg(windows)]
     pub service_pipe_name: Option<String>,
     #[cfg(unix)]
     #[serde(skip)]
@@ -1193,8 +1190,10 @@ pub struct Config {
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_cgroup_path: Option<PathBuf>,
     pub vcpu_count: Option<usize>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub vcpu_hybrid_type: BTreeMap<usize, CpuHybridType>, // CPU index -> hybrid type
     #[cfg(unix)]
-    pub vfio: Vec<super::sys::config::VfioCommand>,
+    pub vfio: Vec<super::sys::config::VfioOption>,
     #[cfg(unix)]
     pub vfio_isolate_hotplug: bool,
     pub vhost_net: bool,
@@ -1226,10 +1225,6 @@ pub struct Config {
     pub virtio_snds: Vec<SndParameters>,
     pub virtio_switches: Vec<PathBuf>,
     pub virtio_trackpad: Vec<TouchDeviceOption>,
-    #[cfg(windows)]
-    pub vm_evt_rdtube: Option<RecvTube>,
-    #[cfg(windows)]
-    pub vm_evt_wrtube: Option<SendTube>,
     #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     pub vtpm_proxy: bool,
     pub vvu_proxy: Vec<VvuOption>,
@@ -1240,6 +1235,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
+            #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+            ac_adapter: false,
             #[cfg(feature = "audio")]
             ac97_parameters: Vec::new(),
             acpi_tables: Vec::new(),
@@ -1285,6 +1282,7 @@ impl Default for Config {
             display_window_keyboard: false,
             display_window_mouse: false,
             dmi_path: None,
+            dump_device_tree_blob: None,
             enable_hwp: false,
             enable_pnp_data: false,
             executable_path: None,
@@ -1379,7 +1377,7 @@ impl Default for Config {
             rng: true,
             rt_cpus: Default::default(),
             serial_parameters: BTreeMap::new(),
-            #[cfg(feature = "kiwi")]
+            #[cfg(windows)]
             service_pipe_name: None,
             #[cfg(unix)]
             shared_dirs: Vec::new(),
@@ -1407,6 +1405,8 @@ impl Default for Config {
             vcpu_affinity: None,
             vcpu_cgroup_path: None,
             vcpu_count: None,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            vcpu_hybrid_type: BTreeMap::new(),
             #[cfg(unix)]
             vfio: Vec::new(),
             #[cfg(unix)]
@@ -1439,10 +1439,6 @@ impl Default for Config {
             virtio_snds: Vec::new(),
             virtio_switches: Vec::new(),
             virtio_trackpad: Vec::new(),
-            #[cfg(windows)]
-            vm_evt_rdtube: None,
-            #[cfg(windows)]
-            vm_evt_wrtube: None,
             #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
             vtpm_proxy: false,
             vvu_proxy: Vec::new(),
@@ -1518,6 +1514,22 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
                             .to_string(),
                     );
                 }
+            }
+        }
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if !cfg.vcpu_hybrid_type.is_empty() {
+        if cfg.host_cpu_topology {
+            return Err("`core-types` cannot be set with `host-cpu-topology`.".to_string());
+        }
+        check_host_hybrid_support(&CpuIdCall::new(__cpuid_count, __cpuid))
+            .map_err(|e| format!("the cpu doesn't support `core-types`: {}", e))?;
+        if cfg.vcpu_hybrid_type.len() != cfg.vcpu_count.unwrap_or(1) {
+            return Err("`core-types` must be set for all virtual CPUs".to_string());
+        }
+        for cpu_id in 0..cfg.vcpu_count.unwrap_or(1) {
+            if !cfg.vcpu_hybrid_type.contains_key(&cpu_id) {
+                return Err("`core-types` must be set for all virtual CPUs".to_string());
             }
         }
     }
@@ -1622,6 +1634,7 @@ fn validate_file_backed_mapping(mapping: &mut FileBackedMappingParameters) -> Re
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_update)]
 mod tests {
     use argh::FromArgs;
     use devices::PciClassCode;
@@ -1690,6 +1703,21 @@ mod tests {
             }
         );
 
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            let res: CpuOptions = from_key_values("core-types=[atom=[1,3-7],core=[0,2]]").unwrap();
+            assert_eq!(
+                res,
+                CpuOptions {
+                    core_types: Some(CpuCoreType {
+                        atom: CpuSet::new([1, 3, 4, 5, 6, 7]),
+                        core: CpuSet::new([0, 2])
+                    }),
+                    ..Default::default()
+                }
+            );
+        }
+
         // All together
         let res: CpuOptions = from_key_values("16,clusters=[[0],[4-6],[7]]").unwrap();
         assert_eq!(
@@ -1697,6 +1725,7 @@ mod tests {
             CpuOptions {
                 num_cores: Some(16),
                 clusters: vec![CpuSet::new([0]), CpuSet::new([4, 5, 6]), CpuSet::new([7])],
+                ..Default::default()
             }
         );
 
@@ -1706,6 +1735,7 @@ mod tests {
             CpuOptions {
                 num_cores: Some(32),
                 clusters: vec![CpuSet::new([0, 1, 2, 3, 4, 5, 6, 7]), CpuSet::new([30, 31])],
+                ..Default::default()
             }
         );
     }
@@ -2170,74 +2200,6 @@ mod tests {
         assert!(parse_userspace_msr_options("0x10,type=w,action=pass,from=f").is_err());
         assert!(parse_userspace_msr_options("0x10").is_err());
         assert!(parse_userspace_msr_options("hoge").is_err());
-    }
-
-    #[test]
-    fn parse_jailconfig() {
-        let config: JailConfig = Default::default();
-        assert_eq!(
-            config,
-            JailConfig {
-                pivot_root: jail_config_default_pivot_root(),
-                #[cfg(unix)]
-                seccomp_policy_dir: None,
-                seccomp_log_failures: false,
-            }
-        );
-
-        let config: JailConfig = from_key_values("").unwrap();
-        assert_eq!(config, Default::default());
-
-        let config: JailConfig = from_key_values("pivot-root=/path/to/pivot/root").unwrap();
-        assert_eq!(
-            config,
-            JailConfig {
-                pivot_root: "/path/to/pivot/root".into(),
-                ..Default::default()
-            }
-        );
-
-        cfg_if::cfg_if! {
-            if #[cfg(unix)] {
-                let config: JailConfig = from_key_values("seccomp-policy-dir=/path/to/seccomp/dir").unwrap();
-                assert_eq!(config, JailConfig {
-                    seccomp_policy_dir: Some("/path/to/seccomp/dir".into()),
-                    ..Default::default()
-                });
-            }
-        }
-
-        let config: JailConfig = from_key_values("seccomp-log-failures").unwrap();
-        assert_eq!(
-            config,
-            JailConfig {
-                seccomp_log_failures: true,
-                ..Default::default()
-            }
-        );
-
-        let config: JailConfig = from_key_values("seccomp-log-failures=false").unwrap();
-        assert_eq!(
-            config,
-            JailConfig {
-                seccomp_log_failures: false,
-                ..Default::default()
-            }
-        );
-
-        let config: JailConfig =
-            from_key_values("pivot-root=/path/to/pivot/root,seccomp-log-failures=true").unwrap();
-        #[allow(clippy::needless_update)]
-        let expected = JailConfig {
-            pivot_root: "/path/to/pivot/root".into(),
-            seccomp_log_failures: true,
-            ..Default::default()
-        };
-        assert_eq!(config, expected);
-
-        let config: Result<JailConfig, String> =
-            from_key_values("seccomp-log-failures,invalid-arg=value");
-        assert!(config.is_err());
     }
 
     #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]

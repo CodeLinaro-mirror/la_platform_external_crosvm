@@ -268,7 +268,7 @@ impl VaapiDecoder {
 
     /// Creates a new instance of the Vaapi decoder.
     pub fn new() -> Result<Self> {
-        let display = libva::Display::open()?;
+        let display = libva::Display::open().ok_or_else(|| anyhow!("failed to open VA display"))?;
 
         let va_profiles = display.query_config_profiles()?;
 
@@ -654,7 +654,7 @@ impl VaapiDecoderSession {
         )
         .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?;
 
-        let frames = self.codec.decode(timestamp, &bitstream_map);
+        let frames = self.codec.decode(timestamp, bitstream_map.as_ref());
 
         // We are always done with the input buffer after `self.codec.decode()`.
         self.event_queue
@@ -669,10 +669,10 @@ impl VaapiDecoderSession {
         match frames {
             Ok(frames) => {
                 if self.codec.negotiation_possible() {
-                    let resolution = self.codec.backend().coded_resolution().unwrap();
+                    let resolution = self.codec.coded_resolution().unwrap();
 
                     let drc_params = DrcParams {
-                        min_num_buffers: self.codec.backend().num_resources_total(),
+                        min_num_buffers: self.codec.num_resources_total(),
                         width: resolution.width,
                         height: resolution.height,
                         visible_rect: Rect {
@@ -1012,58 +1012,32 @@ impl DecoderBackend for VaapiDecoder {
     }
 
     fn new_session(&mut self, format: Format) -> VideoResult<Self::Session> {
-        let display = Display::open().map_err(VideoError::BackendFailure)?;
+        let display = Display::open().ok_or(VideoError::BackendFailure(anyhow!(
+            "failed to open VA display"
+        )))?;
 
         let codec: Box<dyn VideoDecoder> = match format {
-            Format::VP8 => {
-                let backend = Box::new(
-                    cros_codecs::decoders::vp8::backends::stateless::vaapi::Backend::new(
-                        Rc::clone(&display),
-                    )
-                    .unwrap(),
-                );
-
-                Box::new(
-                    cros_codecs::decoders::vp8::decoder::Decoder::new(
-                        backend,
-                        cros_codecs::decoders::BlockingMode::NonBlocking,
-                    )
-                    .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?,
+            Format::VP8 => Box::new(
+                cros_codecs::decoders::vp8::decoder::Decoder::new_vaapi(
+                    display,
+                    cros_codecs::decoders::BlockingMode::NonBlocking,
                 )
-            }
-
-            Format::VP9 => {
-                let backend = Box::new(
-                    cros_codecs::decoders::vp9::backends::stateless::vaapi::Backend::new(
-                        Rc::clone(&display),
-                    )
-                    .unwrap(),
-                );
-
-                Box::new(
-                    cros_codecs::decoders::vp9::decoder::Decoder::new(
-                        backend,
-                        cros_codecs::decoders::BlockingMode::NonBlocking,
-                    )
-                    .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?,
+                .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?,
+            ),
+            Format::VP9 => Box::new(
+                cros_codecs::decoders::vp9::decoder::Decoder::new_vaapi(
+                    display,
+                    cros_codecs::decoders::BlockingMode::NonBlocking,
                 )
-            }
-
-            Format::H264 => {
-                let backend = Box::new(
-                    cros_codecs::decoders::h264::backends::stateless::vaapi::Backend::new(
-                        Rc::clone(&display),
-                    )
-                    .unwrap(),
-                );
-                Box::new(
-                    cros_codecs::decoders::h264::decoder::Decoder::new(
-                        backend,
-                        cros_codecs::decoders::BlockingMode::NonBlocking,
-                    )
-                    .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?,
+                .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?,
+            ),
+            Format::H264 => Box::new(
+                cros_codecs::decoders::h264::decoder::Decoder::new_vaapi(
+                    display,
+                    cros_codecs::decoders::BlockingMode::NonBlocking,
                 )
-            }
+                .map_err(|e| VideoError::BackendFailure(anyhow!(e)))?,
+            ),
             _ => return Err(VideoError::InvalidFormat),
         };
 

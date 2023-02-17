@@ -7,8 +7,11 @@
 use std::ffi::CString;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use base::error;
 use base::AsRawDescriptor;
+#[cfg(feature = "swap")]
+use base::AsRawDescriptors;
 use base::RawDescriptor;
 use base::Tube;
 use base::TubeError;
@@ -68,6 +71,12 @@ enum Command {
     },
     Shutdown,
     GetRanges,
+    Snapshot,
+    Restore {
+        data: serde_json::Value,
+    },
+    Sleep,
+    Wake,
 }
 #[derive(Debug, Serialize, Deserialize)]
 enum CommandResult {
@@ -83,12 +92,14 @@ enum CommandResult {
     },
     ReadVirtualConfigResult(u32),
     GetRangesResult(Vec<(BusRange, BusType)>),
+    SnapshotResult(std::result::Result<serde_json::Value, String>),
+    RestoreResult(std::result::Result<(), String>),
+    SleepResult(std::result::Result<(), String>),
+    WakeResult(std::result::Result<(), String>),
 }
 
-fn child_proc<D: BusDevice>(tube: Tube, device: &mut D) {
-    let mut running = true;
-
-    while running {
+fn child_proc<D: BusDevice>(tube: Tube, mut device: D) {
+    loop {
         let cmd = match tube.recv() {
             Ok(cmd) => cmd,
             Err(err) => {
@@ -140,12 +151,36 @@ fn child_proc<D: BusDevice>(tube: Tube, device: &mut D) {
                 Ok(())
             }
             Command::Shutdown => {
-                running = false;
-                tube.send(&CommandResult::Ok)
+                // Explicitly drop the device so that its Drop implementation has a chance to run
+                // before sending the `Command::Shutdown` response.
+                drop(device);
+
+                let _ = tube.send(&CommandResult::Ok);
+                return;
             }
             Command::GetRanges => {
                 let ranges = device.get_ranges();
                 tube.send(&CommandResult::GetRangesResult(ranges))
+            }
+            Command::Snapshot => {
+                let res = device.snapshot();
+                tube.send(&CommandResult::SnapshotResult(
+                    res.map_err(|e| e.to_string()),
+                ))
+            }
+            Command::Restore { data } => {
+                let res = device.restore(data);
+                tube.send(&CommandResult::RestoreResult(
+                    res.map_err(|e| e.to_string()),
+                ))
+            }
+            Command::Sleep => {
+                let res = device.sleep();
+                tube.send(&CommandResult::SleepResult(res.map_err(|e| e.to_string())))
+            }
+            Command::Wake => {
+                let res = device.wake();
+                tube.send(&CommandResult::WakeResult(res.map_err(|e| e.to_string())))
             }
         };
         if let Err(e) = res {
@@ -178,11 +213,17 @@ impl ProxyDevice {
         mut device: D,
         jail: Minijail,
         mut keep_rds: Vec<RawDescriptor>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<ProxyDevice> {
         let debug_label = device.debug_label();
         let (child_tube, parent_tube) = Tube::pair().map_err(Error::Tube)?;
 
         keep_rds.push(child_tube.as_raw_descriptor());
+
+        #[cfg(feature = "swap")]
+        if let Some(swap_controller) = swap_controller {
+            keep_rds.extend(swap_controller.as_raw_descriptors());
+        }
 
         // Deduplicate the FDs since minijail expects this.
         keep_rds.sort_unstable();
@@ -205,12 +246,17 @@ impl ProxyDevice {
                 // Preserve TZ for `chrono::Local` (b/257987535).
                 std::env::set_var("TZ", tz);
 
-                device.on_sandboxed();
-                child_proc(child_tube, &mut device);
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    if let Err(e) = swap_controller.on_process_forked() {
+                        error!("failed to SwapController::on_process_forked: {:?}", e);
+                        // exit() is trivially safe.
+                        unsafe { libc::exit(1) };
+                    }
+                }
 
-                // Explicitly drop the device so that its Drop implementation has a chance to run
-                // before the call to `libc::exit()`.
-                std::mem::drop(device);
+                device.on_sandboxed();
+                child_proc(child_tube, device);
 
                 // We're explicitly not using std::process::exit here to avoid the cleanup of
                 // stdout/stderr globals. This can cause cascading panics and SIGILL if a worker
@@ -366,7 +412,53 @@ impl BusDevice for ProxyDevice {
     }
 }
 
-impl Suspendable for ProxyDevice {}
+impl Suspendable for ProxyDevice {
+    fn snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        let res = self.sync_send(&Command::Snapshot);
+        match res {
+            Some(CommandResult::SnapshotResult(Ok(snap))) => Ok(snap),
+            Some(CommandResult::SnapshotResult(Err(e))) => Err(anyhow!(
+                "failed to snapshot {}: {:#}",
+                self.debug_label(),
+                e
+            )),
+            _ => Err(anyhow!("unexpected snapshot result {:?}", res)),
+        }
+    }
+
+    fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let res = self.sync_send(&Command::Restore { data });
+        match res {
+            Some(CommandResult::RestoreResult(Ok(()))) => Ok(()),
+            Some(CommandResult::RestoreResult(Err(e))) => {
+                Err(anyhow!("failed to restore {}: {:#}", self.debug_label(), e))
+            }
+            _ => Err(anyhow!("unexpected restore result {:?}", res)),
+        }
+    }
+
+    fn sleep(&mut self) -> anyhow::Result<()> {
+        let res = self.sync_send(&Command::Sleep);
+        match res {
+            Some(CommandResult::SleepResult(Ok(()))) => Ok(()),
+            Some(CommandResult::SleepResult(Err(e))) => {
+                Err(anyhow!("failed to sleep {}: {:#}", self.debug_label(), e))
+            }
+            _ => Err(anyhow!("unexpected sleep result {:?}", res)),
+        }
+    }
+
+    fn wake(&mut self) -> anyhow::Result<()> {
+        let res = self.sync_send(&Command::Wake);
+        match res {
+            Some(CommandResult::WakeResult(Ok(()))) => Ok(()),
+            Some(CommandResult::WakeResult(Err(e))) => {
+                Err(anyhow!("failed to wake {}: {:#}", self.debug_label(), e))
+            }
+            _ => Err(anyhow!("unexpected wake result {:?}", res)),
+        }
+    }
+}
 
 impl Drop for ProxyDevice {
     fn drop(&mut self) {
@@ -435,7 +527,14 @@ mod tests {
         let device = EchoDevice::new();
         let keep_fds: Vec<RawDescriptor> = Vec::new();
         let minijail = Minijail::new().unwrap();
-        ProxyDevice::new(device, minijail, keep_fds).unwrap()
+        ProxyDevice::new(
+            device,
+            minijail,
+            keep_fds,
+            #[cfg(feature = "swap")]
+            None,
+        )
+        .unwrap()
     }
 
     // TODO(b/173833661): Find a way to ensure these tests are run single-threaded.

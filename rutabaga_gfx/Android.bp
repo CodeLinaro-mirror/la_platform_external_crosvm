@@ -12,11 +12,11 @@ package {
 
 rust_library {
     name: "librutabaga_gfx",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "rutabaga_gfx",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
+    cargo_pkg_version: "0.1.1-alpha.1",
     srcs: ["src/lib.rs"],
     edition: "2021",
     features: [
@@ -30,6 +30,7 @@ rust_library {
         "liblibc",
         "libserde",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     target: {
@@ -56,11 +57,11 @@ rust_library {
 
 rust_test {
     name: "rutabaga_gfx_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "rutabaga_gfx",
     cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
+    cargo_pkg_version: "0.1.1-alpha.1",
     srcs: ["src/lib.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
@@ -79,6 +80,7 @@ rust_test {
         "liblibc",
         "libserde",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     target: {

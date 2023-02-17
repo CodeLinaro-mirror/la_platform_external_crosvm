@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Generator, List, cast
 
-from impl.check_code_hygiene import has_crlf_line_endings
+from impl.check_code_hygiene import has_crlf_line_endings, has_lf_line_endings
 from impl.common import (
     CROSVM_ROOT,
     TOOLS_ROOT,
@@ -19,6 +19,7 @@ from impl.common import (
     chdir,
     cmd,
     cwd_context,
+    is_kiwi_repo,
     parallel,
     run_main,
 )
@@ -51,11 +52,20 @@ def check_python_format(context: CheckContext):
     )
 
 
-def check_crlf_line_endings(_: CheckContext):
+def check_crlf_line_endings(context: CheckContext):
     "Checks for crlf line endingings."
-    crlf_endings = has_crlf_line_endings()
+    crlf_endings = has_crlf_line_endings(context.all_files)
     if crlf_endings:
         print("Error: Following files have crlf(dos) line encodings")
+        print(*crlf_endings)
+        raise Exception("Files with crlf line endings.")
+
+
+def check_lf_line_endings(context: CheckContext):
+    "Checks for crlf line endingings."
+    crlf_endings = has_lf_line_endings(context.all_files)
+    if crlf_endings:
+        print("Error: Following files have lf(unix) line encodings")
         print(*crlf_endings)
         raise Exception("Files with crlf line endings.")
 
@@ -121,6 +131,12 @@ KNOWN_DISABLED_FEATURES = [
     "direct",
     "libvda",
     "whpx",
+]
+
+
+# List of python files and globs on which we run checks.
+PYTHON_FILES = [
+    "tools/**.py",
 ]
 
 
@@ -235,6 +251,13 @@ def check_file_ends_with_newline(context: CheckContext):
                     raise Exception(f"File does not end with a newline {file_path}")
 
 
+# List of files have crlf line endings.
+CRLF_LINE_ENDING_FILES: List[str] = [
+    "**.bat",
+    "**.ps1",
+    "e2e_tests/tests/goldens/backcompat_test_simple_lspci_win.txt",
+]
+
 # List of all checks and on which files they should run.
 CHECKS: List[Check] = [
     Check(
@@ -273,12 +296,12 @@ CHECKS: List[Check] = [
     ),
     Check(
         check_python_tests,
-        files=["tools/**.py"],
+        files=PYTHON_FILES,
         python_tools=True,
     ),
     Check(
         check_python_types,
-        files=["tools/**.py"],
+        files=PYTHON_FILES,
         exclude=["tools/windows/*"],
         python_tools=True,
     ),
@@ -287,16 +310,6 @@ CHECKS: List[Check] = [
         files=["**.py"],
         python_tools=True,
         exclude=["infra/recipes.py"],
-        can_fix=True,
-    ),
-    Check(
-        check_infra_configs,
-        files=["infra/config/**.star"],
-        can_fix=True,
-    ),
-    Check(
-        check_infra_tests,
-        files=["infra/**.py"],
         can_fix=True,
     ),
     Check(
@@ -322,8 +335,27 @@ CHECKS: List[Check] = [
             "**.json",
         ],
     ),
-    Check(check_crlf_line_endings),
+    Check(check_crlf_line_endings, exclude=CRLF_LINE_ENDING_FILES),
+    Check(check_lf_line_endings, files=CRLF_LINE_ENDING_FILES),
 ]
+
+# We disable LUCI infra related tests because kokoro doesn't have internet connectivity that
+# the tests rely on.
+if not is_kiwi_repo():
+    CHECKS.extend(
+        [
+            Check(
+                check_infra_configs,
+                files=["infra/config/**.star"],
+                can_fix=True,
+            ),
+            Check(
+                check_infra_tests,
+                files=["infra/**.py"],
+                can_fix=True,
+            ),
+        ]
+    )
 
 CHECKS_DICT = dict((c.name, c) for c in CHECKS)
 

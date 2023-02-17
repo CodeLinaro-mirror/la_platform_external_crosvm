@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libp9",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "p9",
     cargo_env_compat: true,
@@ -28,7 +28,7 @@ rust_library {
 
 rust_test {
     name: "p9_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "p9",
     cargo_env_compat: true,

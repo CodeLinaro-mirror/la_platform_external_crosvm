@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libvm_control",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "vm_control",
     cargo_env_compat: true,
@@ -45,6 +45,7 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    visibility: ["//packages/modules/Virtualization/virtualizationmanager"],
     target: {
         host_linux: {
             features: [
@@ -57,7 +58,7 @@ rust_library {
 
 rust_test {
     name: "vm_control_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "vm_control",
     cargo_env_compat: true,

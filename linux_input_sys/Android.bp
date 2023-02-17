@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "liblinux_input_sys",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "linux_input_sys",
     cargo_env_compat: true,
@@ -23,5 +23,6 @@ rust_library {
         "libbase_rust",
         "libdata_model",
         "liblibc",
+        "libzerocopy",
     ],
 }

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![cfg(not(test))]
 #![no_main]
 
 use std::mem::size_of;
@@ -72,9 +73,11 @@ fuzz_target!(|data: &[u8]| {
     q.set_ready(true);
 
     GUEST_MEM.with(|mem| {
-        if !q.ready() {
+        let mut q = if let Ok(q) = q.activate() {
+            q
+        } else {
             return;
-        }
+        };
 
         // First zero out all of the memory.
         let vs = mem

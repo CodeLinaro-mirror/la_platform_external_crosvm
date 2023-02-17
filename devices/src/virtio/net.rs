@@ -23,7 +23,6 @@ use base::EventToken;
 use base::RawDescriptor;
 use base::ReadNotifier;
 use base::WaitContext;
-use data_model::DataInit;
 use data_model::Le16;
 use data_model::Le64;
 use net_util::Error as TapError;
@@ -42,6 +41,8 @@ use virtio_sys::virtio_net::VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET;
 use virtio_sys::virtio_net::VIRTIO_NET_ERR;
 use virtio_sys::virtio_net::VIRTIO_NET_OK;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use super::copy_config;
 use super::DescriptorError;
@@ -179,14 +180,11 @@ impl FromStr for NetParameters {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, AsBytes, FromBytes)]
 pub struct virtio_net_ctrl_hdr {
     pub class: u8,
     pub cmd: u8,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for virtio_net_ctrl_hdr {}
 
 /// Converts virtio-net feature bits to tap's offload bits.
 pub fn virtio_features_to_tap_offload(features: u64) -> c_uint {
@@ -210,7 +208,7 @@ pub fn virtio_features_to_tap_offload(features: u64) -> c_uint {
     tap_offloads
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct VirtioNetConfig {
     mac: [u8; 6],
@@ -218,9 +216,6 @@ pub struct VirtioNetConfig {
     max_vq_pairs: Le16,
     mtu: Le16,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VirtioNetConfig {}
 
 pub fn process_ctrl<I: SignalableInterrupt, T: TapT>(
     interrupt: &I,
@@ -696,7 +691,7 @@ where
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let vq_pairs = self.queue_sizes.len() / 2;
         let config_space = build_config(vq_pairs as u16, self.mtu, self.guest_mac);
-        copy_config(data, 0, config_space.as_slice(), offset);
+        copy_config(data, 0, config_space.as_bytes(), offset);
     }
 
     fn activate(

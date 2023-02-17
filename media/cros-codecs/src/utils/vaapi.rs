@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::rc::Rc;
 
 use anyhow::anyhow;
@@ -18,6 +19,7 @@ use libva::Surface;
 use libva::VAConfigAttrib;
 use libva::VAConfigAttribType;
 
+use crate::decoders::BlockingMode;
 use crate::decoders::DecodedHandle as DecodedHandleTrait;
 use crate::decoders::DynPicture;
 use crate::decoders::Error as VideoDecoderError;
@@ -26,6 +28,8 @@ use crate::decoders::MappableHandle;
 use crate::decoders::Picture;
 use crate::decoders::Result as VideoDecoderResult;
 use crate::decoders::StatelessBackendError;
+use crate::decoders::StatelessBackendResult;
+use crate::decoders::VideoDecoderBackend;
 use crate::i420_copy;
 use crate::nv12_copy;
 use crate::DecodedFormat;
@@ -54,7 +58,7 @@ pub const FORMAT_MAP: [FormatMap; 2] = [
 ];
 
 /// Returns a set of supported decoded formats given `rt_format`
-pub fn supported_formats_for_rt_format(
+fn supported_formats_for_rt_format(
     display: Rc<Display>,
     rt_format: u32,
     profile: i32,
@@ -248,6 +252,20 @@ impl SurfacePoolHandle {
     }
 }
 
+/// A trait for providing the basic information needed to setup libva for decoding.
+pub(crate) trait StreamInfo {
+    /// Returns the VA profile of the stream.
+    fn va_profile(&self) -> anyhow::Result<i32>;
+    /// Returns the RT format of the stream.
+    fn rt_format(&self) -> anyhow::Result<u32>;
+    /// Returns the minimum number of surfaces required to decode the stream.
+    fn min_num_surfaces(&self) -> usize;
+    /// Returns the coded size of the surfaces required to decode the stream.
+    fn coded_size(&self) -> (u32, u32);
+    /// Returns the visible rectangle within the coded size for the stream.
+    fn visible_rect(&self) -> ((u32, u32), (u32, u32));
+}
+
 /// State of the input stream, which can be either unparsed (we don't know the stream properties
 /// yet) or parsed (we know the stream properties and are ready to decode).
 pub(crate) enum StreamMetadataState {
@@ -265,6 +283,8 @@ pub(crate) enum StreamMetadataState {
         config: Config,
         /// A pool of surfaces. We reuse surfaces as they are expensive to allocate.
         surface_pool: SurfacePoolHandle,
+        /// The number of surfaces required to parse the stream.
+        min_num_surfaces: usize,
         /// The decoder current coded resolution.
         coded_resolution: Resolution,
         /// The decoder current display resolution.
@@ -342,9 +362,124 @@ impl StreamMetadataState {
         }
     }
 
+    pub(crate) fn min_num_surfaces(&self) -> Result<usize> {
+        match self {
+            StreamMetadataState::Unparsed { .. } => Err(anyhow!("Stream metadata not parsed yet")),
+            StreamMetadataState::Parsed {
+                min_num_surfaces, ..
+            } => Ok(*min_num_surfaces),
+        }
+    }
+
     pub(crate) fn get_surface(&mut self) -> Result<Option<Surface>> {
         let mut surface_pool = self.surface_pool()?;
         Ok(surface_pool.get_surface())
+    }
+
+    /// Gets a set of supported formats for the particular stream being
+    /// processed. This requires that some buffers be processed before this call
+    /// is made. Only formats that are compatible with the current color space,
+    /// bit depth, and chroma format are returned such that no conversion is
+    /// needed.
+    pub(crate) fn supported_formats_for_stream(&self) -> Result<HashSet<DecodedFormat>> {
+        let rt_format = self.rt_format()?;
+        let display = self.display();
+        let image_formats = display.query_image_formats()?;
+        let profile = self.profile()?;
+
+        let formats = supported_formats_for_rt_format(
+            display,
+            rt_format,
+            profile,
+            libva::VAEntrypoint::VAEntrypointVLD,
+            &image_formats,
+        )?;
+
+        Ok(formats.into_iter().map(|f| f.decoded_format).collect())
+    }
+
+    /// Initializes or reinitializes the codec state.
+    pub(crate) fn open<S: StreamInfo>(
+        &mut self,
+        hdr: S,
+        format_map: Option<&FormatMap>,
+    ) -> Result<()> {
+        let display = self.display();
+        let va_profile = hdr.va_profile()?;
+        let rt_format = hdr.rt_format()?;
+        let (frame_w, frame_h) = hdr.coded_size();
+
+        let attrs = vec![libva::VAConfigAttrib {
+            type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
+            value: rt_format,
+        }];
+
+        let config =
+            display.create_config(attrs, va_profile, libva::VAEntrypoint::VAEntrypointVLD)?;
+
+        let format_map = if let Some(format_map) = format_map {
+            format_map
+        } else {
+            // Pick the first one that fits
+            FORMAT_MAP
+                .iter()
+                .find(|&map| map.rt_format == rt_format)
+                .ok_or(anyhow!("Unsupported format {}", rt_format))?
+        };
+
+        let map_format = display
+            .query_image_formats()?
+            .iter()
+            .find(|f| f.fourcc == format_map.va_fourcc)
+            .cloned()
+            .unwrap();
+
+        let min_num_surfaces = hdr.min_num_surfaces();
+
+        let surfaces = display.create_surfaces(
+            rt_format,
+            Some(map_format.fourcc),
+            frame_w,
+            frame_h,
+            Some(libva::UsageHint::USAGE_HINT_DECODER),
+            min_num_surfaces as u32,
+        )?;
+
+        let context = display.create_context(
+            &config,
+            i32::try_from(frame_w)?,
+            i32::try_from(frame_h)?,
+            Some(&surfaces),
+            true,
+        )?;
+
+        let coded_resolution = Resolution {
+            width: frame_w,
+            height: frame_h,
+        };
+
+        let visible_rect = hdr.visible_rect();
+
+        let display_resolution = Resolution {
+            width: visible_rect.1 .0 - visible_rect.0 .0,
+            height: visible_rect.1 .1 - visible_rect.0 .1,
+        };
+
+        let surface_pool = SurfacePoolHandle::new(surfaces, coded_resolution);
+
+        *self = StreamMetadataState::Parsed {
+            context,
+            config,
+            surface_pool,
+            min_num_surfaces,
+            coded_resolution,
+            display_resolution,
+            map_format: Rc::new(map_format),
+            rt_format,
+            profile: va_profile,
+        };
+
+        Ok(())
     }
 }
 
@@ -527,5 +662,225 @@ impl TryFrom<&libva::VAImageFormat> for DecodedFormat {
             libva::constants::VA_FOURCC_I420 => Ok(DecodedFormat::I420),
             _ => Err(anyhow!("Unsupported format")),
         }
+    }
+}
+
+/// Keeps track of where the backend is in the negotiation process.
+///
+/// The generic parameter is the data that the decoder wishes to pass from the `Possible` to the
+/// `Negotiated` state - typically, the properties of the stream like its resolution as they have
+/// been parsed.
+#[derive(Clone)]
+pub(crate) enum NegotiationStatus<T> {
+    /// No property about the stream has been parsed yet.
+    NonNegotiated,
+    /// Properties of the stream have been parsed and the client may query and change them.
+    Possible(T),
+    /// Stream is actively decoding and its properties cannot be changed by the client.
+    Negotiated,
+}
+
+impl<T> Default for NegotiationStatus<T> {
+    fn default() -> Self {
+        NegotiationStatus::NonNegotiated
+    }
+}
+
+impl<T> Debug for NegotiationStatus<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NegotiationStatus::NonNegotiated => write!(f, "NonNegotiated"),
+            NegotiationStatus::Possible(_) => write!(f, "Possible"),
+            NegotiationStatus::Negotiated => write!(f, "Negotiated"),
+        }
+    }
+}
+
+/// A type that keeps track of a pending decoding operation. The backend can
+/// complete the job by either querying its status with VA-API or by blocking on
+/// it at some point in the future.
+///
+/// Once the backend is sure that the operation went through, it can assign the
+/// handle to `codec_picture` and dequeue this object from the pending queue.
+///
+/// The generic parameter `P` should be a `Picture` backed by `GenericBackendHandle`.
+pub(crate) struct PendingJob<P> {
+    /// A picture that was already sent to VA-API. It is unclear whether it has
+    /// been decoded yet because we have been asked not to block on it.
+    pub va_picture: libva::Picture<libva::PictureEnd>,
+    /// A handle to the picture passed in by the decoder. It has no handle
+    /// backing it yet, as we cannot be sure that the decoding operation went
+    /// through.
+    pub codec_picture: Rc<RefCell<P>>,
+}
+
+pub(crate) struct VaapiBackend<CodecData, StreamData>
+where
+    CodecData: FrameInfo,
+    for<'a> &'a StreamData: StreamInfo,
+{
+    /// The metadata state. Updated whenever the decoder reads new data from the stream.
+    pub(crate) metadata_state: StreamMetadataState,
+    /// The negotiation status
+    pub(crate) negotiation_status: NegotiationStatus<Box<StreamData>>,
+    /// The FIFO for all pending pictures, in the order they were submitted.
+    pub(crate) pending_jobs: VecDeque<PendingJob<Picture<CodecData, GenericBackendHandle>>>,
+}
+
+impl<CodecData, StreamData> VaapiBackend<CodecData, StreamData>
+where
+    CodecData: FrameInfo,
+    for<'a> &'a StreamData: StreamInfo,
+{
+    pub(crate) fn new(display: Rc<libva::Display>) -> Self {
+        Self {
+            metadata_state: StreamMetadataState::Unparsed { display },
+            pending_jobs: Default::default(),
+            negotiation_status: Default::default(),
+        }
+    }
+
+    pub(crate) fn build_va_decoded_handle(
+        &self,
+        picture: &Rc<RefCell<Picture<CodecData, GenericBackendHandle>>>,
+    ) -> Result<<Self as VideoDecoderBackend>::Handle> {
+        Ok(DecodedHandle::new(
+            Rc::clone(picture),
+            self.metadata_state.coded_resolution()?,
+            self.metadata_state.surface_pool()?,
+        ))
+    }
+}
+
+impl<CodecData, StreamData> VideoDecoderBackend for VaapiBackend<CodecData, StreamData>
+where
+    CodecData: FrameInfo,
+    for<'a> &'a StreamData: StreamInfo,
+{
+    type Handle = DecodedHandle<Picture<CodecData, GenericBackendHandle>>;
+
+    fn coded_resolution(&self) -> Option<Resolution> {
+        self.metadata_state.coded_resolution().ok()
+    }
+
+    fn display_resolution(&self) -> Option<Resolution> {
+        self.metadata_state.display_resolution().ok()
+    }
+
+    fn num_resources_total(&self) -> usize {
+        self.metadata_state.min_num_surfaces().unwrap_or(0)
+    }
+
+    fn num_resources_left(&self) -> usize {
+        match self.metadata_state.surface_pool() {
+            Ok(pool) => pool.num_surfaces_left(),
+            Err(_) => 0,
+        }
+    }
+
+    fn format(&self) -> Option<crate::DecodedFormat> {
+        let map_format = self.metadata_state.map_format().ok()?;
+        DecodedFormat::try_from(map_format.as_ref()).ok()
+    }
+
+    fn try_format(&mut self, format: crate::DecodedFormat) -> VideoDecoderResult<()> {
+        let header = match &self.negotiation_status {
+            NegotiationStatus::Possible(header) => header,
+            _ => {
+                return Err(VideoDecoderError::StatelessBackendError(
+                    StatelessBackendError::NegotiationFailed(anyhow!(
+                        "Negotiation is not possible at this stage {:?}",
+                        self.negotiation_status
+                    )),
+                ))
+            }
+        };
+
+        let supported_formats_for_stream = self.metadata_state.supported_formats_for_stream()?;
+
+        if supported_formats_for_stream.contains(&format) {
+            let map_format = FORMAT_MAP
+                .iter()
+                .find(|&map| map.decoded_format == format)
+                .unwrap();
+
+            self.metadata_state
+                .open(header.as_ref(), Some(map_format))?;
+
+            Ok(())
+        } else {
+            Err(VideoDecoderError::StatelessBackendError(
+                StatelessBackendError::NegotiationFailed(anyhow!(
+                    "Format {:?} is unsupported.",
+                    format
+                )),
+            ))
+        }
+    }
+
+    fn poll(&mut self, blocking_mode: BlockingMode) -> VideoDecoderResult<VecDeque<Self::Handle>> {
+        let mut completed = VecDeque::new();
+        let candidates = self.pending_jobs.drain(..).collect::<VecDeque<_>>();
+
+        for job in candidates {
+            if matches!(blocking_mode, BlockingMode::NonBlocking) {
+                let status = job.va_picture.query_status()?;
+                if status != libva::VASurfaceStatus::VASurfaceReady {
+                    self.pending_jobs.push_back(job);
+                    continue;
+                }
+            }
+
+            let current_picture = job.va_picture.sync()?;
+            let map_format = self.metadata_state.map_format()?;
+            let backend_handle = GenericBackendHandle::new_ready(
+                current_picture,
+                Rc::clone(map_format),
+                self.metadata_state.display_resolution()?,
+            );
+
+            job.codec_picture.borrow_mut().backend_handle = Some(backend_handle);
+            completed.push_back(job.codec_picture);
+        }
+
+        let completed = completed.into_iter().map(|picture| {
+            self.build_va_decoded_handle(&picture)
+                .map_err(|e| VideoDecoderError::from(StatelessBackendError::Other(anyhow!(e))))
+        });
+
+        completed.collect::<Result<VecDeque<_>, _>>()
+    }
+
+    fn handle_is_ready(&self, handle: &Self::Handle) -> bool {
+        match &handle.picture().backend_handle {
+            Some(backend_handle) => backend_handle.is_ready(),
+            None => true,
+        }
+    }
+
+    fn block_on_handle(&mut self, handle: &Self::Handle) -> StatelessBackendResult<()> {
+        for i in 0..self.pending_jobs.len() {
+            // Remove from the queue in order.
+            let job = &self.pending_jobs[i];
+
+            if Picture::same(&job.codec_picture, handle.picture_container()) {
+                let job = self.pending_jobs.remove(i).unwrap();
+                let current_picture = job.va_picture.sync()?;
+                let map_format = self.metadata_state.map_format()?;
+                let backend_handle = GenericBackendHandle::new_ready(
+                    current_picture,
+                    Rc::clone(map_format),
+                    self.metadata_state.display_resolution()?,
+                );
+
+                job.codec_picture.borrow_mut().backend_handle = Some(backend_handle);
+
+                return Ok(());
+            }
+        }
+
+        Err(StatelessBackendError::Other(anyhow!(
+            "Asked to block on a pending job that doesn't exist"
+        )))
     }
 }

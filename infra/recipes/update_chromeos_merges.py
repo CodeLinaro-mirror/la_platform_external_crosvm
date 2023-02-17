@@ -4,8 +4,6 @@
 
 from recipe_engine.post_process import Filter
 
-PYTHON_VERSION_COMPATIBILITY = "PY3"
-
 DEPS = [
     "crosvm",
     "recipe_engine/context",
@@ -22,17 +20,6 @@ def RunSteps(api):
                 "./tools/chromeos/merge_bot",
                 "--verbose",
                 "update-merges",
-                "--is-bot",
-                "origin/main",
-            ],
-        )
-        api.step(
-            "Update Dry Runs",
-            [
-                "vpython3",
-                "./tools/chromeos/merge_bot",
-                "--verbose",
-                "update-dry-runs",
                 "--is-bot",
                 "origin/main",
             ],

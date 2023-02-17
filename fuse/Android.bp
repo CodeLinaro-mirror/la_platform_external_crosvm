@@ -12,7 +12,7 @@ package {
 
 rust_test {
     name: "fuse_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "fuse",
     cargo_env_compat: true,
@@ -31,6 +31,7 @@ rust_test {
         "libdata_model",
         "liblibc",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -40,7 +41,7 @@ rust_test {
 
 rust_library {
     name: "libfuse_rust",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     stem: "libfuse",
     host_supported: true,
     crate_name: "fuse",
@@ -55,9 +56,14 @@ rust_library {
         "libdata_model",
         "liblibc",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
         "libremain",
+    ],
+    visibility: [
+        "//packages/modules/Virtualization/authfs",
+        "//packages/modules/Virtualization/zipfuse",
     ],
 }

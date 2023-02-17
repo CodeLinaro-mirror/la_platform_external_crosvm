@@ -14,7 +14,6 @@ use base::Event;
 use cros_async::sync::Mutex as AsyncMutex;
 use cros_async::EventAsync;
 use cros_async::Executor;
-use data_model::DataInit;
 use futures::channel::mpsc;
 use futures::future::AbortHandle;
 use futures::future::Abortable;
@@ -23,6 +22,7 @@ use once_cell::sync::OnceCell;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
+use zerocopy::AsBytes;
 
 use crate::virtio;
 use crate::virtio::copy_config;
@@ -150,7 +150,7 @@ impl VhostUserBackend for SndBackend {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        copy_config(data, 0, self.cfg.as_slice(), offset)
+        copy_config(data, 0, self.cfg.as_bytes(), offset)
     }
 
     fn reset(&mut self) {
@@ -174,9 +174,6 @@ impl VhostUserBackend for SndBackend {
 
         // Safe because the executor is initialized in main() below.
         let ex = SND_EXECUTOR.get().expect("Executor not initialized");
-
-        // Enable any virtqueue features that were negotiated (like VIRTIO_RING_F_EVENT_IDX).
-        queue.ack_features(self.acked_features);
 
         let mut kick_evt =
             EventAsync::new(kick_evt, ex).context("failed to create EventAsync for kick_evt")?;

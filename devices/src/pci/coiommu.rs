@@ -64,6 +64,8 @@ use vm_control::VmMemoryResponse;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::pci::pci_configuration::PciBarConfiguration;
 use crate::pci::pci_configuration::PciBarPrefetchable;
@@ -210,7 +212,7 @@ struct CoIommuReg {
     dtt_level: u64,
 }
 
-#[derive(Default, Debug, Copy, Clone, PartialEq)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 struct PinnedPageInfo {
     gfn: u64,
     unpin_busy_cnt: u64,
@@ -225,7 +227,7 @@ impl PinnedPageInfo {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Eq)]
 enum UnpinThreadState {
     Unparked,
     Parked,
@@ -273,7 +275,7 @@ fn vfio_unmap(vfio_container: &Arc<Mutex<VfioContainer>>, iova: u64, size: u64) 
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone, FromBytes, AsBytes)]
 #[repr(C)]
 struct PinPageInfo {
     bdf: u16,
@@ -432,7 +434,7 @@ fn pin_page(
     Ok(())
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Eq)]
 enum UnpinResult {
     UnpinlistEmpty,
     Unpinned,

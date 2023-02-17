@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use std::result;
 use std::slice;
 
-use data_model::DataInit;
 use remain::sorted;
 use thiserror::Error;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -80,8 +81,8 @@ fn compute_checksum<T: Copy>(v: &T) -> u8 {
     (!checksum).wrapping_add(1)
 }
 
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, FromBytes, AsBytes)]
 pub struct Smbios23Intermediate {
     pub signature: [u8; 5usize],
     pub checksum: u8,
@@ -91,10 +92,8 @@ pub struct Smbios23Intermediate {
     pub revision: u8,
 }
 
-unsafe impl data_model::DataInit for Smbios23Intermediate {}
-
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, FromBytes, AsBytes)]
 pub struct Smbios23Entrypoint {
     pub signature: [u8; 4usize],
     pub checksum: u8,
@@ -107,10 +106,8 @@ pub struct Smbios23Entrypoint {
     pub dmi: Smbios23Intermediate,
 }
 
-unsafe impl data_model::DataInit for Smbios23Entrypoint {}
-
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, FromBytes, AsBytes)]
 pub struct Smbios30Entrypoint {
     pub signature: [u8; 5usize],
     pub checksum: u8,
@@ -124,10 +121,8 @@ pub struct Smbios30Entrypoint {
     pub physptr: u64,
 }
 
-unsafe impl data_model::DataInit for Smbios30Entrypoint {}
-
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, FromBytes, AsBytes)]
 pub struct SmbiosBiosInfo {
     pub typ: u8,
     pub length: u8,
@@ -142,10 +137,8 @@ pub struct SmbiosBiosInfo {
     pub characteristics_ext2: u8,
 }
 
-unsafe impl data_model::DataInit for SmbiosBiosInfo {}
-
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, FromBytes, AsBytes)]
 pub struct SmbiosSysInfo {
     pub typ: u8,
     pub length: u8,
@@ -160,10 +153,8 @@ pub struct SmbiosSysInfo {
     pub family: u8,
 }
 
-unsafe impl data_model::DataInit for SmbiosSysInfo {}
-
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, FromBytes, AsBytes)]
 pub struct SmbiosOemStrings {
     pub typ: u8,
     pub length: u8,
@@ -171,9 +162,7 @@ pub struct SmbiosOemStrings {
     pub count: u8,
 }
 
-unsafe impl data_model::DataInit for SmbiosOemStrings {}
-
-fn write_and_incr<T: DataInit>(
+fn write_and_incr<T: AsBytes + FromBytes>(
     mem: &GuestMemory,
     val: T,
     mut curptr: GuestAddress,
@@ -218,7 +207,7 @@ fn setup_smbios_from_file(mem: &GuestMemory, path: &Path) -> Result<()> {
     // Try SMBIOS 3.0 format.
     if sme.len() == mem::size_of::<Smbios30Entrypoint>() && sme.starts_with(SM3_MAGIC_IDENT) {
         let mut smbios_ep = Smbios30Entrypoint::default();
-        smbios_ep.as_mut_slice().copy_from_slice(&sme);
+        smbios_ep.as_bytes_mut().copy_from_slice(&sme);
 
         let physptr = GuestAddress(SMBIOS_START)
             .checked_add(mem::size_of::<Smbios30Entrypoint>() as u64)
@@ -241,7 +230,7 @@ fn setup_smbios_from_file(mem: &GuestMemory, path: &Path) -> Result<()> {
     // Try SMBIOS 2.3 format.
     if sme.len() == mem::size_of::<Smbios23Entrypoint>() && sme.starts_with(SM2_MAGIC_IDENT) {
         let mut smbios_ep = Smbios23Entrypoint::default();
-        smbios_ep.as_mut_slice().copy_from_slice(&sme);
+        smbios_ep.as_bytes_mut().copy_from_slice(&sme);
 
         let physptr = GuestAddress(SMBIOS_START)
             .checked_add(mem::size_of::<Smbios23Entrypoint>() as u64)

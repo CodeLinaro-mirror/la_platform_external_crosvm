@@ -37,12 +37,12 @@ invalid.
 
 ## Sandboxing Policy
 
-Every sandbox is made with [minijail] and starts with `create_base_minijail` in
-`linux/jail_helpers.rs` which set some very restrictive settings. Linux namespaces and seccomp
-filters are used extensively. Each seccomp policy can be found under
-`seccomp/{arch}/{device}.policy` and should start by `@include`-ing the `common_device.policy`. With
-the exception of architecture specific devices (such as `Pl030` on ARM or `I8042` on x86_64), every
-device will need a different policy for each supported architecture.
+Every sandbox is made with [minijail] and starts with `create_sandbox_minijail` in `jail` crate
+which set some very restrictive settings. Linux namespaces and seccomp filters are used for
+sandboxing. Each seccomp policy can be found under `jail/seccomp/{arch}/{device}.policy` and should
+start by `@include`-ing the `common_device.policy`. With the exception of architecture specific
+devices (such as `Pl030` on ARM or `I8042` on x86_64), every device will need a different policy for
+each supported architecture.
 
 ## The VM Control Sockets
 
@@ -216,7 +216,7 @@ Source code is organized into crates, each with their own unit tests.
 - `kernel_loader` - Loads elf64 kernel files to a slice of memory.
 - `kvm_sys` - Low-level (mostly) auto-generated structures and constants for using KVM.
 - `kvm` - Unsafe, low-level wrapper code for using `kvm_sys`.
-- `media/libvda` - Safe wrapper of [libvda], a Chrome OS HW-accelerated video decoding/encoding
+- `media/libvda` - Safe wrapper of [libvda], a ChromeOS HW-accelerated video decoding/encoding
   library.
 - `net_sys` - Low-level (mostly) auto-generated structures and constants for creating TUN/TAP
   devices.
@@ -225,7 +225,7 @@ Source code is organized into crates, each with their own unit tests.
 - `seccomp` - Contains minijail seccomp policy files for each sandboxed device. Because some
   syscalls vary by architecture, the seccomp policies are split by architecture.
 - `sync` - Our version of `std::sync::Mutex` and `std::sync::Condvar`.
-- `third_party` - Third-party libraries which we are maintaining on the Chrome OS tree or the AOSP
+- `third_party` - Third-party libraries which we are maintaining on the ChromeOS tree or the AOSP
   tree.
 - `vfio_sys` - Low-level (mostly) auto-generated structures, constants and ioctls for [VFIO].
 - `vhost` - Wrappers for creating vhost based devices.

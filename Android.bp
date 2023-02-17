@@ -34,7 +34,7 @@ license {
 
 rust_binary {
     name: "crosvm",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     prefer_rlib: true,
     crate_name: "crosvm",
@@ -43,6 +43,7 @@ rust_binary {
     srcs: ["src/main.rs"],
     edition: "2021",
     features: [
+        "android-sparse",
         "audio",
         "balloon",
         "gdb",
@@ -62,6 +63,7 @@ rust_binary {
         "libbroker_ipc",
         "libcfg_if",
         "libcros_async",
+        "libcros_tracing",
         "libcrosvm_cli",
         "libdata_model",
         "libdevices",
@@ -69,6 +71,7 @@ rust_binary {
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
+        "libjail",
         "libkernel_cmdline",
         "libkernel_loader",
         "liblibc",
@@ -88,7 +91,6 @@ rust_binary {
         "libstatic_assertions",
         "libsync_rust",
         "libtempfile",
-        "libterminal_size",
         "libthiserror",
         "libuuid",
         "libvhost",
@@ -100,6 +102,7 @@ rust_binary {
         "libenumn",
         "libremain",
     ],
+    visibility: ["//visibility:public"],
     arch: {
         x86_64: {
             rustlibs: ["libx86_64_rust"],
@@ -148,7 +151,7 @@ rust_binary {
 
 rust_test {
     name: "crosvm_test_src_main",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "crosvm",
     cargo_env_compat: true,
@@ -161,6 +164,7 @@ rust_test {
     },
     edition: "2021",
     features: [
+        "android-sparse",
         "audio",
         "balloon",
         "gdb",
@@ -180,6 +184,7 @@ rust_test {
         "libbroker_ipc",
         "libcfg_if",
         "libcros_async",
+        "libcros_tracing",
         "libcrosvm_cli",
         "libdata_model",
         "libdevices",
@@ -187,6 +192,7 @@ rust_test {
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
+        "libjail",
         "libkernel_cmdline",
         "libkernel_loader",
         "liblibc",
@@ -198,6 +204,7 @@ rust_test {
         "libnet_util",
         "libonce_cell",
         "libp9",
+        "librand",
         "libresources",
         "librutabaga_gfx",
         "libserde",
@@ -206,7 +213,6 @@ rust_test {
         "libstatic_assertions",
         "libsync_rust",
         "libtempfile",
-        "libterminal_size",
         "libthiserror",
         "libuuid",
         "libvhost",
@@ -281,4 +287,20 @@ rust_defaults {
         "//apex_available:platform",
         "com.android.virt",
     ],
+    defaults_visibility: [
+        "//external/crosvm:__subpackages__",
+        "//external/libchromeos-rs",
+        "//packages/modules/Virtualization/authfs",
+    ],
+}
+
+// "crosvm_defaults" is being used outside of external/crosvm, so we need a
+// layer of indirection to add options that would break those users.
+//
+// TODO(b/238324526): move others off of "crosvm_defaults"
+rust_defaults {
+    name: "crosvm_inner_defaults",
+    defaults: ["crosvm_defaults"],
+    defaults_visibility: ["//external/crosvm:__subpackages__"],
+    visibility: ["//external/crosvm:__subpackages__"],
 }

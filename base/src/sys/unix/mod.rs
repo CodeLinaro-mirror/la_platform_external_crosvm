@@ -72,13 +72,6 @@ pub use event::EventExt;
 pub(crate) use event::PlatformEvent;
 pub use file::FileDataIterator;
 pub use file_flags::*;
-pub use file_traits::AsRawFds;
-pub use file_traits::FileAllocate;
-pub use file_traits::FileGetLen;
-pub use file_traits::FileReadWriteAtVolatile;
-pub use file_traits::FileReadWriteVolatile;
-pub use file_traits::FileSetLen;
-pub use file_traits::FileSync;
 pub use get_filesystem_type::*;
 pub use ioctl::*;
 use libc::c_int;
@@ -108,7 +101,6 @@ pub use poll::EventContext;
 pub use priority::*;
 pub use sched::*;
 pub use scoped_signal_handler::*;
-pub use shm::kernel_has_memfd;
 pub use shm::MemfdSeals;
 pub use shm::SharedMemory;
 pub use shm::Unix as SharedMemoryUnix;
@@ -567,6 +559,7 @@ pub fn clear_fd_flags(fd: RawFd, clear_flags: c_int) -> Result<()> {
 }
 
 /// Return a timespec filed with the specified Duration `duration`.
+#[allow(clippy::useless_conversion)]
 pub fn duration_to_timespec(duration: Duration) -> libc::timespec {
     // nsec always fits in i32 because subsec_nanos is defined to be less than one billion.
     let nsec = duration.subsec_nanos() as i32;

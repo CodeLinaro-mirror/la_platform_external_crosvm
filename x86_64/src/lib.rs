@@ -9,6 +9,7 @@
 mod fdt;
 
 const SETUP_DTB: u32 = 2;
+const SETUP_RNG_SEED: u32 = 9;
 const X86_64_FDT_MAX_SIZE: u64 = 0x20_0000;
 
 #[allow(dead_code)]
@@ -16,9 +17,6 @@ const X86_64_FDT_MAX_SIZE: u64 = 0x20_0000;
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
 pub mod bootparam;
-
-// boot_params is just a series of ints, it is safe to initialize it.
-unsafe impl data_model::DataInit for bootparam::boot_params {}
 
 #[allow(dead_code)]
 #[allow(non_upper_case_globals)]
@@ -29,14 +27,6 @@ mod msr_index;
 #[allow(non_camel_case_types)]
 #[allow(clippy::all)]
 mod mpspec;
-// These mpspec types are only data, reading them from data is a safe initialization.
-unsafe impl data_model::DataInit for mpspec::mpc_bus {}
-unsafe impl data_model::DataInit for mpspec::mpc_cpu {}
-unsafe impl data_model::DataInit for mpspec::mpc_intsrc {}
-unsafe impl data_model::DataInit for mpspec::mpc_ioapic {}
-unsafe impl data_model::DataInit for mpspec::mpc_table {}
-unsafe impl data_model::DataInit for mpspec::mpc_lintsrc {}
-unsafe impl data_model::DataInit for mpspec::mpf_intel {}
 
 #[cfg(unix)]
 pub mod msr;
@@ -50,6 +40,7 @@ pub mod mptable;
 pub mod regs;
 pub mod smbios;
 
+use std::arch::x86_64::CpuidResult;
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -57,6 +48,7 @@ use std::fs::File;
 use std::io;
 use std::io::Seek;
 use std::mem;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -89,8 +81,6 @@ use devices::Debugcon;
 use devices::IrqChip;
 use devices::IrqChipX86_64;
 use devices::IrqEventSource;
-#[cfg(windows)]
-use devices::Minijail;
 use devices::PciAddress;
 use devices::PciConfigIo;
 use devices::PciConfigMmio;
@@ -117,6 +107,7 @@ use hypervisor::x86_64::Regs;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use hypervisor::x86_64::Sregs;
 use hypervisor::CpuConfigX86_64;
+use hypervisor::Hypervisor;
 use hypervisor::HypervisorX86_64;
 use hypervisor::ProtectionType;
 use hypervisor::VcpuInitX86_64;
@@ -124,9 +115,13 @@ use hypervisor::VcpuX86_64;
 use hypervisor::Vm;
 use hypervisor::VmCap;
 use hypervisor::VmX86_64;
+#[cfg(windows)]
+use jail::FakeMinijailStub as Minijail;
 #[cfg(unix)]
 use minijail::Minijail;
 use once_cell::sync::OnceCell;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
@@ -138,13 +133,18 @@ use vm_control::BatteryType;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::bootparam::boot_params;
+use crate::cpuid::EDX_HYBRID_CPU_SHIFT;
 use crate::msr_index::*;
 
 #[sorted]
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("error allocating a single gpe")]
+    AllocateGpe,
     #[error("error allocating IO resource: {0}")]
     AllocateIOResouce(resources::Error),
     #[error("error allocating a single irq")]
@@ -246,6 +246,8 @@ pub enum Error {
     SetTssAddr(base::Error),
     #[error("failed to set up cpuid: {0}")]
     SetupCpuid(cpuid::Error),
+    #[error("setup data too large")]
+    SetupDataTooLarge,
     #[error("failed to set up FPU: {0}")]
     SetupFpu(base::Error),
     #[error("failed to set up guest memory: {0}")]
@@ -274,6 +276,8 @@ pub enum Error {
     WriteRegs(base::Error),
     #[error("error writing guest memory {0}")]
     WritingGuestMemory(GuestMemoryError),
+    #[error("error writing setup_data: {0}")]
+    WritingSetupData(GuestMemoryError),
     #[error("the zero page extends past the end of guest_mem")]
     ZeroPagePastRamEnd,
     #[error("error writing the zero page of guest memory")]
@@ -283,6 +287,29 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct X8664arch;
+
+// Like `bootparam::setup_data` without the incomplete array field at the end, which allows us to
+// safely implement Copy, Clone
+#[repr(C)]
+#[derive(Copy, Clone, Default, FromBytes, AsBytes)]
+struct setup_data_hdr {
+    pub next: u64,
+    pub type_: u32,
+    pub len: u32,
+}
+
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SetupDataType {
+    Dtb = SETUP_DTB,
+    RngSeed = SETUP_RNG_SEED,
+}
+
+/// A single entry to be inserted in the bootparam `setup_data` linked list.
+pub struct SetupData {
+    pub data: Vec<u8>,
+    pub type_: SetupDataType,
+}
 
 enum E820Type {
     Ram = 0x01,
@@ -421,6 +448,7 @@ fn configure_system(
     params.hdr.boot_flag = KERNEL_BOOT_FLAG_MAGIC;
     params.hdr.header = KERNEL_HDR_MAGIC;
     params.hdr.cmd_line_ptr = cmdline_addr.offset() as u32;
+    params.ext_cmd_line_ptr = (cmdline_addr.offset() >> 32) as u32;
     params.hdr.cmdline_size = cmdline_size as u32;
     params.hdr.kernel_alignment = KERNEL_MIN_ALIGNMENT_BYTES;
     if let Some(setup_data) = setup_data {
@@ -475,6 +503,81 @@ fn configure_system(
         .map_err(|_| Error::ZeroPageSetup)?;
 
     Ok(())
+}
+
+/// Write setup_data entries in guest memory and link them together with the `next` field.
+///
+/// Returns the guest address of the first entry in the setup_data list, if any.
+fn write_setup_data(
+    guest_mem: &GuestMemory,
+    free_addr: &mut u64,
+    setup_data: &[SetupData],
+) -> Result<Option<GuestAddress>> {
+    let mut setup_data_list_head = None;
+
+    // Place the first setup_data at the first 64-bit aligned offset following free_addr.
+    let mut setup_data_addr = GuestAddress(*free_addr)
+        .align(8)
+        .ok_or(Error::SetupDataTooLarge)?;
+
+    let mut entry_iter = setup_data.iter().peekable();
+    while let Some(entry) = entry_iter.next() {
+        if setup_data_list_head.is_none() {
+            setup_data_list_head = Some(setup_data_addr);
+        }
+
+        // Ensure the entry (header plus data) fits into guest memory.
+        let entry_size = (mem::size_of::<setup_data_hdr>() + entry.data.len()) as u64;
+        setup_data_addr
+            .checked_add(entry_size)
+            .ok_or(Error::SetupDataTooLarge)?;
+
+        let next_setup_data_addr = if entry_iter.peek().is_some() {
+            // Place the next setup_data at a 64-bit aligned address.
+            setup_data_addr
+                .checked_add(entry_size)
+                .and_then(|addr| addr.align(8))
+                .ok_or(Error::SetupDataTooLarge)?
+        } else {
+            // This is the final entry. Terminate the list with next == 0.
+            GuestAddress(0)
+        };
+
+        let hdr = setup_data_hdr {
+            next: next_setup_data_addr.offset(),
+            type_: entry.type_ as u32,
+            len: entry
+                .data
+                .len()
+                .try_into()
+                .map_err(|_| Error::SetupDataTooLarge)?,
+        };
+
+        guest_mem
+            .write_obj_at_addr(hdr, setup_data_addr)
+            .map_err(Error::WritingSetupData)?;
+        guest_mem
+            .write_all_at_addr(
+                &entry.data,
+                setup_data_addr.unchecked_add(mem::size_of::<setup_data_hdr>() as u64),
+            )
+            .map_err(Error::WritingSetupData)?;
+
+        *free_addr = setup_data_addr.offset() + entry_size;
+        setup_data_addr = next_setup_data_addr;
+    }
+
+    Ok(setup_data_list_head)
+}
+
+/// Generate a SETUP_RNG_SEED SetupData with random seed data.
+fn setup_data_rng_seed() -> SetupData {
+    let mut data = vec![0u8; 256];
+    OsRng.fill_bytes(&mut data);
+    SetupData {
+        data,
+        type_: SetupDataType::RngSeed,
+    }
 }
 
 /// Add an e820 region to the e820 map.
@@ -533,6 +636,7 @@ impl arch::LinuxArch for X8664arch {
 
     fn guest_memory_layout(
         components: &VmComponents,
+        _hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error> {
         init_low_memory_layout(components.pcie_ecam, components.pci_low_start);
 
@@ -569,8 +673,10 @@ impl arch::LinuxArch for X8664arch {
         devs: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipX86_64,
         vcpu_ids: &mut Vec<usize>,
+        dump_device_tree_blob: Option<PathBuf>,
         debugcon_jail: Option<Minijail>,
         pflash_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -634,6 +740,8 @@ impl arch::LinuxArch for X8664arch {
             &mut vm,
             4, // Share the four pin interrupts (INTx#)
             Some(pcie_vcfg_range.start),
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreatePciRoot)?;
 
@@ -676,6 +784,8 @@ impl arch::LinuxArch for X8664arch {
             system_allocator,
             &mut vm,
             components.acpi_sdts,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreateVirtioMmioBus)?;
         components.acpi_sdts = sdts;
@@ -700,12 +810,16 @@ impl arch::LinuxArch for X8664arch {
             &io_bus,
             serial_parameters,
             serial_jail,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )?;
         Self::setup_debugcon_devices(
             components.hv_cfg.protection_type,
             &io_bus,
             serial_parameters,
             debugcon_jail,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )?;
 
         let bios_size = if let VmImage::Bios(ref bios) = components.vm_image {
@@ -720,6 +834,8 @@ impl arch::LinuxArch for X8664arch {
                 bios_size,
                 &mmio_bus,
                 pflash_jail,
+                #[cfg(feature = "swap")]
+                swap_controller,
             )?;
         }
 
@@ -749,6 +865,10 @@ impl arch::LinuxArch for X8664arch {
             &mmio_bus,
             max_bus,
             &mut resume_notify_devices,
+            #[cfg(feature = "swap")]
+            swap_controller,
+            #[cfg(unix)]
+            components.ac_adapter,
         )?;
 
         // Create customized SSDT table
@@ -846,6 +966,7 @@ impl arch::LinuxArch for X8664arch {
                     components.android_fstab,
                     kernel_end,
                     params,
+                    dump_device_tree_blob,
                 )?;
 
                 // Configure the bootstrap VCPU for the Linux/x86 64-bit boot protocol.
@@ -956,6 +1077,7 @@ impl arch::LinuxArch for X8664arch {
         #[cfg(unix)] minijail: Option<Minijail>,
         resources: &mut SystemAllocator,
         hp_control_tube: &mpsc::Sender<PciRootCommand>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<PciAddress> {
         arch::configure_pci_device(
             linux,
@@ -964,6 +1086,8 @@ impl arch::LinuxArch for X8664arch {
             minijail,
             resources,
             hp_control_tube,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::ConfigurePciDevice)
     }
@@ -1372,6 +1496,7 @@ impl X8664arch {
         bios_size: u64,
         mmio_bus: &devices::Bus,
         jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<()> {
         let size = pflash_image.metadata().map_err(Error::LoadPflash)?.len();
         let start = FIRST_ADDR_PAST_32BITS - bios_size - size;
@@ -1384,7 +1509,14 @@ impl X8664arch {
         let pflash: Arc<Mutex<dyn BusDevice>> = match jail {
             #[cfg(unix)]
             Some(jail) => Arc::new(Mutex::new(
-                ProxyDevice::new(pflash, jail, fds).map_err(Error::CreateProxyDevice)?,
+                ProxyDevice::new(
+                    pflash,
+                    jail,
+                    fds,
+                    #[cfg(feature = "swap")]
+                    swap_controller,
+                )
+                .map_err(Error::CreateProxyDevice)?,
             )),
             #[cfg(windows)]
             Some(_) => unreachable!(),
@@ -1452,6 +1584,7 @@ impl X8664arch {
         android_fstab: Option<File>,
         kernel_end: u64,
         params: boot_params,
+        dump_device_tree_blob: Option<PathBuf>,
     ) -> Result<()> {
         kernel_loader::load_cmdline(mem, GuestAddress(CMDLINE_OFFSET), cmdline)
             .map_err(Error::LoadCmdline)?;
@@ -1460,21 +1593,15 @@ impl X8664arch {
         // data like the device tree blob and initrd will be loaded.
         let mut free_addr = kernel_end;
 
-        let setup_data = if let Some(android_fstab) = android_fstab {
-            let free_addr_aligned = (((free_addr + 64 - 1) / 64) * 64) + 64;
-            let dtb_start = GuestAddress(free_addr_aligned);
-            let dtb_size = fdt::create_fdt(
-                X86_64_FDT_MAX_SIZE as usize,
-                mem,
-                dtb_start.offset(),
-                android_fstab,
-            )
-            .map_err(Error::CreateFdt)?;
-            free_addr = dtb_start.offset() + dtb_size as u64;
-            Some(dtb_start)
-        } else {
-            None
-        };
+        let mut setup_data = Vec::<SetupData>::new();
+        if let Some(android_fstab) = android_fstab {
+            setup_data.push(
+                fdt::create_fdt(android_fstab, dump_device_tree_blob).map_err(Error::CreateFdt)?,
+            );
+        }
+        setup_data.push(setup_data_rng_seed());
+
+        let setup_data = write_setup_data(mem, &mut free_addr, &setup_data)?;
 
         let initrd = match initrd_file {
             Some(mut initrd_file) => {
@@ -1634,6 +1761,8 @@ impl X8664arch {
         #[cfg_attr(windows, allow(unused_variables))] mmio_bus: &devices::Bus,
         max_bus: u8,
         resume_notify_devices: &mut Vec<Arc<Mutex<dyn BusResumeDevice>>>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(unix)] ac_adapter: bool,
     ) -> Result<(acpi::AcpiDevResource, Option<BatControl>)> {
         // The AML data for the acpi devices
         let mut amls = Vec::new();
@@ -1643,7 +1772,14 @@ impl X8664arch {
                 #[cfg(unix)]
                 BatteryType::Goldfish => {
                     let (control_tube, _mmio_base) = arch::sys::unix::add_goldfish_battery(
-                        &mut amls, battery.1, mmio_bus, irq_chip, sci_irq, resources,
+                        &mut amls,
+                        battery.1,
+                        mmio_bus,
+                        irq_chip,
+                        sci_irq,
+                        resources,
+                        #[cfg(feature = "swap")]
+                        swap_controller,
                     )
                     .map_err(Error::CreateBatDevices)?;
                     Some(BatControl {
@@ -1706,12 +1842,45 @@ impl X8664arch {
 
         let pm_sci_evt = devices::IrqLevelEvent::new().map_err(Error::CreateEvent)?;
 
+        #[cfg(unix)]
+        let acdc = if ac_adapter {
+            // Allocate GPE for AC adapter notfication
+            let gpe = resources.allocate_gpe().ok_or(Error::AllocateGpe)?;
+
+            let alloc = resources.get_anon_alloc();
+            let mmio_base = resources
+                .allocate_mmio(
+                    devices::ac_adapter::ACDC_VIRT_MMIO_SIZE,
+                    alloc,
+                    "AcAdapter".to_string(),
+                    resources::AllocOptions::new().align(devices::ac_adapter::ACDC_VIRT_MMIO_SIZE),
+                )
+                .unwrap();
+            let ac_adapter_dev = devices::ac_adapter::AcAdapter::new(mmio_base, gpe);
+            let ac_dev = Arc::new(Mutex::new(ac_adapter_dev));
+            mmio_bus
+                .insert(
+                    ac_dev.clone(),
+                    mmio_base,
+                    devices::ac_adapter::ACDC_VIRT_MMIO_SIZE,
+                )
+                .unwrap();
+
+            ac_dev.lock().to_aml_bytes(&mut amls);
+            Some(ac_dev)
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let acdc = None;
+
         let mut pmresource = devices::ACPIPMResource::new(
             pm_sci_evt.try_clone().map_err(Error::CloneEvent)?,
             #[cfg(feature = "direct")]
             direct_evt_info,
             suspend_evt,
             vm_evt_wrtube,
+            acdc,
         );
         pmresource.to_aml_bytes(&mut amls);
         irq_chip
@@ -1810,6 +1979,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<()> {
         let com_evt_1_3 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         let com_evt_2_4 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
@@ -1821,6 +1991,8 @@ impl X8664arch {
             com_evt_2_4.get_trigger(),
             serial_parameters,
             serial_jail,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreateSerialDevices)?;
 
@@ -1844,6 +2016,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         debugcon_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<()> {
         for param in serial_parameters.values() {
             if param.hardware != SerialHardware::Debugcon {
@@ -1867,6 +2040,8 @@ impl X8664arch {
                         con,
                         jail.try_clone().map_err(Error::CloneJail)?,
                         preserved_fds,
+                        #[cfg(feature = "swap")]
+                        swap_controller,
                     )
                     .map_err(Error::CreateProxyDevice)?,
                 )),
@@ -1949,9 +2124,72 @@ pub fn set_enable_pnp_data_msr_config(
     Ok(())
 }
 
+#[derive(Error, Debug)]
+pub enum HybridSupportError {
+    #[error("Host CPU doesn't support hybrid architecture.")]
+    UnsupportedHostCpu,
+}
+
+/// The wrapper for CPUID call functions.
+pub struct CpuIdCall {
+    /// __cpuid_count or a fake function for test.
+    cpuid_count: unsafe fn(u32, u32) -> CpuidResult,
+    /// __cpuid or a fake function for test.
+    cpuid: unsafe fn(u32) -> CpuidResult,
+}
+
+impl CpuIdCall {
+    pub fn new(
+        cpuid_count: unsafe fn(u32, u32) -> CpuidResult,
+        cpuid: unsafe fn(u32) -> CpuidResult,
+    ) -> CpuIdCall {
+        CpuIdCall { cpuid_count, cpuid }
+    }
+}
+
+/// Check if host supports hybrid CPU feature. The check include:
+///     1. Check if CPUID.1AH exists. CPUID.1AH is hybrid information enumeration leaf.
+///     2. Check if CPUID.07H.00H:EDX[bit 15] sets. This bit means the processor is
+///        identified as a hybrid part.
+///     3. Check if CPUID.1AH:EAX sets. The hybrid core type is set in EAX.
+///
+/// # Arguments
+///
+/// * - `cpuid` the wrapped cpuid functions used to get CPUID info.
+pub fn check_host_hybrid_support(cpuid: &CpuIdCall) -> std::result::Result<(), HybridSupportError> {
+    // CPUID.0H.EAX returns maximum input value for basic CPUID information.
+    //
+    // Safe because we pass 0 for this call and the host supports the
+    // `cpuid` instruction.
+    let mut cpuid_entry = unsafe { (cpuid.cpuid)(0x0) };
+    if cpuid_entry.eax < 0x1A {
+        return Err(HybridSupportError::UnsupportedHostCpu);
+    }
+    // Safe because we pass 0x7 and 0 for this call and the host supports the
+    // `cpuid` instruction.
+    cpuid_entry = unsafe { (cpuid.cpuid_count)(0x7, 0) };
+    if cpuid_entry.edx & 1 << EDX_HYBRID_CPU_SHIFT == 0 {
+        return Err(HybridSupportError::UnsupportedHostCpu);
+    }
+    // From SDM, if a value entered for CPUID.EAX is less than or equal to the
+    // maximum input value and the leaf is not supported on that processor then
+    // 0 is returned in all the registers.
+    // For the CPU with hybrid support, its CPUID.1AH.EAX shouldn't be zero.
+    //
+    // Safe because we pass 0 for this call and the host supports the
+    // `cpuid` instruction.
+    cpuid_entry = unsafe { (cpuid.cpuid)(0x1A) };
+    if cpuid_entry.eax == 0 {
+        return Err(HybridSupportError::UnsupportedHostCpu);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::mem::size_of;
 
     const TEST_MEMORY_SIZE: u64 = 2 * GB;
 
@@ -2071,5 +2309,80 @@ mod tests {
         setup();
         // pci_low_start is 256 MB aligned to be friendly for MTRR mappings.
         assert_eq!(read_pci_mmio_before_32bit().start % (256 * MB), 0);
+    }
+
+    #[test]
+    fn write_setup_data_empty() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), 0x2_0000)]).unwrap();
+        let setup_data = [];
+        let mut free_addr = 0x1000;
+        let setup_data_addr =
+            write_setup_data(&mem, &mut free_addr, &setup_data).expect("write_setup_data");
+        assert_eq!(setup_data_addr, None);
+        assert_eq!(free_addr, 0x1000);
+    }
+
+    #[test]
+    fn write_setup_data_two_of_them() {
+        let mem = GuestMemory::new(&[(GuestAddress(0), 0x2_0000)]).unwrap();
+
+        let mut free_addr = 0x1000;
+
+        let entry1_addr = GuestAddress(0x1000);
+        let entry1_next_addr = entry1_addr;
+        let entry1_len_addr = entry1_addr.checked_add(12).unwrap();
+        let entry1_data_addr = entry1_addr.checked_add(16).unwrap();
+        let entry1_data = [0x55u8; 13];
+        let entry1_size = (size_of::<setup_data_hdr>() + entry1_data.len()) as u64;
+        let entry1_align = 3;
+
+        let entry2_addr = GuestAddress(entry1_addr.offset() + entry1_size + entry1_align);
+        let entry2_next_addr = entry2_addr;
+        let entry2_len_addr = entry2_addr.checked_add(12).unwrap();
+        let entry2_data_addr = entry2_addr.checked_add(16).unwrap();
+        let entry2_data = [0xAAu8; 9];
+        let entry2_size = (size_of::<setup_data_hdr>() + entry2_data.len()) as u64;
+
+        let next_free_addr = entry2_addr.checked_add(entry2_size).unwrap();
+
+        let setup_data = [
+            SetupData {
+                data: entry1_data.to_vec(),
+                type_: SetupDataType::Dtb,
+            },
+            SetupData {
+                data: entry2_data.to_vec(),
+                type_: SetupDataType::Dtb,
+            },
+        ];
+
+        let setup_data_head_addr =
+            write_setup_data(&mem, &mut free_addr, &setup_data).expect("write_setup_data");
+        assert_eq!(setup_data_head_addr, Some(entry1_addr));
+        assert_eq!(free_addr, next_free_addr.offset());
+
+        assert_eq!(
+            mem.read_obj_from_addr::<u64>(entry1_next_addr).unwrap(),
+            entry2_addr.offset()
+        );
+        assert_eq!(
+            mem.read_obj_from_addr::<u32>(entry1_len_addr).unwrap(),
+            entry1_data.len() as u32
+        );
+        assert_eq!(
+            mem.read_obj_from_addr::<[u8; 13]>(entry1_data_addr)
+                .unwrap(),
+            entry1_data
+        );
+
+        assert_eq!(mem.read_obj_from_addr::<u64>(entry2_next_addr).unwrap(), 0);
+        assert_eq!(
+            mem.read_obj_from_addr::<u32>(entry2_len_addr).unwrap(),
+            entry2_data.len() as u32
+        );
+        assert_eq!(
+            mem.read_obj_from_addr::<[u8; 9]>(entry2_data_addr).unwrap(),
+            entry2_data
+        );
     }
 }

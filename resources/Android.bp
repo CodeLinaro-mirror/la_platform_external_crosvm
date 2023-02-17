@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libresources",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "resources",
     cargo_env_compat: true,
@@ -30,7 +30,7 @@ rust_library {
 
 rust_test {
     name: "resources_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "resources",
     cargo_env_compat: true,

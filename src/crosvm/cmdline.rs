@@ -9,9 +9,7 @@ cfg_if::cfg_if! {
         use base::RawDescriptor;
         use devices::virtio::vhost::user::device::parse_wayland_sock;
 
-        use super::sys::config::{
-            VfioCommand, parse_vfio, parse_vfio_platform,
-        };
+        use super::sys::config::VfioOption;
         use super::config::SharedDir;
     } else if #[cfg(windows)] {
         use crate::crosvm::sys::config::IrqChipKind;
@@ -53,6 +51,8 @@ use devices::PflashParameters;
 use devices::SerialHardware;
 use devices::SerialParameters;
 use devices::StubPciParameters;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use hypervisor::CpuHybridType;
 use hypervisor::ProtectionType;
 use merge::bool::overwrite_false;
 use merge::vec::append;
@@ -154,7 +154,6 @@ pub enum CrossPlatformCommands {
     Version(VersionCommand),
     Vfio(VfioCrosvmCommand),
     Snapshot(SnapshotCommand),
-    Restore(RestoreCommand),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -310,6 +309,15 @@ pub struct SwapEnableCommand {
 }
 
 #[derive(FromArgs)]
+#[argh(subcommand, name = "out")]
+/// Enable swap of a VM
+pub struct SwapOutCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
 #[argh(subcommand, name = "disable")]
 /// Disable swap of a VM
 pub struct SwapDisableCommand {
@@ -348,6 +356,7 @@ pub struct SwapCommand {
 /// Swap related operations
 pub enum SwapSubcommands {
     Enable(SwapEnableCommand),
+    SwapOut(SwapOutCommand),
     Disable(SwapDisableCommand),
     Status(SwapStatusCommand),
     LogPageFault(SwapLogPageFaultCommand),
@@ -464,7 +473,6 @@ pub enum CrossPlatformDevicesCommands {
     Block(device::BlockOptions),
     #[cfg(feature = "gpu")]
     Gpu(device::GpuOptions),
-    #[cfg(unix)]
     Net(device::NetOptions),
 }
 
@@ -622,26 +630,12 @@ pub struct SnapshotTakeCommand {
 }
 
 #[derive(FromArgs)]
-#[argh(subcommand)]
-/// Snapshot commands
-pub enum SnapshotSubCommands {
-    Take(SnapshotTakeCommand),
-}
-#[derive(FromArgs)]
-#[argh(subcommand, name = "restore", description = "Restore commands")]
-/// Restore commands
-pub struct RestoreCommand {
-    #[argh(subcommand)]
-    pub restore_command: RestoreSubCommands,
-}
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "apply")]
-/// Restore VM
-pub struct RestoreApplyCommand {
-    #[argh(positional, arg_name = "restore_path")]
-    /// VM Restore image path
-    pub restore_path: PathBuf,
+#[argh(subcommand, name = "restore")]
+/// Restore VM state from a snapshot created by take
+pub struct SnapshotRestoreCommand {
+    #[argh(positional)]
+    /// path to snapshot to restore
+    pub snapshot_path: PathBuf,
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
@@ -649,9 +643,10 @@ pub struct RestoreApplyCommand {
 
 #[derive(FromArgs)]
 #[argh(subcommand)]
-/// Restore commands
-pub enum RestoreSubCommands {
-    Apply(RestoreApplyCommand),
+/// Snapshot commands
+pub enum SnapshotSubCommands {
+    Take(SnapshotTakeCommand),
+    Restore(SnapshotRestoreCommand),
 }
 
 /// Container for GpuParameters that have been fixed after parsing using serde.
@@ -755,6 +750,15 @@ fn overwrite<T>(left: &mut T, right: T) {
 #[argh(subcommand, name = "run", description = "Start a new crosvm instance")]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct RunCommand {
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    #[argh(switch)]
+    #[serde(default)]
+    #[merge(strategy = overwrite_false)]
+    /// enable AC adapter device
+    /// It purpose is to emulate ACPI ACPI0003 device, replicate and propagate the
+    /// ac adapter status from the host to the guest.
+    pub ac_adapter: bool,
+
     #[cfg(feature = "audio")]
     #[argh(
         option,
@@ -948,6 +952,13 @@ pub struct RunCommand {
     ///       clusters=[[0,2],[1,3],[4-7,12]] - creates one cluster
     ///         for cores 0 and 2, another one for cores 1 and 3,
     ///         and one last for cores 4, 5, 6, 7 and 12.
+    ///     core-types=[atom=[CPUSET],core=[CPUSET]] - Hybrid core types. (default: None)
+    ///       Set the type of virtual hybrid CPUs. Now it supports
+    ///       to set intel Atom or intel Core types.
+    ///       Examples:
+    ///       core-types=[atom=[0,1],core=[2,3]] - set vCPU 0 and
+    ///       vCPU 1 as intel Atom type, also set vCPU 2 and vCPU 3
+    ///       as intel Core type.
     pub cpus: Option<CpuOptions>,
 
     #[cfg(feature = "crash-report")]
@@ -1057,6 +1068,12 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// directory with smbios_entry_point/DMI files
     pub dmi: Option<PathBuf>,
+
+    #[argh(option, long = "dump-device-tree-blob", arg_name = "FILE")]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// dump generated device tree as a DTB file
+    pub dump_device_tree_blob: Option<PathBuf>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -1200,6 +1217,8 @@ pub struct RunCommand {
     ///     cache-path=PATH - The path to the render server shader
     ///         cache.
     ///     cache-size=SIZE - The maximum size of the shader cache
+    ///     foz-db-list-path=PATH - The path to GPU foz db list
+    ///         file for dynamically loading RO caches.
     pub gpu_render_server: Option<GpuRenderServerParameters>,
 
     #[argh(switch)]
@@ -1739,7 +1758,7 @@ pub struct RunCommand {
     ///        port if not provided.
     pub serial: Vec<SerialParameters>,
 
-    #[cfg(feature = "kiwi")]
+    #[cfg(windows)]
     #[argh(option, arg_name = "PIPE_NAME")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1952,20 +1971,19 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(
         option,
-        arg_name = "PATH[,guest-address=auto|<BUS:DEVICE.FUNCTION>][,iommu=on|off]",
-        from_str_fn(parse_vfio)
+        arg_name = "PATH[,guest-address=<BUS:DEVICE.FUNCTION>][,iommu=viommu|coiommu|off]"
     )]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(default)]
     #[merge(strategy = append)]
-    /// path to sysfs of PCI pass through or mdev device.
-    ///     guest-address=auto|<BUS:DEVICE.FUNCTION> - PCI address
-    ///        that the device will be assigned in the guest
-    ///        (default: auto).  When set to "auto", the device will
-    ///        be assigned an address that mirrors its address in
-    ///        the host.
-    ///     iommu=on|off - indicates whether to enable virtio IOMMU
-    ///        for this device
-    pub vfio: Vec<VfioCommand>,
+    /// path to sysfs of VFIO device.
+    ///     guest-address=<BUS:DEVICE.FUNCTION> - PCI address
+    ///        that the device will be assigned in the guest.
+    ///        If not specified, the device will be assigned an
+    ///        address that mirrors its address in the host.
+    ///        Only valid for PCI devices.
+    ///     iommu=viommu|coiommu|off - indicates which type of IOMMU
+    ///        to use for this device.
+    pub vfio: Vec<VfioOption>,
 
     #[cfg(unix)]
     #[argh(switch)]
@@ -1975,11 +1993,11 @@ pub struct RunCommand {
     pub vfio_isolate_hotplug: bool,
 
     #[cfg(unix)]
-    #[argh(option, arg_name = "PATH", from_str_fn(parse_vfio_platform))]
-    #[serde(skip)] // TODO(b/255223604)
+    #[argh(option, arg_name = "PATH")]
+    #[serde(skip)] // Deprecated - use `vfio` instead.
     #[merge(strategy = append)]
     /// path to sysfs of platform pass through
-    pub vfio_platform: Vec<VfioCommand>,
+    pub vfio_platform: Vec<VfioOption>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -2234,6 +2252,28 @@ impl TryFrom<RunCommand> for super::config::Config {
                     )
                 }
             };
+
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            if let Some(cpu_types) = cpus.core_types {
+                for cpu in cpu_types.atom {
+                    if cfg
+                        .vcpu_hybrid_type
+                        .insert(cpu, CpuHybridType::Atom)
+                        .is_some()
+                    {
+                        return Err(format!("vCPU index must be unique {}", cpu));
+                    }
+                }
+                for cpu in cpu_types.core {
+                    if cfg
+                        .vcpu_hybrid_type
+                        .insert(cpu, CpuHybridType::Core)
+                        .is_some()
+                    {
+                        return Err(format!("vCPU index must be unique {}", cpu));
+                    }
+                }
+            }
         }
 
         cfg.vcpu_affinity = cmd.cpu_affinity;
@@ -2421,7 +2461,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                 cfg.process_invariants_data_size = cmd.process_invariants_size;
             }
             cfg.pvclock = cmd.pvclock;
-            #[cfg(feature = "kiwi")]
+            #[cfg(windows)]
             {
                 cfg.service_pipe_name = cmd.service_pipe_name;
             }
@@ -2693,16 +2733,21 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.battery_config = cmd.battery;
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+        {
+            cfg.ac_adapter = cmd.ac_adapter;
+        }
 
         #[cfg(feature = "gdb")]
         {
             cfg.gdb = cmd.gdb;
         }
 
+        cfg.host_cpu_topology = cmd.host_cpu_topology;
+
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         {
             cfg.enable_hwp = cmd.enable_hwp;
-            cfg.host_cpu_topology = cmd.host_cpu_topology;
             cfg.force_s2idle = cmd.s2idle;
             cfg.pcie_ecam = cmd.pcie_ecam;
             cfg.pci_low_start = cmd.pci_start;
@@ -2750,6 +2795,8 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.disable_virtio_intx = cmd.disable_virtio_intx;
 
         cfg.dmi_path = cmd.dmi;
+
+        cfg.dump_device_tree_blob = cmd.dump_device_tree_blob;
 
         cfg.itmt = cmd.itmt;
 

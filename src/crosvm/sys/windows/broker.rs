@@ -43,7 +43,9 @@ use base::EventToken;
 use base::FramingMode;
 use base::RawDescriptor;
 use base::ReadNotifier;
+use base::RecvTube;
 use base::SafeDescriptor;
+use base::SendTube;
 #[cfg(feature = "gpu")]
 use base::StreamChannel;
 use base::Timer;
@@ -81,6 +83,8 @@ use metrics::MetricEventType;
 use net_util::slirp::sys::windows::SlirpStartupConfig;
 #[cfg(feature = "slirp")]
 use net_util::slirp::sys::windows::SLIRP_BUFFER_SIZE;
+use serde::Deserialize;
+use serde::Serialize;
 use tube_transporter::TubeToken;
 use tube_transporter::TubeTransferData;
 use tube_transporter::TubeTransporter;
@@ -89,9 +93,17 @@ use win_util::ProcessType;
 use winapi::shared::winerror::ERROR_ACCESS_DENIED;
 use winapi::um::processthreadsapi::TerminateProcess;
 
+use crate::sys::windows::get_gpu_product_configs;
 use crate::Config;
 
 const KILL_CHILD_EXIT_CODE: u32 = 1;
+
+/// Tubes created by the broker and sent to child processes via the bootstrap tube.
+#[derive(Serialize, Deserialize)]
+pub struct BrokerTubes {
+    pub vm_evt_wrtube: SendTube,
+    pub vm_evt_rdtube: RecvTube,
+}
 
 /// This struct represents a configured "disk" device as returned by the platform's API. There will
 /// be two instances of it for each disk device, with the Tubes connected appropriately. The broker
@@ -503,7 +515,7 @@ fn run_internal(mut cfg: Config) -> Result<()> {
     let mut metric_tubes = Vec::new();
     let metrics_controller = spawn_child(
         current_exe().unwrap().to_str().unwrap(),
-        &["run-metrics"],
+        ["run-metrics"],
         get_log_path(&cfg, "metrics_stdout.log"),
         get_log_path(&cfg, "metrics_stderr.log"),
         ProcessType::Metrics,
@@ -524,7 +536,7 @@ fn run_internal(mut cfg: Config) -> Result<()> {
 
     let mut main_child = spawn_child(
         current_exe().unwrap().to_str().unwrap(),
-        &["run-main"],
+        ["run-main"],
         get_log_path(&cfg, "main_stdout.log"),
         get_log_path(&cfg, "main_stderr.log"),
         ProcessType::Main,
@@ -565,11 +577,16 @@ fn run_internal(mut cfg: Config) -> Result<()> {
 
     let (vm_evt_wrtube, vm_evt_rdtube) =
         Tube::directional_pair().context("failed to create vm event tube")?;
-    cfg.vm_evt_wrtube = Some(vm_evt_wrtube);
-    cfg.vm_evt_rdtube = Some(vm_evt_rdtube);
 
     #[cfg(feature = "gpu")]
-    let gpu_cfg = platform_create_gpu(&cfg, &mut main_child, &mut exit_events)?;
+    let gpu_cfg = platform_create_gpu(
+        &cfg,
+        &mut main_child,
+        &mut exit_events,
+        vm_evt_wrtube
+            .try_clone()
+            .exit_context(Exit::CloneEvent, "failed to clone event")?,
+    )?;
 
     #[cfg(feature = "gpu")]
     let _gpu_child = if cfg.vhost_user_gpu.is_empty() {
@@ -612,29 +629,32 @@ fn run_internal(mut cfg: Config) -> Result<()> {
     main_child.bootstrap_tube.send(&exit_event).unwrap();
     exit_events.push(exit_event);
 
+    let broker_tubes = BrokerTubes {
+        vm_evt_wrtube,
+        vm_evt_rdtube,
+    };
+    main_child.bootstrap_tube.send(&broker_tubes).unwrap();
+
     // Setup our own metrics agent
     {
         let broker_metrics = metrics_tube_pair(&mut metric_tubes)?;
         metrics::initialize(broker_metrics);
-        #[cfg(feature = "kiwi")]
-        {
-            let use_vulkan = if cfg!(feature = "gpu") {
-                match &cfg.gpu_parameters {
-                    Some(params) => Some(params.use_vulkan),
-                    None => {
-                        warn!("No GPU parameters set on crosvm config.");
-                        None
-                    }
+        let use_vulkan = if cfg!(feature = "gpu") {
+            match &cfg.gpu_parameters {
+                Some(params) => Some(params.use_vulkan),
+                None => {
+                    warn!("No GPU parameters set on crosvm config.");
+                    None
                 }
-            } else {
-                None
-            };
-            anti_tamper::setup_common_metric_invariants(
-                &cfg.product_version,
-                &cfg.product_channel,
-                &use_vulkan,
-            );
-        }
+            }
+        } else {
+            None
+        };
+        anti_tamper::setup_common_metric_invariants(
+            &cfg.product_version,
+            &cfg.product_channel,
+            &use_vulkan.unwrap_or_default(),
+        );
     }
 
     // We have all the metrics tubes from other children, so give them to the metrics controller
@@ -808,10 +828,7 @@ impl Supervisor {
     }
 
     fn all_non_metrics_processes_exited(&self) -> bool {
-        #[cfg(not(feature = "kiwi"))]
-        return self.children.len() == 0;
-        #[cfg(feature = "kiwi")]
-        return self.children.len() == 0 || self.is_only_metrics_process_running();
+        self.children.len() == 0 || self.is_only_metrics_process_running()
     }
 
     fn start_exit_timer(&mut self, timeout_token: Token) -> Result<()> {
@@ -1078,7 +1095,7 @@ fn spawn_block_backend(
     vhost_user_device_tube.set_target_pid(main_child.alias_pid);
     let block_child = spawn_child(
         current_exe().unwrap().to_str().unwrap(),
-        &["device", "block"],
+        ["device", "block"],
         get_log_path(cfg, &format!("disk_{}_stdout.log", log_index)),
         get_log_path(cfg, &format!("disk_{}_stderr.log", log_index)),
         ProcessType::Block,
@@ -1139,7 +1156,7 @@ where
         )
         .exit_context(Exit::SandboxError, "sandbox operation failed")?;
     policy
-        .set_job_level(process_policy.job_level, 0)
+        .set_job_level(process_policy.job_level, process_policy.ui_exceptions)
         .exit_context(Exit::SandboxError, "sandbox operation failed")?;
     policy
         .set_integrity_level(process_policy.integrity_level)
@@ -1330,7 +1347,7 @@ fn spawn_slirp(
 ) -> Result<ChildProcess> {
     let slirp_child = spawn_child(
         current_exe().unwrap().to_str().unwrap(),
-        &["run-slirp"],
+        ["run-slirp"],
         get_log_path(cfg, "slirp_stdout.log"),
         get_log_path(cfg, "slirp_stderr.log"),
         ProcessType::Slirp,
@@ -1365,7 +1382,7 @@ fn spawn_net_backend(
 
     let net_child = spawn_child(
         current_exe().unwrap().to_str().unwrap(),
-        &["device", "net"],
+        ["device", "net"],
         get_log_path(cfg, "net_stdout.log"),
         get_log_path(cfg, "net_stderr.log"),
         ProcessType::Net,
@@ -1399,6 +1416,7 @@ fn platform_create_gpu(
     cfg: &Config,
     #[allow(unused_variables)] main_child: &mut ChildProcess,
     exit_events: &mut Vec<Event>,
+    exit_evt_wrtube: SendTube,
 ) -> Result<(GpuBackendConfig, GpuVmmConfig)> {
     let exit_event = Event::new().exit_context(Exit::CreateEvent, "failed to create exit event")?;
     exit_events.push(
@@ -1435,12 +1453,8 @@ fn platform_create_gpu(
     event_devices.push(EventDevice::keyboard(event_device_pipe));
     input_event_keyboard_pipes.push(virtio_input_pipe);
 
-    let exit_evt_wrtube = cfg
-        .vm_evt_wrtube
-        .as_ref()
-        .expect("vm_evt_wrtube should be set")
-        .try_clone()
-        .exit_context(Exit::CloneEvent, "failed to clone event")?;
+    let (backend_config_product, vmm_config_product) =
+        get_gpu_product_configs(cfg, main_child.alias_pid)?;
 
     let backend_config = GpuBackendConfig {
         device_vhost_user_tube: None,
@@ -1452,12 +1466,15 @@ fn platform_create_gpu(
             .as_ref()
             .expect("missing GpuParameters in config")
             .clone(),
+        product_config: backend_config_product,
     };
+
     let vmm_config = GpuVmmConfig {
         main_vhost_user_tube: None,
         input_event_multi_touch_pipes,
         input_event_mouse_pipes,
         input_event_keyboard_pipes,
+        product_config: vmm_config_product,
     };
 
     Ok((backend_config, vmm_config))
@@ -1481,7 +1498,7 @@ fn start_up_gpu(
 
     let gpu_child = spawn_child(
         current_exe().unwrap().to_str().unwrap(),
-        &["device", "gpu"],
+        ["device", "gpu"],
         get_log_path(cfg, "gpu_stdout.log"),
         get_log_path(cfg, "gpu_stderr.log"),
         ProcessType::Gpu,
@@ -1711,7 +1728,7 @@ mod tests {
             let exit_events = vec![Event::new().unwrap()];
             let _child_main = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "2"],
+                ["127.0.0.1", "-n", "2"],
                 None,
                 None,
                 ProcessType::Main,
@@ -1739,7 +1756,7 @@ mod tests {
             let exit_events = vec![Event::new().unwrap()];
             let _child_main = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "4"],
+                ["127.0.0.1", "-n", "4"],
                 None,
                 None,
                 ProcessType::Main,
@@ -1752,7 +1769,7 @@ mod tests {
             );
             let _child_device = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "2"],
+                ["127.0.0.1", "-n", "2"],
                 None,
                 None,
                 ProcessType::Block,
@@ -1779,7 +1796,7 @@ mod tests {
             let exit_events = vec![Event::new().unwrap()];
             let _child_main = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "2"],
+                ["127.0.0.1", "-n", "2"],
                 None,
                 None,
                 ProcessType::Main,
@@ -1792,7 +1809,7 @@ mod tests {
             );
             let _child_device = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "11"],
+                ["127.0.0.1", "-n", "11"],
                 None,
                 None,
                 ProcessType::Block,
@@ -1824,7 +1841,7 @@ mod tests {
             let exit_events = vec![Event::new().unwrap()];
             let _child_main = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "11"],
+                ["127.0.0.1", "-n", "11"],
                 None,
                 None,
                 ProcessType::Main,
@@ -1837,7 +1854,7 @@ mod tests {
             );
             let _child_device = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "2"],
+                ["127.0.0.1", "-n", "2"],
                 None,
                 None,
                 ProcessType::Block,
@@ -1869,7 +1886,7 @@ mod tests {
             let exit_events = vec![Event::new().unwrap()];
             let _child_main = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "2"],
+                ["127.0.0.1", "-n", "2"],
                 None,
                 None,
                 ProcessType::Main,
@@ -1882,7 +1899,7 @@ mod tests {
             );
             let _child_device = spawn_child(
                 "cmd",
-                &["/c", "exit -1"],
+                ["/c", "exit -1"],
                 None,
                 None,
                 ProcessType::Block,
@@ -1917,7 +1934,7 @@ mod tests {
             let mut children: HashMap<u32, ChildCleanup> = HashMap::new();
             let _child_main = spawn_child(
                 "ping",
-                &["127.0.0.1", "-n", "3"],
+                ["127.0.0.1", "-n", "3"],
                 None,
                 None,
                 ProcessType::Main,

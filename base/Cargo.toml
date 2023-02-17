@@ -1,12 +1,11 @@
 [package]
 name = "base"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [features]
 chromeos = []
-kiwi = []
 
 [dependencies]
 audio_streams = { path = "../common/audio_streams" } # provided by ebuild
@@ -27,6 +26,7 @@ smallvec = "1.6.1"
 tempfile = "3"
 thiserror = "1.0.20"
 uuid = { version = "0.8.2", features = ["v4"] }
+zerocopy = "*"
 
 [target.'cfg(unix)'.dependencies]
 minijail = "*"

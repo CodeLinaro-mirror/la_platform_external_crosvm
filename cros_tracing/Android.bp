@@ -12,11 +12,16 @@ package {
 
 rust_library {
     name: "libcros_tracing",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "cros_tracing",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
+    rustlibs: [
+        "libanyhow",
+        "libbase_rust",
+        "libcfg_if",
+    ],
 }

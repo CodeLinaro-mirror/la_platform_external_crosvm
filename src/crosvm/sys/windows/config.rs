@@ -4,10 +4,8 @@
 
 use std::str::FromStr;
 
-#[cfg(all(feature = "prod-build", feature = "kiwi"))]
+#[cfg(feature = "prod-build")]
 use devices::serial_device::SerialType;
-#[cfg(feature = "audio")]
-use devices::Ac97Parameters;
 use devices::SerialParameters;
 use serde::Deserialize;
 use serde::Serialize;
@@ -16,17 +14,17 @@ use crate::crosvm::config::Config;
 
 #[cfg(feature = "audio")]
 pub fn parse_ac97_options(
-    _ac97_params: &mut Ac97Parameters,
+    _ac97_params: &mut devices::Ac97Parameters,
     key: &str,
-    value: &str,
+    _value: &str,
 ) -> Result<(), String> {
-    Err(format!("unknown ac97 parameter {} {}", key, value))
+    Err(format!("unknown ac97 parameter {}", key))
 }
 
 pub fn check_serial_params(
     #[allow(unused_variables)] serial_params: &SerialParameters,
 ) -> Result<(), String> {
-    #[cfg(all(feature = "prod-build", feature = "kiwi"))]
+    #[cfg(feature = "prod-build")]
     {
         if matches!(serial_params.type_, SerialType::SystemSerialType) {
             return Err(format!(
@@ -45,7 +43,7 @@ pub fn validate_config(_cfg: &mut Config) -> std::result::Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrqChipKind {
     /// All interrupt controllers are emulated in the kernel.
     Kernel,
@@ -69,7 +67,7 @@ impl FromStr for IrqChipKind {
 }
 
 /// Hypervisor backend.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Eq)]
 pub enum HypervisorKind {
     #[cfg(feature = "gvm")]
     Gvm,

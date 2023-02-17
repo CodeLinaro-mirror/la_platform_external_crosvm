@@ -32,6 +32,7 @@ use base::FromRawDescriptor;
 use base::RawDescriptor;
 use base::SafeDescriptor;
 use data_model::vec_with_array_field;
+use data_model::zerocopy_from_reader;
 use data_model::DataInit;
 use hypervisor::DeviceKind;
 use hypervisor::Vm;
@@ -44,6 +45,7 @@ use resources::Error as ResourcesError;
 use sync::Mutex;
 use thiserror::Error;
 use vfio_sys::*;
+use zerocopy::FromBytes;
 
 use crate::IommuDevType;
 
@@ -88,6 +90,8 @@ pub enum VfioError {
     OpenGroup(io::Error, String),
     #[error("resources error: {0}")]
     Resources(ResourcesError),
+    #[error("unknown vfio device type (flags: {0:#x})")]
+    UnknownDeviceType(u32),
     #[error(
         "vfio API version doesn't match with VFIO_API_VERSION defined in vfio_sys/src/vfio.rs"
     )]
@@ -120,6 +124,12 @@ fn get_error() -> Error {
 
 static KVM_VFIO_FILE: OnceCell<SafeDescriptor> = OnceCell::new();
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VfioDeviceType {
+    Pci,
+    Platform,
+}
+
 enum KvmVfioGroupOps {
     Add,
     Delete,
@@ -138,7 +148,7 @@ enum IommuType {
 
 // Hint as to whether IOMMU mappings will tend to be large and static or
 // small and dynamic.
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 enum IommuMappingHint {
     Static,
     Dynamic,
@@ -152,9 +162,10 @@ pub struct VfioContainer {
 
 fn extract_vfio_struct<T>(bytes: &[u8], offset: usize) -> T
 where
-    T: DataInit,
+    T: FromBytes,
 {
-    T::from_reader(&bytes[offset..(offset + mem::size_of::<T>())]).expect("malformed kernel data")
+    zerocopy_from_reader(&bytes[offset..(offset + mem::size_of::<T>())])
+        .expect("malformed kernel data")
 }
 
 const VFIO_API_VERSION: u8 = 0;
@@ -749,10 +760,12 @@ pub struct VfioDevice {
     dev: File,
     name: String,
     container: Arc<Mutex<VfioContainer>>,
+    dev_type: VfioDeviceType,
     group_descriptor: RawDescriptor,
     group_id: u32,
     // vec for vfio device's regions
     regions: Vec<VfioRegion>,
+    num_irqs: u32,
 
     iova_alloc: Arc<Mutex<AddressAllocator>>,
 }
@@ -779,7 +792,8 @@ impl VfioDevice {
         let name_str = name_osstr.to_str().ok_or(VfioError::InvalidPath)?;
         let name = String::from(name_str);
         let dev = group.lock().get_device(&name)?;
-        let regions = Self::get_regions(&dev)?;
+        let (dev_info, dev_type) = Self::get_device_info(&dev)?;
+        let regions = Self::get_regions(&dev, dev_info.num_regions)?;
         group.lock().add_device_num();
         let group_descriptor = group.lock().as_raw_descriptor();
 
@@ -791,9 +805,11 @@ impl VfioDevice {
             dev,
             name,
             container,
+            dev_type,
             group_descriptor,
             group_id,
             regions,
+            num_irqs: dev_info.num_irqs,
             iova_alloc: Arc::new(Mutex::new(iova_alloc)),
         })
     }
@@ -818,7 +834,14 @@ impl VfioDevice {
                 return Err(e);
             }
         };
-        let regions = match Self::get_regions(&dev) {
+        let (dev_info, dev_type) = match Self::get_device_info(&dev) {
+            Ok(dev_info) => dev_info,
+            Err(e) => {
+                container.lock().remove_group(group_id, false);
+                return Err(e);
+            }
+        };
+        let regions = match Self::get_regions(&dev, dev_info.num_regions) {
             Ok(regions) => regions,
             Err(e) => {
                 container.lock().remove_group(group_id, false);
@@ -836,9 +859,11 @@ impl VfioDevice {
             dev,
             name,
             container,
+            dev_type,
             group_descriptor,
             group_id,
             regions,
+            num_irqs: dev_info.num_irqs,
             iova_alloc: Arc::new(Mutex::new(iova_alloc)),
         })
     }
@@ -853,11 +878,46 @@ impl VfioDevice {
         &self.name
     }
 
+    /// Returns the type of this VFIO device.
+    pub fn device_type(&self) -> VfioDeviceType {
+        self.dev_type
+    }
+
     /// enter the device's low power state
     pub fn pm_low_power_enter(&self) -> Result<()> {
         let mut device_feature = vec_with_array_field::<vfio_device_feature, u8>(0);
         device_feature[0].argsz = mem::size_of::<vfio_device_feature>() as u32;
         device_feature[0].flags = VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_ENTRY;
+        // Safe as we are the owner of self and power_management which are valid value
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE(), &device_feature[0]) };
+        if ret < 0 {
+            Err(VfioError::VfioPmLowPowerEnter(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// enter the device's low power state with wakeup notification
+    pub fn pm_low_power_enter_with_wakeup(&self, wakeup_evt: Event) -> Result<()> {
+        let payload = vfio_device_low_power_entry_with_wakeup {
+            wakeup_eventfd: wakeup_evt.as_raw_descriptor(),
+            reserved: 0,
+        };
+        let payload_size = mem::size_of::<vfio_device_low_power_entry_with_wakeup>();
+        let mut device_feature = vec_with_array_field::<vfio_device_feature, u8>(payload_size);
+        device_feature[0].argsz = (mem::size_of::<vfio_device_feature>() + payload_size) as u32;
+        device_feature[0].flags =
+            VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_ENTRY_WITH_WAKEUP;
+        unsafe {
+            // Safe as we know vfio_device_low_power_entry_with_wakeup has two 32-bit int fields
+            device_feature[0]
+                .data
+                .as_mut_slice(payload_size)
+                .copy_from_slice(
+                    mem::transmute::<vfio_device_low_power_entry_with_wakeup, [u8; 8]>(payload)
+                        .as_slice(),
+                );
+        }
         // Safe as we are the owner of self and power_management which are valid value
         let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE(), &device_feature[0]) };
         if ret < 0 {
@@ -1015,23 +1075,8 @@ impl VfioDevice {
         }
     }
 
-    fn validate_dev_info(dev_info: &mut vfio_device_info) -> Result<()> {
-        if (dev_info.flags & VFIO_DEVICE_FLAGS_PCI) != 0 {
-            if dev_info.num_regions < VFIO_PCI_CONFIG_REGION_INDEX + 1
-                || dev_info.num_irqs < VFIO_PCI_MSIX_IRQ_INDEX + 1
-            {
-                return Err(VfioError::VfioDeviceGetInfo(get_error()));
-            }
-            return Ok(());
-        } else if (dev_info.flags & VFIO_DEVICE_FLAGS_PLATFORM) != 0 {
-            return Ok(());
-        }
-
-        Err(VfioError::VfioDeviceGetInfo(get_error()))
-    }
-
     /// Get and validate VFIO device information.
-    pub fn check_device_info(&self) -> Result<vfio_device_info> {
+    fn get_device_info(device_file: &File) -> Result<(vfio_device_info, VfioDeviceType)> {
         let mut dev_info = vfio_device_info {
             argsz: mem::size_of::<vfio_device_info>() as u32,
             flags: 0,
@@ -1042,24 +1087,34 @@ impl VfioDevice {
 
         // Safe as we are the owner of device_file and dev_info which are valid value,
         // and we verify the return value.
-        let ret = unsafe {
-            ioctl_with_mut_ref(self.device_file(), VFIO_DEVICE_GET_INFO(), &mut dev_info)
-        };
+        let ret = unsafe { ioctl_with_mut_ref(device_file, VFIO_DEVICE_GET_INFO(), &mut dev_info) };
         if ret < 0 {
             return Err(VfioError::VfioDeviceGetInfo(get_error()));
         }
 
-        Self::validate_dev_info(&mut dev_info)?;
-        Ok(dev_info)
+        let dev_type = if (dev_info.flags & VFIO_DEVICE_FLAGS_PCI) != 0 {
+            if dev_info.num_regions < VFIO_PCI_CONFIG_REGION_INDEX + 1
+                || dev_info.num_irqs < VFIO_PCI_MSIX_IRQ_INDEX + 1
+            {
+                return Err(VfioError::VfioDeviceGetInfo(get_error()));
+            }
+
+            VfioDeviceType::Pci
+        } else if (dev_info.flags & VFIO_DEVICE_FLAGS_PLATFORM) != 0 {
+            VfioDeviceType::Platform
+        } else {
+            return Err(VfioError::UnknownDeviceType(dev_info.flags));
+        };
+
+        Ok((dev_info, dev_type))
     }
 
     /// Query interrupt information
     /// return: Vector of interrupts information, each of which contains flags and index
     pub fn get_irqs(&self) -> Result<Vec<VfioIrq>> {
-        let dev_info = self.check_device_info()?;
         let mut irqs: Vec<VfioIrq> = Vec::new();
 
-        for i in 0..dev_info.num_irqs {
+        for i in 0..self.num_irqs {
             let argsz = mem::size_of::<vfio_irq_info>() as u32;
             let mut irq_info = vfio_irq_info {
                 argsz,
@@ -1067,7 +1122,7 @@ impl VfioDevice {
                 index: i,
                 count: 0,
             };
-            // Safe as we are the owner of dev and dev_info which are valid value,
+            // Safe as we are the owner of dev and irq_info which are valid value,
             // and we verify the return value.
             let ret = unsafe {
                 ioctl_with_mut_ref(
@@ -1090,24 +1145,9 @@ impl VfioDevice {
     }
 
     #[allow(clippy::cast_ptr_alignment)]
-    fn get_regions(dev: &File) -> Result<Vec<VfioRegion>> {
+    fn get_regions(dev: &File, num_regions: u32) -> Result<Vec<VfioRegion>> {
         let mut regions: Vec<VfioRegion> = Vec::new();
-        let mut dev_info = vfio_device_info {
-            argsz: mem::size_of::<vfio_device_info>() as u32,
-            flags: 0,
-            num_regions: 0,
-            num_irqs: 0,
-            ..Default::default()
-        };
-        // Safe as we are the owner of dev and dev_info which are valid value,
-        // and we verify the return value.
-        let mut ret = unsafe { ioctl_with_mut_ref(dev, VFIO_DEVICE_GET_INFO(), &mut dev_info) };
-        if ret < 0 {
-            return Err(VfioError::VfioDeviceGetInfo(get_error()));
-        }
-
-        Self::validate_dev_info(&mut dev_info)?;
-        for i in 0..dev_info.num_regions {
+        for i in 0..num_regions {
             let argsz = mem::size_of::<vfio_region_info>() as u32;
             let mut reg_info = vfio_region_info {
                 argsz,
@@ -1119,7 +1159,8 @@ impl VfioDevice {
             };
             // Safe as we are the owner of dev and reg_info which are valid value,
             // and we verify the return value.
-            ret = unsafe { ioctl_with_mut_ref(dev, VFIO_DEVICE_GET_REGION_INFO(), &mut reg_info) };
+            let ret =
+                unsafe { ioctl_with_mut_ref(dev, VFIO_DEVICE_GET_REGION_INFO(), &mut reg_info) };
             if ret < 0 {
                 continue;
             }
@@ -1138,7 +1179,7 @@ impl VfioDevice {
                 region_with_cap[0].region_info.offset = 0;
                 // Safe as we are the owner of dev and region_info which are valid value,
                 // and we verify the return value.
-                ret = unsafe {
+                let ret = unsafe {
                     ioctl_with_mut_ref(
                         dev,
                         VFIO_DEVICE_GET_REGION_INFO(),
@@ -1353,14 +1394,13 @@ impl VfioDevice {
     }
 
     /// Reads a value from the specified `VfioRegionAddr.addr` + `offset`.
-    pub fn region_read_from_addr<T: DataInit>(&self, addr: &VfioRegionAddr, offset: u64) -> T {
+    pub fn region_read_from_addr<T: FromBytes>(&self, addr: &VfioRegionAddr, offset: u64) -> T {
         let mut val = mem::MaybeUninit::zeroed();
         // Safe because we have zero-initialized `size_of::<T>()` bytes.
         let buf =
             unsafe { slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, mem::size_of::<T>()) };
         self.region_read(addr.index, buf, addr.addr + offset);
-        // Safe because any bit pattern is valid for a type that implements
-        // DataInit.
+        // Safe because any bit pattern is valid for a type that implements FromBytes.
         unsafe { val.assume_init() }
     }
 

@@ -233,6 +233,9 @@ impl Vcpu for HaxmVcpu {
                     // Safe because we know this is an mmio read, so we need to put data into the
                     // "value" field of the hax_fastmmio. The "value" field is a u64, so casting
                     // as a &mut [u8] of len 8 is safe.
+                    // TODO(b/250085118): remove this clippy allow as it's allowing potentially
+                    // problematic behavior.
+                    #[allow(unaligned_references)]
                     let buffer = unsafe {
                         std::slice::from_raw_parts_mut(
                             &mut (*mmio).__bindgen_anon_1.value as *mut u64 as *mut u8,
@@ -378,7 +381,7 @@ impl VcpuX86_64 for HaxmVcpu {
         // Safe because we know we mapped enough memory to hold the hax_tunnel struct because the
         // kernel told us how large it was.
         unsafe {
-            (*self.tunnel).request_interrupt_window = if requested { 1 } else { 0 };
+            (*self.tunnel).request_interrupt_window = i32::from(requested);
         }
     }
 

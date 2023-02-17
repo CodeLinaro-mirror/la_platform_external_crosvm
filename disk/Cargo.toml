@@ -1,7 +1,7 @@
 [package]
 name = "disk"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [lib]
@@ -29,6 +29,7 @@ thiserror = "*"
 tempfile = "3"
 uuid = { version = "0.8.2", features = ["v4"], optional = true }
 vm_memory = { path = "../vm_memory" }
+zerocopy = "*"
 
 [dependencies.futures]
 version = "*"

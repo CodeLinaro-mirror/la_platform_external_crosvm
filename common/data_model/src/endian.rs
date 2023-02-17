@@ -38,15 +38,16 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 use static_assertions::const_assert;
-
-use crate::DataInit;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 macro_rules! endian_type {
     ($old_type:ident, $new_type:ident, $to_new:ident, $from_new:ident) => {
         /// An integer type of with an explicit endianness.
         ///
         /// See module level documentation for examples.
-        #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+        #[repr(transparent)]
+        #[derive(Copy, Clone, Eq, PartialEq, Debug, Default, FromBytes, AsBytes)]
         pub struct $new_type($old_type);
 
         impl $new_type {
@@ -60,8 +61,6 @@ macro_rules! endian_type {
                 $old_type::$from_new(self.0)
             }
         }
-
-        unsafe impl DataInit for $new_type {}
 
         impl PartialEq<$old_type> for $new_type {
             fn eq(&self, other: &$old_type) -> bool {
