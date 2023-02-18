@@ -89,8 +89,7 @@ use crate::virtio::Writer;
 use crate::Suspendable;
 
 const DEFAULT_QUEUE_SIZE: u16 = 256;
-// ANDROID(b/251366833): We've temporarily reduced the number of queues to debug an issue.
-pub const DEFAULT_NUM_QUEUES: u16 = 1; // 16;
+pub const DEFAULT_NUM_QUEUES: u16 = 16;
 
 const SECTOR_SHIFT: u8 = 9;
 const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;

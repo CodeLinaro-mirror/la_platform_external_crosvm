@@ -44,6 +44,7 @@ def collect_binary_sizes(api, properties):
             "./tools/build_release",
             "--json",
             "--platform=" + str(properties.test_arch),
+            "--strip",
         ],
         stdout=api.raw_io.output_text(name="Obtain release build output", add_output_log=True),
     )
@@ -67,6 +68,14 @@ def collect_binary_sizes(api, properties):
                     binary_path,
                     "--base-dir",
                     "/scratch/cargo_target/crosvm",
+                    # Only upload binary size in postsubmit
+                    *(("--upload",) if properties.profile == "postsubmit" else tuple()),
+                    "--builder-name",
+                    api.buildbucket.builder_name,
+                    "--log-url",
+                    api.buildbucket.build_url(),
+                    "--build-version",
+                    api.buildbucket.gitiles_commit.id,
                 ],
                 infra_step=True,
                 stdout=api.raw_io.output_text(),
@@ -104,7 +113,6 @@ def RunSteps(api, properties):
                 "--platform=" + properties.test_arch,
             ],
         )
-
         with api.step.nest("Collect binary sizes"):
             collect_binary_sizes(api, properties)
 
