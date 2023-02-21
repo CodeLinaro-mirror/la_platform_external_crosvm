@@ -2,13 +2,17 @@
 
 set -ex
 
-function usage() { echo "merge-setup.sh [-s]" && exit 1; }
+function usage() { echo "merge-setup.sh [-s][-b]" && exit 1; }
 
 sync=""
-while getopts 's' FLAG; do
+branch=""
+while getopts 'sb' FLAG; do
   case ${FLAG} in
     s)
       sync="sync"
+      ;;
+    b)
+      branch="branch"
       ;;
     ?)
       echo "unknown flag."
@@ -35,7 +39,7 @@ fi
 if [ -z $ANDROID_BUILD_TOP ]; then echo "forgot to source build/envsetup.sh?" && exit 1; fi
 cd $ANDROID_BUILD_TOP/external/crosvm
 
-if ! [[ -z $(git branch --list merge) ]];
+if [[ ! -z $(git branch --list merge) && ! "$branch" = "branch" ]];
   then
     echo "branch merge already exists. Forgot to clean up?" && exit 1;
 fi
@@ -48,6 +52,11 @@ fi
 
 source $ANDROID_BUILD_TOP/build/envsetup.sh
 m blueprint_tools cargo_embargo crosvm
-repo start merge
+
+if [ ! "$branch" = "branch" ];
+  then
+    repo start merge;
+fi
+
 git merge --log aosp/upstream-main
 $ANDROID_BUILD_TOP/external/crosvm/tools/install-deps

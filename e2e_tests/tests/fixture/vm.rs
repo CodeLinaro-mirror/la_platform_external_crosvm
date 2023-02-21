@@ -115,13 +115,20 @@ impl Config {
     /// Uses extra arguments for `crosvm run`.
     #[allow(dead_code)]
     pub fn extra_args(mut self, args: Vec<String>) -> Self {
-        self.extra_args = args;
+        let mut args = args;
+        self.extra_args.append(&mut args);
         self
     }
 
     /// Uses `O_DIRECT` for the rootfs.
     pub fn o_direct(mut self) -> Self {
         self.o_direct = true;
+        self
+    }
+
+    /// Uses `disable-sandbox` argument for `crosvm run`.
+    pub fn disable_sandbox(mut self) -> Self {
+        self.extra_args.push("--disable-sandbox".to_string());
         self
     }
 }
@@ -224,6 +231,18 @@ impl TestVm {
         Ok(())
     }
 
+    /// Executes the shell command `command` async, allowing for calls other actions between the
+    /// command call and the result, and returns the programs stdout.
+    pub fn exec_command_async(&mut self, command: &str, block: impl Fn(&mut Self)) -> Result<()> {
+        // Write command to serial port.
+        writeln!(&mut self.sys.to_guest, "{}", command)?;
+        block(self);
+        let mut echo = String::new();
+        self.sys.from_guest_reader.read_line(&mut echo)?;
+        assert_eq!(echo.trim(), command);
+        Ok(())
+    }
+
     pub fn wait_for_guest(&mut self) -> Result<String> {
         // Return all remaining lines until we receive the MAGIC_LINE
         let mut output = String::new();
@@ -255,6 +274,24 @@ impl TestVm {
 
     pub fn disk(&mut self, args: Vec<String>) -> Result<()> {
         self.sys.crosvm_command("disk", args)
+    }
+
+    pub fn snapshot(&mut self, filename: &std::path::Path) -> Result<()> {
+        self.sys.crosvm_command(
+            "snapshot",
+            vec!["take".to_string(), String::from(filename.to_str().unwrap())],
+        )
+    }
+
+    // No argument is passed in restore as we will always restore snapshot.bkp for testing.
+    pub fn restore(&mut self, filename: &std::path::Path) -> Result<()> {
+        self.sys.crosvm_command(
+            "restore",
+            vec![
+                "apply".to_string(),
+                String::from(filename.to_str().unwrap()),
+            ],
+        )
     }
 }
 

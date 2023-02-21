@@ -5,7 +5,7 @@
 use std::cell::Ref;
 use std::cell::RefCell;
 use std::cell::RefMut;
-use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use thiserror::Error;
@@ -41,7 +41,15 @@ pub enum StatelessBackendError {
     Other(#[from] anyhow::Error),
 }
 
-pub trait VideoDecoderBackend {
+pub type StatelessBackendResult<T> = std::result::Result<T, StatelessBackendError>;
+
+pub(crate) trait VideoDecoderBackend {
+    /// The type that the backend returns as a result of a decode operation.
+    /// This will usually be some backend-specific type with a resource and a
+    /// resource pool so that said buffer can be reused for another decode
+    /// operation when it goes out of scope.
+    type Handle: DecodedHandle;
+
     /// Returns the current coded resolution of the bitstream being processed.
     /// This may be None if we have not read the stream parameters yet.
     fn coded_resolution(&self) -> Option<Resolution>;
@@ -61,18 +69,19 @@ pub trait VideoDecoderBackend {
     /// processed first before the default format can be set.
     fn format(&self) -> Option<DecodedFormat>;
 
-    /// Gets a set of supported formats for the particular stream being
-    /// processed. This required that some buffers be processed before this call
-    /// is made. Only formats that are compatible with the current color space,
-    /// bit depth, and chroma format are returned such that no conversion is
-    /// needed.
-    ///
-    /// The format can be altered by calling `try_format` if the new format is
-    /// supported by the implementation.
-    fn supported_formats_for_stream(&self) -> Result<HashSet<DecodedFormat>>;
-
     /// Try altering the decoded format.
     fn try_format(&mut self, format: DecodedFormat) -> Result<()>;
+
+    /// Poll for any ready pictures. `block` dictates whether this call should
+    /// block on the operation or return immediately.
+    fn poll(&mut self, blocking_mode: BlockingMode) -> Result<VecDeque<Self::Handle>>;
+
+    /// Whether the handle is ready for presentation. The decoder will check
+    /// this before returning the handle to clients.
+    fn handle_is_ready(&self, handle: &Self::Handle) -> bool;
+
+    /// Block on handle `handle`.
+    fn block_on_handle(&mut self, handle: &Self::Handle) -> StatelessBackendResult<()>;
 }
 
 pub trait VideoDecoder {
@@ -87,12 +96,6 @@ pub trait VideoDecoder {
     /// Flush the decoder i.e. finish processing all queued decode requests and
     /// emit frames for them.
     fn flush(&mut self) -> Result<Vec<Box<dyn DynDecodedHandle>>>;
-
-    /// Gets a shared handle to the backend in use.
-    fn backend(&self) -> &dyn VideoDecoderBackend;
-
-    /// Gets a mutable handle to the backend in use.
-    fn backend_mut(&mut self) -> &mut dyn VideoDecoderBackend;
 
     /// Whether negotiation of the decoded format is possible. In particular, a
     /// decoder will indicate that negotiation is possible after enough metadata
@@ -128,6 +131,13 @@ pub trait VideoDecoder {
     /// Gets the number of output resources left in the backend after accounting
     /// for any buffers that might be queued in the decoder.
     fn num_resources_left(&self) -> Option<usize>;
+
+    /// Gets the number of output resources allocated by the backend.
+    fn num_resources_total(&self) -> usize;
+    ///
+    /// Returns the current coded resolution of the bitstream being processed.
+    /// This may be None if we have not read the stream parameters yet.
+    fn coded_resolution(&self) -> Option<Resolution>;
 
     /// Polls the decoder, emitting frames for all queued decode requests. This
     /// is similar to flush, but it does not change the state of the decoded

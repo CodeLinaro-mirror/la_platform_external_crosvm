@@ -193,8 +193,7 @@
       "--revision",
       "crosvm@2d72510e447ab60a9728aeea2362d8be2cbd7789",
       "--refs",
-      "refs/heads/main",
-      "--gerrit_no_reset"
+      "refs/heads/main"
     ],
     "cwd": "[CACHE]/builder",
     "env": {
@@ -404,6 +403,36 @@
     "name": "Prepare Container Build.Prepare dev_container.Ensure dev container exists",
     "~followup_annotations": [
       "@@@STEP_NEST_LEVEL@2@@@"
+    ]
+  },
+  {
+    "cmd": [
+      "vpython3",
+      "[CACHE]/builder/crosvm/tools/dev_container",
+      "--verbose",
+      "./tools/build_release",
+      "--json",
+      "--platform=x86_64"
+    ],
+    "cwd": "[CACHE]/builder/crosvm",
+    "env": {
+      "CROSVM_CONTAINER_CACHE": "[CACHE]/builder/dev_container"
+    },
+    "luci_context": {
+      "realm": {
+        "name": "crosvm/crosvm:ci"
+      },
+      "resultdb": {
+        "current_invocation": {
+          "name": "invocations/build:8945511751514863184",
+          "update_token": "token"
+        },
+        "hostname": "rdbhost"
+      }
+    },
+    "name": "Build crosvm releases",
+    "~followup_annotations": [
+      "@@@STEP_LOG_END@raw_io.output_text[Obtain release build output]@@@"
     ]
   },
   {

@@ -39,6 +39,7 @@ const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 #[allow(dead_code)]
 const VIRTQ_DESC_F_INDIRECT: u16 = 0x4;
 
+#[allow(dead_code)]
 const VIRTQ_USED_F_NO_NOTIFY: u16 = 0x1;
 #[allow(dead_code)]
 const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 0x1;
@@ -295,14 +296,11 @@ impl<'a, 'b> Iterator for AvailIter<'a, 'b> {
     }
 }
 
-#[derive(Clone)]
 /// A virtio queue's parameters.
-///
-/// WARNING: it is NOT safe to clone and then use n>1 Queue(s) to interact with the same virtqueue.
-/// That will prevent descriptor index tracking from being accurate, which can cause incorrect
-/// interrupt masking.
-/// TODO(b/201119859) drop Clone from this struct.
 pub struct Queue {
+    /// Whether this queue has already been activated.
+    activated: bool,
+
     /// The maximal size in elements offered by the device
     max_size: u16,
 
@@ -332,11 +330,6 @@ pub struct Queue {
     // Device feature bits accepted by the driver
     features: u64,
     last_used: Wrapping<u16>,
-
-    // Count of notification disables. Users of the queue can disable guest notification while
-    // processing requests. This is the count of how many are in flight(could be several contexts
-    // handling requests in parallel). When this count is zero, notifications are re-enabled.
-    notification_disable_count: usize,
 
     iommu: Option<Arc<Mutex<IpcMemoryMapper>>>,
 
@@ -369,6 +362,7 @@ impl Queue {
     pub fn new(max_size: u16) -> Queue {
         assert!(max_size.is_power_of_two());
         Queue {
+            activated: false,
             max_size,
             size: max_size,
             ready: false,
@@ -380,7 +374,6 @@ impl Queue {
             next_used: Wrapping(0),
             features: 0,
             last_used: Wrapping(0),
-            notification_disable_count: 0,
             iommu: None,
             exported_desc_table: None,
             exported_avail_ring: None,
@@ -458,6 +451,39 @@ impl Queue {
         self.ready = enable;
     }
 
+    /// Convert the queue configuration into an active queue.
+    pub fn activate(&mut self) -> Result<Queue> {
+        if !self.ready {
+            bail!("attempted to activate a non-ready queue");
+        }
+
+        if self.activated {
+            bail!("queue is already activated");
+        }
+
+        self.activated = true;
+
+        let queue = Queue {
+            activated: self.activated,
+            max_size: self.max_size,
+            size: self.size,
+            ready: self.ready,
+            vector: self.vector,
+            desc_table: self.desc_table,
+            avail_ring: self.avail_ring,
+            used_ring: self.used_ring,
+            next_avail: self.next_avail,
+            next_used: self.next_used,
+            features: self.features,
+            last_used: self.last_used,
+            iommu: self.iommu.as_ref().map(Arc::clone),
+            exported_desc_table: self.exported_desc_table.clone(),
+            exported_avail_ring: self.exported_avail_ring.clone(),
+            exported_used_ring: self.exported_used_ring.clone(),
+        };
+        Ok(queue)
+    }
+
     // Return `index` modulo the currently configured queue size.
     fn wrap_queue_index(&self, index: Wrapping<u16>) -> u16 {
         // We know that `self.size` is a power of two (enforced by `set_size()`), so the modulus can
@@ -468,6 +494,7 @@ impl Queue {
 
     /// Reset queue to a clean state
     pub fn reset(&mut self) {
+        self.activated = false;
         self.ready = false;
         self.size = self.max_size;
         self.vector = VIRTIO_MSI_NO_VECTOR;
@@ -612,23 +639,6 @@ impl Queue {
             .unwrap();
     }
 
-    // Set a single-bit flag in the used ring.
-    //
-    // Changes the bit specified by the mask in `flag` to `value`.
-    fn set_used_flag(&mut self, mem: &GuestMemory, flag: u16, value: bool) {
-        fence(Ordering::SeqCst);
-
-        let mut used_flags: u16 =
-            read_obj_from_addr_wrapper(mem, &self.exported_used_ring, self.used_ring).unwrap();
-        if value {
-            used_flags |= flag;
-        } else {
-            used_flags &= !flag;
-        }
-        write_obj_at_addr_wrapper(mem, &self.exported_used_ring, used_flags, self.used_ring)
-            .unwrap();
-    }
-
     /// Get the first available descriptor chain without removing it from the queue.
     /// Call `pop_peeked` to remove the returned descriptor chain from the queue.
     pub fn peek(&mut self, mem: &GuestMemory) -> Option<DescriptorChain> {
@@ -737,26 +747,6 @@ impl Queue {
 
         self.next_used += Wrapping(1);
         self.set_used_index(mem, self.next_used);
-    }
-
-    /// Enable / Disable guest notify device that requests are available on
-    /// the descriptor chain.
-    pub fn set_notify(&mut self, mem: &GuestMemory, enable: bool) {
-        if enable {
-            self.notification_disable_count -= 1;
-        } else {
-            self.notification_disable_count += 1;
-        }
-
-        // We should only set VIRTQ_USED_F_NO_NOTIFY when the VIRTIO_RING_F_EVENT_IDX feature has
-        // not been negotiated.
-        if self.features & ((1u64) << VIRTIO_RING_F_EVENT_IDX) == 0 {
-            self.set_used_flag(
-                mem,
-                VIRTQ_USED_F_NO_NOTIFY,
-                self.notification_disable_count > 0,
-            );
-        }
     }
 
     /// Returns if the queue should have an interrupt sent based on its state.

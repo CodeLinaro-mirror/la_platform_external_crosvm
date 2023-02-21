@@ -486,7 +486,7 @@ fn create_virtio_devices(
     }
 
     if let Some(tube) = pvclock_device_tube {
-        product::push_pvclock_device(&mut devs, tsc_frequency, tube);
+        product::push_pvclock_device(cfg, &mut devs, tsc_frequency, tube);
     }
 
     devs.push(create_rng_device(cfg)?);
@@ -1202,6 +1202,7 @@ fn create_whpx(
         false, /* enable_pnp_data */
         no_smt,
         false, /* itmt */
+        None,  /* hybrid_type */
     );
 
     // context for non-cpu-specific cpuid results
@@ -1868,6 +1869,7 @@ where
         pci_devices,
         irq_chip,
         &mut vcpu_ids,
+        cfg.dump_device_tree_blob.clone(),
         /*debugcon_jail=*/ None,
         None,
     )
