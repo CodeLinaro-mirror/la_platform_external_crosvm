@@ -2248,15 +2248,15 @@ mod tests {
         );
     }
 
-    // ANDROID(b/242733327): re-enable test once it no longer requires "/usr/local/bin" to exist.
-    #[ignore]
     #[cfg(unix)]
     #[test]
     fn parse_shared_dir() {
-        let s = "/usr/local/bin:usr_local_bin:type=fs:cache=always:uidmap=0 655360 5000,5000 600 50,5050 660410 1994950:gidmap=0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950:timeout=3600:rewrite-security-xattrs=true:ascii_casefold=false:writeback=true:posix_acl=true";
+        // Although I want to test /usr/local/bin, Use / instead of
+        // /usr/local/bin, as /usr/local/bin doesn't always exist.
+        let s = "/:usr_local_bin:type=fs:cache=always:uidmap=0 655360 5000,5000 600 50,5050 660410 1994950:gidmap=0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950:timeout=3600:rewrite-security-xattrs=true:ascii_casefold=false:writeback=true:posix_acl=true";
 
         let shared_dir: SharedDir = s.parse().unwrap();
-        assert_eq!(shared_dir.src, Path::new("/usr/local/bin").to_path_buf());
+        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
         assert_eq!(shared_dir.tag, "usr_local_bin");
         assert!(shared_dir.kind == SharedDirKind::FS);
         assert_eq!(
