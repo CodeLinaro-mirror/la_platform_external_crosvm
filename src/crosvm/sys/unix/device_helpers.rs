@@ -1404,6 +1404,7 @@ pub fn create_sound_device(
     })
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum VfioDeviceVariant {
     Pci(VfioPciDevice),
     Platform(VfioPlatformDevice),
@@ -1432,13 +1433,8 @@ pub fn create_vfio_device(
         expose_with_viommu: false,
     });
 
-    let vfio_device_tube_vm = if hotplug {
-        let (vfio_host_tube_vm, device_tube_vm) = Tube::pair().context("failed to create tube")?;
-        control_tubes.push(TaggedControlTube::Vm(vfio_host_tube_vm));
-        Some(device_tube_vm)
-    } else {
-        None
-    };
+    let (vfio_host_tube_vm, vfio_device_tube_vm) = Tube::pair().context("failed to create tube")?;
+    control_tubes.push(TaggedControlTube::Vm(vfio_host_tube_vm));
 
     let vfio_device = VfioDevice::new_passthrough(
         &vfio_path,
@@ -1459,7 +1455,6 @@ pub fn create_vfio_device(
             control_tubes.push(TaggedControlTube::VmIrq(vfio_host_tube_msix));
 
             let mut vfio_pci_device = VfioPciDevice::new(
-                #[cfg(feature = "direct")]
                 vfio_path,
                 vfio_device,
                 hotplug,

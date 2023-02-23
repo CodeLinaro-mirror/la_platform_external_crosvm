@@ -79,6 +79,7 @@ use devices::virtio::NetParametersMode;
 use devices::virtio::VirtioTransportType;
 #[cfg(feature = "audio")]
 use devices::Ac97Dev;
+use devices::Bus;
 use devices::BusDeviceObj;
 use devices::CoIommuDev;
 #[cfg(feature = "usb")]
@@ -965,6 +966,7 @@ fn create_pcie_root_port(
     // TODO(b/228627457): clippy is incorrectly warning about this Vec, which needs to be a Vec so
     // we can push into it
     #[allow(clippy::ptr_arg)] gpe_notify_devs: &mut Vec<(u32, Arc<Mutex<dyn GpeNotify>>)>,
+    #[allow(clippy::ptr_arg)] pme_notify_devs: &mut Vec<(u8, Arc<Mutex<dyn PmeNotify>>)>,
 ) -> Result<()> {
     if host_pcie_rp.is_empty() {
         // user doesn't specify host pcie root port which link to this virtual pcie rp,
@@ -980,6 +982,7 @@ fn create_pcie_root_port(
                 continue;
             }
             let pcie_root_port = Arc::new(Mutex::new(PcieRootPort::new(i, false)));
+            pme_notify_devs.push((i, pcie_root_port.clone() as Arc<Mutex<dyn PmeNotify>>));
             let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
             control_tubes.push(TaggedControlTube::VmIrq(msi_host_tube));
             let pci_bridge = Box::new(PciBridge::new(pcie_root_port.clone(), msi_device_tube));
@@ -992,6 +995,10 @@ fn create_pcie_root_port(
             return Err(anyhow!("no more addresses are available"));
         }
         let pcie_root_port = Arc::new(Mutex::new(PcieRootPort::new(hp_sec_bus, true)));
+        pme_notify_devs.push((
+            hp_sec_bus,
+            pcie_root_port.clone() as Arc<Mutex<dyn PmeNotify>>,
+        ));
         let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
         control_tubes.push(TaggedControlTube::VmIrq(msi_host_tube));
         let pci_bridge = Box::new(PciBridge::new(pcie_root_port.clone(), msi_device_tube));
@@ -1707,6 +1714,8 @@ where
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let mut gpe_notify_devs: Vec<(u32, Arc<Mutex<dyn GpeNotify>>)> = Vec::new();
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let mut pme_notify_devs: Vec<(u8, Arc<Mutex<dyn PmeNotify>>)> = Vec::new();
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         #[cfg(feature = "direct")]
         let rp_host = cfg.pcie_rp.clone();
@@ -1722,6 +1731,7 @@ where
             &mut hotplug_buses,
             &mut hp_endpoints_ranges,
             &mut gpe_notify_devs,
+            &mut pme_notify_devs,
         )?;
     }
 
@@ -1799,6 +1809,7 @@ where
         devices,
         irq_chip,
         &mut vcpu_ids,
+        cfg.dump_device_tree_blob.clone(),
         simple_jail(&cfg.jail_config, "serial_device")?,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         simple_jail(&cfg.jail_config, "block_device")?,
@@ -1809,7 +1820,7 @@ where
     let (hp_control_tube, hp_worker_tube) = mpsc::channel();
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
+    let hp_thread = {
         for (bus_num, hp_bus) in hotplug_buses {
             linux.hotplug_bus.insert(bus_num, hp_bus);
         }
@@ -1818,13 +1829,16 @@ where
             while let Some((gpe, notify_dev)) = gpe_notify_devs.pop() {
                 pm.lock().register_gpe_notify_dev(gpe, notify_dev);
             }
+            while let Some((bus, notify_dev)) = pme_notify_devs.pop() {
+                pm.lock().register_pme_notify_dev(bus, notify_dev);
+            }
         }
 
         let pci_root = linux.root_config.clone();
         std::thread::Builder::new()
             .name("pci_root".to_string())
-            .spawn(move || start_pci_root_worker(pci_root, hp_worker_tube))?;
-    }
+            .spawn(move || start_pci_root_worker(pci_root, hp_worker_tube))?
+    };
 
     #[cfg(feature = "direct")]
     if let Some(pmio) = &cfg.direct_pmio {
@@ -1877,6 +1891,8 @@ where
         iommu_host_tube,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         hp_control_tube,
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        hp_thread,
         #[cfg(feature = "swap")]
         swap_controller,
     )
@@ -2298,6 +2314,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] hp_control_tube: mpsc::Sender<
         PciRootCommand,
     >,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] hp_thread: std::thread::JoinHandle<()>,
     #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
 ) -> Result<ExitState> {
     #[derive(EventToken)]
@@ -2451,6 +2468,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     // Architecture-specific code must supply a vcpu_init element for each VCPU.
     assert_eq!(vcpus.len(), linux.vcpu_init.len());
 
+    let (to_vm_control, state_from_vcpu_channel) = mpsc::channel();
     for ((cpu_id, vcpu), vcpu_init) in vcpus.into_iter().enumerate().zip(linux.vcpu_init.drain(..))
     {
         let (to_vcpu_channel, from_main_channel) = mpsc::channel();
@@ -2461,6 +2479,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         };
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let vcpu_hybrid_type = if !cfg.vcpu_hybrid_type.is_empty() {
+            Some(*cfg.vcpu_hybrid_type.get(&cpu_id).unwrap())
+        } else {
+            None
+        };
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         let cpu_config = Some(CpuConfigX86_64::new(
             cfg.force_calibrated_tsc_leaf,
             cfg.host_cpu_topology,
@@ -2468,6 +2493,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             cfg.enable_pnp_data,
             cfg.no_smt,
             cfg.itmt,
+            vcpu_hybrid_type,
         ));
         #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
         let bus_lock_ratelimit_ctrl = Arc::clone(&bus_lock_ratelimit_ctrl);
@@ -2515,6 +2541,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             guest_suspended_cvar.clone(),
             #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
             bus_lock_ratelimit_ctrl,
+            to_vm_control.clone(),
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }
@@ -2721,11 +2748,19 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 #[cfg(not(feature = "usb"))]
                                                 None,
                                                 &mut linux.bat_control,
-                                                &vcpu_handles,
+                                                |msg| {
+                                                    vcpu::kick_all_vcpus(
+                                                        &vcpu_handles,
+                                                        linux.irq_chip.as_irq_chip(),
+                                                        msg,
+                                                    )
+                                                },
                                                 cfg.force_s2idle,
                                                 #[cfg(feature = "swap")]
                                                 swap_controller.as_ref(),
                                                 &device_ctrl_tube,
+                                                &state_from_vcpu_channel,
+                                                vcpu_handles.len(),
                                             );
 
                                             // For non s2idle guest suspension we are done
@@ -3010,7 +3045,36 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     // Stop pci root worker thread
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let _ = hp_control_tube.send(PciRootCommand::Kill);
+    {
+        let _ = hp_control_tube.send(PciRootCommand::Kill);
+        if let Err(e) = hp_thread.join() {
+            error!("failed to join hotplug thread: {:?}", e);
+        }
+    }
+
+    if linux.devices_thread.is_some() {
+        if let Err(e) = device_ctrl_tube.send(&DeviceControlCommand::Exit) {
+            error!("failed to stop device control loop: {}", e);
+        };
+        if let Some(thread) = linux.devices_thread.take() {
+            if let Err(e) = thread.join() {
+                error!("failed to exit devices thread: {:?}", e);
+            }
+        }
+    }
+
+    // At this point, the only remaining `Arc` references to the `Bus` objects should be the ones
+    // inside `linux`. If the checks below fail, then some other thread is probably still running
+    // and needs to be explicitly stopped before dropping `linux` to ensure devices actually get
+    // cleaned up.
+    match Arc::try_unwrap(std::mem::replace(&mut linux.mmio_bus, Arc::new(Bus::new()))) {
+        Ok(_) => {}
+        Err(_) => panic!("internal error: mmio_bus had more than one reference at shutdown"),
+    }
+    match Arc::try_unwrap(std::mem::replace(&mut linux.io_bus, Arc::new(Bus::new()))) {
+        Ok(_) => {}
+        Err(_) => panic!("internal error: io_bus had more than one reference at shutdown"),
+    }
 
     // Explicitly drop the VM structure here to allow the devices to clean up before the
     // control sockets are closed when this function exits.

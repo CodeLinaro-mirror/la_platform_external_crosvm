@@ -6,6 +6,9 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+use aarch64::AArch64 as CrosvmArch;
+use anyhow::Context;
 use base::error;
 use base::info;
 use base::Tube;
@@ -37,6 +40,10 @@ use gdbstub::target::TargetResult;
 use gdbstub_arch::aarch64::AArch64 as GdbArch;
 #[cfg(target_arch = "x86_64")]
 use gdbstub_arch::x86::X86_64_SSE as GdbArch;
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+use hypervisor::VcpuAArch64 as VcpuArch;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use hypervisor::VcpuX86_64 as VcpuArch;
 use remain::sorted;
 use sync::Mutex;
 use thiserror::Error as ThisError;
@@ -47,6 +54,9 @@ use vm_control::VcpuDebugStatusMessage;
 use vm_control::VmRequest;
 use vm_control::VmResponse;
 use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use x86_64::X8664arch as CrosvmArch;
 
 pub fn gdb_thread(mut gdbstub: GdbStub, port: u32) {
     let addr = format!("0.0.0.0:{}", port);
@@ -525,4 +535,86 @@ impl BlockingEventLoop for GdbStubEventLoop {
 
         Ok(Some(SingleThreadStopReason::Signal(Signal::SIGINT)))
     }
+}
+
+/// Notify the GDB thread that a VCPU has stopped because of a breakpoint.
+pub fn vcpu_exit_debug(
+    cpu: usize,
+    to_gdb_tube: Option<&mpsc::Sender<VcpuDebugStatusMessage>>,
+) -> anyhow::Result<()> {
+    if let Some(ch) = to_gdb_tube.as_ref() {
+        ch.send(VcpuDebugStatusMessage {
+            cpu,
+            msg: VcpuDebugStatus::HitBreakPoint,
+        })
+        .context("failed to send breakpoint status to gdb thread")?;
+    }
+    Ok(())
+}
+
+/// Handle a `VcpuDebug` request for a given `vcpu`.
+pub fn vcpu_control_debug<V>(
+    cpu_id: usize,
+    vcpu: &V,
+    guest_mem: &GuestMemory,
+    d: VcpuDebug,
+    reply_tube: Option<&mpsc::Sender<VcpuDebugStatusMessage>>,
+) -> anyhow::Result<()>
+where
+    V: VcpuArch + 'static,
+{
+    let reply_tube = reply_tube
+        .as_ref()
+        .context("VcpuControl::Debug received while debugger not connected")?;
+
+    let debug_status = match d {
+        VcpuDebug::ReadRegs => VcpuDebugStatus::RegValues(
+            <CrosvmArch as arch::GdbOps<V>>::read_registers(vcpu as &V)
+                .context("failed to handle a gdb ReadRegs command")?,
+        ),
+        VcpuDebug::WriteRegs(regs) => {
+            <CrosvmArch as arch::GdbOps<V>>::write_registers(vcpu as &V, &regs)
+                .context("failed to handle a gdb WriteRegs command")?;
+            VcpuDebugStatus::CommandComplete
+        }
+        VcpuDebug::ReadReg(reg) => VcpuDebugStatus::RegValue(
+            <CrosvmArch as arch::GdbOps<V>>::read_register(vcpu as &V, reg)
+                .context("failed to handle a gdb ReadReg command")?,
+        ),
+        VcpuDebug::WriteReg(reg, buf) => {
+            <CrosvmArch as arch::GdbOps<V>>::write_register(vcpu as &V, reg, &buf)
+                .context("failed to handle a gdb WriteReg command")?;
+            VcpuDebugStatus::CommandComplete
+        }
+        VcpuDebug::ReadMem(vaddr, len) => VcpuDebugStatus::MemoryRegion(
+            <CrosvmArch as arch::GdbOps<V>>::read_memory(vcpu as &V, guest_mem, vaddr, len)
+                .unwrap_or(Vec::new()),
+        ),
+        VcpuDebug::WriteMem(vaddr, buf) => {
+            <CrosvmArch as arch::GdbOps<V>>::write_memory(vcpu as &V, guest_mem, vaddr, &buf)
+                .context("failed to handle a gdb WriteMem command")?;
+            VcpuDebugStatus::CommandComplete
+        }
+        VcpuDebug::EnableSinglestep => {
+            <CrosvmArch as arch::GdbOps<V>>::enable_singlestep(vcpu as &V)
+                .context("failed to handle a gdb EnableSingleStep command")?;
+            VcpuDebugStatus::CommandComplete
+        }
+        VcpuDebug::GetHwBreakPointCount => VcpuDebugStatus::HwBreakPointCount(
+            <CrosvmArch as arch::GdbOps<V>>::get_max_hw_breakpoints(vcpu as &V)
+                .context("failed to get max number of HW breakpoints")?,
+        ),
+        VcpuDebug::SetHwBreakPoint(addrs) => {
+            <CrosvmArch as arch::GdbOps<V>>::set_hw_breakpoints(vcpu as &V, &addrs)
+                .context("failed to handle a gdb SetHwBreakPoint command")?;
+            VcpuDebugStatus::CommandComplete
+        }
+    };
+
+    reply_tube
+        .send(VcpuDebugStatusMessage {
+            cpu: cpu_id,
+            msg: debug_status,
+        })
+        .context("failed to send a debug status to GDB thread")
 }

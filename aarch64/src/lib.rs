@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -31,6 +32,8 @@ use devices::BusError;
 use devices::IrqChip;
 use devices::IrqChipAArch64;
 use devices::IrqEventSource;
+#[cfg(windows)]
+use devices::Minijail;
 use devices::PciAddress;
 use devices::PciConfigMmio;
 use devices::PciDevice;
@@ -52,6 +55,7 @@ use hypervisor::VcpuRegAArch64;
 use hypervisor::Vm;
 use hypervisor::VmAArch64;
 use kernel_loader::LoadedKernel;
+#[cfg(unix)]
 use minijail::Minijail;
 use remain::sorted;
 use resources::AddressRange;
@@ -342,6 +346,7 @@ impl arch::LinuxArch for AArch64 {
         devs: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
         irq_chip: &mut dyn IrqChipAArch64,
         vcpu_ids: &mut Vec<usize>,
+        dump_device_tree_blob: Option<PathBuf>,
         _debugcon_jail: Option<Minijail>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
@@ -640,6 +645,7 @@ impl arch::LinuxArch for AArch64 {
             components.swiotlb,
             bat_mmio_base_and_irq,
             vmwdt_cfg,
+            dump_device_tree_blob,
         )
         .map_err(Error::CreateFdt)?;
 

@@ -9,10 +9,9 @@ use std::rc::Rc;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use enumn::N;
 use log::debug;
 
-use crate::decoders::h264::backends::stateless::StatelessDecoderBackend;
+use crate::decoders::h264::backends::StatelessDecoderBackend;
 use crate::decoders::h264::dpb::Dpb;
 use crate::decoders::h264::parser::Nalu;
 use crate::decoders::h264::parser::NaluType;
@@ -33,11 +32,7 @@ use crate::decoders::Error as VideoDecoderError;
 use crate::decoders::Result as VideoDecoderResult;
 use crate::decoders::StatelessBackendError;
 use crate::decoders::VideoDecoder;
-use crate::decoders::VideoDecoderBackend;
 use crate::Resolution;
-
-/// The maximum number of pictures in the DPB, as per A.3.1, clause h)
-const DPB_MAX_SIZE: usize = 16;
 
 const ZIGZAG_8X8: [usize; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
@@ -46,37 +41,6 @@ const ZIGZAG_8X8: [usize; 64] = [
 ];
 
 const ZIGZAG_4X4: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
-
-#[derive(N)]
-pub enum Profile {
-    Baseline = 66,
-    Main = 77,
-    High = 100,
-}
-
-#[derive(N)]
-enum Level {
-    L1 = 10,
-    L1B = 9,
-    L1_1 = 11,
-    L1_2 = 12,
-    L1_3 = 13,
-    L2_0 = 20,
-    L2_1 = 21,
-    L2_2 = 22,
-    L3 = 30,
-    L3_1 = 31,
-    L3_2 = 32,
-    L4 = 40,
-    L4_1 = 41,
-    L4_2 = 42,
-    L5 = 50,
-    L5_1 = 51,
-    L5_2 = 52,
-    L6 = 60,
-    L6_1 = 61,
-    L6_2 = 62,
-}
 
 #[derive(Copy, Clone, Debug)]
 enum RefPicList {
@@ -279,7 +243,8 @@ where
         + 'static,
 {
     // Creates a new instance of the decoder.
-    pub fn new(
+    #[cfg(any(feature = "vaapi", test))]
+    pub(crate) fn new(
         backend: Box<dyn StatelessDecoderBackend<Handle = T>>,
         blocking_mode: BlockingMode,
     ) -> Result<Self> {
@@ -314,72 +279,12 @@ where
         })
     }
 
-    pub fn max_dpb_frames(sps: &Sps) -> Result<usize> {
-        let mut level = Level::n(sps.level_idc())
-            .with_context(|| format!("Unsupported level {}", sps.level_idc()))?;
-        let profile = Profile::n(sps.profile_idc())
-            .with_context(|| format!("Unsupported profile {}", sps.profile_idc()))?;
-
-        // A.3.1 and A.3.2: Level 1b for Baseline, Constrained Baseline and Main
-        // profile if level_idc == 11 and constraint_set3_flag == 1
-        if matches!(level, Level::L1_1)
-            && (matches!(profile, Profile::Baseline) || matches!(profile, Profile::Main))
-            && sps.constraint_set3_flag()
-        {
-            level = Level::L1B;
-        };
-
-        // Table A.1
-        let max_dpb_mbs = match level {
-            Level::L1 => 396,
-            Level::L1B => 396,
-            Level::L1_1 => 900,
-            Level::L1_2 => 2376,
-            Level::L1_3 => 2376,
-            Level::L2_0 => 2376,
-            Level::L2_1 => 4752,
-            Level::L2_2 => 8100,
-            Level::L3 => 8100,
-            Level::L3_1 => 18000,
-            Level::L3_2 => 20480,
-            Level::L4 => 32768,
-            Level::L4_1 => 32768,
-            Level::L4_2 => 34816,
-            Level::L5 => 110400,
-            Level::L5_1 => 184320,
-            Level::L5_2 => 184320,
-            Level::L6 => 696320,
-            Level::L6_1 => 696320,
-            Level::L6_2 => 696320,
-        };
-
-        let width_mb = sps.width() / 16;
-        let height_mb = sps.height() / 16;
-
-        let max_dpb_frames =
-            std::cmp::min(max_dpb_mbs / (width_mb * height_mb), DPB_MAX_SIZE as u32) as usize;
-
-        let mut max_dpb_frames = std::cmp::max(max_dpb_frames, sps.max_num_ref_frames() as usize);
-
-        if sps.vui_parameters_present_flag() && sps.vui_parameters().bitstream_restriction_flag() {
-            max_dpb_frames = std::cmp::max(
-                1,
-                sps.vui_parameters()
-                    .max_dec_frame_buffering()
-                    .try_into()
-                    .unwrap(),
-            );
-        }
-
-        Ok(max_dpb_frames)
-    }
-
     fn negotiation_possible(
         sps: &Sps,
         dpb: &Dpb<T>,
         current_resolution: Resolution,
     ) -> Result<bool> {
-        let max_dpb_frames = Self::max_dpb_frames(sps)?;
+        let max_dpb_frames = sps.max_dpb_frames()?;
 
         let prev_max_dpb_frames = dpb.max_num_pics();
         let prev_interlaced = dpb.interlaced();
@@ -426,7 +331,7 @@ where
             Self::negotiation_possible(sps, &self.dpb, self.coded_resolution)?;
 
         if negotiation_possible {
-            let max_dpb_frames = Self::max_dpb_frames(sps)?;
+            let max_dpb_frames = sps.max_dpb_frames()?;
             let interlaced = !sps.frame_mbs_only_flag();
             let resolution = Resolution {
                 width: sps.width(),
@@ -2335,13 +2240,9 @@ where
     }
 
     #[cfg(test)]
-    pub fn backend(&self) -> &dyn StatelessDecoderBackend<Handle = T> {
+    #[allow(dead_code)]
+    pub(crate) fn backend(&self) -> &dyn StatelessDecoderBackend<Handle = T> {
         self.backend.as_ref()
-    }
-
-    #[cfg(test)]
-    pub fn backend_mut(&mut self) -> &mut dyn StatelessDecoderBackend<Handle = T> {
-        self.backend.as_mut()
     }
 
     fn decode_access_unit(
@@ -2436,10 +2337,8 @@ where
                 queued_buffers.push((timestamp, buffer));
 
                 if let Some(sps) = &sps {
-                    let max_dpb_frames = Self::max_dpb_frames(sps)?;
-
                     self.backend.poll(BlockingMode::Blocking)?;
-                    self.backend.new_sequence(sps, max_dpb_frames)?;
+                    self.backend.new_sequence(sps)?;
 
                     self.negotiation_status = NegotiationStatus::Possible {
                         queued_buffers: queued_buffers.clone(),
@@ -2511,14 +2410,6 @@ where
             .collect())
     }
 
-    fn backend(&self) -> &dyn VideoDecoderBackend {
-        self.backend.as_video_decoder_backend()
-    }
-
-    fn backend_mut(&mut self) -> &mut dyn VideoDecoderBackend {
-        self.backend.as_video_decoder_backend_mut()
-    }
-
     fn negotiation_possible(&self) -> bool {
         matches!(self.negotiation_status, NegotiationStatus::Possible { .. })
     }
@@ -2538,6 +2429,14 @@ where
         } else {
             Some(left_in_the_backend)
         }
+    }
+
+    fn num_resources_total(&self) -> usize {
+        self.backend.num_resources_total()
+    }
+
+    fn coded_resolution(&self) -> Option<Resolution> {
+        self.backend.coded_resolution()
     }
 
     fn poll(
@@ -2566,7 +2465,6 @@ pub mod tests {
     use crate::decoders::DecodedHandle;
     use crate::decoders::DynDecodedHandle;
     use crate::decoders::VideoDecoder;
-    use crate::utils::dummy::Backend;
 
     pub fn process_ready_frames<Handle>(
         decoder: &mut Decoder<Handle>,
@@ -2725,8 +2623,7 @@ pub mod tests {
 
         for blocking_mode in blocking_modes {
             let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
+            let mut decoder = Decoder::new_dummy(blocking_mode).unwrap();
 
             run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
                 process_ready_frames(decoder, &mut |_, _| frame_num += 1);
@@ -2749,8 +2646,7 @@ pub mod tests {
 
         for blocking_mode in blocking_modes {
             let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
+            let mut decoder = Decoder::new_dummy(blocking_mode).unwrap();
 
             run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
                 process_ready_frames(decoder, &mut |_, _| frame_num += 1);
@@ -2773,8 +2669,7 @@ pub mod tests {
 
         for blocking_mode in blocking_modes {
             let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
+            let mut decoder = Decoder::new_dummy(blocking_mode).unwrap();
 
             run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
                 process_ready_frames(decoder, &mut |_, _| frame_num += 1);
@@ -2799,84 +2694,13 @@ pub mod tests {
 
         for blocking_mode in blocking_modes {
             let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
+            let mut decoder = Decoder::new_dummy(blocking_mode).unwrap();
 
             run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
                 process_ready_frames(decoder, &mut |_, _| frame_num += 1);
             });
 
             assert_eq!(frame_num, 4);
-        }
-    }
-
-    #[test]
-    fn test_interlaced_kodi_1080i() {
-        /// A 1080i example from the Kodi samples, available at
-        /// https://drive.google.com/file/d/0BwxFVkl63-lEbFBzak1sbmU1N0E/view?usp=sharing&resourcekey=0-GOK3gZYAmP-ywn6T9zCDoQ
-        ///
-        /// Note that fair use is claimed on all non-copyleft clips, as their
-        /// the purpose is only for testing, technical evaluation, and
-        /// documentation.
-        ///
-        /// The clip was demuxed on GStreamer and only the first 32 buffers were kept.
-        ///
-        /// The pipeline used was:
-        /// gst-launch-1.0 filesrc location="1080i-25-H264.mkv" ! matroskademux ! h264parse ! \
-        /// video/x-h264,stream-format=byte-stream ! identity eos-after = 33 ! \
-        /// filesink location="test-kodi-1080i-25-H264.h264"
-        ///
-        /// This test helps ensure that the interlaced logic actually works in the decoder.
-        /// We loop through the buffers and unwrap the calls to decode() to make sure there
-        /// are no errors that would make the decoder abort.
-        ///
-        /// We also test the flush implementation, to make sure we can empty the DPB correctly even
-        /// in interlaced mode.
-        const TEST_STREAM: &[u8] = include_bytes!("test_data/test-kodi-1080i-25-H264.h264");
-        let blocking_modes = [BlockingMode::Blocking, BlockingMode::NonBlocking];
-
-        for blocking_mode in blocking_modes {
-            let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
-
-            run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
-                process_ready_frames(decoder, &mut |_, _| frame_num += 1);
-            });
-
-            /* 32 fields, 16 frames */
-            assert_eq!(frame_num, 16);
-        }
-    }
-
-    #[test]
-    fn test_kodi_1080p() {
-        /// A 1080p example from the Kodi samples, available at
-        /// https://drive.google.com/file/d/0BwxFVkl63-lEdzlZZ2lCLTVLa2c/view?resourcekey=0-iCq6zrc9whsrif4-Zvu0DQ
-        ///
-        /// Note that fair use is claimed on all non-copyleft clips, as their
-        /// the purpose is only for testing, technical evaluation, and
-        /// documentation.
-        ///
-        /// The clip was demuxed on GStreamer and only the first 30 buffers were kept.
-        ///
-        /// The pipeline used was:
-        /// gst-launch-1.0 filesrc location="/tmp/FPS_test_1080p24_L4.1.mkv" ! \
-        /// matroskademux ! h264parse ! video/x-h264,stream-format=byte-stream ! \
-        /// identity eos-after=31 ! filesink location = "/tmp/FPS_test_1080p24_l4_1.h264"
-        const TEST_STREAM: &[u8] = include_bytes!("test_data/FPS_test_1080p24_l4_1.h264");
-        let blocking_modes = [BlockingMode::Blocking, BlockingMode::NonBlocking];
-
-        for blocking_mode in blocking_modes {
-            let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
-
-            run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
-                process_ready_frames(decoder, &mut |_, _| frame_num += 1);
-            });
-
-            assert_eq!(frame_num, 30);
         }
     }
 
@@ -2896,8 +2720,7 @@ pub mod tests {
 
         for blocking_mode in blocking_modes {
             let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
+            let mut decoder = Decoder::new_dummy(blocking_mode).unwrap();
 
             run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
                 process_ready_frames(decoder, &mut |_, _| frame_num += 1);
@@ -2915,8 +2738,7 @@ pub mod tests {
 
         for blocking_mode in blocking_modes {
             let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
+            let mut decoder = Decoder::new_dummy(blocking_mode).unwrap();
 
             run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
                 process_ready_frames(decoder, &mut |_, _| frame_num += 1);

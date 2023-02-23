@@ -91,6 +91,7 @@ rust_test {
                 "gfxstream",
                 "gpu",
                 "gpu_display",
+                "virgl_renderer",
                 "virgl_renderer_next",
             ],
             rustlibs: [
@@ -185,6 +186,7 @@ rust_test {
                 "gfxstream",
                 "gpu",
                 "gpu_display",
+                "virgl_renderer",
                 "virgl_renderer_next",
             ],
             rustlibs: [
@@ -270,6 +272,7 @@ rust_library {
                 "gfxstream",
                 "gpu",
                 "gpu_display",
+                "virgl_renderer",
                 "virgl_renderer_next",
             ],
             rustlibs: [
