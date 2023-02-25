@@ -36,12 +36,12 @@ use base::WaitContext;
 use data_model::DataInit;
 use data_model::Le32;
 use data_model::Le64;
-use data_model::VolatileRef;
 use vm_control::PvClockCommand;
 use vm_control::PvClockCommandResponse;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::FromBytes;
 
 use super::copy_config;
 use super::DeviceType;
@@ -83,7 +83,7 @@ struct virtio_pvclock_config {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for virtio_pvclock_config {}
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes)]
 #[repr(C)]
 struct virtio_pvclock_set_pvclock_page_req {
     // Physical address of pvclock page.
@@ -472,22 +472,14 @@ fn run_worker(
                         }
                     };
 
-                    let mut req = {
-                        // TODO(b/236759218): Use Reader/Writer abstraction. Example:
-                        // https://source.chromium.org/chromium/chromiumos/platform/crosvm/+/main:devices/src/virtio/rng.rs;drc=d4505a7f1c9e4aa502ff49367863aedeadbafb9d;l=41
-                        let req_ref: VolatileRef<virtio_pvclock_set_pvclock_page_req> = match worker
-                            .mem
-                            .get_ref_at_addr(desc.addr)
-                        {
+                    let mut req: virtio_pvclock_set_pvclock_page_req =
+                        match worker.mem.read_obj_from_addr(desc.addr) {
                             Ok(req) => req,
                             Err(e) => {
                                 error!("failed to read request from set_pvclock_page queue: {}", e);
                                 continue;
                             }
                         };
-                        req_ref.load()
-                        // We drop req_ref here so that we can mutable reference to worker below
-                    };
 
                     req.status = match worker.set_pvclock_page(req.pvclock_page_pa.into()) {
                         Err(e) => {
@@ -497,16 +489,10 @@ fn run_worker(
                         Ok(_) => VIRTIO_PVCLOCK_S_OK,
                     };
 
-                    match worker
-                        .mem
-                        .get_ref_at_addr::<virtio_pvclock_set_pvclock_page_req>(desc.addr)
-                    {
-                        Ok(req_ref) => req_ref.store(req),
-                        Err(e) => {
-                            error!("failed to write set_pvclock_page status: {}", e);
-                            continue;
-                        }
-                    };
+                    if let Err(e) = worker.mem.write_obj_at_addr(req, desc.addr) {
+                        error!("failed to write set_pvclock_page status: {}", e);
+                        continue;
+                    }
 
                     set_pvclock_page_queue.add_used(&worker.mem, desc.index, desc.len);
                     set_pvclock_page_queue.trigger_interrupt(&worker.mem, &interrupt);

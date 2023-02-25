@@ -2,7 +2,7 @@
 
 set -ex
 
-function usage() { echo "merge-setup.sh [-s][-b]" && exit 1; }
+function usage() { echo "$0 [-s][-b]" && exit 1; }
 
 sync=""
 branch=""

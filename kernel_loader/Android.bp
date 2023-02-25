@@ -32,6 +32,7 @@ rust_test {
         "libtempfile",
         "libthiserror",
         "libvm_memory",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }
@@ -52,6 +53,7 @@ rust_library {
         "libresources",
         "libthiserror",
         "libvm_memory",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }

@@ -47,6 +47,7 @@ rust_library {
         "libthiserror",
         "libvm_control",
         "libvm_memory",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     // Exclude arm family manually
@@ -102,6 +103,7 @@ rust_test {
         "libthiserror",
         "libvm_control",
         "libvm_memory",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     // Exclude arm family manually
@@ -158,6 +160,7 @@ rust_test {
         "libvm_control",
         "libvm_memory",
         "libx86_64_rust",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     // Exclude arm family manually
@@ -214,6 +217,7 @@ rust_test {
         "libvm_control",
         "libvm_memory",
         "libx86_64_rust",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     // Exclude arm family manually

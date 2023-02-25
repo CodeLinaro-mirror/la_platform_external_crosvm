@@ -64,6 +64,7 @@ rust_library {
         "liblibc",
         "libtempfile",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }
@@ -97,6 +98,7 @@ rust_test {
         "liblibc",
         "libtempfile",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }

@@ -31,6 +31,7 @@ rust_test {
         "libdata_model",
         "liblibc",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -55,6 +56,7 @@ rust_library {
         "libdata_model",
         "liblibc",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",

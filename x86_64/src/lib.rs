@@ -18,9 +18,6 @@ const X86_64_FDT_MAX_SIZE: u64 = 0x20_0000;
 #[allow(non_snake_case)]
 pub mod bootparam;
 
-// boot_params is just a series of ints, it is safe to initialize it.
-unsafe impl data_model::DataInit for bootparam::boot_params {}
-
 #[allow(dead_code)]
 #[allow(non_upper_case_globals)]
 mod msr_index;
@@ -120,6 +117,7 @@ use hypervisor::x86_64::Regs;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use hypervisor::x86_64::Sregs;
 use hypervisor::CpuConfigX86_64;
+use hypervisor::Hypervisor;
 use hypervisor::HypervisorX86_64;
 use hypervisor::ProtectionType;
 use hypervisor::VcpuInitX86_64;
@@ -143,6 +141,8 @@ use vm_control::BatteryType;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::bootparam::boot_params;
 use crate::cpuid::EDX_HYBRID_CPU_SHIFT;
@@ -297,7 +297,7 @@ pub struct X8664arch;
 // Like `bootparam::setup_data` without the incomplete array field at the end, which allows us to
 // safely implement Copy, Clone, and DataInit.
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, FromBytes, AsBytes)]
 struct setup_data_hdr {
     pub next: u64,
     pub type_: u32,
@@ -643,6 +643,7 @@ impl arch::LinuxArch for X8664arch {
 
     fn guest_memory_layout(
         components: &VmComponents,
+        _hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error> {
         init_low_memory_layout(components.pcie_ecam, components.pci_low_start);
 
@@ -682,6 +683,7 @@ impl arch::LinuxArch for X8664arch {
         dump_device_tree_blob: Option<PathBuf>,
         debugcon_jail: Option<Minijail>,
         pflash_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -745,6 +747,8 @@ impl arch::LinuxArch for X8664arch {
             &mut vm,
             4, // Share the four pin interrupts (INTx#)
             Some(pcie_vcfg_range.start),
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreatePciRoot)?;
 
@@ -787,6 +791,8 @@ impl arch::LinuxArch for X8664arch {
             system_allocator,
             &mut vm,
             components.acpi_sdts,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreateVirtioMmioBus)?;
         components.acpi_sdts = sdts;
@@ -811,12 +817,16 @@ impl arch::LinuxArch for X8664arch {
             &io_bus,
             serial_parameters,
             serial_jail,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )?;
         Self::setup_debugcon_devices(
             components.hv_cfg.protection_type,
             &io_bus,
             serial_parameters,
             debugcon_jail,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )?;
 
         let bios_size = if let VmImage::Bios(ref bios) = components.vm_image {
@@ -831,6 +841,8 @@ impl arch::LinuxArch for X8664arch {
                 bios_size,
                 &mmio_bus,
                 pflash_jail,
+                #[cfg(feature = "swap")]
+                swap_controller,
             )?;
         }
 
@@ -860,6 +872,8 @@ impl arch::LinuxArch for X8664arch {
             &mmio_bus,
             max_bus,
             &mut resume_notify_devices,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )?;
 
         // Create customized SSDT table
@@ -1068,6 +1082,7 @@ impl arch::LinuxArch for X8664arch {
         #[cfg(unix)] minijail: Option<Minijail>,
         resources: &mut SystemAllocator,
         hp_control_tube: &mpsc::Sender<PciRootCommand>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<PciAddress> {
         arch::configure_pci_device(
             linux,
@@ -1076,6 +1091,8 @@ impl arch::LinuxArch for X8664arch {
             minijail,
             resources,
             hp_control_tube,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::ConfigurePciDevice)
     }
@@ -1484,6 +1501,7 @@ impl X8664arch {
         bios_size: u64,
         mmio_bus: &devices::Bus,
         jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<()> {
         let size = pflash_image.metadata().map_err(Error::LoadPflash)?.len();
         let start = FIRST_ADDR_PAST_32BITS - bios_size - size;
@@ -1496,7 +1514,14 @@ impl X8664arch {
         let pflash: Arc<Mutex<dyn BusDevice>> = match jail {
             #[cfg(unix)]
             Some(jail) => Arc::new(Mutex::new(
-                ProxyDevice::new(pflash, jail, fds).map_err(Error::CreateProxyDevice)?,
+                ProxyDevice::new(
+                    pflash,
+                    jail,
+                    fds,
+                    #[cfg(feature = "swap")]
+                    swap_controller,
+                )
+                .map_err(Error::CreateProxyDevice)?,
             )),
             #[cfg(windows)]
             Some(_) => unreachable!(),
@@ -1741,6 +1766,7 @@ impl X8664arch {
         #[cfg_attr(windows, allow(unused_variables))] mmio_bus: &devices::Bus,
         max_bus: u8,
         resume_notify_devices: &mut Vec<Arc<Mutex<dyn BusResumeDevice>>>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<(acpi::AcpiDevResource, Option<BatControl>)> {
         // The AML data for the acpi devices
         let mut amls = Vec::new();
@@ -1750,7 +1776,14 @@ impl X8664arch {
                 #[cfg(unix)]
                 BatteryType::Goldfish => {
                     let (control_tube, _mmio_base) = arch::sys::unix::add_goldfish_battery(
-                        &mut amls, battery.1, mmio_bus, irq_chip, sci_irq, resources,
+                        &mut amls,
+                        battery.1,
+                        mmio_bus,
+                        irq_chip,
+                        sci_irq,
+                        resources,
+                        #[cfg(feature = "swap")]
+                        swap_controller,
                     )
                     .map_err(Error::CreateBatDevices)?;
                     Some(BatControl {
@@ -1917,6 +1950,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<()> {
         let com_evt_1_3 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         let com_evt_2_4 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
@@ -1928,6 +1962,8 @@ impl X8664arch {
             com_evt_2_4.get_trigger(),
             serial_parameters,
             serial_jail,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreateSerialDevices)?;
 
@@ -1951,6 +1987,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         debugcon_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<()> {
         for param in serial_parameters.values() {
             if param.hardware != SerialHardware::Debugcon {
@@ -1974,6 +2011,8 @@ impl X8664arch {
                         con,
                         jail.try_clone().map_err(Error::CloneJail)?,
                         preserved_fds,
+                        #[cfg(feature = "swap")]
+                        swap_controller,
                     )
                     .map_err(Error::CreateProxyDevice)?,
                 )),

@@ -19,11 +19,10 @@ use base::MappedRegion;
 use base::MemoryMappingBuilder;
 use base::SharedMemory;
 use common::*;
-use data_model::VolatileMemory;
 use swap::page_handler::Error;
 use swap::page_handler::PageHandler;
-use swap::register_regions;
-use swap::unregister_regions;
+use swap::userfaultfd::register_regions;
+use swap::userfaultfd::unregister_regions;
 use swap::worker::Worker;
 
 const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024; // 2MB
@@ -117,9 +116,9 @@ fn handle_page_fault_zero_success() {
     let join_handle = thread::spawn(move || {
         let mut result = Vec::new();
         for i in 0..(3 * pagesize()) {
-            let ptr = shm.mmap.get_ref::<u8>(i).unwrap().as_mut_ptr();
+            let ptr = shm.mmap.as_ptr() as usize + i;
             unsafe {
-                result.push(*ptr);
+                result.push(*(ptr as *mut u8));
             }
         }
         result

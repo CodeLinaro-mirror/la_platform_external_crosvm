@@ -79,6 +79,7 @@ rust_test {
         "libvm_control",
         "libvm_memory",
         "libvmm_vhost",
+        "libzerocopy",
     ],
     proc_macros: [
         "libasync_trait",
@@ -174,6 +175,7 @@ rust_test {
         "libvm_control",
         "libvm_memory",
         "libvmm_vhost",
+        "libzerocopy",
     ],
     proc_macros: [
         "libasync_trait",
@@ -260,6 +262,7 @@ rust_library {
         "libvm_control",
         "libvm_memory",
         "libvmm_vhost",
+        "libzerocopy",
     ],
     proc_macros: [
         "libasync_trait",
