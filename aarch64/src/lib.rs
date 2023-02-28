@@ -151,6 +151,19 @@ fn get_bios_addr() -> GuestAddress {
     GuestAddress(AARCH64_PHYS_MEM_START + AARCH64_BIOS_OFFSET)
 }
 
+// When static swiotlb allocation is required, returns the address it should be allocated at.
+// Otherwise, returns None.
+fn get_swiotlb_addr(
+    memory_size: u64,
+    hypervisor: &(impl Hypervisor + ?Sized),
+) -> Option<GuestAddress> {
+    if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+        Some(GuestAddress(AARCH64_PHYS_MEM_START + memory_size))
+    } else {
+        None
+    }
+}
+
 // Serial device requires 8 bytes of registers;
 const AARCH64_SERIAL_SIZE: u64 = 0x8;
 // This was the speed kvmtool used, not sure if it matters.
@@ -312,6 +325,7 @@ impl arch::LinuxArch for AArch64 {
     /// These should be used to configure the GuestMemory structure for the platform.
     fn guest_memory_layout(
         components: &VmComponents,
+        hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error> {
         let mut memory_regions =
             vec![(GuestAddress(AARCH64_PHYS_MEM_START), components.memory_size)];
@@ -322,6 +336,12 @@ impl arch::LinuxArch for AArch64 {
                 GuestAddress(AARCH64_PROTECTED_VM_FW_START),
                 AARCH64_PROTECTED_VM_FW_MAX_SIZE,
             ));
+        }
+
+        if let Some(size) = components.swiotlb {
+            if let Some(addr) = get_swiotlb_addr(components.memory_size, hypervisor) {
+                memory_regions.push((addr, size));
+            }
         }
 
         Ok(memory_regions)
@@ -348,6 +368,7 @@ impl arch::LinuxArch for AArch64 {
         vcpu_ids: &mut Vec<usize>,
         dump_device_tree_blob: Option<PathBuf>,
         _debugcon_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmAArch64,
@@ -503,6 +524,8 @@ impl arch::LinuxArch for AArch64 {
             &mut vm,
             (devices::AARCH64_GIC_NR_SPIS - AARCH64_IRQ_BASE) as usize,
             None,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreatePciRoot)?;
 
@@ -522,6 +545,8 @@ impl arch::LinuxArch for AArch64 {
                 irq_chip.as_irq_chip_mut(),
                 &mmio_bus,
                 system_allocator,
+                #[cfg(feature = "swap")]
+                swap_controller,
             )
             .map_err(Error::CreatePlatformBus)?;
         pid_debug_label_map.append(&mut platform_pid_debug_label_map);
@@ -542,6 +567,8 @@ impl arch::LinuxArch for AArch64 {
             com_evt_2_4.get_trigger(),
             serial_parameters,
             serial_jail,
+            #[cfg(feature = "swap")]
+            swap_controller,
         )
         .map_err(Error::CreateSerialDevices)?;
 
@@ -605,6 +632,8 @@ impl arch::LinuxArch for AArch64 {
                     irq_chip.as_irq_chip_mut(),
                     bat_irq,
                     system_allocator,
+                    #[cfg(feature = "swap")]
+                    swap_controller,
                 )
                 .map_err(Error::CreateBatDevices)?;
                 (
@@ -642,7 +671,12 @@ impl arch::LinuxArch for AArch64 {
             irq_chip.get_vgic_version() == DeviceKind::ArmVgicV3,
             use_pmu,
             psci_version,
-            components.swiotlb,
+            components.swiotlb.map(|size| {
+                (
+                    get_swiotlb_addr(components.memory_size, vm.get_hypervisor()),
+                    size,
+                )
+            }),
             bat_mmio_base_and_irq,
             vmwdt_cfg,
             dump_device_tree_blob,
@@ -699,6 +733,7 @@ impl arch::LinuxArch for AArch64 {
         _minijail: Option<Minijail>,
         _resources: &mut SystemAllocator,
         _tube: &mpsc::Sender<PciRootCommand>,
+        #[cfg(feature = "swap")] _swap_controller: Option<&swap::SwapController>,
     ) -> std::result::Result<PciAddress, Self::Error> {
         // hotplug function isn't verified on AArch64, so set it unsupported here.
         Err(Error::Unsupported)

@@ -138,7 +138,6 @@ use hypervisor::whpx::WhpxVcpu;
 use hypervisor::whpx::WhpxVm;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::CpuConfigX86_64;
-#[cfg(feature = "whpx")]
 use hypervisor::Hypervisor;
 #[cfg(feature = "whpx")]
 use hypervisor::HypervisorCap;
@@ -190,6 +189,7 @@ use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::sys::config::HypervisorKind;
 #[cfg(any(feature = "gvm", feature = "whpx"))]
 use crate::crosvm::sys::config::IrqChipKind;
+use crate::crosvm::sys::windows::broker::BrokerTubes;
 #[cfg(feature = "stats")]
 use crate::crosvm::sys::windows::stats::StatisticsCollector;
 pub(crate) use crate::sys::windows::product::get_gpu_product_configs;
@@ -1129,9 +1129,7 @@ const GVM_MINIMUM_VERSION: GvmVersion = GvmVersion {
 };
 
 #[cfg(feature = "gvm")]
-fn create_gvm(mem: GuestMemory) -> Result<GvmVm> {
-    info!("Creating GVM");
-    let gvm = Gvm::new()?;
+fn create_gvm_vm(gvm: Gvm, mem: GuestMemory) -> Result<GvmVm> {
     match gvm.get_full_version() {
         Ok(version) => {
             if version < GVM_MINIMUM_VERSION {
@@ -1154,9 +1152,11 @@ fn create_gvm(mem: GuestMemory) -> Result<GvmVm> {
 }
 
 #[cfg(feature = "haxm")]
-fn create_haxm(mem: GuestMemory, kernel_log_file: &Option<String>) -> Result<HaxmVm> {
-    info!("Creating HAXM ghaxm={}", get_use_ghaxm());
-    let haxm = Haxm::new()?;
+fn create_haxm_vm(
+    haxm: Haxm,
+    mem: GuestMemory,
+    kernel_log_file: &Option<String>,
+) -> Result<HaxmVm> {
     let vm = HaxmVm::new(&haxm, mem)?;
     if let Some(path) = kernel_log_file {
         use hypervisor::haxm::HAX_CAP_VM_LOG;
@@ -1184,7 +1184,8 @@ fn create_haxm(mem: GuestMemory, kernel_log_file: &Option<String>) -> Result<Hax
 
 #[cfg(feature = "whpx")]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn create_whpx(
+fn create_whpx_vm(
+    whpx: Whpx,
     mem: GuestMemory,
     cpu_count: usize,
     no_smt: bool,
@@ -1192,9 +1193,6 @@ fn create_whpx(
     force_calibrated_tsc_leaf: bool,
     vm_evt_wrtube: SendTube,
 ) -> Result<WhpxVm> {
-    info!("Creating Whpx");
-    let whpx = Whpx::new()?;
-
     let cpu_config = CpuConfigX86_64::new(
         force_calibrated_tsc_leaf,
         false, /* host_cpu_topology */
@@ -1553,26 +1551,44 @@ pub fn run_config_for_broker(raw_tube_transporter: RawDescriptor) -> Result<Exit
     #[cfg(feature = "crash-report")]
     crash_report::set_crash_tube_map(crash_tube_map);
 
-    run_config_inner(cfg)
+    let BrokerTubes {
+        vm_evt_wrtube,
+        vm_evt_rdtube,
+    } = bootstrap_tube
+        .recv::<BrokerTubes>()
+        .exit_context(Exit::TubeFailure, "failed to read bootstrap tube")?;
+
+    run_config_inner(cfg, vm_evt_wrtube, vm_evt_rdtube)
 }
 
-pub fn run_config(mut cfg: Config) -> Result<ExitState> {
+pub fn run_config(cfg: Config) -> Result<ExitState> {
     let _raise_timer_resolution = enable_high_res_timers()
         .exit_context(Exit::EnableHighResTimer, "failed to enable high res timer")?;
 
-    assert_eq!(cfg.vm_evt_wrtube.is_some(), cfg.vm_evt_rdtube.is_some());
-    if cfg.vm_evt_wrtube.is_none() {
-        // There is no broker when using run_config(), so the vm_evt tubes need to be created.
-        let (vm_evt_wrtube, vm_evt_rdtube) =
-            Tube::directional_pair().context("failed to create vm event tube")?;
-        cfg.vm_evt_wrtube = Some(vm_evt_wrtube);
-        cfg.vm_evt_rdtube = Some(vm_evt_rdtube);
-    }
+    // There is no broker when using run_config(), so the vm_evt tubes need to be created.
+    let (vm_evt_wrtube, vm_evt_rdtube) =
+        Tube::directional_pair().context("failed to create vm event tube")?;
 
-    run_config_inner(cfg)
+    run_config_inner(cfg, vm_evt_wrtube, vm_evt_rdtube)
 }
 
-fn run_config_inner(cfg: Config) -> Result<ExitState> {
+fn create_guest_memory(
+    components: &VmComponents,
+    hypervisor: &impl Hypervisor,
+) -> Result<GuestMemory> {
+    let guest_mem_layout = Arch::guest_memory_layout(components, hypervisor).exit_context(
+        Exit::GuestMemoryLayout,
+        "failed to create guest memory layout",
+    )?;
+    GuestMemory::new(&guest_mem_layout)
+        .exit_context(Exit::CreateGuestMemory, "failed to create guest memory")
+}
+
+fn run_config_inner(
+    cfg: Config,
+    vm_evt_wrtube: SendTube,
+    vm_evt_rdtube: RecvTube,
+) -> Result<ExitState> {
     product::setup_common_metric_invariants(&cfg);
 
     #[cfg(feature = "perfetto")]
@@ -1591,20 +1607,16 @@ fn run_config_inner(cfg: Config) -> Result<ExitState> {
         hypervisor = HypervisorKind::Whpx;
     }
 
-    let guest_mem_layout = Arch::guest_memory_layout(&components).exit_context(
-        Exit::GuestMemoryLayout,
-        "failed to create guest memory layout",
-    )?;
-    let guest_mem = GuestMemory::new(&guest_mem_layout)
-        .exit_context(Exit::CreateGuestMemory, "failed to create guest memory")?;
-
     match hypervisor {
         #[cfg(feature = "haxm")]
         HypervisorKind::Haxm | HypervisorKind::Ghaxm => {
             if hypervisor == HypervisorKind::Haxm {
                 set_use_ghaxm(false);
             }
-            let vm = create_haxm(guest_mem, &cfg.kernel_log_file)?;
+            info!("Creating HAXM ghaxm={}", get_use_ghaxm());
+            let haxm = Haxm::new()?;
+            let guest_mem = create_guest_memory(&components, &haxm)?;
+            let vm = create_haxm_vm(haxm, guest_mem, &cfg.kernel_log_file)?;
             let (ioapic_host_tube, ioapic_device_tube) =
                 Tube::pair().exit_context(Exit::CreateTube, "failed to create tube")?;
             let irq_chip = create_userspace_irq_chip::<HaxmVm, HaxmVcpu>(
@@ -1617,6 +1629,8 @@ fn run_config_inner(cfg: Config) -> Result<ExitState> {
                 vm,
                 WindowsIrqChip::Userspace(irq_chip).as_mut(),
                 Some(ioapic_host_tube),
+                vm_evt_wrtube,
+                vm_evt_rdtube,
             )
         }
         #[cfg(feature = "whpx")]
@@ -1638,15 +1652,17 @@ fn run_config_inner(cfg: Config) -> Result<ExitState> {
             let (ioapic_host_tube, ioapic_device_tube) =
                 Tube::pair().exit_context(Exit::CreateTube, "failed to create tube")?;
 
-            let vm = create_whpx(
+            info!("Creating Whpx");
+            let whpx = Whpx::new()?;
+            let guest_mem = create_guest_memory(&components, &whpx)?;
+            let vm = create_whpx_vm(
+                whpx,
                 guest_mem,
                 components.vcpu_count,
                 no_smt,
                 apic_emulation_supported && irq_chip == IrqChipKind::Split,
                 cfg.force_calibrated_tsc_leaf,
-                cfg.vm_evt_wrtube
-                    .as_ref()
-                    .expect("vm_evt_wrtube must be set")
+                vm_evt_wrtube
                     .try_clone()
                     .expect("could not clone vm_evt_wrtube"),
             )?;
@@ -1675,11 +1691,16 @@ fn run_config_inner(cfg: Config) -> Result<ExitState> {
                 vm,
                 irq_chip.as_mut(),
                 Some(ioapic_host_tube),
+                vm_evt_wrtube,
+                vm_evt_rdtube,
             )
         }
         #[cfg(feature = "gvm")]
         HypervisorKind::Gvm => {
-            let vm = create_gvm(guest_mem)?;
+            info!("Creating GVM");
+            let gvm = Gvm::new()?;
+            let guest_mem = create_guest_memory(&components, &gvm)?;
+            let vm = create_gvm_vm(gvm, guest_mem)?;
             let ioapic_host_tube;
             let mut irq_chip = match cfg.irq_chip.unwrap_or(IrqChipKind::Kernel) {
                 IrqChipKind::Split => unimplemented!("Split irqchip mode not supported by GVM"),
@@ -1697,7 +1718,15 @@ fn run_config_inner(cfg: Config) -> Result<ExitState> {
                     )?)
                 }
             };
-            run_vm::<GvmVcpu, GvmVm>(cfg, components, vm, irq_chip.as_mut(), ioapic_host_tube)
+            run_vm::<GvmVcpu, GvmVm>(
+                cfg,
+                components,
+                vm,
+                irq_chip.as_mut(),
+                ioapic_host_tube,
+                vm_evt_wrtube,
+                vm_evt_rdtube,
+            )
         }
     }
 }
@@ -1709,6 +1738,8 @@ fn run_vm<Vcpu, V>(
     mut vm: V,
     irq_chip: &mut dyn IrqChipArch,
     ioapic_host_tube: Option<Tube>,
+    vm_evt_wrtube: SendTube,
+    vm_evt_rdtube: RecvTube,
 ) -> Result<ExitState>
 where
     Vcpu: VcpuArch + 'static,
@@ -1762,15 +1793,6 @@ where
 
     let gralloc =
         RutabagaGralloc::new().exit_context(Exit::CreateGralloc, "failed to create gralloc")?;
-
-    let (vm_evt_wrtube, vm_evt_rdtube) = (
-        cfg.vm_evt_wrtube
-            .take()
-            .expect("vm_evt_wrtube should be set"),
-        cfg.vm_evt_rdtube
-            .take()
-            .expect("vm_evt_rdtube should be set"),
-    );
 
     let pstore_size = components.pstore.as_ref().map(|pstore| pstore.size as u64);
     let mut sys_allocator = SystemAllocator::new(

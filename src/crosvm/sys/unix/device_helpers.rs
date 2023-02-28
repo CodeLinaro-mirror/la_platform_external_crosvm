@@ -438,29 +438,25 @@ pub fn create_virtio_snd_device(
         _ => unreachable!(),
     };
 
-    let jail = match simple_jail(jail_config, policy)? {
-        Some(mut jail) => {
-            // Create a tmpfs in the device's root directory for cras_snd_device.
-            // The size is 20*1024, or 20 KB.
-            #[cfg(feature = "audio_cras")]
-            if backend == Backend::Sys(virtio::snd::sys::StreamSourceBackend::CRAS) {
-                jail.mount_with_data(
-                    Path::new("none"),
-                    Path::new("/"),
-                    "tmpfs",
-                    (libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as usize,
-                    "size=20480",
-                )?;
-
-                let run_cras_path = Path::new("/run/cras");
-                jail.mount_bind(run_cras_path, run_cras_path, true)?;
-            }
-
-            add_current_user_to_jail(&mut jail)?;
-
-            Some(jail)
+    let jail = if let Some(jail_config) = jail_config {
+        let mut config = SandboxConfig::new(jail_config, policy);
+        #[cfg(feature = "audio_cras")]
+        if backend == Backend::Sys(virtio::snd::sys::StreamSourceBackend::CRAS) {
+            config.bind_mounts = true;
         }
-        None => None,
+        // TODO(b/267574679): running as current_user may not be required for snd device.
+        config.run_as = RunAsUser::CurrentUser;
+        #[allow(unused_mut)]
+        let mut jail =
+            create_sandbox_minijail(&jail_config.pivot_root, MAX_OPEN_FILES_DEFAULT, &config)?;
+        #[cfg(feature = "audio_cras")]
+        if backend == Backend::Sys(virtio::snd::sys::StreamSourceBackend::CRAS) {
+            let run_cras_path = Path::new("/run/cras");
+            jail.mount_bind(run_cras_path, run_cras_path, true)?;
+        }
+        Some(jail)
+    } else {
+        None
     };
 
     Ok(VirtioDeviceStub {
@@ -478,47 +474,37 @@ pub fn create_software_tpm_device(
     use std::fs;
     use std::process;
 
-    let tpm_storage: PathBuf;
-    let mut tpm_jail = simple_jail(jail_config, "tpm_device")?;
+    let (jail, tpm_storage) = if let Some(jail_config) = jail_config {
+        let mut config = SandboxConfig::new(jail_config, "tpm_device");
+        config.bind_mounts = true;
+        let mut jail =
+            create_sandbox_minijail(&jail_config.pivot_root, MAX_OPEN_FILES_DEFAULT, &config)?;
 
-    match &mut tpm_jail {
-        Some(jail) => {
-            // Create a tmpfs in the device's root directory for tpm
-            // simulator storage. The size is 20*1024, or 20 KB.
-            jail.mount_with_data(
-                Path::new("none"),
-                Path::new("/"),
-                "tmpfs",
-                (libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as usize,
-                "size=20480",
-            )?;
+        let pid = process::id();
+        let crosvm_uid = geteuid();
+        let crosvm_gid = getegid();
+        let tpm_pid_dir = format!("/run/vm/tpm.{}", pid);
+        let tpm_storage = PathBuf::from(&tpm_pid_dir);
+        fs::create_dir_all(&tpm_storage).with_context(|| {
+            format!("failed to create tpm storage dir {}", tpm_storage.display())
+        })?;
+        let tpm_pid_dir_c = CString::new(tpm_pid_dir).expect("no nul bytes");
+        chown(&tpm_pid_dir_c, crosvm_uid, crosvm_gid).context("failed to chown tpm storage")?;
 
-            let crosvm_ids = add_current_user_to_jail(jail)?;
+        jail.mount_bind(&tpm_storage, &tpm_storage, true)?;
 
-            let pid = process::id();
-            let tpm_pid_dir = format!("/run/vm/tpm.{}", pid);
-            tpm_storage = Path::new(&tpm_pid_dir).to_owned();
-            fs::create_dir_all(&tpm_storage).with_context(|| {
-                format!("failed to create tpm storage dir {}", tpm_storage.display())
-            })?;
-            let tpm_pid_dir_c = CString::new(tpm_pid_dir).expect("no nul bytes");
-            chown(&tpm_pid_dir_c, crosvm_ids.uid, crosvm_ids.gid)
-                .context("failed to chown tpm storage")?;
-
-            jail.mount_bind(&tpm_storage, &tpm_storage, true)?;
-        }
-        None => {
-            // Path used inside cros_sdk which does not have /run/vm.
-            tpm_storage = Path::new("/tmp/tpm-simulator").to_owned();
-        }
-    }
+        (Some(jail), tpm_storage)
+    } else {
+        // Path used inside cros_sdk which does not have /run/vm.
+        (None, PathBuf::from("/tmp/tpm-simulator"))
+    };
 
     let backend = SoftwareTpm::new(tpm_storage).context("failed to create SoftwareTpm")?;
     let dev = virtio::Tpm::new(Box::new(backend), virtio::base_features(protection_type));
 
     Ok(VirtioDeviceStub {
         dev: Box::new(dev),
-        jail: tpm_jail,
+        jail,
     })
 }
 
@@ -527,34 +513,24 @@ pub fn create_vtpm_proxy_device(
     protection_type: ProtectionType,
     jail_config: &Option<JailConfig>,
 ) -> DeviceResult {
-    let mut tpm_jail = simple_jail(jail_config, "vtpm_proxy_device")?;
-
-    match &mut tpm_jail {
-        Some(jail) => {
-            // Create a tmpfs in the device's root directory so that we can bind mount files.
-            // The size is 20*1024, or 20 KB.
-            jail.mount_with_data(
-                Path::new("none"),
-                Path::new("/"),
-                "tmpfs",
-                (libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as usize,
-                "size=20480",
-            )?;
-
-            add_current_user_to_jail(jail)?;
-
-            let system_bus_socket_path = Path::new("/run/dbus/system_bus_socket");
-            jail.mount_bind(system_bus_socket_path, system_bus_socket_path, true)?;
-        }
-        None => {}
-    }
+    let jail = if let Some(jail_config) = jail_config {
+        let mut config = SandboxConfig::new(jail_config, "vtpm_proxy_device");
+        config.bind_mounts = true;
+        let mut jail =
+            create_sandbox_minijail(&jail_config.pivot_root, MAX_OPEN_FILES_DEFAULT, &config)?;
+        let system_bus_socket_path = Path::new("/run/dbus/system_bus_socket");
+        jail.mount_bind(system_bus_socket_path, system_bus_socket_path, true)?;
+        Some(jail)
+    } else {
+        None
+    };
 
     let backend = VtpmProxy::new();
     let dev = virtio::Tpm::new(Box::new(backend), virtio::base_features(protection_type));
 
     Ok(VirtioDeviceStub {
         dev: Box::new(dev),
-        jail: tpm_jail,
+        jail,
     })
 }
 
@@ -921,20 +897,21 @@ pub fn create_wayland_device(
     let dev = virtio::Wl::new(features, wayland_socket_paths.clone(), resource_bridge)
         .context("failed to create wayland device")?;
 
-    let jail = match gpu_jail(jail_config, "wl_device")? {
-        Some(mut jail) => {
-            // Bind mount the wayland socket's directory into jail's root. This is necessary since
-            // each new wayland context must open() the socket. If the wayland socket is ever
-            // destroyed and remade in the same host directory, new connections will be possible
-            // without restarting the wayland device.
-            for dir in &wayland_socket_dirs {
-                jail.mount_bind(dir, dir, true)?;
-            }
-            add_current_user_to_jail(&mut jail)?;
-
-            Some(jail)
+    let jail = if let Some(jail_config) = jail_config {
+        let mut config = SandboxConfig::new(jail_config, "wl_device");
+        config.bind_mounts = true;
+        let mut jail = create_gpu_minijail(&jail_config.pivot_root, &config)?;
+        // Bind mount the wayland socket's directory into jail's root. This is necessary since
+        // each new wayland context must open() the socket. If the wayland socket is ever
+        // destroyed and remade in the same host directory, new connections will be possible
+        // without restarting the wayland device.
+        for dir in &wayland_socket_dirs {
+            jail.mount_bind(dir, dir, true)?;
         }
-        None => None,
+
+        Some(jail)
+    } else {
+        None
     };
 
     Ok(VirtioDeviceStub {
@@ -951,74 +928,68 @@ pub fn create_video_device(
     typ: VideoDeviceType,
     resource_bridge: Tube,
 ) -> DeviceResult {
-    let jail = match simple_jail(jail_config, "video_device")? {
-        Some(mut jail) => {
-            match typ {
-                #[cfg(feature = "video-decoder")]
-                VideoDeviceType::Decoder => add_current_user_to_jail(&mut jail)?,
-                #[cfg(feature = "video-encoder")]
-                VideoDeviceType::Encoder => add_current_user_to_jail(&mut jail)?,
-                #[cfg(any(not(feature = "video-decoder"), not(feature = "video-encoder")))]
-                // `typ` is always a VideoDeviceType enabled
-                device_type => unreachable!("Not compiled with {:?} enabled", device_type),
-            };
+    let jail = if let Some(jail_config) = jail_config {
+        match typ {
+            #[cfg(feature = "video-decoder")]
+            VideoDeviceType::Decoder => {}
+            #[cfg(feature = "video-encoder")]
+            VideoDeviceType::Encoder => {}
+            #[cfg(any(not(feature = "video-decoder"), not(feature = "video-encoder")))]
+            // `typ` is always a VideoDeviceType enabled
+            device_type => unreachable!("Not compiled with {:?} enabled", device_type),
+        };
+        let mut config = SandboxConfig::new(jail_config, "video_device");
+        config.bind_mounts = true;
+        let mut jail =
+            create_sandbox_minijail(&jail_config.pivot_root, MAX_OPEN_FILES_DEFAULT, &config)?;
 
-            // Create a tmpfs in the device's root directory so that we can bind mount files.
-            jail.mount_with_data(
-                Path::new("none"),
-                Path::new("/"),
-                "tmpfs",
-                (libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as usize,
-                "size=67108864",
-            )?;
+        let need_drm_device = match backend {
+            #[cfg(any(feature = "libvda", feature = "libvda-stub"))]
+            VideoBackendType::Libvda => true,
+            #[cfg(any(feature = "libvda", feature = "libvda-stub"))]
+            VideoBackendType::LibvdaVd => true,
+            #[cfg(feature = "vaapi")]
+            VideoBackendType::Vaapi => true,
+            #[cfg(feature = "ffmpeg")]
+            VideoBackendType::Ffmpeg => false,
+        };
 
-            let need_drm_device = match backend {
-                #[cfg(any(feature = "libvda", feature = "libvda-stub"))]
-                VideoBackendType::Libvda => true,
-                #[cfg(any(feature = "libvda", feature = "libvda-stub"))]
-                VideoBackendType::LibvdaVd => true,
-                #[cfg(feature = "vaapi")]
-                VideoBackendType::Vaapi => true,
-                #[cfg(feature = "ffmpeg")]
-                VideoBackendType::Ffmpeg => false,
-            };
-
-            if need_drm_device {
-                // follow the implementation at:
-                // https://chromium.googlesource.com/chromiumos/platform/minigbm/+/c06cc9cccb3cf3c7f9d2aec706c27c34cd6162a0/cros_gralloc/cros_gralloc_driver.cc#90
-                const DRM_NUM_NODES: u32 = 63;
-                const DRM_RENDER_NODE_START: u32 = 128;
-                for offset in 0..DRM_NUM_NODES {
-                    let path_str = format!("/dev/dri/renderD{}", DRM_RENDER_NODE_START + offset);
-                    let dev_dri_path = Path::new(&path_str);
-                    if !dev_dri_path.exists() {
-                        break;
-                    }
-                    jail.mount_bind(dev_dri_path, dev_dri_path, false)?;
+        if need_drm_device {
+            // follow the implementation at:
+            // https://chromium.googlesource.com/chromiumos/platform/minigbm/+/c06cc9cccb3cf3c7f9d2aec706c27c34cd6162a0/cros_gralloc/cros_gralloc_driver.cc#90
+            const DRM_NUM_NODES: u32 = 63;
+            const DRM_RENDER_NODE_START: u32 = 128;
+            for offset in 0..DRM_NUM_NODES {
+                let path_str = format!("/dev/dri/renderD{}", DRM_RENDER_NODE_START + offset);
+                let dev_dri_path = Path::new(&path_str);
+                if !dev_dri_path.exists() {
+                    break;
                 }
+                jail.mount_bind(dev_dri_path, dev_dri_path, false)?;
             }
-
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                // Device nodes used by libdrm through minigbm in libvda on AMD devices.
-                let sys_dev_char_path = Path::new("/sys/dev/char");
-                jail.mount_bind(sys_dev_char_path, sys_dev_char_path, false)?;
-                let sys_devices_path = Path::new("/sys/devices");
-                jail.mount_bind(sys_devices_path, sys_devices_path, false)?;
-
-                // Required for loading dri libraries loaded by minigbm on AMD devices.
-                jail_mount_bind_if_exists(&mut jail, &["/usr/lib64"])?;
-            }
-
-            // Device nodes required by libchrome which establishes Mojo connection in libvda.
-            let dev_urandom_path = Path::new("/dev/urandom");
-            jail.mount_bind(dev_urandom_path, dev_urandom_path, false)?;
-            let system_bus_socket_path = Path::new("/run/dbus/system_bus_socket");
-            jail.mount_bind(system_bus_socket_path, system_bus_socket_path, true)?;
-
-            Some(jail)
         }
-        None => None,
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Device nodes used by libdrm through minigbm in libvda on AMD devices.
+            let sys_dev_char_path = Path::new("/sys/dev/char");
+            jail.mount_bind(sys_dev_char_path, sys_dev_char_path, false)?;
+            let sys_devices_path = Path::new("/sys/devices");
+            jail.mount_bind(sys_devices_path, sys_devices_path, false)?;
+
+            // Required for loading dri libraries loaded by minigbm on AMD devices.
+            jail_mount_bind_if_exists(&mut jail, &["/usr/lib64"])?;
+        }
+
+        // Device nodes required by libchrome which establishes Mojo connection in libvda.
+        let dev_urandom_path = Path::new("/dev/urandom");
+        jail.mount_bind(dev_urandom_path, dev_urandom_path, false)?;
+        let system_bus_socket_path = Path::new("/run/dbus/system_bus_socket");
+        jail.mount_bind(system_bus_socket_path, system_bus_socket_path, true)?;
+
+        Some(jail)
+    } else {
+        None
     };
 
     Ok(VirtioDeviceStub {
@@ -1099,24 +1070,15 @@ pub fn create_fs_device(
     let max_open_files =
         base::get_max_open_files().context("failed to get max number of open files")?;
     let j = if let Some(jail_config) = jail_config {
-        let policy_path = jail_config
-            .seccomp_policy_dir
-            .as_ref()
-            .map(|dir| dir.join("fs_device"));
-        let config = SandboxConfig {
-            limit_caps: false,
-            uid_map: Some(uid_map),
-            gid_map: Some(gid_map),
-            log_failures: jail_config.seccomp_log_failures,
-            seccomp_policy_path: policy_path.as_deref(),
-            seccomp_policy_name: "fs_device",
-            // We want bind mounts from the parent namespaces to propagate into the fs device's
-            // namespace.
-            remount_mode: Some(libc::MS_SLAVE),
-        };
-        create_base_minijail(src, Some(max_open_files), Some(&config))?
+        let mut config = SandboxConfig::new(jail_config, "fs_device");
+        config.limit_caps = false;
+        config.ugid_map = Some((uid_map, gid_map));
+        // We want bind mounts from the parent namespaces to propagate into the fs device's
+        // namespace.
+        config.remount_mode = Some(libc::MS_SLAVE);
+        create_sandbox_minijail(src, max_open_files, &config)?
     } else {
-        create_base_minijail(src, Some(max_open_files), None)?
+        create_base_minijail(src, max_open_files)?
     };
 
     let features = virtio::base_features(protection_type);
@@ -1143,23 +1105,13 @@ pub fn create_9p_device(
     let max_open_files =
         base::get_max_open_files().context("failed to get max number of open files")?;
     let (jail, root) = if let Some(jail_config) = jail_config {
-        let policy_path = jail_config
-            .seccomp_policy_dir
-            .as_ref()
-            .map(|dir| dir.join("9p_device"));
-        let config = SandboxConfig {
-            limit_caps: false,
-            uid_map: Some(uid_map),
-            gid_map: Some(gid_map),
-            log_failures: jail_config.seccomp_log_failures,
-            seccomp_policy_path: policy_path.as_deref(),
-            seccomp_policy_name: "9p_device",
-            // We want bind mounts from the parent namespaces to propagate into the 9p server's
-            // namespace.
-            remount_mode: Some(libc::MS_SLAVE),
-        };
-
-        let jail = create_base_minijail(src, Some(max_open_files), Some(&config))?;
+        let mut config = SandboxConfig::new(jail_config, "9p_device");
+        config.limit_caps = false;
+        config.ugid_map = Some((uid_map, gid_map));
+        // We want bind mounts from the parent namespaces to propagate into the 9p server's
+        // namespace.
+        config.remount_mode = Some(libc::MS_SLAVE);
+        let jail = create_sandbox_minijail(src, max_open_files, &config)?;
 
         //  The shared directory becomes the root of the device's file system.
         let root = Path::new("/");
@@ -1364,28 +1316,18 @@ impl VirtioDeviceBuilder for &SerialParameters {
         jail_config: &Option<JailConfig>,
         virtio_transport: VirtioDeviceType,
     ) -> anyhow::Result<Option<Minijail>> {
-        let jail = match simple_jail(jail_config, &virtio_transport.seccomp_policy_file("serial"))?
-        {
-            Some(mut jail) => {
-                // Create a tmpfs in the device's root directory so that we can bind mount the
-                // log socket directory into it.
-                // The size=67108864 is size=64*1024*1024 or size=64MB.
-                jail.mount_with_data(
-                    Path::new("none"),
-                    Path::new("/"),
-                    "tmpfs",
-                    (libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID) as usize,
-                    "size=67108864",
-                )?;
-                add_current_user_to_jail(&mut jail)?;
-                add_bind_mounts(self, &mut jail)
-                    .context("failed to add bind mounts for console device")?;
-                Some(jail)
-            }
-            None => None,
-        };
-
-        Ok(jail)
+        if let Some(jail_config) = jail_config {
+            let policy = virtio_transport.seccomp_policy_file("serial");
+            let mut config = SandboxConfig::new(jail_config, &policy);
+            config.bind_mounts = true;
+            let mut jail =
+                create_sandbox_minijail(&jail_config.pivot_root, MAX_OPEN_FILES_DEFAULT, &config)?;
+            add_bind_mounts(self, &mut jail)
+                .context("failed to add bind mounts for console device")?;
+            Ok(Some(jail))
+        } else {
+            Ok(None)
+        }
     }
 }
 
