@@ -4,6 +4,8 @@
 
 //! Testing vsock.
 
+#![cfg(unix)]
+
 pub mod fixture;
 
 use std::process::Command;

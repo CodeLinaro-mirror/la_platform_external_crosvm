@@ -16,6 +16,7 @@ use std::thread;
 use std::time::Duration;
 use std::u32;
 
+use anyhow::Context;
 use base::error;
 use base::info;
 use base::warn;
@@ -477,17 +478,12 @@ pub async fn flush_disk(
 fn run_worker(
     ex: Executor,
     interrupt: Interrupt,
-    queues: Vec<Queue>,
+    queues: Vec<(Queue, Event)>,
     mem: GuestMemory,
     disk_state: &Rc<AsyncMutex<DiskState>>,
     control_tube: &Option<AsyncTube>,
-    queue_evts: Vec<Event>,
     kill_evt: Event,
 ) -> Result<(), String> {
-    if queues.len() != queue_evts.len() {
-        return Err("Number of queues and events must match.".to_string());
-    }
-
     // One flush timer per disk.
     let timer = Timer::new().expect("Failed to create a timer");
     let flush_timer_armed = Rc::new(RefCell::new(false));
@@ -516,19 +512,13 @@ fn run_worker(
 
     let queue_handlers = queues
         .into_iter()
-        .map(|q| Rc::new(RefCell::new(q)))
-        .zip(
-            queue_evts
-                .into_iter()
-                .map(|e| EventAsync::new(e, &ex).expect("Failed to create async event for queue")),
-        )
         .map(|(queue, event)| {
             handle_queue(
                 ex.clone(),
                 mem.clone(),
                 Rc::clone(disk_state),
-                Rc::clone(&queue),
-                event,
+                Rc::new(RefCell::new(queue)),
+                EventAsync::new(event, &ex).expect("Failed to create async event for queue"),
                 interrupt.clone(),
                 Rc::clone(&flush_timer),
                 Rc::clone(&flush_timer_armed),
@@ -918,16 +908,11 @@ impl VirtioDevice for BlockAsync {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<Queue>,
-        queue_evts: Vec<Event>,
-    ) {
-        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("failed creating kill Event pair: {}", e);
-                return;
-            }
-        };
+        queues: Vec<(Queue, Event)>,
+    ) -> anyhow::Result<()> {
+        let (self_kill_evt, kill_evt) = Event::new()
+            .and_then(|e| Ok((e.try_clone()?, e)))
+            .context("failed creating kill Event pair")?;
         self.kill_evt = Some(self_kill_evt);
 
         let read_only = self.read_only;
@@ -935,59 +920,52 @@ impl VirtioDevice for BlockAsync {
         let disk_size = self.disk_size.clone();
         let id = self.id.take();
         let executor_kind = self.executor_kind;
-        if let Some(disk_image) = self.disk_image.take() {
-            let control_tube = self.control_tube.take();
-            let worker_result =
-                thread::Builder::new()
-                    .name("virtio_blk".to_string())
-                    .spawn(move || {
-                        let ex = Executor::with_executor_kind(executor_kind)
-                            .expect("Failed to create an executor");
+        let disk_image = self.disk_image.take().context("missing disk image")?;
+        let control_tube = self.control_tube.take();
+        let worker_thread = thread::Builder::new()
+            .name("virtio_blk".to_string())
+            .spawn(move || {
+                let ex = Executor::with_executor_kind(executor_kind)
+                    .expect("Failed to create an executor");
 
-                        let async_control = control_tube
-                            .map(|c| AsyncTube::new(&ex, c).expect("failed to create async tube"));
-                        let async_image = match disk_image.to_async_disk(&ex) {
-                            Ok(d) => d,
-                            Err(e) => panic!("Failed to create async disk {}", e),
-                        };
-                        let disk_state = Rc::new(AsyncMutex::new(DiskState {
-                            disk_image: async_image,
-                            disk_size,
-                            read_only,
-                            sparse,
-                            id,
-                        }));
-                        if let Err(err_string) = run_worker(
-                            ex,
-                            interrupt,
-                            queues,
-                            mem,
-                            &disk_state,
-                            &async_control,
-                            queue_evts,
-                            kill_evt,
-                        ) {
-                            error!("{}", err_string);
-                        }
-
-                        let disk_state = match Rc::try_unwrap(disk_state) {
-                            Ok(d) => d.into_inner(),
-                            Err(_) => panic!("too many refs to the disk"),
-                        };
-                        (
-                            disk_state.disk_image.into_inner(),
-                            async_control.map(|c| c.into()),
-                        )
-                    });
-
-            self.worker_thread = match worker_result {
-                Err(e) => {
-                    error!("failed to spawn virtio_blk worker: {}", e);
-                    return;
+                let async_control = control_tube
+                    .map(|c| AsyncTube::new(&ex, c).expect("failed to create async tube"));
+                let async_image = match disk_image.to_async_disk(&ex) {
+                    Ok(d) => d,
+                    Err(e) => panic!("Failed to create async disk {}", e),
+                };
+                let disk_state = Rc::new(AsyncMutex::new(DiskState {
+                    disk_image: async_image,
+                    disk_size,
+                    read_only,
+                    sparse,
+                    id,
+                }));
+                if let Err(err_string) = run_worker(
+                    ex,
+                    interrupt,
+                    queues,
+                    mem,
+                    &disk_state,
+                    &async_control,
+                    kill_evt,
+                ) {
+                    error!("{}", err_string);
                 }
-                Ok(join_handle) => Some(join_handle),
-            }
-        }
+
+                let disk_state = match Rc::try_unwrap(disk_state) {
+                    Ok(d) => d.into_inner(),
+                    Err(_) => panic!("too many refs to the disk"),
+                };
+                (
+                    disk_state.disk_image.into_inner(),
+                    async_control.map(|c| c.into()),
+                )
+            })
+            .context("failed to spawn virtio_blk worker")?;
+
+        self.worker_thread = Some(worker_thread);
+        Ok(())
     }
 
     fn reset(&mut self) -> bool {

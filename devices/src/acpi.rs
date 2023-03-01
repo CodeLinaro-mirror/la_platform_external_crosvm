@@ -15,6 +15,7 @@ use std::thread;
 
 use acpi_tables::aml;
 use acpi_tables::aml::Aml;
+use anyhow::Context;
 use base::error;
 use base::warn;
 use base::Error as SysError;
@@ -31,6 +32,7 @@ use vm_control::GpeNotify;
 use vm_control::PmResource;
 
 use crate::pci::CrosvmDeviceId;
+use crate::serialize_arc_mutex;
 use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::BusResumeDevice;
@@ -60,15 +62,18 @@ pub enum ACPIPMFixedEvent {
     RTC,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct Pm1Resource {
     pub(crate) status: u16,
     enable: u16,
     control: u16,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct GpeResource {
     pub(crate) status: [u8; ACPIPM_RESOURCE_GPE0_BLK_LEN as usize / 2],
     enable: [u8; ACPIPM_RESOURCE_GPE0_BLK_LEN as usize / 2],
+    #[serde(skip_serializing, skip_deserializing)]
     pub(crate) gpe_notify: BTreeMap<u32, Vec<Arc<Mutex<dyn GpeNotify>>>>,
 }
 
@@ -90,22 +95,39 @@ struct DirectFixedEvent {
 
 /// ACPI PM resource for handling OS suspend/resume request
 #[allow(dead_code)]
+#[derive(Serialize)]
 pub struct ACPIPMResource {
     // This is SCI interrupt that will be raised in the VM.
+    #[serde(skip_serializing)]
     sci_evt: IrqLevelEvent,
     // This is the host SCI that is being handled by crosvm.
     #[cfg(feature = "direct")]
+    #[serde(skip_serializing)]
     sci_direct_evt: Option<IrqLevelEvent>,
     #[cfg(feature = "direct")]
+    #[serde(skip_serializing)]
     direct_gpe: Vec<DirectGpe>,
     #[cfg(feature = "direct")]
+    #[serde(skip_serializing)]
     direct_fixed_evts: Vec<DirectFixedEvent>,
+    #[serde(skip_serializing)]
     kill_evt: Option<Event>,
+    #[serde(skip_serializing)]
     worker_thread: Option<thread::JoinHandle<()>>,
+    #[serde(skip_serializing)]
     suspend_evt: Event,
+    #[serde(skip_serializing)]
     exit_evt_wrtube: SendTube,
+    #[serde(serialize_with = "serialize_arc_mutex")]
     pm1: Arc<Mutex<Pm1Resource>>,
+    #[serde(serialize_with = "serialize_arc_mutex")]
     gpe0: Arc<Mutex<GpeResource>>,
+}
+
+#[derive(Deserialize)]
+struct ACPIPMResrourceSerializable {
+    pm1: Pm1Resource,
+    gpe0: GpeResource,
 }
 
 impl ACPIPMResource {
@@ -218,7 +240,43 @@ impl ACPIPMResource {
     }
 }
 
-impl Suspendable for ACPIPMResource {}
+impl Suspendable for ACPIPMResource {
+    fn snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        serde_json::to_value(self)
+            .with_context(|| format!("error serializing {}", self.debug_label()))
+    }
+
+    fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let acpi_snapshot: ACPIPMResrourceSerializable = serde_json::from_value(data)
+            .with_context(|| format!("error deserializing {}", self.debug_label()))?;
+        {
+            let mut pm1 = self.pm1.lock();
+            *pm1 = acpi_snapshot.pm1;
+        }
+        {
+            let mut gpe0 = self.gpe0.lock();
+            gpe0.status = acpi_snapshot.gpe0.status;
+            gpe0.enable = acpi_snapshot.gpe0.enable;
+        }
+        Ok(())
+    }
+
+    fn sleep(&mut self) -> anyhow::Result<()> {
+        if let Some(kill_evt) = self.kill_evt.take() {
+            let _ = kill_evt.signal();
+        }
+
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let _ = worker_thread.join();
+        }
+        Ok(())
+    }
+
+    fn wake(&mut self) -> anyhow::Result<()> {
+        self.start();
+        Ok(())
+    }
+}
 
 fn run_worker(
     sci_evt: IrqLevelEvent,
@@ -965,4 +1023,46 @@ impl Aml for ACPIPMResource {
         )
         .to_aml_bytes(bytes);
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::suspendable_tests;
+    use base::SendTube;
+    use base::Tube;
+
+    fn get_evt_tube() -> SendTube {
+        let (vm_evt_wrtube, _) = Tube::directional_pair().unwrap();
+        vm_evt_wrtube
+    }
+
+    fn get_irq_evt() -> IrqLevelEvent {
+        match crate::IrqLevelEvent::new() {
+            Ok(evt) => evt,
+            Err(e) => panic!(
+                "failed to create irqlevelevt: {} - panic. Can't test ACPI",
+                e
+            ),
+        }
+    }
+
+    fn modify_device(acpi: &mut ACPIPMResource) {
+        {
+            let mut pm1 = acpi.pm1.lock();
+            pm1.enable += 1;
+        }
+    }
+
+    suspendable_tests!(
+        acpi,
+        ACPIPMResource::new(
+            get_irq_evt(),
+            #[cfg(feature = "direct")]
+            None,
+            Event::new().unwrap(),
+            get_evt_tube(),
+        ),
+        modify_device
+    );
 }

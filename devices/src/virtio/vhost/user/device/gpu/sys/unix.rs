@@ -239,6 +239,10 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     // The regular gpu device sets this to true when sandboxing is enabled. Assume that we
     // are always sandboxed.
     let external_blob = true;
+
+    // Fallback for when external_blob is not available on the machine. Currently always off.
+    let system_blob = false;
+
     let base_features = virtio::base_features(ProtectionType::Unprotected);
     let channels = wayland_paths;
 
@@ -255,6 +259,7 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
         None,
         event_devices,
         external_blob,
+        system_blob,
         base_features,
         channels,
     )));
@@ -270,5 +275,10 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
         platform_workers: Default::default(),
         backend_req_conn: VhostBackendReqConnectionState::NoConnection,
     });
-    ex.run_until(listener.run_backend(backend, &ex))?
+
+    // Run until the backend is finished.
+    let _ = ex.run_until(listener.run_backend(backend, &ex))?;
+
+    // Process any tasks from the backend's destructor.
+    Ok(ex.run_until(async {})?)
 }

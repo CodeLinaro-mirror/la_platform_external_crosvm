@@ -15,6 +15,8 @@ use std::result;
 use std::sync::Arc;
 use std::thread;
 
+use anyhow::anyhow;
+use anyhow::Context;
 use base::error;
 use base::info;
 use base::named_pipes;
@@ -201,65 +203,51 @@ impl VirtioDevice for Vsock {
         self.features &= value;
     }
 
-    // Allow error! and early return anywhere in function
-    #[allow(clippy::needless_return)]
     fn activate(
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
-        mut queue_evts: Vec<Event>,
-    ) {
-        if queues.len() != QUEUE_SIZES.len() || queue_evts.len() != QUEUE_SIZES.len() {
-            error!(
-                "Failed to activate vsock device. queues.len(): {} != {} or \
-            queue_evts.len(): {} != {}",
+        mut queues: Vec<(Queue, Event)>,
+    ) -> anyhow::Result<()> {
+        if queues.len() != QUEUE_SIZES.len() {
+            return Err(anyhow!(
+                "Failed to activate vsock device. queues.len(): {} != {}",
                 queues.len(),
                 QUEUE_SIZES.len(),
-                queue_evts.len(),
-                QUEUE_SIZES.len()
-            );
-            return;
+            ));
         }
 
-        let (self_kill_evt, worker_kill_evt) =
-            match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to create virtio-vsock kill Event pair: {}", e);
-                    return;
-                }
-            };
+        let (rx_queue, rx_queue_evt) = queues.remove(0);
+        let (tx_queue, tx_queue_evt) = queues.remove(0);
+        let (event_queue, event_queue_evt) = queues.remove(0);
+
+        let (self_kill_evt, worker_kill_evt) = Event::new()
+            .and_then(|e| Ok((e.try_clone()?, e)))
+            .context("failed to create kill Event pair")?;
         self.kill_evt = Some(self_kill_evt);
         let host_guid = self.host_guid.clone();
         let guest_cid = self.guest_cid;
-        let worker_result = thread::Builder::new()
+        let worker_thread = thread::Builder::new()
             .name("userspace_virtio_vsock".to_string())
             .spawn(move || {
                 let mut worker = Worker::new(mem, interrupt, host_guid, guest_cid);
                 let result = worker.run(
-                    queues.remove(0),     /* rx_queue */
-                    queues.remove(0),     /* tx_queue */
-                    queues.remove(0),     /* event_queue */
-                    queue_evts.remove(0), /* rx_queue_evt */
-                    queue_evts.remove(0), /* tx_queue_evt */
-                    queue_evts.remove(0), /* event_queue_evt */
+                    rx_queue,
+                    tx_queue,
+                    event_queue,
+                    rx_queue_evt,
+                    tx_queue_evt,
+                    event_queue_evt,
                     worker_kill_evt,
                 );
 
                 if let Err(e) = result {
                     error!("userspace vsock worker thread exited with error: {:?}", e);
                 }
-            });
-        match worker_result {
-            Err(e) => {
-                error!("failed to spawn virtio-vsock worker: {}", e);
-                return;
-            }
-            Ok(join_handle) => {
-                self.worker_thread = Some(join_handle);
-            }
-        }
+            })
+            .context("failed to spawn virtio-vsock worker")?;
+        self.worker_thread = Some(worker_thread);
+        Ok(())
     }
 }
 

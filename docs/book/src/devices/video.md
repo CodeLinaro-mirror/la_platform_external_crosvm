@@ -9,8 +9,7 @@ The virtio-video host device uses backends to perform the actual decoding. The c
 backends are:
 
 - `libvda`, a hardware-accelerated backend that supports both decoding and encoding by delegating
-  the work to a running instance of Chrome. It can only be built and used in a Chrome OS
-  environment.
+  the work to a running instance of Chrome. It can only be built and used in a ChromeOS environment.
 - `ffmpeg`, a software-based backend that supports encoding and decoding. It exists to make testing
   and development of virtio-video easier, as it does not require any particular hardware and is
   based on a reliable codec library.
@@ -35,7 +34,7 @@ make O=build_crosvm_x86 -j16
 ```
 
 The resulting kernel image that can be passed to `crosvm` will be in
-`build_crosvm_x86/arch/x86/boot/compressed/vmlinux.bin`.
+`build_crosvm_x86/arch/x86/boot/bzImage`.
 
 ## Crosvm requirements
 
@@ -53,14 +52,14 @@ To enable the **decoder** device, start crosvm with the `--video-decoder=ffmpeg`
 argument:
 
 ```sh
-crosvm run --disable-sandbox --video-decoder=ffmpeg -c 4 -m 2048 --block /path/to/disk.img,root --serial type=stdout,hardware=virtio-console,console=true,stdin=true /path/to/vmlinux.bin
+crosvm run --disable-sandbox --video-decoder=ffmpeg -c 4 -m 2048 --block /path/to/disk.img,root --serial type=stdout,hardware=virtio-console,console=true,stdin=true /path/to/bzImage
 ```
 
 Alternatively, to enable the **encoder** device, start crosvm with the `--video-encoder=ffmpeg`
 command-line argument:
 
 ```sh
-crosvm run --disable-sandbox --video-encoder=ffmpeg -c 4 -m 2048 --block /path/to/disk.img,root --serial type=stdout,hardware=virtio-console,console=true,stdin=true /path/to/vmlinux.bin
+crosvm run --disable-sandbox --video-encoder=ffmpeg -c 4 -m 2048 --block /path/to/disk.img,root --serial type=stdout,hardware=virtio-console,console=true,stdin=true /path/to/bzImage
 ```
 
 If the guest kernel includes the virtio-video driver, then the device should be probed and show up.

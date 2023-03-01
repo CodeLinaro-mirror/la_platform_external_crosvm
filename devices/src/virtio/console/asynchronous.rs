@@ -8,9 +8,9 @@ use std::collections::VecDeque;
 use std::io;
 use std::thread;
 
+use anyhow::anyhow;
 use anyhow::Context;
 use base::error;
-use base::warn;
 use base::AsRawDescriptor;
 use base::Event;
 use base::FileSync;
@@ -298,11 +298,10 @@ impl VirtioDevice for AsyncConsole {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
-        mut queue_evts: Vec<Event>,
-    ) {
-        if queues.len() < 2 || queue_evts.len() < 2 {
-            return;
+        mut queues: Vec<(Queue, Event)>,
+    ) -> anyhow::Result<()> {
+        if queues.len() < 2 {
+            return Err(anyhow!("expected 2 queues, got {}", queues.len()));
         }
 
         // Reset the device if it was already running.
@@ -313,31 +312,23 @@ impl VirtioDevice for AsyncConsole {
         let state = std::mem::replace(&mut self.state, VirtioConsoleState::Broken);
         let console = match state {
             VirtioConsoleState::Running { .. } => {
-                error!("device should not be running here. This is a bug.");
-                return;
+                return Err(anyhow!("device should not be running here. This is a bug."));
             }
             VirtioConsoleState::Stopped(console) => console,
             VirtioConsoleState::Broken => {
-                warn!("device is broken and cannot be activated");
-                return;
+                return Err(anyhow!("device is broken and cannot be activated"));
             }
         };
 
-        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("failed creating kill Event pair: {}", e);
-                return;
-            }
-        };
+        let (self_kill_evt, kill_evt) = Event::new()
+            .and_then(|e| Ok((e.try_clone()?, e)))
+            .context("failed creating kill Event pair")?;
 
         let ex = Executor::new().expect("failed to create an executor");
-        let receive_queue = queues.remove(0);
-        let receive_evt = queue_evts.remove(0);
-        let transmit_queue = queues.remove(0);
-        let transmit_evt = queue_evts.remove(0);
+        let (receive_queue, receive_evt) = queues.remove(0);
+        let (transmit_queue, transmit_evt) = queues.remove(0);
 
-        let worker_result = thread::Builder::new()
+        let worker_thread = thread::Builder::new()
             .name("v_console".to_string())
             .spawn(move || {
                 let mut console = console;
@@ -362,17 +353,15 @@ impl VirtioDevice for AsyncConsole {
 
                     Ok(console)
                 })?
-            });
+            })
+            .context("failed to spawn virtio_console worker")?;
 
-        match worker_result {
-            Err(e) => error!("failed to spawn virtio_console worker: {}", e),
-            Ok(join_handle) => {
-                self.state = VirtioConsoleState::Running {
-                    kill_evt: self_kill_evt,
-                    worker_thread: join_handle,
-                };
-            }
-        }
+        self.state = VirtioConsoleState::Running {
+            kill_evt: self_kill_evt,
+            worker_thread,
+        };
+
+        Ok(())
     }
 
     fn reset(&mut self) -> bool {

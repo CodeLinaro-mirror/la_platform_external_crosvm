@@ -81,6 +81,7 @@ rust_test {
         "libvmm_vhost",
     ],
     proc_macros: [
+        "libasync_trait",
         "libenumn",
         "libremain",
     ],
@@ -174,6 +175,7 @@ rust_test {
         "libvmm_vhost",
     ],
     proc_macros: [
+        "libasync_trait",
         "libenumn",
         "libremain",
     ],
@@ -258,6 +260,7 @@ rust_library {
         "libvmm_vhost",
     ],
     proc_macros: [
+        "libasync_trait",
         "libenumn",
         "libremain",
     ],

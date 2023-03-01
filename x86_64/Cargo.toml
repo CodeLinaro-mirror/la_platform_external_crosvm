@@ -1,7 +1,7 @@
 [package]
 name = "x86_64"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [features]
@@ -32,4 +32,4 @@ vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
 
 [target.'cfg(unix)'.dependencies]
-minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
+minijail = "*"

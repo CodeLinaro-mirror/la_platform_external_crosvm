@@ -6,6 +6,8 @@ use std::io;
 use std::io::Write;
 use std::thread;
 
+use anyhow::anyhow;
+use anyhow::Context;
 use base::error;
 use base::warn;
 use base::Event;
@@ -37,6 +39,7 @@ pub type Result<T> = std::result::Result<T, RngError>;
 struct Worker {
     interrupt: Interrupt,
     queue: Queue,
+    queue_evt: Event,
     mem: GuestMemory,
 }
 
@@ -77,7 +80,7 @@ impl Worker {
         needs_interrupt
     }
 
-    fn run(&mut self, queue_evt: Event, kill_evt: Event) {
+    fn run(&mut self, kill_evt: Event) {
         #[derive(EventToken)]
         enum Token {
             QueueAvailable,
@@ -86,7 +89,7 @@ impl Worker {
         }
 
         let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
-            (&queue_evt, Token::QueueAvailable),
+            (&self.queue_evt, Token::QueueAvailable),
             (&kill_evt, Token::Kill),
         ]) {
             Ok(pc) => pc,
@@ -118,7 +121,7 @@ impl Worker {
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     Token::QueueAvailable => {
-                        if let Err(e) = queue_evt.wait() {
+                        if let Err(e) = self.queue_evt.wait() {
                             error!("failed reading queue Event: {}", e);
                             break 'wait;
                         }
@@ -189,44 +192,34 @@ impl VirtioDevice for Rng {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
-        mut queue_evts: Vec<Event>,
-    ) {
-        if queues.len() != 1 || queue_evts.len() != 1 {
-            return;
+        mut queues: Vec<(Queue, Event)>,
+    ) -> anyhow::Result<()> {
+        if queues.len() != 1 {
+            return Err(anyhow!("expected 1 queue, got {}", queues.len()));
         }
 
-        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("failed to create kill Event pair: {}", e);
-                return;
-            }
-        };
+        let (self_kill_evt, kill_evt) = Event::new()
+            .and_then(|e| Ok((e.try_clone()?, e)))
+            .context("failed to create kill Event pair")?;
         self.kill_evt = Some(self_kill_evt);
 
-        let queue = queues.remove(0);
+        let (queue, queue_evt) = queues.remove(0);
 
-        let worker_result = thread::Builder::new()
+        let worker_thread = thread::Builder::new()
             .name("v_rng".to_string())
             .spawn(move || {
                 let mut worker = Worker {
                     interrupt,
                     queue,
+                    queue_evt,
                     mem,
                 };
-                worker.run(queue_evts.remove(0), kill_evt);
+                worker.run(kill_evt);
                 worker
-            });
-
-        match worker_result {
-            Err(e) => {
-                error!("failed to spawn virtio_rng worker: {}", e);
-            }
-            Ok(join_handle) => {
-                self.worker_thread = Some(join_handle);
-            }
-        }
+            })
+            .context("failed to spawn virtio_rng worker")?;
+        self.worker_thread = Some(worker_thread);
+        Ok(())
     }
 
     fn reset(&mut self) -> bool {

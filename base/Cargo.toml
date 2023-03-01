@@ -1,12 +1,11 @@
 [package]
 name = "base"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [features]
 chromeos = []
-kiwi = []
 
 [dependencies]
 audio_streams = { path = "../common/audio_streams" } # provided by ebuild
@@ -29,7 +28,7 @@ thiserror = "1.0.20"
 uuid = { version = "0.8.2", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
+minijail = "*"
 
 [target.'cfg(windows)'.dependencies]
 rand = "0.8"

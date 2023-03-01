@@ -1,7 +1,7 @@
 [package]
 name = "vm_control"
 version = "0.1.0"
-authors = ["The Chromium OS Authors"]
+authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [features]
@@ -34,6 +34,3 @@ swap = { path = "../swap", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = "*"
-
-[patch.crates-io]
-minijail = { path = "../../minijail/rust/minijail" }

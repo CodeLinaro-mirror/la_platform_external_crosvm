@@ -46,6 +46,9 @@ use crate::virtio::Gpu;
 use crate::virtio::GpuDisplayParameters;
 use crate::virtio::GpuParameters;
 
+pub mod generic;
+pub use generic as product;
+
 async fn run_display(
     display: EventAsync,
     state: Rc<RefCell<gpu::Frontend>>,
@@ -126,6 +129,7 @@ pub struct GpuVmmConfig {
     pub input_event_multi_touch_pipes: Vec<StreamChannel>,
     pub input_event_mouse_pipes: Vec<StreamChannel>,
     pub input_event_keyboard_pipes: Vec<StreamChannel>,
+    pub product_config: product::GpuVmmConfig,
 }
 
 /// Config arguments passed through the bootstrap Tube from the broker to the Gpu backend
@@ -142,6 +146,8 @@ pub struct GpuBackendConfig {
     pub event_devices: Vec<EventDevice>,
     // GPU parameters.
     pub params: GpuParameters,
+    // Product related configurations.
+    pub product_config: product::GpuBackendConfig,
 }
 
 pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
@@ -180,6 +186,10 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
 
     // Required to share memory across processes.
     let external_blob = true;
+
+    // Fallback for when external_blob is not available on the machine. Currently always off.
+    let system_blob = false;
+
     let base_features = virtio::base_features(ProtectionType::Unprotected);
 
     let gpu = Rc::new(RefCell::new(Gpu::new(
@@ -192,6 +202,7 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
         None,
         config.event_devices,
         external_blob,
+        system_blob,
         base_features,
         /*channels=*/ Default::default(),
         wndproc_thread,
@@ -222,9 +233,12 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     // }
 
     info!("vhost-user gpu device ready, starting run loop...");
+
+    // Run until the backend is finished.
     if let Err(e) = ex.run_until(handler.run(vhost_user_tube, config.exit_event, &ex)) {
         bail!("error occurred: {}", e);
     }
 
-    Ok(())
+    // Process any tasks from the backend's destructor.
+    Ok(ex.run_until(async {})?)
 }

@@ -8,6 +8,8 @@ use std::mem;
 use std::result;
 use std::thread;
 
+use anyhow::anyhow;
+use anyhow::Context;
 use base::error;
 use base::warn;
 use base::Error as SysError;
@@ -78,6 +80,7 @@ struct Worker {
     interrupt: Interrupt,
     mem: GuestMemory,
     queue: Queue,
+    queue_evt: Event,
     server: p9::Server,
 }
 
@@ -101,7 +104,7 @@ impl Worker {
         Ok(())
     }
 
-    fn run(&mut self, queue_evt: Event, kill_evt: Event) -> P9Result<()> {
+    fn run(&mut self, kill_evt: Event) -> P9Result<()> {
         #[derive(EventToken)]
         enum Token {
             // A request is ready on the queue.
@@ -112,9 +115,11 @@ impl Worker {
             Kill,
         }
 
-        let wait_ctx: WaitContext<Token> =
-            WaitContext::build_with(&[(&queue_evt, Token::QueueReady), (&kill_evt, Token::Kill)])
-                .map_err(P9Error::CreateWaitContext)?;
+        let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
+            (&self.queue_evt, Token::QueueReady),
+            (&kill_evt, Token::Kill),
+        ])
+        .map_err(P9Error::CreateWaitContext)?;
         if let Some(resample_evt) = self.interrupt.get_resample_evt() {
             wait_ctx
                 .add(resample_evt, Token::InterruptResample)
@@ -126,7 +131,7 @@ impl Worker {
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     Token::QueueReady => {
-                        queue_evt.wait().map_err(P9Error::ReadQueueEvent)?;
+                        self.queue_evt.wait().map_err(P9Error::ReadQueueEvent)?;
                         self.process_queue()?;
                     }
                     Token::InterruptResample => {
@@ -216,41 +221,37 @@ impl VirtioDevice for P9 {
         &mut self,
         guest_mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<Queue>,
-        mut queue_evts: Vec<Event>,
-    ) {
-        if queues.len() != 1 || queue_evts.len() != 1 {
-            return;
+        mut queues: Vec<(Queue, Event)>,
+    ) -> anyhow::Result<()> {
+        if queues.len() != 1 {
+            return Err(anyhow!("expected 1 queue, got {}", queues.len()));
         }
 
-        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("failed creating kill Event pair: {}", e);
-                return;
-            }
-        };
+        let (queue, queue_evt) = queues.remove(0);
+
+        let (self_kill_evt, kill_evt) = Event::new()
+            .and_then(|e| Ok((e.try_clone()?, e)))
+            .context("failed creating kill Event pair")?;
         self.kill_evt = Some(self_kill_evt);
 
-        if let Some(server) = self.server.take() {
-            let worker_result = thread::Builder::new()
-                .name("v_9p".to_string())
-                .spawn(move || {
-                    let mut worker = Worker {
-                        interrupt,
-                        mem: guest_mem,
-                        queue: queues.remove(0),
-                        server,
-                    };
+        let server = self.server.take().context("missing server")?;
 
-                    worker.run(queue_evts.remove(0), kill_evt)
-                });
+        let worker_thread = thread::Builder::new()
+            .name("v_9p".to_string())
+            .spawn(move || {
+                let mut worker = Worker {
+                    interrupt,
+                    mem: guest_mem,
+                    queue,
+                    queue_evt,
+                    server,
+                };
 
-            match worker_result {
-                Ok(worker) => self.worker = Some(worker),
-                Err(e) => error!("failed to spawn virtio_9p worker: {}", e),
-            }
-        }
+                worker.run(kill_evt)
+            })
+            .context("failed to spawn virtio_9p worker")?;
+        self.worker = Some(worker_thread);
+        Ok(())
     }
 }
 

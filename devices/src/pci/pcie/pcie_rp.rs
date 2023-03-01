@@ -15,12 +15,12 @@ use crate::bus::HostHotPlugKey;
 use crate::bus::HotPlugBus;
 use crate::pci::pci_configuration::PciCapabilityID;
 use crate::pci::pcie::pci_bridge::PciBridgeBusRange;
-use crate::pci::pcie::pcie_device::PciPmcCap;
 use crate::pci::pcie::pcie_device::PcieCap;
 use crate::pci::pcie::pcie_device::PcieDevice;
 use crate::pci::pcie::pcie_host::PcieHostPort;
 use crate::pci::pcie::pcie_port::PciePort;
 use crate::pci::pcie::*;
+use crate::pci::pm::PciPmCap;
 use crate::pci::MsiConfig;
 use crate::pci::PciAddress;
 use crate::pci::PciCapability;
@@ -95,7 +95,7 @@ impl PcieDevice for PcieRootPort {
                 self.pcie_port.hotplug_implemented(),
                 0,
             )),
-            Box::new(PciPmcCap::new()),
+            Box::new(PciPmCap::new()),
         ]
     }
 
@@ -219,7 +219,8 @@ impl GpeNotify for PcieRootPort {
         }
 
         if self.pcie_port.should_trigger_pme() {
-            self.pcie_port.inject_pme();
+            self.pcie_port
+                .inject_pme(self.pcie_port.get_address().unwrap().pme_requester_id());
         }
     }
 }

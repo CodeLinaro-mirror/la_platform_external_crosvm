@@ -9,7 +9,6 @@ use acpi_tables::aml::Aml;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use base::error;
 use base::pagesize;
@@ -27,6 +26,7 @@ use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER_OK;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FAILED;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FEATURES_OK;
+use virtio_sys::virtio_config::VIRTIO_CONFIG_S_NEEDS_RESET;
 use virtio_sys::virtio_mmio::*;
 use vm_memory::GuestMemory;
 
@@ -132,18 +132,6 @@ impl VirtioMmioDevice {
         self.driver_status == DEVICE_RESET as u8
     }
 
-    fn are_queues_valid(&mut self) -> bool {
-        // All queues marked as ready must be valid.
-        self.queues
-            .iter_mut()
-            .filter(|q| q.ready())
-            .all(|q| q.is_valid(&self.mem))
-    }
-
-    fn clone_queue_evts(&self) -> Result<Vec<Event>> {
-        self.queue_evts.iter().map(|e| e.try_clone()).collect()
-    }
-
     fn device_type(&self) -> u32 {
         self.device.device_type() as u32
     }
@@ -161,28 +149,27 @@ impl VirtioMmioDevice {
         let interrupt = Interrupt::new_mmio(interrupt_evt, self.async_intr_status);
         self.interrupt = Some(interrupt.clone());
 
-        match self.clone_queue_evts() {
-            Ok(queue_evts) => {
-                // Use ready queues and their events.
-                let (queues, queue_evts) = self
-                    .queues
-                    .clone()
-                    .into_iter()
-                    .zip(queue_evts.into_iter())
-                    .filter(|(q, _)| q.ready())
-                    .unzip();
+        // Use ready queues and their events.
+        let queues = self
+            .queues
+            .iter()
+            .zip(self.queue_evts.iter())
+            .filter(|(q, _)| q.ready())
+            .map(|(queue, evt)| {
+                Ok((
+                    queue.clone(),
+                    evt.try_clone().context("failed to clone queue_evt")?,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<(Queue, Event)>>>()?;
 
-                self.device.activate(mem, interrupt, queues, queue_evts);
-                self.device_activated = true;
-            }
-            Err(e) => {
-                bail!(
-                    "{} not activate due to failed to clone queue_evts: {}",
-                    self.debug_label(),
-                    e
-                );
-            }
+        if let Err(e) = self.device.activate(mem, interrupt, queues) {
+            error!("{} activate failed: {:#}", self.debug_label(), e);
+            self.driver_status |= VIRTIO_CONFIG_S_NEEDS_RESET as u8;
+        } else {
+            self.device_activated = true;
         }
+
         Ok(())
     }
 
@@ -214,7 +201,7 @@ impl VirtioMmioDevice {
                     0
                 }
             }
-            VIRTIO_MMIO_QUEUE_NUM_MAX => self.with_queue(|q| q.max_size).unwrap_or(0).into(),
+            VIRTIO_MMIO_QUEUE_NUM_MAX => self.with_queue(|q| q.max_size()).unwrap_or(0).into(),
             VIRTIO_MMIO_QUEUE_PFN => {
                 warn!(
                     "{}: read from legacy register {}, in non-legacy mode",
@@ -346,10 +333,8 @@ impl VirtioMmioDevice {
                 }
             }
 
-            if self.are_queues_valid() {
-                if let Err(e) = self.activate() {
-                    error!("failed to activate device: {:#}", e);
-                }
+            if let Err(e) = self.activate() {
+                error!("failed to activate device: {:#}", e);
             }
         }
 
@@ -517,11 +502,11 @@ impl Suspendable for VirtioMmioDevice {
         self.device.wake()
     }
 
-    fn snapshot(&self) -> anyhow::Result<String> {
+    fn snapshot(&self) -> anyhow::Result<serde_json::Value> {
         self.device.snapshot()
     }
 
-    fn restore(&mut self, data: &str) -> anyhow::Result<()> {
+    fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
         self.device.restore(data)
     }
 }

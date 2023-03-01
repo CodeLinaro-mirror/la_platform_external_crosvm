@@ -19,4 +19,9 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
+    rustlibs: [
+        "libanyhow",
+        "libbase_rust",
+        "libcfg_if",
+    ],
 }

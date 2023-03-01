@@ -62,6 +62,7 @@ rust_binary {
         "libbroker_ipc",
         "libcfg_if",
         "libcros_async",
+        "libcros_tracing",
         "libcrosvm_cli",
         "libdata_model",
         "libdevices",
@@ -74,6 +75,7 @@ rust_binary {
         "liblibc",
         "liblibcras",
         "liblog_rust",
+        "libmerge",
         "libmetrics",
         "libminijail_rust",
         "libnet_util",
@@ -120,19 +122,7 @@ rust_binary {
                 "libprocessgroup",
             ],
         },
-        darwin: {
-            enabled: false,
-        },
         host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
             shared_libs: [
                 "libprocessgroup",
             ],
@@ -191,6 +181,7 @@ rust_test {
         "libbroker_ipc",
         "libcfg_if",
         "libcros_async",
+        "libcros_tracing",
         "libcrosvm_cli",
         "libdata_model",
         "libdevices",
@@ -203,6 +194,7 @@ rust_test {
         "liblibc",
         "liblibcras",
         "liblog_rust",
+        "libmerge",
         "libmetrics",
         "libminijail_rust",
         "libnet_util",
@@ -250,15 +242,6 @@ rust_test {
             ],
         },
         host_linux: {
-            features: [
-                "gdb",
-                "gdbstub",
-            ],
-            rustlibs: [
-                "libgdbstub",
-                "libgdbstub_arch",
-                "libthiserror",
-            ],
             shared_libs: [
                 "libprocessgroup",
             ],

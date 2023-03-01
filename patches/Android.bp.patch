@@ -10,16 +10,6 @@ index d3d46248..bc1191a5 100644
      crate_name: "crosvm",
      cargo_env_compat: true,
      srcs: ["src/main.rs"],
-@@ -94,6 +94,9 @@ rust_binary {
-                 "gpu",
-             ],  
-         },
-+        darwin: {
-+            enabled: false,
-+        },
-         host_linux: {
-             features: [
-                 "gdb",
 @@ -107,6 +108,18 @@ rust_binary {
                  "libthiserror",
              ],
@@ -39,13 +29,3 @@ index d3d46248..bc1191a5 100644
      },
      ld_flags: [
          "-Wl,--rpath,\\$$ORIGIN",
-@@ -263,6 +266,9 @@ rust_defaults {
-         linux_bionic_arm64: {
-             enabled: true,
-         },
-+        linux_musl_arm64: {
-+            enabled: true,
-+        },
-         darwin: {
-             enabled: false,
-         },

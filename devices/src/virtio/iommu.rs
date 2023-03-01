@@ -22,6 +22,7 @@ use std::thread;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
+use anyhow::anyhow;
 use anyhow::Context;
 use base::debug;
 use base::error;
@@ -641,8 +642,7 @@ async fn request_queue<I: SignalableInterrupt>(
 fn run(
     state: State,
     iommu_device_tube: Tube,
-    mut queues: Vec<Queue>,
-    queue_evts: Vec<Event>,
+    mut queues: Vec<(Queue, Event)>,
     kill_evt: Event,
     interrupt: Interrupt,
     translate_response_senders: Option<BTreeMap<u32, Tube>>,
@@ -651,12 +651,8 @@ fn run(
     let state = Rc::new(RefCell::new(state));
     let ex = Executor::new().expect("Failed to create an executor");
 
-    let mut evts_async: Vec<EventAsync> = queue_evts
-        .into_iter()
-        .map(|e| EventAsync::new(e, &ex).expect("Failed to create async event for queue"))
-        .collect();
-
-    let (req_queue, req_evt) = (queues.remove(0), evts_async.remove(0));
+    let (req_queue, req_evt) = queues.remove(0);
+    let req_evt = EventAsync::new(req_evt, &ex).expect("Failed to create async event for queue");
 
     let f_resample = async_utils::handle_irq_resample(&ex, interrupt.clone());
     let f_kill = async_utils::await_and_exit(&ex, kill_evt);
@@ -836,20 +832,19 @@ impl VirtioDevice for Iommu {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<Queue>,
-        queue_evts: Vec<Event>,
-    ) {
-        if queues.len() != QUEUE_SIZES.len() || queue_evts.len() != QUEUE_SIZES.len() {
-            return;
+        queues: Vec<(Queue, Event)>,
+    ) -> anyhow::Result<()> {
+        if queues.len() != QUEUE_SIZES.len() {
+            return Err(anyhow!(
+                "expected {} queues, got {}",
+                QUEUE_SIZES.len(),
+                queues.len()
+            ));
         }
 
-        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("failed to create kill Event pair: {}", e);
-                return;
-            }
-        };
+        let (self_kill_evt, kill_evt) = Event::new()
+            .and_then(|e| Ok((e.try_clone()?, e)))
+            .context("failed to create kill Event pair")?;
         self.kill_evt = Some(self_kill_evt);
 
         // The least significant bit of page_size_masks defines the page
@@ -861,45 +856,39 @@ impl VirtioDevice for Iommu {
         let translate_response_senders = self.translate_response_senders.take();
         let translate_request_rx = self.translate_request_rx.take();
 
-        match self.iommu_device_tube.take() {
-            Some(iommu_device_tube) => {
-                let worker_result =
-                    thread::Builder::new()
-                        .name("v_iommu".to_string())
-                        .spawn(move || {
-                            let state = State {
-                                mem,
-                                page_mask,
-                                hp_endpoints_ranges,
-                                endpoint_map: BTreeMap::new(),
-                                domain_map: BTreeMap::new(),
-                                endpoints: eps,
-                                dmabuf_mem: BTreeMap::new(),
-                            };
-                            let result = run(
-                                state,
-                                iommu_device_tube,
-                                queues,
-                                queue_evts,
-                                kill_evt,
-                                interrupt,
-                                translate_response_senders,
-                                translate_request_rx,
-                            );
-                            if let Err(e) = result {
-                                error!("virtio-iommu worker thread exited with error: {}", e);
-                            }
-                        });
+        let iommu_device_tube = self
+            .iommu_device_tube
+            .take()
+            .context("failed to start virtio-iommu worker: No control tube")?;
 
-                match worker_result {
-                    Err(e) => error!("failed to spawn virtio_iommu worker thread: {}", e),
-                    Ok(join_handle) => self.worker_thread = Some(join_handle),
+        let worker_thread = thread::Builder::new()
+            .name("v_iommu".to_string())
+            .spawn(move || {
+                let state = State {
+                    mem,
+                    page_mask,
+                    hp_endpoints_ranges,
+                    endpoint_map: BTreeMap::new(),
+                    domain_map: BTreeMap::new(),
+                    endpoints: eps,
+                    dmabuf_mem: BTreeMap::new(),
+                };
+                let result = run(
+                    state,
+                    iommu_device_tube,
+                    queues,
+                    kill_evt,
+                    interrupt,
+                    translate_response_senders,
+                    translate_request_rx,
+                );
+                if let Err(e) = result {
+                    error!("virtio-iommu worker thread exited with error: {}", e);
                 }
-            }
-            None => {
-                error!("failed to start virtio-iommu worker: No control tube");
-            }
-        }
+            })
+            .context("failed to spawn virtio_iommu worker thread")?;
+        self.worker_thread = Some(worker_thread);
+        Ok(())
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

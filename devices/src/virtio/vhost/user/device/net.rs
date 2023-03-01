@@ -36,7 +36,6 @@ thread_local! {
 // TODO(b/188947559): Come up with better way to include these constants. Compiler errors happen
 // if they are kept in the trait.
 const MAX_QUEUE_NUM: usize = 3; /* rx, tx, ctrl */
-const MAX_VRING_LEN: u16 = 1024;
 
 async fn run_tx_queue<T: TapT>(
     mut queue: virtio::Queue,
@@ -112,10 +111,6 @@ where
         MAX_QUEUE_NUM
     }
 
-    fn max_vring_len(&self) -> u16 {
-        MAX_VRING_LEN
-    }
-
     fn features(&self) -> u64 {
         self.avail_features
     }
@@ -156,7 +151,7 @@ where
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        let config_space = build_config(Self::max_vq_pairs() as u16, self.mtu);
+        let config_space = build_config(Self::max_vq_pairs() as u16, self.mtu, None);
         virtio::copy_config(data, 0, config_space.as_slice(), offset);
     }
 

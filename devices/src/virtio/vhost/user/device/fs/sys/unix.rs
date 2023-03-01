@@ -63,6 +63,7 @@ fn jail_and_fork(
     j.set_rlimit(libc::RLIMIT_MEMLOCK as i32, 1 << 20, 1 << 20)?;
 
     // Make sure there are no duplicates in keep_rds
+    keep_rds.sort_unstable();
     keep_rds.dedup();
 
     let tz = std::env::var("TZ").unwrap_or_default();
@@ -101,6 +102,7 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
     )?;
 
     base::syslog::push_descriptors(&mut keep_rds);
+    cros_tracing::push_descriptors!(&mut keep_rds);
 
     let pid = jail_and_fork(keep_rds, opts.shared_dir, opts.uid_map, opts.gid_map)?;
 

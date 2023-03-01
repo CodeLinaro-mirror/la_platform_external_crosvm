@@ -14,11 +14,11 @@ use crate::bus::HostHotPlugKey;
 use crate::bus::HotPlugBus;
 use crate::pci::pci_configuration::PciCapabilityID;
 use crate::pci::pcie::pci_bridge::PciBridgeBusRange;
-use crate::pci::pcie::pcie_device::PciPmcCap;
 use crate::pci::pcie::pcie_device::PcieCap;
 use crate::pci::pcie::pcie_device::PcieDevice;
 use crate::pci::pcie::pcie_port::PciePort;
 use crate::pci::pcie::*;
+use crate::pci::pm::PciPmCap;
 use crate::pci::MsiConfig;
 use crate::pci::PciAddress;
 use crate::pci::PciCapability;
@@ -98,7 +98,7 @@ impl PcieDevice for PcieUpstreamPort {
     fn get_caps(&self) -> Vec<Box<dyn PciCapability>> {
         vec![
             Box::new(PcieCap::new(PcieDevicePortType::UpstreamPort, false, 0)),
-            Box::new(PciPmcCap::new()),
+            Box::new(PciPmCap::new()),
         ]
     }
 
@@ -257,7 +257,7 @@ impl PcieDevice for PcieDownstreamPort {
     fn get_caps(&self) -> Vec<Box<dyn PciCapability>> {
         vec![
             Box::new(PcieCap::new(PcieDevicePortType::DownstreamPort, true, 0)),
-            Box::new(PciPmcCap::new()),
+            Box::new(PciPmCap::new()),
         ]
     }
 

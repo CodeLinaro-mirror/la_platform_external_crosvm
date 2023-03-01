@@ -39,7 +39,6 @@ use crate::virtio::SharedMemoryRegion;
 use crate::virtio::VirtioDevice;
 
 const MAX_QUEUE_NUM: usize = gpu::QUEUE_SIZES.len();
-const MAX_VRING_LEN: u16 = gpu::QUEUE_SIZES[0];
 
 #[derive(Clone)]
 struct SharedReader {
@@ -97,10 +96,6 @@ struct GpuBackend {
 impl VhostUserBackend for GpuBackend {
     fn max_queue_num(&self) -> usize {
         MAX_QUEUE_NUM
-    }
-
-    fn max_vring_len(&self) -> u16 {
-        MAX_VRING_LEN
     }
 
     fn features(&self) -> u64 {
@@ -246,5 +241,14 @@ impl VhostUserBackend for GpuBackend {
         }
 
         self.backend_req_conn = VhostBackendReqConnectionState::Connected(conn);
+    }
+}
+
+impl Drop for GpuBackend {
+    fn drop(&mut self) {
+        // Workers are detached and will leak unless they are aborted. Aborting marks the
+        // Abortable task, then wakes it up. This means the executor should be asked to continue
+        // running for one more step after the backend is destroyed.
+        self.reset();
     }
 }

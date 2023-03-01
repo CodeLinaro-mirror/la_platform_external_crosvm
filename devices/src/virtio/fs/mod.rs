@@ -7,6 +7,8 @@ use std::mem;
 use std::sync::Arc;
 use std::thread;
 
+use anyhow::anyhow;
+use anyhow::Context;
 use base::error;
 use base::warn;
 use base::AsRawDescriptor;
@@ -20,6 +22,8 @@ use remain::sorted;
 use resources::Alloc;
 use sync::Mutex;
 use thiserror::Error;
+use virtio_sys::virtio_fs::virtio_fs_config;
+use virtio_sys::virtio_fs::VIRTIO_FS_SHMCAP_ID_CACHE;
 use vm_control::FsMappingRequest;
 use vm_control::VmResponse;
 use vm_memory::GuestMemory;
@@ -30,6 +34,8 @@ use crate::pci::PciBarPrefetchable;
 use crate::pci::PciBarRegionType;
 use crate::pci::PciCapability;
 use crate::virtio::copy_config;
+use crate::virtio::device_constants::fs::FS_MAX_TAG_LEN;
+use crate::virtio::device_constants::fs::QUEUE_SIZE;
 use crate::virtio::DescriptorError;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
@@ -50,31 +56,9 @@ use passthrough::PassthroughFs;
 pub use worker::process_fs_queue;
 use worker::Worker;
 
-// The fs device does not have a fixed number of queues.
-pub const QUEUE_SIZE: u16 = 1024;
-
 const FS_BAR_NUM: u8 = 4;
 const FS_BAR_OFFSET: u64 = 0;
 const FS_BAR_SIZE: u64 = 1 << 33;
-
-/// Defined in kernel/include/uapi/linux/virtio_fs.h.
-const VIRTIO_FS_SHMCAP_ID_CACHE: u8 = 0;
-
-/// The maximum allowable length of the tag used to identify a specific virtio-fs device.
-pub const FS_MAX_TAG_LEN: usize = 36;
-
-/// kernel/include/uapi/linux/virtio_fs.h
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct virtio_fs_config {
-    /// Filesystem name (UTF-8, not NUL-terminated, padded with NULs)
-    pub tag: [u8; FS_MAX_TAG_LEN],
-    /// Number of request queues
-    pub num_request_queues: Le32,
-}
-
-// Safe because all members are plain old data and any value is valid.
-unsafe impl DataInit for virtio_fs_config {}
 
 /// Errors that may occur during the creation or operation of an Fs device.
 #[sorted]
@@ -245,11 +229,14 @@ impl VirtioDevice for Fs {
         &mut self,
         guest_mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<Queue>,
-        queue_evts: Vec<Event>,
-    ) {
-        if queues.len() != self.queue_sizes.len() || queue_evts.len() != self.queue_sizes.len() {
-            return;
+        queues: Vec<(Queue, Event)>,
+    ) -> anyhow::Result<()> {
+        if queues.len() != self.queue_sizes.len() {
+            return Err(anyhow!(
+                "expected {} queues, got {}",
+                self.queue_sizes.len(),
+                queues.len()
+            ));
         }
 
         let fs = self.fs.take().expect("missing file system implementation");
@@ -281,14 +268,13 @@ impl VirtioDevice for Fs {
 
         let socket = Arc::new(Mutex::new(socket));
         let mut watch_resample_event = true;
-        for (idx, (queue, evt)) in queues.into_iter().zip(queue_evts.into_iter()).enumerate() {
+        for (idx, (queue, evt)) in queues.into_iter().enumerate() {
             let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e)))
             {
                 Ok(v) => v,
                 Err(e) => {
-                    error!("fs: failed creating kill Event pair: {}", e);
                     self.stop_workers();
-                    return;
+                    return Err(e).context("failed creating kill Event pair");
                 }
             };
 
@@ -311,12 +297,12 @@ impl VirtioDevice for Fs {
             match worker_result {
                 Ok(worker) => self.workers.push((self_kill_evt, worker)),
                 Err(e) => {
-                    error!("fs: failed to spawn virtio_fs worker: {}", e);
                     self.stop_workers();
-                    return;
+                    return Err(e).context("failed to spawn virtio_fs worker");
                 }
             }
         }
+        Ok(())
     }
 
     fn get_device_bars(&mut self, address: PciAddress) -> Vec<PciBarConfiguration> {
@@ -349,7 +335,7 @@ impl VirtioDevice for Fs {
             FS_BAR_NUM,
             FS_BAR_OFFSET,
             FS_BAR_SIZE,
-            VIRTIO_FS_SHMCAP_ID_CACHE,
+            VIRTIO_FS_SHMCAP_ID_CACHE as u8,
         ))]
     }
 }
