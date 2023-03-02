@@ -26,6 +26,7 @@
     "crosvm_plugin",
     "e2e_tests",
     "ffmpeg",
+    "fixture",
     "gpu_buffer",
     "libva",
     "libvda",

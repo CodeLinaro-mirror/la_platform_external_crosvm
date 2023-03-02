@@ -66,15 +66,10 @@ macro_rules! push_descriptors {
 ///
 /// * `keep_rds` - List of file descriptors that will be accessible after jailing
 pub fn push_descriptors(keep_rds: &mut Vec<RawDescriptor>) {
-    match TRACE_MARKER_FILE.get() {
-        Some(file) => {
-            let fd = file.lock().unwrap().as_raw_fd();
-            if !keep_rds.contains(&fd) {
-                keep_rds.push(fd);
-            }
-        }
-        None => {
-            error!("Unable to obtain trace_marker descriptor. Was None.");
+    if let Some(file) = TRACE_MARKER_FILE.get() {
+        let fd = file.lock().unwrap().as_raw_fd();
+        if !keep_rds.contains(&fd) {
+            keep_rds.push(fd);
         }
     }
 }
@@ -105,20 +100,16 @@ pub fn trace_simple_print(message: String) {
 /// without tracing.
 pub fn init() {
     let path = Path::new("/sys/kernel/tracing/trace_marker");
-    let file = if path.exists() {
-        match OpenOptions::new().read(false).write(true).open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                error!(
-                    "Failed opening the trace_marker file: {}. Tracing will not work.",
-                    e
-                );
-                return;
-            }
+    let file = match OpenOptions::new().read(false).write(true).open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            error!(
+                "Failed to open {}: {}. Tracing will not work.",
+                path.display(),
+                e
+            );
+            return;
         }
-    } else {
-        error!("Could not find trace_marker location. Tracing will not work.");
-        return;
     };
 
     if TRACE_MARKER_FILE.set(Mutex::new(file)).is_err() {

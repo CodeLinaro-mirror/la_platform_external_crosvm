@@ -6,7 +6,6 @@ use std::ffi::CString;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
-use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -14,21 +13,21 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
-use std::process::Stdio;
-use std::str::from_utf8;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use anyhow::Context;
 use anyhow::Result;
 use libc::O_DIRECT;
 use tempfile::TempDir;
 
-use crate::fixture::utils::find_crosvm_binary;
-use crate::fixture::vm::kernel_path;
-use crate::fixture::vm::rootfs_path;
-use crate::fixture::vm::run_with_timeout;
-use crate::fixture::vm::Config;
-use crate::fixture::vm::TestVm;
+use crate::utils::find_crosvm_binary;
+use crate::utils::run_with_timeout;
+use crate::vm::kernel_path;
+use crate::vm::rootfs_path;
+use crate::vm::Config;
 
 const FROM_GUEST_PIPE: &str = "from_guest";
 const TO_GUEST_PIPE: &str = "to_guest";
@@ -61,13 +60,12 @@ pub(crate) fn mkfifo(path: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
 pub struct TestVmSys {
     /// Maintain ownership of test_dir until the vm is destroyed.
     #[allow(dead_code)]
     pub test_dir: TempDir,
-    pub from_guest_reader: BufReader<File>,
-    pub to_guest: File,
+    pub from_guest_reader: Arc<Mutex<BufReader<File>>>,
+    pub to_guest: Arc<Mutex<File>>,
     pub control_socket_path: PathBuf,
     pub process: Option<Child>, // Use `Option` to allow taking the ownership in `Drop::drop()`.
 }
@@ -98,7 +96,7 @@ impl TestVmSys {
         from_guest_pipe: &Path,
         to_guest_pipe: &Path,
     ) {
-        command.args(["--serial", "type=syslog"]);
+        command.args(["--serial", "type=stdout"]);
 
         // Setup channel for communication with the delegate.
         let serial_params = format!(
@@ -140,46 +138,31 @@ impl TestVmSys {
         f(&mut command, test_dir.path(), &cfg)?;
 
         command.args(&cfg.extra_args);
-        // Set `Stdio::piped` so we can forward the outputs to stdout later.
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
 
         println!("$ {:?}", command);
-
         let mut process = Some(command.spawn()?);
 
-        // Open pipes. Panic if we cannot connect after a timeout.
-        let (to_guest, from_guest) = run_with_timeout(
-            move || (File::create(to_guest_pipe), File::open(from_guest_pipe)),
+        // Open pipes. Apply timeout to `from_guest` since it will block until crosvm opens the
+        // other end.
+        let to_guest = File::create(to_guest_pipe)?;
+        let from_guest = match run_with_timeout(
+            move || File::open(from_guest_pipe),
             VM_COMMUNICATION_TIMEOUT,
-            || {
+        ) {
+            Ok(from_guest) => from_guest.with_context(|| "Cannot open from_guest pipe")?,
+            Err(error) => {
+                // Kill the crosvm process if we cannot connect in time.
                 let mut process = process.take().unwrap();
                 process.kill().unwrap();
-                let output = process.wait_with_output().unwrap();
-
-                // Print both the crosvm's stdout/stderr to stdout so that they'll be shown when
-                // the test failed.
-                println!(
-                    "TestVm stdout:\n{}",
-                    std::str::from_utf8(&output.stdout).unwrap()
-                );
-                println!(
-                    "TestVm stderr:\n{}",
-                    std::str::from_utf8(&output.stderr).unwrap()
-                );
-            },
-        );
-
-        // Wait for magic line to be received, indicating the delegate is ready.
-        let mut from_guest_reader = BufReader::new(from_guest?);
-        let mut magic_line = String::new();
-        from_guest_reader.read_line(&mut magic_line)?;
-        assert_eq!(magic_line.trim(), TestVm::MAGIC_LINE);
+                process.wait().unwrap();
+                panic!("Cannot connect to VM: {}", error);
+            }
+        };
 
         Ok(TestVmSys {
             test_dir,
-            from_guest_reader,
-            to_guest: to_guest?,
+            from_guest_reader: Arc::new(Mutex::new(BufReader::new(from_guest))),
+            to_guest: Arc::new(Mutex::new(to_guest)),
             control_socket_path,
             process,
         })
@@ -214,7 +197,7 @@ impl TestVmSys {
               "params": [ "init=/bin/delegate" ],
               "serial": [
                 {{
-                  "type": "syslog"
+                  "type": "stdout"
                 }},
                 {{
                   "type": "file",
@@ -263,23 +246,8 @@ impl TestVmSys {
 
         let mut cmd = Command::new(find_crosvm_binary());
         cmd.arg(command).args(args);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
 
         let output = cmd.output()?;
-        // Print both the crosvm's stdout/stderr to stdout so that they'll be shown when the test
-        // is failed.
-        println!(
-            "`crosvm {}` stdout:\n{}",
-            command,
-            from_utf8(&output.stdout).unwrap()
-        );
-        println!(
-            "`crosvm {}` stderr:\n{}",
-            command,
-            from_utf8(&output.stderr).unwrap()
-        );
-
         if !output.status.success() {
             Err(anyhow!("Command failed with exit code {}", output.status))
         } else {

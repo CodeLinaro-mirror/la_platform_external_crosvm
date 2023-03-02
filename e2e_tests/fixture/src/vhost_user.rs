@@ -7,10 +7,12 @@
 use std::process;
 use std::process::Command;
 use std::process::Stdio;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::fixture::utils::find_crosvm_binary;
+use crate::utils::find_crosvm_binary;
 
 pub enum CmdType {
     /// `crosvm device` command
@@ -71,6 +73,8 @@ impl VhostUserBackend {
         println!("$ {:?}", cmd);
 
         let process = Some(cmd.spawn()?);
+        // TODO(b/269174700): Wait for the VU socket to be available instead.
+        thread::sleep(Duration::from_millis(100));
 
         Ok(Self {
             name: cfg.dev_name,

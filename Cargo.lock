@@ -602,6 +602,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_keyvalue",
+ "smallvec",
  "static_assertions",
  "swap",
  "sync",
@@ -846,10 +847,7 @@ name = "e2e_tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arch",
- "base",
- "cfg-if",
- "libc",
+ "fixture",
  "prebuilts",
  "rand",
  "tempfile",
@@ -911,6 +909,20 @@ dependencies = [
  "libc",
  "pkg-config",
  "thiserror",
+]
+
+[[package]]
+name = "fixture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arch",
+ "base",
+ "cfg-if",
+ "libc",
+ "prebuilts",
+ "rand",
+ "tempfile",
 ]
 
 [[package]]
@@ -1085,6 +1097,7 @@ dependencies = [
  "sync",
  "thiserror",
  "vm_control",
+ "which",
  "win_util",
  "winapi",
  "zerocopy",
