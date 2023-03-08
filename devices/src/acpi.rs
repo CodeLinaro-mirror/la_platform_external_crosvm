@@ -11,7 +11,6 @@ use std::io::Error as IoError;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread;
 
 use acpi_tables::aml;
 use acpi_tables::aml::Aml;
@@ -25,6 +24,7 @@ use base::EventToken;
 use base::SendTube;
 use base::VmEventType;
 use base::WaitContext;
+use base::WorkerThread;
 use serde::Deserialize;
 use serde::Serialize;
 use sync::Mutex;
@@ -33,6 +33,7 @@ use vm_control::GpeNotify;
 use vm_control::PmResource;
 use vm_control::PmeNotify;
 
+use crate::ac_adapter::AcAdapter;
 use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
@@ -120,9 +121,7 @@ pub struct ACPIPMResource {
     #[serde(skip_serializing)]
     direct_fixed_evts: Vec<DirectFixedEvent>,
     #[serde(skip_serializing)]
-    kill_evt: Option<Event>,
-    #[serde(skip_serializing)]
-    worker_thread: Option<thread::JoinHandle<()>>,
+    worker_thread: Option<WorkerThread<()>>,
     #[serde(skip_serializing)]
     suspend_evt: Event,
     #[serde(skip_serializing)]
@@ -133,6 +132,8 @@ pub struct ACPIPMResource {
     gpe0: Arc<Mutex<GpeResource>>,
     #[serde(serialize_with = "serialize_arc_mutex")]
     pci: Arc<Mutex<PciResource>>,
+    #[serde(skip_serializing)]
+    acdc: Option<Arc<Mutex<AcAdapter>>>,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +159,7 @@ impl ACPIPMResource {
         )>,
         suspend_evt: Event,
         exit_evt_wrtube: SendTube,
+        acdc: Option<Arc<Mutex<AcAdapter>>>,
     ) -> ACPIPMResource {
         let pm1 = Pm1Resource {
             status: 0,
@@ -194,29 +196,21 @@ impl ACPIPMResource {
             direct_gpe,
             #[cfg(feature = "direct")]
             direct_fixed_evts,
-            kill_evt: None,
             worker_thread: None,
             suspend_evt,
             exit_evt_wrtube,
             pm1: Arc::new(Mutex::new(pm1)),
             gpe0: Arc::new(Mutex::new(gpe0)),
             pci: Arc::new(Mutex::new(pci)),
+            acdc,
         }
     }
 
     pub fn start(&mut self) {
-        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("failed to create kill Event pair: {}", e);
-                return;
-            }
-        };
-        self.kill_evt = Some(self_kill_evt);
-
         let sci_evt = self.sci_evt.try_clone().expect("failed to clone event");
         let pm1 = self.pm1.clone();
         let gpe0 = self.gpe0.clone();
+        let acdc = self.acdc.clone();
 
         #[cfg(feature = "direct")]
         let sci_direct_evt = self.sci_direct_evt.take();
@@ -232,26 +226,20 @@ impl ACPIPMResource {
         #[cfg(not(feature = "direct"))]
         let acpi_event_ignored_gpe = Vec::new();
 
-        let worker_result = thread::Builder::new()
-            .name("ACPI PM worker".to_string())
-            .spawn(move || {
-                if let Err(e) = run_worker(
-                    sci_evt,
-                    kill_evt,
-                    pm1,
-                    gpe0,
-                    acpi_event_ignored_gpe,
-                    #[cfg(feature = "direct")]
-                    sci_direct_evt,
-                ) {
-                    error!("{}", e);
-                }
-            });
-
-        match worker_result {
-            Err(e) => error!("failed to spawn ACPI PM worker thread: {}", e),
-            Ok(join_handle) => self.worker_thread = Some(join_handle),
-        }
+        self.worker_thread = Some(WorkerThread::start("ACPI PM worker", move |kill_evt| {
+            if let Err(e) = run_worker(
+                sci_evt,
+                kill_evt,
+                pm1,
+                gpe0,
+                acpi_event_ignored_gpe,
+                #[cfg(feature = "direct")]
+                sci_direct_evt,
+                acdc,
+            ) {
+                error!("{}", e);
+            }
+        }));
     }
 }
 
@@ -277,12 +265,8 @@ impl Suspendable for ACPIPMResource {
     }
 
     fn sleep(&mut self) -> anyhow::Result<()> {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            let _ = kill_evt.signal();
-        }
-
         if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
+            worker_thread.stop();
         }
         Ok(())
     }
@@ -300,6 +284,7 @@ fn run_worker(
     gpe0: Arc<Mutex<GpeResource>>,
     acpi_event_ignored_gpe: Vec<u32>,
     #[cfg(feature = "direct")] sci_direct_evt: Option<IrqLevelEvent>,
+    arced_ac_adapter: Option<Arc<Mutex<AcAdapter>>>,
 ) -> Result<(), ACPIPMError> {
     let acpi_event_sock = crate::sys::get_acpi_event_sock()?;
     #[derive(EventToken)]
@@ -337,7 +322,13 @@ fn run_worker(
         for event in events.iter().filter(|e| e.is_readable) {
             match event.token {
                 Token::AcpiEvent => {
-                    crate::sys::acpi_event_run(&acpi_event_sock, &gpe0, &acpi_event_ignored_gpe);
+                    crate::sys::acpi_event_run(
+                        &sci_evt,
+                        &acpi_event_sock,
+                        &gpe0,
+                        &acpi_event_ignored_gpe,
+                        &arced_ac_adapter,
+                    );
                 }
                 Token::InterruptResample => {
                     sci_evt.clear_resample();
@@ -378,18 +369,6 @@ fn run_worker(
     }
 }
 
-impl Drop for ACPIPMResource {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            let _ = kill_evt.signal();
-        }
-
-        if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
-        }
-    }
-}
-
 impl Pm1Resource {
     fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
         if self.status & self.enable & ACPIPMFixedEvent::bitmask_all() != 0 {
@@ -401,7 +380,7 @@ impl Pm1Resource {
 }
 
 impl GpeResource {
-    fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
+    pub fn trigger_sci(&self, sci_evt: &IrqLevelEvent) {
         if (0..self.status.len()).any(|i| self.status[i] & self.enable[i] != 0) {
             if let Err(e) = sci_evt.trigger() {
                 error!("ACPIPM: failed to trigger sci event for gpe: {}", e);
@@ -601,6 +580,9 @@ pub const ACPIPM_RESOURCE_EVENTBLK_LEN: u8 = 4;
 pub const ACPIPM_RESOURCE_CONTROLBLK_LEN: u8 = 2;
 pub const ACPIPM_RESOURCE_GPE0_BLK_LEN: u8 = 64;
 pub const ACPIPM_RESOURCE_LEN: u8 = ACPIPM_RESOURCE_EVENTBLK_LEN + 4 + ACPIPM_RESOURCE_GPE0_BLK_LEN;
+
+// Should be in sync with gpe_allocator range
+pub const ACPIPM_GPE_MAX: u16 = ACPIPM_RESOURCE_GPE0_BLK_LEN as u16 / 2 * 8 - 1;
 
 /// ACPI PM register value definitions
 
@@ -1068,10 +1050,11 @@ impl Aml for ACPIPMResource {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::suspendable_tests;
     use base::SendTube;
     use base::Tube;
+
+    use super::*;
+    use crate::suspendable_tests;
 
     fn get_evt_tube() -> SendTube {
         let (vm_evt_wrtube, _) = Tube::directional_pair().unwrap();
@@ -1103,6 +1086,7 @@ mod tests {
             None,
             Event::new().unwrap(),
             get_evt_tube(),
+            None,
         ),
         modify_device
     );

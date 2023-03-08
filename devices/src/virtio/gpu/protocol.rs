@@ -18,7 +18,6 @@ use std::str::from_utf8;
 
 use base::Error as BaseError;
 use base::TubeError;
-use data_model::DataInit;
 use data_model::Le32;
 use data_model::Le64;
 use gpu_display::GpuDisplayError;
@@ -26,6 +25,8 @@ use remain::sorted;
 use rutabaga_gfx::RutabagaError;
 use thiserror::Error;
 use vm_memory::udmabuf::UdmabufError;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 pub use super::super::device_constants::gpu::virtio_gpu_config;
 pub use super::super::device_constants::gpu::VIRTIO_GPU_F_CONTEXT_INIT;
@@ -156,7 +157,7 @@ pub fn virtio_gpu_cmd_str(cmd: u32) -> &'static str {
 pub const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
 pub const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_gpu_ctrl_hdr {
     pub type_: Le32,
@@ -167,11 +168,9 @@ pub struct virtio_gpu_ctrl_hdr {
     pub padding: [u8; 3],
 }
 
-unsafe impl DataInit for virtio_gpu_ctrl_hdr {}
-
 /* data passed in the cursor vq */
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_cursor_pos {
     pub scanout_id: Le32,
@@ -180,10 +179,8 @@ pub struct virtio_gpu_cursor_pos {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_cursor_pos {}
-
 /* VIRTIO_GPU_CMD_UPDATE_CURSOR, VIRTIO_GPU_CMD_MOVE_CURSOR */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_update_cursor {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -194,11 +191,9 @@ pub struct virtio_gpu_update_cursor {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_update_cursor {}
-
 /* data passed in the control vq, 2d related */
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_rect {
     pub x: Le32,
@@ -207,10 +202,8 @@ pub struct virtio_gpu_rect {
     pub height: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_rect {}
-
 /* VIRTIO_GPU_CMD_RESOURCE_UNREF */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_unref {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -218,10 +211,8 @@ pub struct virtio_gpu_resource_unref {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_unref {}
-
 /* VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: create a 2d resource with a format */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_create_2d {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -231,10 +222,8 @@ pub struct virtio_gpu_resource_create_2d {
     pub height: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_create_2d {}
-
 /* VIRTIO_GPU_CMD_SET_SCANOUT */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_set_scanout {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -243,10 +232,8 @@ pub struct virtio_gpu_set_scanout {
     pub resource_id: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_set_scanout {}
-
 /* VIRTIO_GPU_CMD_RESOURCE_FLUSH */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_flush {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -255,10 +242,8 @@ pub struct virtio_gpu_resource_flush {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_flush {}
-
 /* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: simple transfer to_host */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_transfer_to_host_2d {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -268,9 +253,7 @@ pub struct virtio_gpu_transfer_to_host_2d {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_transfer_to_host_2d {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_gpu_mem_entry {
     pub addr: Le64,
@@ -278,10 +261,8 @@ pub struct virtio_gpu_mem_entry {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_mem_entry {}
-
 /* VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_attach_backing {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -289,10 +270,8 @@ pub struct virtio_gpu_resource_attach_backing {
     pub nr_entries: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_attach_backing {}
-
 /* VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_detach_backing {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -300,9 +279,7 @@ pub struct virtio_gpu_resource_detach_backing {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_detach_backing {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_display_one {
     pub r: virtio_gpu_rect,
@@ -310,22 +287,18 @@ pub struct virtio_gpu_display_one {
     pub flags: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_display_one {}
-
 /* VIRTIO_GPU_RESP_OK_DISPLAY_INFO */
 pub const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resp_display_info {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub pmodes: [virtio_gpu_display_one; VIRTIO_GPU_MAX_SCANOUTS],
 }
 
-unsafe impl DataInit for virtio_gpu_resp_display_info {}
-
 /* data passed in the control vq, 3d related */
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_box {
     pub x: Le32,
@@ -336,10 +309,8 @@ pub struct virtio_gpu_box {
     pub d: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_box {}
-
 /* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_transfer_host_3d {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -351,11 +322,9 @@ pub struct virtio_gpu_transfer_host_3d {
     pub layer_stride: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_transfer_host_3d {}
-
 /* VIRTIO_GPU_CMD_RESOURCE_CREATE_3D */
 pub const VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP: u32 = 1 << 0;
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_create_3d {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -373,11 +342,9 @@ pub struct virtio_gpu_resource_create_3d {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_create_3d {}
-
 /* VIRTIO_GPU_CMD_CTX_CREATE */
 pub const VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK: u32 = 1 << 0;
-#[derive(Copy)]
+#[derive(Copy, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_ctx_create {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -391,8 +358,6 @@ impl Default for virtio_gpu_ctx_create {
         unsafe { ::std::mem::zeroed() }
     }
 }
-
-unsafe impl DataInit for virtio_gpu_ctx_create {}
 
 impl Clone for virtio_gpu_ctx_create {
     fn clone(&self) -> virtio_gpu_ctx_create {
@@ -412,16 +377,14 @@ impl fmt::Debug for virtio_gpu_ctx_create {
 }
 
 /* VIRTIO_GPU_CMD_CTX_DESTROY */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_ctx_destroy {
     pub hdr: virtio_gpu_ctrl_hdr,
 }
 
-unsafe impl DataInit for virtio_gpu_ctx_destroy {}
-
 /* VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_ctx_resource {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -429,18 +392,14 @@ pub struct virtio_gpu_ctx_resource {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_ctx_resource {}
-
 /* VIRTIO_GPU_CMD_SUBMIT_3D */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_cmd_submit {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub size: Le32,
     pub padding: Le32,
 }
-
-unsafe impl DataInit for virtio_gpu_cmd_submit {}
 
 pub const VIRTIO_GPU_CAPSET_VIRGL: u32 = 1;
 pub const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;
@@ -449,7 +408,7 @@ pub const VIRTIO_GPU_CAPSET_VENUS: u32 = 4;
 pub const VIRTIO_GPU_CAPSET_CROSS_DOMAIN: u32 = 5;
 
 /* VIRTIO_GPU_CMD_GET_CAPSET_INFO */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_get_capset_info {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -457,10 +416,8 @@ pub struct virtio_gpu_get_capset_info {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_get_capset_info {}
-
 /* VIRTIO_GPU_RESP_OK_CAPSET_INFO */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resp_capset_info {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -470,18 +427,14 @@ pub struct virtio_gpu_resp_capset_info {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resp_capset_info {}
-
 /* VIRTIO_GPU_CMD_GET_CAPSET */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_get_capset {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub capset_id: Le32,
     pub capset_version: Le32,
 }
-
-unsafe impl DataInit for virtio_gpu_get_capset {}
 
 /* VIRTIO_GPU_RESP_OK_CAPSET */
 #[derive(Copy, Clone, Debug, Default)]
@@ -491,10 +444,8 @@ pub struct virtio_gpu_resp_capset {
     pub capset_data: PhantomData<[u8]>,
 }
 
-unsafe impl DataInit for virtio_gpu_resp_capset {}
-
 /* VIRTIO_GPU_CMD_GET_EDID */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_get_edid {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -502,10 +453,8 @@ pub struct virtio_gpu_get_edid {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_get_edid {}
-
 /* VIRTIO_GPU_RESP_OK_EDID */
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resp_get_edid {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -514,10 +463,8 @@ pub struct virtio_gpu_resp_get_edid {
     pub edid: [u8; 1024],
 }
 
-unsafe impl DataInit for virtio_gpu_resp_get_edid {}
-
 /* VIRTIO_GPU_RESP_OK_RESOURCE_PLANE_INFO */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resp_resource_plane_info {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -528,13 +475,11 @@ pub struct virtio_gpu_resp_resource_plane_info {
     pub offsets: [Le32; 4],
 }
 
-unsafe impl DataInit for virtio_gpu_resp_resource_plane_info {}
-
 pub const PLANE_INFO_MAX_COUNT: usize = 4;
 
 pub const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_create_blob {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -546,9 +491,7 @@ pub struct virtio_gpu_resource_create_blob {
     pub size: Le64,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_create_blob {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_map_blob {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -557,9 +500,7 @@ pub struct virtio_gpu_resource_map_blob {
     pub offset: Le64,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_map_blob {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_unmap_blob {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -567,18 +508,15 @@ pub struct virtio_gpu_resource_unmap_blob {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_unmap_blob {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resp_map_info {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub map_info: Le32,
+    pub padding: u32,
 }
 
-unsafe impl DataInit for virtio_gpu_resp_map_info {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resource_assign_uuid {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -586,19 +524,15 @@ pub struct virtio_gpu_resource_assign_uuid {
     pub padding: Le32,
 }
 
-unsafe impl DataInit for virtio_gpu_resource_assign_uuid {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_resp_resource_uuid {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub uuid: [u8; 16],
 }
 
-unsafe impl DataInit for virtio_gpu_resp_resource_uuid {}
-
 /* VIRTIO_GPU_CMD_SET_SCANOUT_BLOB */
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct virtio_gpu_set_scanout_blob {
     pub hdr: virtio_gpu_ctrl_hdr,
@@ -612,8 +546,6 @@ pub struct virtio_gpu_set_scanout_blob {
     pub strides: [Le32; 4],
     pub offsets: [Le32; 4],
 }
-
-unsafe impl DataInit for virtio_gpu_set_scanout_blob {}
 
 /* simple formats for fbcon/X use */
 pub const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -1016,6 +948,7 @@ impl GpuResponse {
                 let resp_info = virtio_gpu_resp_map_info {
                     hdr,
                     map_info: Le32::from(map_info),
+                    padding: Default::default(),
                 };
 
                 resp.write_obj(resp_info)?;

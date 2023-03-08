@@ -16,7 +16,6 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -33,6 +32,7 @@ use base::SendTube;
 use base::Tube;
 use base::VmEventType;
 use base::WaitContext;
+use base::WorkerThread;
 use data_model::*;
 pub use gpu_display::EventDevice;
 use gpu_display::*;
@@ -50,6 +50,7 @@ pub use vm_control::gpu::DEFAULT_DISPLAY_WIDTH;
 pub use vm_control::gpu::DEFAULT_REFRESH_RATE;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 
 pub use self::protocol::virtio_gpu_config;
 pub use self::protocol::VIRTIO_GPU_F_CONTEXT_INIT;
@@ -1059,8 +1060,7 @@ pub struct Gpu {
     mapper: Option<Box<dyn SharedMemoryMapper>>,
     resource_bridges: Option<ResourceBridges>,
     event_devices: Vec<EventDevice>,
-    kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<()>>,
+    worker_thread: Option<WorkerThread<()>>,
     display_backends: Vec<DisplayBackend>,
     display_params: Vec<GpuDisplayParameters>,
     display_event: Arc<AtomicBool>,
@@ -1154,7 +1154,6 @@ impl Gpu {
             mapper: None,
             resource_bridges: Some(ResourceBridges::new(resource_bridges)),
             event_devices,
-            kill_evt: None,
             worker_thread: None,
             display_backends,
             display_params,
@@ -1255,13 +1254,8 @@ impl Gpu {
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.signal();
-        }
-
         if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
+            worker_thread.stop();
         }
     }
 }
@@ -1340,12 +1334,12 @@ impl VirtioDevice for Gpu {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        copy_config(data, 0, self.get_config().as_slice(), offset);
+        copy_config(data, 0, self.get_config().as_bytes(), offset);
     }
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         let mut cfg = self.get_config();
-        copy_config(cfg.as_mut_slice(), offset, data, 0);
+        copy_config(cfg.as_bytes_mut(), offset, data, 0);
         if (cfg.events_clear.to_native() & VIRTIO_GPU_EVENT_DISPLAY) != 0 {
             self.display_event.store(false, Ordering::Relaxed);
         }
@@ -1376,11 +1370,6 @@ impl VirtioDevice for Gpu {
             .take()
             .context("gpu_control_tube is none")?;
 
-        let (self_kill_evt, kill_evt) = Event::new()
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .context("error creating kill Event pair")?;
-        self.kill_evt = Some(self_kill_evt);
-
         let resource_bridges = self
             .resource_bridges
             .take()
@@ -1409,50 +1398,46 @@ impl VirtioDevice for Gpu {
             .take()
             .context("missing rutabaga_builder")?;
 
-        let worker_thread = thread::Builder::new()
-            .name("v_gpu".to_string())
-            .spawn(move || {
-                let fence_handler =
-                    create_fence_handler(mem.clone(), ctrl_queue.clone(), fence_state.clone());
+        self.worker_thread = Some(WorkerThread::start("v_gpu", move |kill_evt| {
+            let fence_handler =
+                create_fence_handler(mem.clone(), ctrl_queue.clone(), fence_state.clone());
 
-                let virtio_gpu = match build(
-                    &display_backends,
-                    display_params,
-                    display_event,
-                    rutabaga_builder,
-                    event_devices,
-                    mapper,
-                    external_blob,
-                    #[cfg(windows)]
-                    &mut wndproc_thread,
-                    udmabuf,
-                    fence_handler,
-                    #[cfg(feature = "virgl_renderer_next")]
-                    render_server_fd,
-                ) {
-                    Some(backend) => backend,
-                    None => return,
-                };
+            let virtio_gpu = match build(
+                &display_backends,
+                display_params,
+                display_event,
+                rutabaga_builder,
+                event_devices,
+                mapper,
+                external_blob,
+                #[cfg(windows)]
+                &mut wndproc_thread,
+                udmabuf,
+                fence_handler,
+                #[cfg(feature = "virgl_renderer_next")]
+                render_server_fd,
+            ) {
+                Some(backend) => backend,
+                None => return,
+            };
 
-                Worker {
-                    interrupt,
-                    exit_evt_wrtube,
-                    #[cfg(unix)]
-                    gpu_control_tube,
-                    mem,
-                    ctrl_queue: ctrl_queue.clone(),
-                    ctrl_evt,
-                    cursor_queue,
-                    cursor_evt,
-                    resource_bridges,
-                    kill_evt,
-                    state: Frontend::new(virtio_gpu, fence_state),
-                }
-                .run()
-            })
-            .context("failed to spawn virtio_gpu worker")?;
+            Worker {
+                interrupt,
+                exit_evt_wrtube,
+                #[cfg(unix)]
+                gpu_control_tube,
+                mem,
+                ctrl_queue: ctrl_queue.clone(),
+                ctrl_evt,
+                cursor_queue,
+                cursor_evt,
+                resource_bridges,
+                kill_evt,
+                state: Frontend::new(virtio_gpu, fence_state),
+            }
+            .run()
+        }));
 
-        self.worker_thread = Some(worker_thread);
         Ok(())
     }
 

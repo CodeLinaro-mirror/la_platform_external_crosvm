@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::stdin;
 use std::iter;
 use std::mem;
 use std::os::windows::fs::OpenOptionsExt;
@@ -61,6 +62,7 @@ use base::RecvTube;
 use base::SendTube;
 #[cfg(feature = "gpu")]
 use base::StreamChannel;
+use base::Terminal;
 use base::TriggeredEvent;
 use base::Tube;
 use base::TubeError;
@@ -103,7 +105,6 @@ use devices::IrqChip;
 use devices::IrqChipAArch64 as IrqChipArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::IrqChipX86_64 as IrqChipArch;
-use devices::Minijail;
 use devices::UserspaceIrqChip;
 use devices::VirtioPciDevice;
 #[cfg(feature = "whpx")]
@@ -155,6 +156,7 @@ use hypervisor::VmAArch64 as VmArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64 as VmArch;
 use irq_wait::IrqWaitWorker;
+use jail::FakeMinijailStub as Minijail;
 #[cfg(not(feature = "crash-report"))]
 pub(crate) use panic_hook::set_panic_hook;
 use resources::SystemAllocator;
@@ -913,6 +915,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     let (device_ctrl_tube, device_ctrl_resp) = Tube::pair().context("failed to create tube")?;
     guest_os.devices_thread = match create_devices_worker_thread(
+        guest_os.vm.get_memory().clone(),
         guest_os.io_bus.clone(),
         guest_os.mmio_bus.clone(),
         device_ctrl_resp,
@@ -948,6 +951,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     }
 
     let ime_thread = run_ime_thread(product_args, &exit_evt)?;
+
+    let original_terminal_mode = stdin().set_raw_mode().ok();
 
     let vcpu_boxes: Arc<Mutex<Vec<Box<dyn VcpuArch>>>> = Arc::new(Mutex::new(Vec::new()));
     let run_mode_arc = Arc::new(VcpuRunMode::default());
@@ -1110,6 +1115,12 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     if let Some(stats) = stats {
         println!("Statistics Collected:\n{}", stats.lock());
         println!("Statistics JSON:\n{}", stats.lock().json());
+    }
+
+    if let Some(mode) = original_terminal_mode {
+        if let Err(e) = stdin().restore_mode(mode) {
+            warn!("failed to restore terminal mode: {}", e);
+        }
     }
 
     // Explicitly drop the VM structure here to allow the devices to clean up before the

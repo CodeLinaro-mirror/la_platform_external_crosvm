@@ -26,6 +26,7 @@
     "crosvm_plugin",
     "e2e_tests",
     "ffmpeg",
+    "fixture",
     "gpu_buffer",
     "libva",
     "libvda",
@@ -43,7 +44,7 @@
     "win_audio",
     "win_util"
   ],
-  "global_defaults": "crosvm_defaults",
+  "global_defaults": "crosvm_inner_defaults",
   "apex_available": [],
   "module_name_overrides": {
     "libbase": "libbase_rust",
@@ -100,6 +101,21 @@
     "virtio_sys_test_src_lib",
     "wire_format_derive_test_wire_format_derive"
   ],
+  "module_visibility": {
+    "crosvm": ["//visibility:public"],
+    "libbase_rust": ["//packages/modules/Virtualization/virtualizationmanager"],
+    "libdata_model": [
+      "//external/libchromeos-rs",
+      "//packages/modules/Virtualization/apkdmverity",
+      "//packages/modules/Virtualization/libs/devicemapper"
+    ],
+    "libdisk": ["//packages/modules/Virtualization/virtualizationmanager"],
+    "libfuse_rust": [
+        "//packages/modules/Virtualization/authfs",
+        "//packages/modules/Virtualization/zipfuse"
+    ],
+    "libvm_control": ["//packages/modules/Virtualization/virtualizationmanager"]
+  },
   "package": {
     "aarch64": {
       "add_module_block": "aarch64/cargo2android_arch.bp"

@@ -383,7 +383,7 @@ fn create_pci_nodes(
     // and "PCI Bus Binding to IEEE Std 1275-1994".
     let ranges: Vec<u32> = ranges
         .iter()
-        .map(|r| {
+        .flat_map(|r| {
             let ss = r.space as u32;
             let p = r.prefetchable as u32;
             [
@@ -399,7 +399,6 @@ fn create_pci_nodes(
                 r.size as u32,
             ]
         })
-        .flatten()
         .collect();
 
     let bus_range = [0, 0]; // Only bus 0
@@ -592,12 +591,16 @@ pub fn create_fdt(
     // End giant node
     fdt.end_node(root_node)?;
 
-    let fdt_final = fdt.finish(fdt_max_size)?;
+    let fdt_final = fdt.finish()?;
+
+    if fdt_final.len() > fdt_max_size {
+        return Err(Error::TotalSizeTooLarge);
+    }
 
     let written = guest_mem
         .write_at_addr(fdt_final.as_slice(), fdt_address)
         .map_err(|_| Error::FdtGuestMemoryWriteError)?;
-    if written < fdt_max_size {
+    if written < fdt_final.len() {
         return Err(Error::FdtGuestMemoryWriteError);
     }
 

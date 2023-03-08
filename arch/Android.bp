@@ -12,7 +12,7 @@ package {
 
 rust_test {
     name: "arch_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "arch",
     cargo_env_compat: true,
@@ -40,6 +40,7 @@ rust_test {
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
+        "libjail",
         "libkernel_cmdline",
         "liblibc",
         "libminijail_rust",
@@ -58,7 +59,7 @@ rust_test {
 
 rust_library {
     name: "libarch",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "arch",
     cargo_env_compat: true,
@@ -81,6 +82,7 @@ rust_library {
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
+        "libjail",
         "libkernel_cmdline",
         "liblibc",
         "libminijail_rust",

@@ -12,7 +12,7 @@ package {
 
 rust_test {
     name: "bit_field_test_tests_test_enum",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "test_enum",
     cargo_env_compat: true,
@@ -30,7 +30,7 @@ rust_test {
 
 rust_test {
     name: "bit_field_test_tests_test_tuple_struct",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "test_tuple_struct",
     cargo_env_compat: true,
@@ -48,7 +48,7 @@ rust_test {
 
 rust_library {
     name: "libbit_field",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "bit_field",
     cargo_env_compat: true,

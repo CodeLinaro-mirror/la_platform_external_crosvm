@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libnet_util",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "net_util",
     cargo_env_compat: true,
@@ -23,20 +23,20 @@ rust_library {
         "libbase_rust",
         "libcfg_if",
         "libcros_async",
-        "libdata_model",
         "liblibc",
         "libnet_sys",
         "libserde",
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }
 
 rust_test {
     name: "net_util_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "net_util",
     cargo_env_compat: true,
@@ -52,7 +52,6 @@ rust_test {
         "libbase_rust",
         "libcfg_if",
         "libcros_async",
-        "libdata_model",
         "liblibc",
         "libnet_sys",
         "libserde",
@@ -60,13 +59,14 @@ rust_test {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }
 
 rust_test {
     name: "net_util_test_tests_unix_tap",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "unix_tap",
     cargo_env_compat: true,
@@ -82,7 +82,6 @@ rust_test {
         "libbase_rust",
         "libcfg_if",
         "libcros_async",
-        "libdata_model",
         "liblibc",
         "libnet_sys",
         "libnet_util",
@@ -91,6 +90,7 @@ rust_test {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }

@@ -40,6 +40,8 @@ use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vhost::user::device::gpu::sys::windows::GpuBackendConfig;
 #[cfg(all(windows, feature = "gpu"))]
 use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
+#[cfg(all(windows, feature = "audio"))]
+use devices::virtio::vhost::user::device::snd::sys::windows::SndSplitConfig;
 use devices::virtio::NetParameters;
 #[cfg(feature = "audio")]
 use devices::Ac97Backend;
@@ -53,6 +55,7 @@ use devices::StubPciParameters;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::CpuHybridType;
 use hypervisor::ProtectionType;
+use jail::JailConfig;
 use resources::AddressRange;
 use serde::Deserialize;
 use serde::Serialize;
@@ -564,33 +567,6 @@ pub struct HostPcieRootPortParameters {
     pub hp_gpe: Option<u32>,
 }
 
-fn jail_config_default_pivot_root() -> PathBuf {
-    PathBuf::from(option_env!("DEFAULT_PIVOT_ROOT").unwrap_or("/var/empty"))
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, serde_keyvalue::FromKeyValues)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct JailConfig {
-    #[serde(default = "jail_config_default_pivot_root")]
-    pub pivot_root: PathBuf,
-    #[cfg(unix)]
-    #[serde(default)]
-    pub seccomp_policy_dir: Option<PathBuf>,
-    #[serde(default)]
-    pub seccomp_log_failures: bool,
-}
-
-impl Default for JailConfig {
-    fn default() -> Self {
-        JailConfig {
-            pivot_root: jail_config_default_pivot_root(),
-            #[cfg(unix)]
-            seccomp_policy_dir: None,
-            seccomp_log_failures: false,
-        }
-    }
-}
-
 fn parse_hex_or_decimal(maybe_hex_string: &str) -> Result<u64, String> {
     // Parse string starting with 0x as hex and others as numbers.
     if let Some(hex_string) = maybe_hex_string.strip_prefix("0x") {
@@ -1047,6 +1023,8 @@ mod serde_serial_params {
 #[derive(Serialize, Deserialize)]
 #[remain::sorted]
 pub struct Config {
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    pub ac_adapter: bool,
     #[cfg(feature = "audio")]
     pub ac97_parameters: Vec<Ac97Parameters>,
     pub acpi_tables: Vec<PathBuf>,
@@ -1192,6 +1170,8 @@ pub struct Config {
     pub shared_dirs: Vec<SharedDir>,
     #[cfg(feature = "slirp-ring-capture")]
     pub slirp_capture_file: Option<String>,
+    #[cfg(all(windows, feature = "audio"))]
+    pub snd_split_config: Option<SndSplitConfig>,
     pub socket_path: Option<PathBuf>,
     #[cfg(feature = "tpm")]
     pub software_tpm: bool,
@@ -1209,6 +1189,8 @@ pub struct Config {
     pub tap_name: Vec<String>,
     #[cfg(target_os = "android")]
     pub task_profiles: Vec<String>,
+    #[cfg(unix)]
+    pub unmap_guest_memory_on_fork: bool,
     pub usb: bool,
     pub userspace_msr: BTreeMap<u32, MsrConfig>,
     pub vcpu_affinity: Option<VcpuAffinity>,
@@ -1259,6 +1241,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
+            #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+            ac_adapter: false,
             #[cfg(feature = "audio")]
             ac97_parameters: Vec::new(),
             acpi_tables: Vec::new(),
@@ -1405,6 +1389,8 @@ impl Default for Config {
             shared_dirs: Vec::new(),
             #[cfg(feature = "slirp-ring-capture")]
             slirp_capture_file: None,
+            #[cfg(all(windows, feature = "audio"))]
+            snd_split_config: None,
             swap_dir: None,
             socket_path: None,
             #[cfg(feature = "tpm")]
@@ -1422,6 +1408,8 @@ impl Default for Config {
             tap_name: Vec::new(),
             #[cfg(target_os = "android")]
             task_profiles: Vec::new(),
+            #[cfg(unix)]
+            unmap_guest_memory_on_fork: false,
             usb: true,
             userspace_msr: BTreeMap::new(),
             vcpu_affinity: None,
@@ -1656,6 +1644,7 @@ fn validate_file_backed_mapping(mapping: &mut FileBackedMappingParameters) -> Re
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_update)]
 mod tests {
     use argh::FromArgs;
     use devices::PciClassCode;
@@ -2223,74 +2212,6 @@ mod tests {
         assert!(parse_userspace_msr_options("hoge").is_err());
     }
 
-    #[test]
-    fn parse_jailconfig() {
-        let config: JailConfig = Default::default();
-        assert_eq!(
-            config,
-            JailConfig {
-                pivot_root: jail_config_default_pivot_root(),
-                #[cfg(unix)]
-                seccomp_policy_dir: None,
-                seccomp_log_failures: false,
-            }
-        );
-
-        let config: JailConfig = from_key_values("").unwrap();
-        assert_eq!(config, Default::default());
-
-        let config: JailConfig = from_key_values("pivot-root=/path/to/pivot/root").unwrap();
-        assert_eq!(
-            config,
-            JailConfig {
-                pivot_root: "/path/to/pivot/root".into(),
-                ..Default::default()
-            }
-        );
-
-        cfg_if::cfg_if! {
-            if #[cfg(unix)] {
-                let config: JailConfig = from_key_values("seccomp-policy-dir=/path/to/seccomp/dir").unwrap();
-                assert_eq!(config, JailConfig {
-                    seccomp_policy_dir: Some("/path/to/seccomp/dir".into()),
-                    ..Default::default()
-                });
-            }
-        }
-
-        let config: JailConfig = from_key_values("seccomp-log-failures").unwrap();
-        assert_eq!(
-            config,
-            JailConfig {
-                seccomp_log_failures: true,
-                ..Default::default()
-            }
-        );
-
-        let config: JailConfig = from_key_values("seccomp-log-failures=false").unwrap();
-        assert_eq!(
-            config,
-            JailConfig {
-                seccomp_log_failures: false,
-                ..Default::default()
-            }
-        );
-
-        let config: JailConfig =
-            from_key_values("pivot-root=/path/to/pivot/root,seccomp-log-failures=true").unwrap();
-        #[allow(clippy::needless_update)]
-        let expected = JailConfig {
-            pivot_root: "/path/to/pivot/root".into(),
-            seccomp_log_failures: true,
-            ..Default::default()
-        };
-        assert_eq!(config, expected);
-
-        let config: Result<JailConfig, String> =
-            from_key_values("seccomp-log-failures,invalid-arg=value");
-        assert!(config.is_err());
-    }
-
     #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
     #[test]
     fn parse_video() {
@@ -2331,5 +2252,37 @@ mod tests {
                 uuid: Some(Uuid::parse_str("23546c3d-962d-4ebc-94d9-4acf50996944").unwrap()),
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_shared_dir() {
+        // Although I want to test /usr/local/bin, Use / instead of
+        // /usr/local/bin, as /usr/local/bin doesn't always exist.
+        let s = "/:usr_local_bin:type=fs:cache=always:uidmap=0 655360 5000,5000 600 50,5050 660410 1994950:gidmap=0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950:timeout=3600:rewrite-security-xattrs=true:ascii_casefold=false:writeback=true:posix_acl=true";
+
+        let shared_dir: SharedDir = s.parse().unwrap();
+        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
+        assert_eq!(shared_dir.tag, "usr_local_bin");
+        assert!(shared_dir.kind == SharedDirKind::FS);
+        assert_eq!(
+            shared_dir.uid_map,
+            "0 655360 5000,5000 600 50,5050 660410 1994950"
+        );
+        assert_eq!(
+            shared_dir.gid_map,
+            "0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950"
+        );
+        assert_eq!(shared_dir.fs_cfg.ascii_casefold, false);
+        assert_eq!(shared_dir.fs_cfg.attr_timeout, Duration::from_secs(3600));
+        assert_eq!(shared_dir.fs_cfg.entry_timeout, Duration::from_secs(3600));
+        assert_eq!(shared_dir.fs_cfg.writeback, true);
+        assert_eq!(
+            shared_dir.fs_cfg.cache_policy,
+            passthrough::CachePolicy::Always
+        );
+        assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
+        assert_eq!(shared_dir.fs_cfg.use_dax, false);
+        assert_eq!(shared_dir.fs_cfg.posix_acl, true);
     }
 }

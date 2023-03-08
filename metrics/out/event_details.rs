@@ -1560,6 +1560,8 @@ pub enum EmulatorProcessType {
     PROCESS_TYPE_SLIRP = 5,
     PROCESS_TYPE_GPU = 6,
     PROCESS_TYPE_SOUND = 7,
+    PROCESS_TYPE_BROKER = 8,
+    PROCESS_TYPE_SPU = 9,
 }
 
 impl ::protobuf::ProtobufEnum for EmulatorProcessType {
@@ -1577,6 +1579,8 @@ impl ::protobuf::ProtobufEnum for EmulatorProcessType {
             5 => ::std::option::Option::Some(EmulatorProcessType::PROCESS_TYPE_SLIRP),
             6 => ::std::option::Option::Some(EmulatorProcessType::PROCESS_TYPE_GPU),
             7 => ::std::option::Option::Some(EmulatorProcessType::PROCESS_TYPE_SOUND),
+            8 => ::std::option::Option::Some(EmulatorProcessType::PROCESS_TYPE_BROKER),
+            9 => ::std::option::Option::Some(EmulatorProcessType::PROCESS_TYPE_SPU),
             _ => ::std::option::Option::None
         }
     }
@@ -1591,6 +1595,8 @@ impl ::protobuf::ProtobufEnum for EmulatorProcessType {
             EmulatorProcessType::PROCESS_TYPE_SLIRP,
             EmulatorProcessType::PROCESS_TYPE_GPU,
             EmulatorProcessType::PROCESS_TYPE_SOUND,
+            EmulatorProcessType::PROCESS_TYPE_BROKER,
+            EmulatorProcessType::PROCESS_TYPE_SPU,
         ];
         values
     }
@@ -1647,12 +1653,13 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     ulatorChildProcessExitDetails\x12\x1b\n\texit_code\x18\x01\x20\x01(\rR\
     \x08exitCode\x127\n\x0cprocess_type\x18\x02\x20\x01(\x0e2\x14.EmulatorPr\
     ocessTypeR\x0bprocessType\"8\n\x12EmulatorDllDetails\x12\"\n\rdll_base_n\
-    ame\x18\x01\x20\x01(\tR\x0bdllBaseName*\xd4\x01\n\x13EmulatorProcessType\
+    ame\x18\x01\x20\x01(\tR\x0bdllBaseName*\x83\x02\n\x13EmulatorProcessType\
     \x12\x18\n\x14PROCESS_TYPE_UNKNOWN\x10\0\x12\x15\n\x11PROCESS_TYPE_MAIN\
     \x10\x01\x12\x16\n\x12PROCESS_TYPE_BLOCK\x10\x02\x12\x18\n\x14PROCESS_TY\
     PE_METRICS\x10\x03\x12\x14\n\x10PROCESS_TYPE_NET\x10\x04\x12\x16\n\x12PR\
     OCESS_TYPE_SLIRP\x10\x05\x12\x14\n\x10PROCESS_TYPE_GPU\x10\x06\x12\x16\n\
-    \x12PROCESS_TYPE_SOUND\x10\x07\
+    \x12PROCESS_TYPE_SOUND\x10\x07\x12\x17\n\x13PROCESS_TYPE_BROKER\x10\x08\
+    \x12\x14\n\x10PROCESS_TYPE_SPU\x10\t\
 ";
 
 static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;

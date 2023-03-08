@@ -46,8 +46,6 @@ use devices::IrqChipAArch64 as IrqChipArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::IrqChipX86_64 as IrqChipArch;
 use devices::IrqEventSource;
-#[cfg(windows)]
-use devices::Minijail;
 use devices::PciAddress;
 use devices::PciBus;
 use devices::PciDevice;
@@ -89,6 +87,8 @@ use hypervisor::Vm;
 use hypervisor::VmAArch64 as VmArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64 as VmArch;
+#[cfg(windows)]
+use jail::FakeMinijailStub as Minijail;
 #[cfg(unix)]
 use minijail::Minijail;
 use remain::sorted;
@@ -305,6 +305,8 @@ pub enum VcpuAffinity {
 /// create a `RunnableLinuxVm`.
 #[sorted]
 pub struct VmComponents {
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    pub ac_adapter: bool,
     pub acpi_sdts: Vec<SDT>,
     pub android_fstab: Option<File>,
     pub cpu_capacity: BTreeMap<usize, u32>,

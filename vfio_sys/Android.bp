@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libvfio_sys",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "vfio_sys",
     cargo_env_compat: true,
@@ -21,6 +21,6 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libbase_rust",
-        "libdata_model",
+        "libzerocopy",
     ],
 }

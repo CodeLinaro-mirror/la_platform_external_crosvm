@@ -4,8 +4,8 @@
 
 mod sys;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::thread;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -18,13 +18,13 @@ use base::AsRawDescriptor;
 use base::Event;
 use base::RawDescriptor;
 use base::Tube;
+use base::WorkerThread;
 use cros_async::block_on;
-use cros_async::select8;
+use cros_async::select9;
 use cros_async::sync::Mutex as AsyncMutex;
 use cros_async::AsyncTube;
 use cros_async::EventAsync;
 use cros_async::Executor;
-use data_model::DataInit;
 use data_model::Le16;
 use data_model::Le32;
 use data_model::Le64;
@@ -36,6 +36,8 @@ use remain::sorted;
 use thiserror::Error as ThisError;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use super::async_utils;
 use super::copy_config;
@@ -57,6 +59,9 @@ pub enum BalloonError {
     /// Failed an async await
     #[error("failed async await: {0}")]
     AsyncAwait(cros_async::AsyncError),
+    /// Failed to create event.
+    #[error("failed to create event: {0}")]
+    CreatingEvent(base::Error),
     /// Failed to create async message receiver.
     #[error("failed to create async message receiver: {0}")]
     CreatingMessageReceiver(base::TubeError),
@@ -99,15 +104,12 @@ const VIRTIO_BALLOON_F_RESPONSIVE_DEVICE: u32 = 6; // Device actively watching g
 const VIRTIO_BALLOON_F_EVENTS_VQ: u32 = 7; // Event vq is enabled
 
 // virtio_balloon_config is the balloon device configuration space defined by the virtio spec.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
 #[repr(C)]
 struct virtio_balloon_config {
     num_pages: Le32,
     actual: Le32,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for virtio_balloon_config {}
 
 // BalloonState is shared by the worker and device thread.
 #[derive(Default)]
@@ -118,6 +120,7 @@ struct BalloonState {
     // is set by an Adjust command that has allow_failure set, and is cleared when the
     // Adjusted success/failure response is sent.
     failable_update: bool,
+    pending_adjusted_responses: VecDeque<u32>,
 }
 
 // The constants defining stats types in virtio_baloon_stat
@@ -135,14 +138,12 @@ const VIRTIO_BALLOON_S_NONSTANDARD_SHMEM: u16 = 65534;
 const VIRTIO_BALLOON_S_NONSTANDARD_UNEVICTABLE: u16 = 65535;
 
 // BalloonStat is used to deserialize stats from the stats_queue.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct BalloonStat {
     tag: Le16,
     val: Le64,
 }
-// Safe because it only has data.
-unsafe impl DataInit for BalloonStat {}
 
 impl BalloonStat {
     fn update_stats(&self, stats: &mut BalloonStats) {
@@ -169,13 +170,10 @@ const VIRTIO_BALLOON_EVENT_PRESSURE: u32 = 1;
 const VIRTIO_BALLOON_EVENT_PUFF_FAILURE: u32 = 2;
 
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 struct virtio_balloon_event_header {
     evt_type: Le32,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for virtio_balloon_event_header {}
 
 fn invoke_desc_handler<F>(ranges: Vec<(u64, u64)>, desc_handler: &mut F)
 where
@@ -436,6 +434,15 @@ async fn handle_stats_queue(
     }
 }
 
+async fn send_adjusted_response(
+    tube: &AsyncTube,
+    num_pages: u32,
+) -> std::result::Result<(), base::TubeError> {
+    let num_bytes = (num_pages as u64) << VIRTIO_BALLOON_PFN_SHIFT;
+    let result = BalloonTubeResult::Adjusted { num_bytes };
+    tube.send(result).await
+}
+
 async fn handle_event(
     state: Arc<AsyncMutex<BalloonState>>,
     interrupt: Interrupt,
@@ -454,9 +461,9 @@ async fn handle_event(
                     interrupt.signal_config_changed();
 
                     state.failable_update = false;
-                    return sys::send_adjusted_response_async(command_tube, state.actual_pages)
+                    send_adjusted_response(command_tube, state.actual_pages)
                         .await
-                        .map_err(BalloonError::SendResponse);
+                        .map_err(BalloonError::SendResponse)?;
                 }
             }
             _ => {
@@ -518,7 +525,8 @@ async fn handle_command_tube(
 
                     if allow_failure {
                         if num_pages == state.actual_pages {
-                            sys::send_adjusted_response(command_tube, num_pages)
+                            send_adjusted_response(command_tube, num_pages)
+                                .await
                                 .map_err(BalloonError::SendResponse)?;
                         } else {
                             state.failable_update = true;
@@ -538,6 +546,24 @@ async fn handle_command_tube(
     }
 }
 
+async fn handle_pending_adjusted_responses(
+    pending_adjusted_response_event: EventAsync,
+    command_tube: &AsyncTube,
+    state: Arc<AsyncMutex<BalloonState>>,
+) -> Result<()> {
+    loop {
+        pending_adjusted_response_event
+            .next_val()
+            .await
+            .map_err(BalloonError::AsyncAwait)?;
+        while let Some(num_pages) = state.lock().await.pending_adjusted_responses.pop_front() {
+            send_adjusted_response(command_tube, num_pages)
+                .await
+                .map_err(BalloonError::SendResponse)?;
+        }
+    }
+}
+
 // The main worker thread. Initialized the asynchronous worker tasks and passes them to the executor
 // to be processed.
 fn run_worker(
@@ -551,9 +577,10 @@ fn run_worker(
     release_memory_tube: Option<Tube>,
     interrupt: Interrupt,
     kill_evt: Event,
+    pending_adjusted_response_event: Event,
     mem: GuestMemory,
     state: Arc<AsyncMutex<BalloonState>>,
-) -> Option<Tube> {
+) -> (Option<Tube>, Tube) {
     let ex = Executor::new().unwrap();
     let command_tube = AsyncTube::new(&ex, command_tube).unwrap();
 
@@ -661,7 +688,7 @@ fn run_worker(
                 &mem,
                 events_queue,
                 EventAsync::new(events_queue_evt, &ex).expect("failed to create async event"),
-                state,
+                state.clone(),
                 interrupt,
                 &command_tube,
             )
@@ -671,9 +698,25 @@ fn run_worker(
         };
         pin_mut!(events);
 
+        let pending_adjusted = handle_pending_adjusted_responses(
+            EventAsync::new(pending_adjusted_response_event, &ex)
+                .expect("failed to create async event"),
+            &command_tube,
+            state,
+        );
+        pin_mut!(pending_adjusted);
+
         if let Err(e) = ex
-            .run_until(select8(
-                inflate, deflate, stats, reporting, command, resample, kill, events,
+            .run_until(select9(
+                inflate,
+                deflate,
+                stats,
+                reporting,
+                command,
+                resample,
+                kill,
+                events,
+                pending_adjusted,
             ))
             .map(|_| ())
         {
@@ -681,7 +724,7 @@ fn run_worker(
         }
     }
 
-    release_memory_tube
+    (release_memory_tube, command_tube.into())
 }
 
 /// Virtio device for memory balloon inflation/deflation.
@@ -690,11 +733,11 @@ pub struct Balloon {
     #[cfg(windows)]
     dynamic_mapping_tube: Option<Tube>,
     release_memory_tube: Option<Tube>,
+    pending_adjusted_response_event: Event,
     state: Arc<AsyncMutex<BalloonState>>,
     features: u64,
     acked_features: u64,
-    kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<Option<Tube>>>,
+    worker_thread: Option<WorkerThread<(Option<Tube>, Tube)>>,
 }
 
 /// Operation mode of the balloon.
@@ -737,12 +780,13 @@ impl Balloon {
             #[cfg(windows)]
             dynamic_mapping_tube: Some(dynamic_mapping_tube),
             release_memory_tube,
+            pending_adjusted_response_event: Event::new().map_err(BalloonError::CreatingEvent)?,
             state: Arc::new(AsyncMutex::new(BalloonState {
                 num_pages: (init_balloon_size >> VIRTIO_BALLOON_PFN_SHIFT) as u32,
                 actual_pages: 0,
                 failable_update: false,
+                pending_adjusted_responses: VecDeque::new(),
             })),
-            kill_evt: None,
             worker_thread: None,
             features,
             acked_features: 0,
@@ -766,19 +810,6 @@ impl Balloon {
     }
 }
 
-impl Drop for Balloon {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            // Ignore the result because there is nothing we can do with a failure.
-            let _ = kill_evt.signal();
-        }
-
-        if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
-        }
-    }
-}
-
 impl VirtioDevice for Balloon {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
         let mut rds = Vec::new();
@@ -788,6 +819,7 @@ impl VirtioDevice for Balloon {
         if let Some(release_memory_tube) = &self.release_memory_tube {
             rds.push(release_memory_tube.as_raw_descriptor());
         }
+        rds.push(self.pending_adjusted_response_event.as_raw_descriptor());
         rds
     }
 
@@ -800,14 +832,20 @@ impl VirtioDevice for Balloon {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        copy_config(data, 0, self.get_config().as_slice(), offset);
+        copy_config(data, 0, self.get_config().as_bytes(), offset);
     }
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         let mut config = self.get_config();
-        copy_config(config.as_mut_slice(), offset, data, 0);
-
-        sys::send_adjusted_response_if_needed(&self.state, &self.command_tube, config);
+        copy_config(config.as_bytes_mut(), offset, data, 0);
+        let mut state = block_on(self.state.lock());
+        state.actual_pages = config.actual.to_native();
+        if state.failable_update && state.actual_pages == state.num_pages {
+            state.failable_update = false;
+            let num_pages = state.num_pages;
+            state.pending_adjusted_responses.push_back(num_pages);
+            let _ = self.pending_adjusted_response_event.signal();
+        }
     }
 
     fn features(&self) -> u64 {
@@ -855,70 +893,45 @@ impl VirtioDevice for Balloon {
             None
         };
 
-        let (self_kill_evt, kill_evt) = Event::new()
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .context("failed to create kill Event pair")?;
-        self.kill_evt = Some(self_kill_evt);
-
         let state = self.state.clone();
 
-        // TODO(b/222588331): this relies on Tube::try_clone working
-        #[cfg(unix)]
-        #[allow(deprecated)]
-        let command_tube = self
-            .command_tube
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .context("failed to clone command tube")?;
-        #[cfg(windows)]
         let command_tube = self.command_tube.take().unwrap();
         #[cfg(windows)]
         let mapping_tube = self.dynamic_mapping_tube.take().unwrap();
         let release_memory_tube = self.release_memory_tube.take();
-        let worker_thread = thread::Builder::new()
-            .name("v_balloon".to_string())
-            .spawn(move || {
-                run_worker(
-                    inflate_queue,
-                    deflate_queue,
-                    stats_queue,
-                    reporting_queue,
-                    events_queue,
-                    command_tube,
-                    #[cfg(windows)]
-                    mapping_tube,
-                    release_memory_tube,
-                    interrupt,
-                    kill_evt,
-                    mem,
-                    state,
-                )
-            })
-            .context("failed to spawn virtio_balloon worker")?;
-        self.worker_thread = Some(worker_thread);
+        let pending_adjusted_response_event = self
+            .pending_adjusted_response_event
+            .try_clone()
+            .context("failed to clone Event")?;
+
+        self.worker_thread = Some(WorkerThread::start("v_balloon", move |kill_evt| {
+            run_worker(
+                inflate_queue,
+                deflate_queue,
+                stats_queue,
+                reporting_queue,
+                events_queue,
+                command_tube,
+                #[cfg(windows)]
+                mapping_tube,
+                release_memory_tube,
+                interrupt,
+                kill_evt,
+                pending_adjusted_response_event,
+                mem,
+                state,
+            )
+        }));
+
         Ok(())
     }
 
     fn reset(&mut self) -> bool {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            if kill_evt.signal().is_err() {
-                error!("{}: failed to notify the kill event", self.debug_label());
-                return false;
-            }
-        }
-
         if let Some(worker_thread) = self.worker_thread.take() {
-            match worker_thread.join() {
-                Err(_) => {
-                    error!("{}: failed to get back resources", self.debug_label());
-                    return false;
-                }
-                Ok(release_memory_tube) => {
-                    self.release_memory_tube = release_memory_tube;
-                    return true;
-                }
-            }
+            let (release_memory_tube, command_tube) = worker_thread.stop();
+            self.release_memory_tube = release_memory_tube;
+            self.command_tube = Some(command_tube);
+            return true;
         }
         false
     }
