@@ -18,7 +18,6 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::result;
 use std::sync::Arc;
-use std::thread;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
@@ -39,11 +38,11 @@ use base::RawDescriptor;
 use base::Result as SysResult;
 use base::Tube;
 use base::TubeError;
+use base::WorkerThread;
 use cros_async::AsyncError;
 use cros_async::AsyncTube;
 use cros_async::EventAsync;
 use cros_async::Executor;
-use data_model::DataInit;
 use data_model::Le64;
 use futures::select;
 use futures::FutureExt;
@@ -54,6 +53,8 @@ use thiserror::Error;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::pci::PciAddress;
@@ -86,7 +87,7 @@ const VIRTIO_IOMMU_VIOT_NODE_PCI_RANGE: u8 = 1;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const VIRTIO_IOMMU_VIOT_NODE_VIRTIO_IOMMU_PCI: u8 = 3;
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct VirtioIommuViotHeader {
     node_count: u16,
@@ -94,10 +95,7 @@ struct VirtioIommuViotHeader {
     reserved: [u8; 8],
 }
 
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VirtioIommuViotHeader {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct VirtioIommuViotVirtioPciNode {
     type_: u8,
@@ -108,10 +106,7 @@ struct VirtioIommuViotVirtioPciNode {
     reserved2: [u8; 8],
 }
 
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VirtioIommuViotVirtioPciNode {}
-
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct VirtioIommuViotPciRangeNode {
     type_: u8,
@@ -126,9 +121,6 @@ struct VirtioIommuViotPciRangeNode {
     reserved2: [u8; 2],
     reserved3: [u8; 4],
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VirtioIommuViotPciRangeNode {}
 
 type Result<T> = result::Result<T, IommuError>;
 
@@ -537,7 +529,7 @@ impl State {
                 ..Default::default()
             };
             writer
-                .write_all(properties.as_slice())
+                .write_all(properties.as_bytes())
                 .map_err(IommuError::GuestMemoryWrite)?;
         }
 
@@ -591,7 +583,7 @@ impl State {
         };
 
         writer
-            .write_all(tail.as_slice())
+            .write_all(tail.as_bytes())
             .map_err(IommuError::GuestMemoryWrite)?;
         Ok((
             (reply_len as usize) + size_of::<virtio_iommu_req_tail>(),
@@ -700,8 +692,7 @@ fn run(
 
 /// Virtio device for IOMMU memory management.
 pub struct Iommu {
-    kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<()>>,
+    worker_thread: Option<WorkerThread<()>>,
     config: virtio_iommu_config,
     avail_features: u64,
     // Attached endpoints
@@ -762,7 +753,6 @@ impl Iommu {
         }
 
         Ok(Iommu {
-            kill_evt: None,
             worker_thread: None,
             config,
             avail_features,
@@ -772,18 +762,6 @@ impl Iommu {
             translate_request_rx,
             iommu_device_tube,
         })
-    }
-}
-
-impl Drop for Iommu {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            let _ = kill_evt.signal();
-        }
-
-        if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
-        }
     }
 }
 
@@ -824,7 +802,7 @@ impl VirtioDevice for Iommu {
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let mut config: Vec<u8> = Vec::new();
-        config.extend_from_slice(self.config.as_slice());
+        config.extend_from_slice(self.config.as_bytes());
         copy_config(data, 0, config.as_slice(), offset);
     }
 
@@ -842,11 +820,6 @@ impl VirtioDevice for Iommu {
             ));
         }
 
-        let (self_kill_evt, kill_evt) = Event::new()
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .context("failed to create kill Event pair")?;
-        self.kill_evt = Some(self_kill_evt);
-
         // The least significant bit of page_size_masks defines the page
         // granularity of IOMMU mappings
         let page_mask = (1u64 << u64::from(self.config.page_size_mask).trailing_zeros()) - 1;
@@ -861,33 +834,29 @@ impl VirtioDevice for Iommu {
             .take()
             .context("failed to start virtio-iommu worker: No control tube")?;
 
-        let worker_thread = thread::Builder::new()
-            .name("v_iommu".to_string())
-            .spawn(move || {
-                let state = State {
-                    mem,
-                    page_mask,
-                    hp_endpoints_ranges,
-                    endpoint_map: BTreeMap::new(),
-                    domain_map: BTreeMap::new(),
-                    endpoints: eps,
-                    dmabuf_mem: BTreeMap::new(),
-                };
-                let result = run(
-                    state,
-                    iommu_device_tube,
-                    queues,
-                    kill_evt,
-                    interrupt,
-                    translate_response_senders,
-                    translate_request_rx,
-                );
-                if let Err(e) = result {
-                    error!("virtio-iommu worker thread exited with error: {}", e);
-                }
-            })
-            .context("failed to spawn virtio_iommu worker thread")?;
-        self.worker_thread = Some(worker_thread);
+        self.worker_thread = Some(WorkerThread::start("v_iommu", move |kill_evt| {
+            let state = State {
+                mem,
+                page_mask,
+                hp_endpoints_ranges,
+                endpoint_map: BTreeMap::new(),
+                domain_map: BTreeMap::new(),
+                endpoints: eps,
+                dmabuf_mem: BTreeMap::new(),
+            };
+            let result = run(
+                state,
+                iommu_device_tube,
+                queues,
+                kill_evt,
+                interrupt,
+                translate_response_senders,
+                translate_request_rx,
+            );
+            if let Err(e) = result {
+                error!("virtio-iommu worker thread exited with error: {}", e);
+            }
+        }));
         Ok(())
     }
 

@@ -4,7 +4,6 @@
 
 use std::fs::File;
 use std::io;
-use std::thread;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -15,6 +14,7 @@ use base::Event;
 use base::RawDescriptor;
 use base::Result as SysResult;
 use base::Tube;
+use base::WorkerThread;
 use cros_async::select3;
 use cros_async::EventAsync;
 use cros_async::Executor;
@@ -29,6 +29,8 @@ use vm_control::VmMsyncRequest;
 use vm_control::VmMsyncResponse;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use super::async_utils;
 use super::copy_config;
@@ -59,7 +61,7 @@ struct virtio_pmem_config {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for virtio_pmem_config {}
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
 #[repr(C)]
 struct virtio_pmem_resp {
     status_code: Le32,
@@ -68,7 +70,7 @@ struct virtio_pmem_resp {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for virtio_pmem_resp {}
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
 #[repr(C)]
 struct virtio_pmem_req {
     type_: Le32,
@@ -233,8 +235,7 @@ fn run_worker(
 }
 
 pub struct Pmem {
-    kill_event: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<()>>,
+    worker_thread: Option<WorkerThread<()>>,
     base_features: u64,
     disk_image: Option<File>,
     mapping_address: GuestAddress,
@@ -257,7 +258,6 @@ impl Pmem {
         }
 
         Ok(Pmem {
-            kill_event: None,
             worker_thread: None,
             base_features,
             disk_image: Some(disk_image),
@@ -266,19 +266,6 @@ impl Pmem {
             mapping_size,
             pmem_device_tube,
         })
-    }
-}
-
-impl Drop for Pmem {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_event.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.signal();
-        }
-
-        if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
-        }
     }
 }
 
@@ -336,27 +323,19 @@ impl VirtioDevice for Pmem {
             .take()
             .context("missing pmem device tube")?;
 
-        let (self_kill_event, kill_event) = Event::new()
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .context("failed creating kill Event pair")?;
-        self.kill_event = Some(self_kill_event);
+        self.worker_thread = Some(WorkerThread::start("v_pmem", move |kill_event| {
+            run_worker(
+                queue_event,
+                queue,
+                pmem_device_tube,
+                interrupt,
+                kill_event,
+                memory,
+                mapping_arena_slot,
+                mapping_size,
+            )
+        }));
 
-        let worker_thread = thread::Builder::new()
-            .name("v_pmem".to_string())
-            .spawn(move || {
-                run_worker(
-                    queue_event,
-                    queue,
-                    pmem_device_tube,
-                    interrupt,
-                    kill_event,
-                    memory,
-                    mapping_arena_slot,
-                    mapping_size,
-                )
-            })
-            .context("failed to spawn virtio_pmem worker")?;
-        self.worker_thread = Some(worker_thread);
         Ok(())
     }
 }

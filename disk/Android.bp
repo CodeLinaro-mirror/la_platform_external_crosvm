@@ -12,7 +12,7 @@ package {
 
 rust_test {
     name: "disk_test_src_disk",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "disk",
     cargo_env_compat: true,
@@ -26,20 +26,26 @@ rust_test {
     edition: "2021",
     features: [
         "android-sparse",
+        "composite-disk", // Added manually
         "qcow",
     ],
     rustlibs: [
         "libbase_rust",
         "libcfg_if",
+        "libcrc32fast", // Added manually
         "libcros_async",
         "libdata_model",
         "libfutures",
         "liblibc",
+        "libprotobuf", // Added manually
+        "libprotos", // Added manually
         "libserde",
         "libsync_rust",
         "libtempfile",
         "libthiserror",
+        "libuuid", // Added manually
         "libvm_memory",
+        "libzerocopy",
     ],
     proc_macros: [
         "libasync_trait",
@@ -49,7 +55,7 @@ rust_test {
 
 rust_library {
     name: "libdisk",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "disk",
     cargo_env_compat: true,
@@ -77,9 +83,11 @@ rust_library {
         "libthiserror",
         "libuuid", // Added manually
         "libvm_memory",
+        "libzerocopy",
     ],
     proc_macros: [
         "libasync_trait",
         "libremain",
     ],
+    visibility: ["//packages/modules/Virtualization/virtualizationmanager"],
 }

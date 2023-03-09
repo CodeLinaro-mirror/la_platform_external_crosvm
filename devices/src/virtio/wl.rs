@@ -53,7 +53,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::result;
-use std::thread;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -112,6 +111,8 @@ use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 #[cfg(feature = "gpu")]
 use super::resource_bridge::get_resource_info;
@@ -136,7 +137,10 @@ use crate::virtio::device_constants::wl::QUEUE_SIZES;
 use crate::virtio::device_constants::wl::VIRTIO_WL_F_SEND_FENCES;
 use crate::virtio::device_constants::wl::VIRTIO_WL_F_TRANS_FLAGS;
 use crate::virtio::device_constants::wl::VIRTIO_WL_F_USE_SHMEM;
+use crate::virtio::virtio_device::Error as VirtioError;
+use crate::virtio::VirtioDeviceSaved;
 use crate::Suspendable;
+use base::WorkerThread;
 
 const VIRTWL_SEND_MAX_ALLOCS: usize = 28;
 const VIRTIO_WL_CMD_VFD_NEW: u32 = 256;
@@ -252,6 +256,7 @@ fn encode_vfd_new(
         flags: Le32::from(flags),
         pfn: Le64::from(pfn),
         size: Le32::from(size),
+        padding: Default::default(),
     };
 
     writer
@@ -559,26 +564,25 @@ impl VmRequester {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 struct CtrlHeader {
     type_: Le32,
     flags: Le32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, FromBytes, AsBytes)]
 struct CtrlVfdNew {
     hdr: CtrlHeader,
     id: Le32,
     flags: Le32,
     pfn: Le64,
     size: Le32,
+    padding: Le32,
 }
 
-unsafe impl DataInit for CtrlVfdNew {}
-
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, FromBytes)]
 struct CtrlVfdNewCtxNamed {
     hdr: CtrlHeader,
     id: Le32,
@@ -588,10 +592,8 @@ struct CtrlVfdNewCtxNamed {
     name: [u8; 32],
 }
 
-unsafe impl DataInit for CtrlVfdNewCtxNamed {}
-
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[cfg(feature = "minigbm")]
 struct CtrlVfdNewDmabuf {
     hdr: CtrlHeader,
@@ -611,10 +613,8 @@ struct CtrlVfdNewDmabuf {
 }
 
 #[cfg(feature = "minigbm")]
-unsafe impl DataInit for CtrlVfdNewDmabuf {}
-
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[cfg(feature = "minigbm")]
 struct CtrlVfdDmabufSync {
     hdr: CtrlHeader,
@@ -622,30 +622,23 @@ struct CtrlVfdDmabufSync {
     flags: Le32,
 }
 
-#[cfg(feature = "minigbm")]
-unsafe impl DataInit for CtrlVfdDmabufSync {}
-
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, AsBytes, FromBytes)]
 struct CtrlVfdRecv {
     hdr: CtrlHeader,
     id: Le32,
     vfd_count: Le32,
 }
 
-unsafe impl DataInit for CtrlVfdRecv {}
-
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 struct CtrlVfd {
     hdr: CtrlHeader,
     id: Le32,
 }
 
-unsafe impl DataInit for CtrlVfd {}
-
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 struct CtrlVfdSend {
     hdr: CtrlHeader,
     id: Le32,
@@ -653,34 +646,26 @@ struct CtrlVfdSend {
     // Remainder is an array of vfd_count IDs followed by data.
 }
 
-unsafe impl DataInit for CtrlVfdSend {}
-
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 struct CtrlVfdSendVfd {
     kind: Le32,
     id: Le32,
 }
 
-unsafe impl DataInit for CtrlVfdSendVfd {}
-
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, FromBytes)]
 union CtrlVfdSendVfdV2Payload {
     id: Le32,
     seqno: Le64,
 }
 
-unsafe impl DataInit for CtrlVfdSendVfdV2Payload {}
-
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, FromBytes)]
 struct CtrlVfdSendVfdV2 {
     kind: Le32,
     payload: CtrlVfdSendVfdV2Payload,
 }
-
-unsafe impl DataInit for CtrlVfdSendVfdV2 {}
 
 impl CtrlVfdSendVfdV2 {
     fn id(&self) -> Le32 {
@@ -1834,7 +1819,7 @@ impl Worker {
         }
     }
 
-    fn run(&mut self, kill_evt: Event) {
+    fn run(mut self, kill_evt: Event) -> anyhow::Result<VirtioDeviceSaved> {
         #[derive(EventToken)]
         enum Token {
             InQueue,
@@ -1844,26 +1829,18 @@ impl Worker {
             InterruptResample,
         }
 
-        let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
+        let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
             (&self.in_queue_evt, Token::InQueue),
             (&self.out_queue_evt, Token::OutQueue),
             (&kill_evt, Token::Kill),
             (&self.state.wait_ctx, Token::State),
-        ]) {
-            Ok(pc) => pc,
-            Err(e) => {
-                error!("failed creating WaitContext: {}", e);
-                return;
-            }
-        };
+        ])
+        .context("failed creating WaitContext")?;
+
         if let Some(resample_evt) = self.interrupt.get_resample_evt() {
-            if wait_ctx
+            wait_ctx
                 .add(resample_evt, Token::InterruptResample)
-                .is_err()
-            {
-                error!("failed adding resample event to WaitContext.");
-                return;
-            }
+                .context("failed adding resample event to WaitContext.")?;
         }
 
         let mut watching_state_ctx = true;
@@ -1925,12 +1902,15 @@ impl Worker {
                 }
             }
         }
+
+        Ok(VirtioDeviceSaved {
+            queues: vec![self.in_queue, self.out_queue],
+        })
     }
 }
 
 pub struct Wl {
-    kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<()>>,
+    worker_thread: Option<WorkerThread<anyhow::Result<VirtioDeviceSaved>>>,
     wayland_paths: Map<String, PathBuf>,
     mapper: Option<Box<dyn SharedMemoryMapper>>,
     resource_bridge: Option<Tube>,
@@ -1950,7 +1930,6 @@ impl Wl {
         resource_bridge: Option<Tube>,
     ) -> Result<Wl> {
         Ok(Wl {
-            kill_evt: None,
             worker_thread: None,
             wayland_paths,
             mapper: None,
@@ -1963,19 +1942,6 @@ impl Wl {
             gralloc: None,
             address_offset: None,
         })
-    }
-}
-
-impl Drop for Wl {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.signal();
-        }
-
-        if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
-        }
     }
 }
 
@@ -2047,11 +2013,6 @@ impl VirtioDevice for Wl {
             ));
         }
 
-        let (self_kill_evt, kill_evt) = Event::new()
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .context("failed creating kill Event pair")?;
-        self.kill_evt = Some(self_kill_evt);
-
         let mapper = self.mapper.take().context("missing mapper")?;
 
         let wayland_paths = self.wayland_paths.clone();
@@ -2068,28 +2029,25 @@ impl VirtioDevice for Wl {
         } else {
             None
         };
-        let worker_thread = thread::Builder::new()
-            .name("v_wl".to_string())
-            .spawn(move || {
-                Worker::new(
-                    mem,
-                    interrupt,
-                    queues.remove(0),
-                    queues.remove(0),
-                    wayland_paths,
-                    mapper,
-                    use_transition_flags,
-                    use_send_vfd_v2,
-                    resource_bridge,
-                    #[cfg(feature = "minigbm")]
-                    gralloc,
-                    address_offset,
-                )
-                .run(kill_evt);
-            })
-            .context("failed to spawn virtio_wl worker")?;
 
-        self.worker_thread = Some(worker_thread);
+        self.worker_thread = Some(WorkerThread::start("v_wl", move |kill_evt| {
+            Worker::new(
+                mem,
+                interrupt,
+                queues.remove(0),
+                queues.remove(0),
+                wayland_paths,
+                mapper,
+                use_transition_flags,
+                use_send_vfd_v2,
+                resource_bridge,
+                #[cfg(feature = "minigbm")]
+                gralloc,
+                address_offset,
+            )
+            .run(kill_evt)
+        }));
+
         Ok(())
     }
 
@@ -2106,6 +2064,14 @@ impl VirtioDevice for Wl {
 
     fn set_shared_memory_mapper(&mut self, mapper: Box<dyn SharedMemoryMapper>) {
         self.mapper = Some(mapper);
+    }
+
+    fn stop(&mut self) -> std::result::Result<Option<VirtioDeviceSaved>, VirtioError> {
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let state = worker_thread.stop().map_err(VirtioError::InThreadFailure)?;
+            return Ok(Some(state));
+        }
+        Ok(None)
     }
 }
 

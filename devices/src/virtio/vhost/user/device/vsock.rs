@@ -23,9 +23,7 @@ use base::IntoRawDescriptor;
 use base::UnlinkUnixListener;
 use cros_async::EventAsync;
 use cros_async::Executor;
-use data_model::DataInit;
 use data_model::Le64;
-use hypervisor::ProtectionType;
 use vhost::Vhost;
 use vhost::Vsock;
 use vm_memory::GuestMemory;
@@ -47,8 +45,8 @@ use vmm_vhost::Result;
 use vmm_vhost::SlaveListener;
 use vmm_vhost::SlaveReqHandler;
 use vmm_vhost::VhostUserSlaveReqHandlerMut;
+use zerocopy::AsBytes;
 
-use crate::virtio::base_features;
 use crate::virtio::device_constants::vsock::NUM_QUEUES;
 use crate::virtio::device_constants::vsock::QUEUE_SIZE;
 use crate::virtio::vhost::user::device::handler::sys::unix::run_handler;
@@ -59,7 +57,6 @@ use crate::virtio::vhost::user::device::handler::vmm_va_to_gpa;
 use crate::virtio::vhost::user::device::handler::MappingInfo;
 use crate::virtio::vhost::user::device::handler::VhostUserPlatformOps;
 use crate::virtio::vhost::user::device::handler::VhostUserRegularOps;
-use crate::virtio::vhost::user::device::vvu::doorbell::DoorbellRegion;
 use crate::virtio::vhost::user::device::vvu::pci::VvuPciDevice;
 use crate::virtio::vhost::user::device::vvu::VvuDevice;
 use crate::virtio::Queue;
@@ -68,27 +65,25 @@ use crate::virtio::SignalableInterrupt;
 const MAX_VRING_LEN: u16 = QUEUE_SIZE;
 const EVENT_QUEUE: usize = NUM_QUEUES - 1;
 
-struct VsockBackend<H: VhostUserPlatformOps> {
+struct VsockBackend {
+    queues: [Queue; NUM_QUEUES],
+    vmm_maps: Option<Vec<MappingInfo>>,
+    mem: Option<GuestMemory>,
+    ops: Box<dyn VhostUserPlatformOps>,
+
     ex: Executor,
     handle: Vsock,
     cid: u64,
-    features: u64,
-    handler: H,
     protocol_features: VhostUserProtocolFeatures,
-    mem: Option<GuestMemory>,
-    vmm_maps: Option<Vec<MappingInfo>>,
-    queues: [Queue; NUM_QUEUES],
-    // Only used for vvu device mode.
-    call_evts: [Option<DoorbellRegion>; NUM_QUEUES],
 }
 
-impl<H: VhostUserPlatformOps> VsockBackend<H> {
+impl VsockBackend {
     fn new<P: AsRef<Path>>(
         ex: &Executor,
         cid: u64,
         vhost_socket: P,
-        handler: H,
-    ) -> anyhow::Result<VsockBackend<H>> {
+        ops: Box<dyn VhostUserPlatformOps>,
+    ) -> anyhow::Result<VsockBackend> {
         let handle = Vsock::new(
             OpenOptions::new()
                 .read(true)
@@ -98,23 +93,20 @@ impl<H: VhostUserPlatformOps> VsockBackend<H> {
                 .context("failed to open `Vsock` socket")?,
         );
 
-        let features = handle.get_features().context("failed to get features")?;
         let protocol_features = VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::CONFIG;
         Ok(VsockBackend {
-            ex: ex.clone(),
-            handle,
-            cid,
-            features,
-            handler,
-            protocol_features,
-            mem: None,
-            vmm_maps: None,
             queues: [
                 Queue::new(MAX_VRING_LEN),
                 Queue::new(MAX_VRING_LEN),
                 Queue::new(MAX_VRING_LEN),
             ],
-            call_evts: Default::default(),
+            vmm_maps: None,
+            mem: None,
+            ops,
+            ex: ex.clone(),
+            handle,
+            cid,
+            protocol_features,
         })
     }
 }
@@ -127,9 +119,9 @@ fn convert_vhost_error(err: vhost::Error) -> Error {
     }
 }
 
-impl<H: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for VsockBackend<H> {
+impl VhostUserSlaveReqHandlerMut for VsockBackend {
     fn protocol(&self) -> Protocol {
-        self.handler.protocol()
+        self.ops.protocol()
     }
 
     fn set_owner(&mut self) -> Result<()> {
@@ -141,15 +133,18 @@ impl<H: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for VsockBackend<H> {
     }
 
     fn get_features(&mut self) -> Result<u64> {
-        let features = base_features(ProtectionType::Unprotected)
-            | self.features
+        // Add the vhost-user features that we support.
+        let features = self.handle.get_features().map_err(convert_vhost_error)?
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
         Ok(features)
     }
 
     fn set_features(&mut self, features: u64) -> Result<()> {
+        // Unset the vhost-user feature flags as they are not supported by the underlying vhost
+        // device.
+        let features = features & !VhostUserVirtioFeatures::all().bits();
         self.handle
-            .set_features(features & self.features)
+            .set_features(features)
             .map_err(convert_vhost_error)
     }
 
@@ -171,7 +166,7 @@ impl<H: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for VsockBackend<H> {
         contexts: &[VhostUserMemoryRegion],
         files: Vec<File>,
     ) -> Result<()> {
-        let (guest_mem, vmm_maps) = self.handler.set_mem_table(contexts, files)?;
+        let (guest_mem, vmm_maps) = self.ops.set_mem_table(contexts, files)?;
 
         self.handle
             .set_mem_table(&guest_mem)
@@ -297,7 +292,7 @@ impl<H: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for VsockBackend<H> {
             return Err(Error::InvalidParam);
         }
 
-        let event = self.handler.set_vring_kick(index, fd)?;
+        let event = self.ops.set_vring_kick(index, fd)?;
         let index = usize::from(index);
         if index != EVENT_QUEUE {
             self.handle
@@ -313,13 +308,11 @@ impl<H: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for VsockBackend<H> {
             return Err(Error::InvalidParam);
         }
 
-        let doorbell = self.handler.set_vring_call(index, fd)?;
+        let doorbell = self.ops.set_vring_call(index, fd)?;
         let index = usize::from(index);
         let event = match doorbell {
             Doorbell::Call(call_event) => call_event.into_inner(),
             Doorbell::Vfio(doorbell_region) => {
-                self.call_evts[index] = Some(doorbell_region.clone());
-
                 let kernel_evt = Event::new().map_err(|_| Error::SlaveInternalError)?;
                 let task_evt = EventAsync::new(
                     kernel_evt.try_clone().expect("failed to clone event"),
@@ -408,7 +401,7 @@ impl<H: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for VsockBackend<H> {
             return Err(Error::InvalidParam);
         }
 
-        Ok(Le64::from(self.cid).as_slice()[start..end].to_vec())
+        Ok(Le64::from(self.cid).as_bytes()[start..end].to_vec())
     }
 
     fn set_config(
@@ -456,7 +449,7 @@ impl<H: VhostUserPlatformOps> VhostUserSlaveReqHandlerMut for VsockBackend<H> {
 async fn run_device<P: AsRef<Path>>(
     ex: &Executor,
     socket: P,
-    backend: StdMutex<VsockBackend<VhostUserRegularOps>>,
+    backend: StdMutex<VsockBackend>,
 ) -> anyhow::Result<()> {
     let listener = UnixListener::bind(socket)
         .map(UnlinkUnixListener)
@@ -501,7 +494,7 @@ fn run_vvu_device<P: AsRef<Path>>(
 ) -> anyhow::Result<()> {
     let mut device =
         VvuPciDevice::new(device_name, NUM_QUEUES).context("failed to create `VvuPciDevice`")?;
-    let backend = VsockBackend::new(ex, cid, vhost_socket, VvuOps::new(&mut device))
+    let backend = VsockBackend::new(ex, cid, vhost_socket, Box::new(VvuOps::new(&mut device)))
         .map(StdMutex::new)
         .context("failed to create `VsockBackend`")?;
     let driver = VvuDevice::new(device);
@@ -530,8 +523,13 @@ pub fn run_vsock_device(opts: Options) -> anyhow::Result<()> {
 
     match (opts.socket, opts.vfio) {
         (Some(socket), None) => {
-            let backend = VsockBackend::new(&ex, opts.cid, opts.vhost_socket, VhostUserRegularOps)
-                .map(StdMutex::new)?;
+            let backend = VsockBackend::new(
+                &ex,
+                opts.cid,
+                opts.vhost_socket,
+                Box::new(VhostUserRegularOps),
+            )
+            .map(StdMutex::new)?;
 
             // TODO: Replace the `and_then` with `Result::flatten` once it is stabilized.
             ex.run_until(run_device(&ex, socket, backend))

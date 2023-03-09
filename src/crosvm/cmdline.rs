@@ -154,7 +154,6 @@ pub enum CrossPlatformCommands {
     Version(VersionCommand),
     Vfio(VfioCrosvmCommand),
     Snapshot(SnapshotCommand),
-    Restore(RestoreCommand),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -337,15 +336,6 @@ pub struct SwapStatusCommand {
 }
 
 #[derive(FromArgs)]
-#[argh(subcommand, name = "log_pagefault")]
-/// Get swap status of a VM
-pub struct SwapLogPageFaultCommand {
-    #[argh(positional, arg_name = "VM_SOCKET")]
-    /// VM Socket path
-    pub socket_path: String,
-}
-
-#[derive(FromArgs)]
 #[argh(subcommand, name = "swap", description = "vmm-swap related commands")]
 pub struct SwapCommand {
     #[argh(subcommand)]
@@ -360,7 +350,6 @@ pub enum SwapSubcommands {
     SwapOut(SwapOutCommand),
     Disable(SwapDisableCommand),
     Status(SwapStatusCommand),
-    LogPageFault(SwapLogPageFaultCommand),
 }
 
 #[derive(FromArgs)]
@@ -475,6 +464,8 @@ pub enum CrossPlatformDevicesCommands {
     #[cfg(feature = "gpu")]
     Gpu(device::GpuOptions),
     Net(device::NetOptions),
+    #[cfg(feature = "audio")]
+    Snd(device::SndOptions),
 }
 
 #[derive(argh_helpers::FlattenSubcommand)]
@@ -631,26 +622,12 @@ pub struct SnapshotTakeCommand {
 }
 
 #[derive(FromArgs)]
-#[argh(subcommand)]
-/// Snapshot commands
-pub enum SnapshotSubCommands {
-    Take(SnapshotTakeCommand),
-}
-#[derive(FromArgs)]
-#[argh(subcommand, name = "restore", description = "Restore commands")]
-/// Restore commands
-pub struct RestoreCommand {
-    #[argh(subcommand)]
-    pub restore_command: RestoreSubCommands,
-}
-
-#[derive(FromArgs)]
-#[argh(subcommand, name = "apply")]
-/// Restore VM
-pub struct RestoreApplyCommand {
-    #[argh(positional, arg_name = "restore_path")]
-    /// VM Restore image path
-    pub restore_path: PathBuf,
+#[argh(subcommand, name = "restore")]
+/// Restore VM state from a snapshot created by take
+pub struct SnapshotRestoreCommand {
+    #[argh(positional)]
+    /// path to snapshot to restore
+    pub snapshot_path: PathBuf,
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
@@ -658,9 +635,10 @@ pub struct RestoreApplyCommand {
 
 #[derive(FromArgs)]
 #[argh(subcommand)]
-/// Restore commands
-pub enum RestoreSubCommands {
-    Apply(RestoreApplyCommand),
+/// Snapshot commands
+pub enum SnapshotSubCommands {
+    Take(SnapshotTakeCommand),
+    Restore(SnapshotRestoreCommand),
 }
 
 /// Container for GpuParameters that have been fixed after parsing using serde.
@@ -764,6 +742,15 @@ fn overwrite<T>(left: &mut T, right: T) {
 #[argh(subcommand, name = "run", description = "Start a new crosvm instance")]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct RunCommand {
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    #[argh(switch)]
+    #[serde(default)]
+    #[merge(strategy = overwrite_false)]
+    /// enable AC adapter device
+    /// It purpose is to emulate ACPI ACPI0003 device, replicate and propagate the
+    /// ac adapter status from the host to the guest.
+    pub ac_adapter: bool,
+
     #[cfg(feature = "audio")]
     #[argh(
         option,
@@ -1942,6 +1929,19 @@ pub struct RunCommand {
     /// path to a socket from where to read trackpad input events and write status updates to, optionally followed by screen width and height (defaults to 800x1280)
     pub trackpad: Vec<TouchDeviceOption>,
 
+    #[cfg(unix)]
+    #[argh(switch)]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_false)]
+    /// set MADV_DONTFORK on guest memory
+    ///
+    /// Intended for use in combination with --protected-vm, where the guest memory can be
+    /// dangerous to access. Some systems, e.g. Android, have tools that fork processes and examine
+    /// their memory. This flag effectively hides the guest memory from those tools.
+    ///
+    /// Not compatible with sandboxing or vvu devices.
+    pub unmap_guest_memory_on_fork: bool,
+
     // Must be `Some` iff `protection_type == ProtectionType::UnprotectedWithFirmware`.
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -2738,16 +2738,21 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.battery_config = cmd.battery;
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+        {
+            cfg.ac_adapter = cmd.ac_adapter;
+        }
 
         #[cfg(feature = "gdb")]
         {
             cfg.gdb = cmd.gdb;
         }
 
+        cfg.host_cpu_topology = cmd.host_cpu_topology;
+
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         {
             cfg.enable_hwp = cmd.enable_hwp;
-            cfg.host_cpu_topology = cmd.host_cpu_topology;
             cfg.force_s2idle = cmd.s2idle;
             cfg.pcie_ecam = cmd.pcie_ecam;
             cfg.pci_low_start = cmd.pci_start;
@@ -2830,6 +2835,14 @@ impl TryFrom<RunCommand> for super::config::Config {
         #[cfg(target_os = "android")]
         {
             cfg.task_profiles = cmd.task_profiles;
+        }
+
+        #[cfg(unix)]
+        {
+            if cmd.unmap_guest_memory_on_fork && !cmd.disable_sandbox {
+                return Err("--unmap-guest-memory-on-fork requires --disable-sandbox".to_string());
+            }
+            cfg.unmap_guest_memory_on_fork = cmd.unmap_guest_memory_on_fork;
         }
 
         #[cfg(unix)]

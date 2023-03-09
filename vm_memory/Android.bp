@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libvm_memory",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "vm_memory",
     cargo_env_compat: true,
@@ -20,6 +20,7 @@ rust_library {
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
+        "libanyhow",
         "libbase_rust",
         "libbitflags",
         "libcfg_if",
@@ -27,6 +28,7 @@ rust_library {
         "libdata_model",
         "liblibc",
         "libserde",
+        "libserde_json",
         "libthiserror",
         "libzerocopy",
     ],
@@ -35,7 +37,7 @@ rust_library {
 
 rust_test {
     name: "vm_memory_test_src_lib",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "vm_memory",
     cargo_env_compat: true,
@@ -48,6 +50,7 @@ rust_test {
     },
     edition: "2021",
     rustlibs: [
+        "libanyhow",
         "libbase_rust",
         "libbitflags",
         "libcfg_if",
@@ -55,6 +58,7 @@ rust_test {
         "libdata_model",
         "liblibc",
         "libserde",
+        "libserde_json",
         "libthiserror",
         "libzerocopy",
     ],

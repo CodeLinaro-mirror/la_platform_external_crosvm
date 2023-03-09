@@ -20,11 +20,13 @@ pub mod userfaultfd;
 // this is public only for integration tests.
 pub mod worker;
 
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::stderr;
 use std::io::stdout;
 use std::ops::Range;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -50,12 +52,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use vm_memory::GuestMemory;
 
+#[cfg(feature = "log_page_fault")]
 use crate::logger::PageFaultEventLogger;
 use crate::page_handler::MoveToStaging;
 use crate::page_handler::PageHandler;
 use crate::processes::freeze_all_processes;
 use crate::userfaultfd::register_regions;
 use crate::userfaultfd::unregister_regions;
+use crate::userfaultfd::Factory as UffdFactory;
 use crate::userfaultfd::UffdEvent;
 use crate::userfaultfd::Userfaultfd;
 use crate::worker::Channel;
@@ -190,12 +194,12 @@ enum Command {
     Status,
     #[serde(with = "base::platform::with_raw_descriptor")]
     ProcessForked(RawDescriptor),
-    StartPageFaultLogging,
 }
 
 /// [SwapController] provides APIs to control vmm-swap.
 pub struct SwapController {
     child_process: Child,
+    uffd_factory: UffdFactory,
     tube: Tube,
 }
 
@@ -209,20 +213,46 @@ impl SwapController {
     /// * `guest_memory` - fresh new [GuestMemory]. Any pages on the [GuestMemory] must not be
     ///   touched.
     /// * `swap_dir` - directory to store swap files.
-    pub fn launch(guest_memory: GuestMemory, swap_dir: PathBuf) -> anyhow::Result<Self> {
+    pub fn launch(guest_memory: GuestMemory, swap_dir: &Path) -> anyhow::Result<Self> {
         info!("vmm-swap is enabled. launch monitor process.");
 
-        let mut keep_rds = vec![stdout().as_raw_descriptor(), stderr().as_raw_descriptor()];
+        let uffd_factory = UffdFactory::new();
+        let uffd = uffd_factory.create().context("create userfaultfd")?;
+
+        // The swap file is created as `O_TMPFILE` from the specified directory. As benefits:
+        //
+        // * it has no chance to conflict.
+        // * it has a security benefit that no one (except root) can access the swap file.
+        // * it will be automatically deleted by the kernel when crosvm exits/dies or on reboot if
+        //   the device panics/hard-resets while crosvm is running.
+        let swap_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_TMPFILE | libc::O_EXCL)
+            .mode(0o000) // other processes with the same uid can't open the file
+            .open(swap_dir)?;
 
         let (tube_main_process, tube_monitor_process) = Tube::pair().context("create swap tube")?;
-        keep_rds.push(tube_monitor_process.as_raw_descriptor());
+
+        #[cfg(feature = "log_page_fault")]
+        let page_fault_logger = PageFaultEventLogger::create(&swap_dir, &guest_memory)
+            .context("create page fault logger")?;
+
+        let mut keep_rds = vec![
+            stdout().as_raw_descriptor(),
+            stderr().as_raw_descriptor(),
+            uffd.as_raw_descriptor(),
+            swap_file.as_raw_descriptor(),
+            tube_monitor_process.as_raw_descriptor(),
+            #[cfg(feature = "log_page_fault")]
+            page_fault_logger.as_raw_descriptor(),
+        ];
 
         syslog::push_descriptors(&mut keep_rds);
         cros_tracing::push_descriptors!(&mut keep_rds);
         keep_rds.extend(guest_memory.as_raw_descriptors());
 
-        let userfaultfd = Userfaultfd::new().context("create userfaultfd")?;
-        keep_rds.push(userfaultfd.as_raw_descriptor());
+        keep_rds.extend(uffd_factory.as_raw_descriptors());
 
         // TODO(b/258351526): setup minijail details
         let jail = Minijail::new().context("create minijail")?;
@@ -231,9 +261,14 @@ impl SwapController {
         // current process)
         let child_process =
             fork_process(jail, keep_rds, Some(String::from("swap monitor")), || {
-                if let Err(e) =
-                    monitor_process(tube_monitor_process, guest_memory, userfaultfd, swap_dir)
-                {
+                if let Err(e) = monitor_process(
+                    tube_monitor_process,
+                    guest_memory,
+                    uffd,
+                    swap_file,
+                    #[cfg(feature = "log_page_fault")]
+                    page_fault_logger,
+                ) {
                     panic!("page_fault_handler_thread exited with error: {:?}", e)
                 }
             })
@@ -258,6 +293,7 @@ impl SwapController {
 
         Ok(Self {
             child_process,
+            uffd_factory,
             tube: tube_main_process,
         })
     }
@@ -317,17 +353,6 @@ impl SwapController {
         Ok(status)
     }
 
-    /// Start page fault logging.
-    ///
-    /// This returns as soon as it succeeds to send request to the monitor process.
-    /// Requests will be ignored if it is already start logging.
-    pub fn start_page_fault_logging(&self) -> anyhow::Result<()> {
-        self.tube
-            .send(&Command::StartPageFaultLogging)
-            .context("send page fault logging request")?;
-        Ok(())
-    }
-
     /// Shutdown the monitor process.
     ///
     /// This blocks until the monitor process exits.
@@ -350,7 +375,7 @@ impl SwapController {
     /// Userfaultfd(2) originally has `UFFD_FEATURE_EVENT_FORK`. But it is not applicable to crosvm
     /// since it does not support non-root user namespace.
     pub fn on_process_forked(&self) -> anyhow::Result<()> {
-        let uffd = Userfaultfd::new().context("create userfaultfd")?;
+        let uffd = self.uffd_factory.create().context("create userfaultfd")?;
         self.tube
             .send(&Command::ProcessForked(uffd.as_raw_descriptor()))
             .context("send forked event")?;
@@ -362,7 +387,9 @@ impl SwapController {
 
 impl AsRawDescriptors for SwapController {
     fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
-        self.tube.as_raw_descriptors()
+        let mut rds = self.uffd_factory.as_raw_descriptors();
+        rds.push(self.tube.as_raw_descriptor());
+        rds
     }
 }
 
@@ -426,12 +453,12 @@ fn regions_from_guest_memory(guest_memory: &GuestMemory) -> Vec<Range<usize>> {
     regions
 }
 
-fn start_monitoring(
+fn start_monitoring<'a>(
     uffd_list: &mut UffdList,
     guest_memory: &GuestMemory,
-    swap_dir: &Path,
+    swap_file: &'a File,
     channel: Arc<Channel<MoveToStaging>>,
-) -> anyhow::Result<PageHandler> {
+) -> anyhow::Result<PageHandler<'a>> {
     // Drain the event queue to ensure that the uffds for all forked processes are being monitored.
     let mut new_uffds = Vec::new();
     for uffd in uffd_list.get_list() {
@@ -449,7 +476,7 @@ fn start_monitoring(
 
     let regions = regions_from_guest_memory(guest_memory);
 
-    let page_hander = PageHandler::create(swap_dir, &regions, channel).context("enable swap")?;
+    let page_hander = PageHandler::create(swap_file, &regions, channel).context("enable swap")?;
 
     // safe because the regions are from guest memory and uffd_list contains all the processes of
     // crosvm.
@@ -499,7 +526,8 @@ fn monitor_process(
     tube: Tube,
     guest_memory: GuestMemory,
     uffd: Userfaultfd,
-    swap_dir: PathBuf,
+    swap_file: File,
+    #[cfg(feature = "log_page_fault")] mut page_fault_logger: PageFaultEventLogger,
 ) -> anyhow::Result<()> {
     info!("monitor_process started");
 
@@ -521,7 +549,6 @@ fn monitor_process(
     let mut state: SwapState = SwapState::Disabled;
     let mut state_transition = StateTransition::default();
     let mut page_handler_opt: Option<PageHandler> = None;
-    let mut page_fault_logger: Option<PageFaultEventLogger> = None;
 
     'wait: loop {
         let events = match &state {
@@ -579,9 +606,8 @@ fn monitor_process(
                     } {
                         match event {
                             UffdEvent::Pagefault { addr, .. } => {
-                                if let Some(ref mut page_fault_logger) = page_fault_logger {
-                                    page_fault_logger.log_page_fault(addr as usize, id_uffd);
-                                }
+                                #[cfg(feature = "log_page_fault")]
+                                page_fault_logger.log_page_fault(addr as usize, id_uffd);
                                 if let Some(ref mut page_handler) = page_handler_opt {
                                     page_handler
                                         .handle_page_fault(uffd, addr as usize)
@@ -627,7 +653,7 @@ fn monitor_process(
                             page_handler_opt = Some(start_monitoring(
                                 &mut uffd_list,
                                 &guest_memory,
-                                &swap_dir,
+                                &swap_file,
                                 worker.channel.clone(),
                             )?);
                         }
@@ -716,6 +742,8 @@ fn monitor_process(
                                 "swap in all {} pages in {} ms. swap disabled.",
                                 state_transition.pages, state_transition.time_ms
                             );
+                            // Truncate the swap file to hold minimum resources while disabled.
+                            swap_file.set_len(0).context("clear swap file")?;
                             state = SwapState::Disabled;
                         } else {
                             error!("swap is already disabled.");
@@ -728,14 +756,6 @@ fn monitor_process(
                         let status = Status::new(&state, &state_transition, &page_handler_opt);
                         tube.send(&status).context("send status response")?;
                         info!("swap status: {:?}.", status);
-                    }
-                    Command::StartPageFaultLogging => {
-                        if page_fault_logger.is_none() {
-                            page_fault_logger = Some(
-                                PageFaultEventLogger::create(&swap_dir, &guest_memory)
-                                    .context("create page fault logger")?,
-                            )
-                        }
                     }
                 },
             };

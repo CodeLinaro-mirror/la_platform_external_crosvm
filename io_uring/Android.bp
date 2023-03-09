@@ -12,7 +12,7 @@ package {
 
 rust_test {
     name: "io_uring_test_tests_uring",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "uring",
     cargo_env_compat: true,
@@ -38,7 +38,7 @@ rust_test {
 
 rust_library {
     name: "libio_uring",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "io_uring",
     cargo_env_compat: true,

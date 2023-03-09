@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libvhost",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "vhost",
     cargo_env_compat: true,
@@ -33,7 +33,7 @@ rust_library {
 
 rust_test {
     name: "vhost_test_tests_unix",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "unix",
     cargo_env_compat: true,
