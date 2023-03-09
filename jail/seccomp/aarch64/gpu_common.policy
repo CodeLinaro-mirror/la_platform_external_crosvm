@@ -71,7 +71,9 @@ fstatfs: 1
 prctl: arg0 == PR_SET_NAME || arg0 == PR_GET_NAME
 
 # 0x6400 == DRM_IOCTL_BASE, 0x8000 = KBASE_IOCTL_TYPE (mali), 0x40086200 = DMA_BUF_IOCTL_SYNC, 0x40087543 == UDMABUF_CREATE_LIST
-ioctl: arg1 & 0x6400 || arg1 & 0x8000 || arg1 == 0x40086200 || arg1 == 0x40087543
+# (from vmm-swap below) 0xc018aa3f == UFFDIO_API, 0xaa00 == USERFAULTFD_IOC_NEW
+# (from wl_device) arg1 == FIONBIO || arg1 == DMA_BUF_IOCTL_SYNC || arg1 == SYNC_IOC_FILE_INFO || arg1 & DRM_IOCTL_BASE
+ioctl: arg1 & 0x6400 || arg1 & 0x8000 || arg1 == 0x40086200 || arg1 == 0x40087543 || arg1 == 0xc018aa3f || arg1 == 0xaa00 || arg1 == 0x5421 || arg1 == 0x40086200 || arg1 == 0xc0383e04 || arg1 & 0x6400
 
 # Used for sharing memory with wayland. arg1 == MFD_CLOEXEC|MFD_ALLOW_SEALING
 memfd_create: arg1 == 3
@@ -104,4 +106,4 @@ getegid: 1
 ## Rules for vmm-swap
 userfaultfd: 1
 # 0xc018aa3f == UFFDIO_API, 0xaa00 == USERFAULTFD_IOC_NEW
-ioctl: arg1 == 0xc018aa3f || arg1 == 0xaa00
+# ioctl: arg1 == 0xc018aa3f || arg1 == 0xaa00

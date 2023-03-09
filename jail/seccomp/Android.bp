@@ -24,9 +24,20 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
+python_binary_host {
+    name: "detect_duplication",
+    main: "detect_duplication.py",
+    srcs: [
+        "detect_duplication.py",
+    ],
+}
+
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "$(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/block.policy) $(location x86_64/vvu.policy) $(location x86_64/vhost_user.policy) < $(in) > $(out)",
+    cmd: "$(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/block.policy) $(location x86_64/vvu.policy) $(location x86_64/vhost_user.policy) < $(in) | $(location detect_duplication) > $(out)",
+    tools: [
+        "detect_duplication",
+    ],
     tool_files: [
         "policy-inliner.sh",
         "x86_64/common_device.policy",
@@ -40,7 +51,10 @@ genrule_defaults {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_aarch64",
-    cmd: "$(location policy-inliner.sh) $(location aarch64/common_device.policy) $(location aarch64/gpu_common.policy) $(location aarch64/serial.policy) < $(in) > $(out)",
+    cmd: "$(location policy-inliner.sh) $(location aarch64/common_device.policy) $(location aarch64/gpu_common.policy) $(location aarch64/serial.policy) < $(in) | $(location detect_duplication) > $(out)",
+    tools: [
+        "detect_duplication",
+    ],
     tool_files: [
         "policy-inliner.sh",
         "aarch64/common_device.policy",
