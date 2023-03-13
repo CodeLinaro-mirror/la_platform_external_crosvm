@@ -10,6 +10,8 @@ use std::time::Duration;
 use anyhow::anyhow;
 use base::error;
 use base::AsRawDescriptor;
+#[cfg(feature = "swap")]
+use base::AsRawDescriptors;
 use base::RawDescriptor;
 use base::Tube;
 use base::TubeError;
@@ -96,10 +98,8 @@ enum CommandResult {
     WakeResult(std::result::Result<(), String>),
 }
 
-fn child_proc<D: BusDevice>(tube: Tube, device: &mut D) {
-    let mut running = true;
-
-    while running {
+fn child_proc<D: BusDevice>(tube: Tube, mut device: D) {
+    loop {
         let cmd = match tube.recv() {
             Ok(cmd) => cmd,
             Err(err) => {
@@ -151,8 +151,12 @@ fn child_proc<D: BusDevice>(tube: Tube, device: &mut D) {
                 Ok(())
             }
             Command::Shutdown => {
-                running = false;
-                tube.send(&CommandResult::Ok)
+                // Explicitly drop the device so that its Drop implementation has a chance to run
+                // before sending the `Command::Shutdown` response.
+                drop(device);
+
+                let _ = tube.send(&CommandResult::Ok);
+                return;
             }
             Command::GetRanges => {
                 let ranges = device.get_ranges();
@@ -209,11 +213,17 @@ impl ProxyDevice {
         mut device: D,
         jail: Minijail,
         mut keep_rds: Vec<RawDescriptor>,
+        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<ProxyDevice> {
         let debug_label = device.debug_label();
         let (child_tube, parent_tube) = Tube::pair().map_err(Error::Tube)?;
 
         keep_rds.push(child_tube.as_raw_descriptor());
+
+        #[cfg(feature = "swap")]
+        if let Some(swap_controller) = swap_controller {
+            keep_rds.extend(swap_controller.as_raw_descriptors());
+        }
 
         // Deduplicate the FDs since minijail expects this.
         keep_rds.sort_unstable();
@@ -236,12 +246,17 @@ impl ProxyDevice {
                 // Preserve TZ for `chrono::Local` (b/257987535).
                 std::env::set_var("TZ", tz);
 
-                device.on_sandboxed();
-                child_proc(child_tube, &mut device);
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    if let Err(e) = swap_controller.on_process_forked() {
+                        error!("failed to SwapController::on_process_forked: {:?}", e);
+                        // exit() is trivially safe.
+                        unsafe { libc::exit(1) };
+                    }
+                }
 
-                // Explicitly drop the device so that its Drop implementation has a chance to run
-                // before the call to `libc::exit()`.
-                std::mem::drop(device);
+                device.on_sandboxed();
+                child_proc(child_tube, device);
 
                 // We're explicitly not using std::process::exit here to avoid the cleanup of
                 // stdout/stderr globals. This can cause cascading panics and SIGILL if a worker
@@ -512,7 +527,14 @@ mod tests {
         let device = EchoDevice::new();
         let keep_fds: Vec<RawDescriptor> = Vec::new();
         let minijail = Minijail::new().unwrap();
-        ProxyDevice::new(device, minijail, keep_fds).unwrap()
+        ProxyDevice::new(
+            device,
+            minijail,
+            keep_fds,
+            #[cfg(feature = "swap")]
+            None,
+        )
+        .unwrap()
     }
 
     // TODO(b/173833661): Find a way to ensure these tests are run single-threaded.

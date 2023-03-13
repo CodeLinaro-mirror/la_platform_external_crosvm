@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
+use std::path::PathBuf;
 
 use arch::CpuSet;
 use arch::SERIAL_ADDR;
@@ -19,6 +19,8 @@ use devices::PciInterruptPin;
 use hypervisor::PsciVersion;
 use hypervisor::PSCI_0_2;
 use hypervisor::PSCI_1_0;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
@@ -77,25 +79,32 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemory) -> Result<()
     Ok(())
 }
 
-fn create_resv_memory_node(fdt: &mut FdtWriter, resv_size: Option<u64>) -> Result<Option<u32>> {
-    if let Some(resv_size) = resv_size {
-        let resv_memory_node = fdt.begin_node("reserved-memory")?;
-        fdt.property_u32("#address-cells", 0x2)?;
-        fdt.property_u32("#size-cells", 0x2)?;
-        fdt.property_null("ranges")?;
+fn create_resv_memory_node(
+    fdt: &mut FdtWriter,
+    resv_addr_and_size: (Option<GuestAddress>, u64),
+) -> Result<u32> {
+    let (resv_addr, resv_size) = resv_addr_and_size;
 
-        let restricted_dma_pool = fdt.begin_node("restricted_dma_reserved")?;
-        fdt.property_u32("phandle", PHANDLE_RESTRICTED_DMA_POOL)?;
-        fdt.property_string("compatible", "restricted-dma-pool")?;
-        fdt.property_u64("size", resv_size)?;
-        fdt.property_u64("alignment", base::pagesize() as u64)?;
-        fdt.end_node(restricted_dma_pool)?;
+    let resv_memory_node = fdt.begin_node("reserved-memory")?;
+    fdt.property_u32("#address-cells", 0x2)?;
+    fdt.property_u32("#size-cells", 0x2)?;
+    fdt.property_null("ranges")?;
 
-        fdt.end_node(resv_memory_node)?;
-        Ok(Some(PHANDLE_RESTRICTED_DMA_POOL))
+    let restricted_dma_pool = if let Some(resv_addr) = resv_addr {
+        let node = fdt.begin_node(&format!("restricted_dma_reserved@{:x}", resv_addr.0))?;
+        fdt.property_array_u64("reg", &[resv_addr.0, resv_size])?;
+        node
     } else {
-        Ok(None)
-    }
+        fdt.begin_node("restricted_dma_reserved")?
+    };
+    fdt.property_u32("phandle", PHANDLE_RESTRICTED_DMA_POOL)?;
+    fdt.property_string("compatible", "restricted-dma-pool")?;
+    fdt.property_u64("size", resv_size)?;
+    fdt.property_u64("alignment", base::pagesize() as u64)?;
+    fdt.end_node(restricted_dma_pool)?;
+
+    fdt.end_node(resv_memory_node)?;
+    Ok(PHANDLE_RESTRICTED_DMA_POOL)
 }
 
 fn create_cpu_nodes(
@@ -275,18 +284,13 @@ fn create_chosen_node(
     // Used by android bootloader for boot console output
     fdt.property_string("stdout-path", &format!("/U6_16550A@{:x}", SERIAL_ADDR[0]))?;
 
-    let mut random_file = File::open("/dev/urandom").map_err(Error::FdtIoError)?;
     let mut kaslr_seed_bytes = [0u8; 8];
-    random_file
-        .read_exact(&mut kaslr_seed_bytes)
-        .map_err(Error::FdtIoError)?;
+    OsRng.fill_bytes(&mut kaslr_seed_bytes);
     let kaslr_seed = u64::from_le_bytes(kaslr_seed_bytes);
     fdt.property_u64("kaslr-seed", kaslr_seed)?;
 
     let mut rng_seed_bytes = [0u8; 256];
-    random_file
-        .read_exact(&mut rng_seed_bytes)
-        .map_err(Error::FdtIoError)?;
+    OsRng.fill_bytes(&mut rng_seed_bytes);
     fdt.property("rng-seed", &rng_seed_bytes)?;
 
     if let Some((initrd_addr, initrd_size)) = initrd {
@@ -521,16 +525,16 @@ fn create_vmwdt_node(fdt: &mut FdtWriter, vmwdt_cfg: VmWdtConfig) -> Result<()> 
 /// * `pci_cfg` - Location of the memory-mapped PCI configuration space.
 /// * `pci_ranges` - Memory ranges accessible via the PCI host controller.
 /// * `num_cpus` - Number of virtual CPUs the guest will have
-/// * `fdt_load_offset` - The offset into physical memory for the device tree
+/// * `fdt_address` - The offset into physical memory for the device tree
 /// * `cmdline` - The kernel commandline
 /// * `initrd` - An optional tuple of initrd guest physical address and size
 /// * `android_fstab` - An optional file holding Android fstab entries
 /// * `is_gicv3` - True if gicv3, false if v2
 /// * `psci_version` - the current PSCI version
-/// * `bat_mmio_base` - The battery base address
-/// * `bat_irq` - The battery irq number
-/// * `swiotlb` - Reserve a memory pool for DMA
+/// * `swiotlb` - Reserve a memory pool for DMA. Tuple of base address and size.
+/// * `bat_mmio_base_and_irq` - The battery base address and irq number
 /// * `vmwdt_cfg` - The virtual watchdog configuration
+/// * `dump_device_tree_blob` - Option path to write DTB to
 pub fn create_fdt(
     fdt_max_size: usize,
     guest_mem: &GuestMemory,
@@ -548,9 +552,10 @@ pub fn create_fdt(
     is_gicv3: bool,
     use_pmu: bool,
     psci_version: PsciVersion,
-    swiotlb: Option<u64>,
+    swiotlb: Option<(Option<GuestAddress>, u64)>,
     bat_mmio_base_and_irq: Option<(u64, u32)>,
     vmwdt_cfg: VmWdtConfig,
+    dump_device_tree_blob: Option<PathBuf>,
 ) -> Result<()> {
     let mut fdt = FdtWriter::new(&[]);
 
@@ -566,7 +571,10 @@ pub fn create_fdt(
     create_chosen_node(&mut fdt, cmdline, initrd)?;
     create_config_node(&mut fdt, image)?;
     create_memory_node(&mut fdt, guest_mem)?;
-    let dma_pool_phandle = create_resv_memory_node(&mut fdt, swiotlb)?;
+    let dma_pool_phandle = match swiotlb {
+        Some(x) => Some(create_resv_memory_node(&mut fdt, x)?),
+        None => None,
+    };
     create_cpu_nodes(&mut fdt, num_cpus, cpu_clusters, cpu_capacity)?;
     create_gic_node(&mut fdt, is_gicv3, num_cpus as u64)?;
     create_timer_node(&mut fdt, num_cpus)?;
@@ -592,6 +600,12 @@ pub fn create_fdt(
     if written < fdt_max_size {
         return Err(Error::FdtGuestMemoryWriteError);
     }
+
+    if let Some(file_path) = dump_device_tree_blob {
+        std::fs::write(&file_path, &fdt_final)
+            .map_err(|e| Error::FdtDumpIoError(e, file_path.clone()))?;
+    }
+
     Ok(())
 }
 

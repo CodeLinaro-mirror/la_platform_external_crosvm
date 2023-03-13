@@ -5,7 +5,7 @@
 use anyhow::anyhow;
 use anyhow::Result;
 
-use crate::decoders::vp8::backends::stateless::StatelessDecoderBackend;
+use crate::decoders::vp8::backends::StatelessDecoderBackend;
 use crate::decoders::vp8::parser::Frame;
 use crate::decoders::vp8::parser::Header;
 use crate::decoders::vp8::parser::Parser;
@@ -99,7 +99,8 @@ pub struct Decoder<T: DecodedHandle<CodecData = Header>> {
 
 impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<T> {
     /// Create a new codec backend for VP8.
-    pub fn new(
+    #[cfg(any(feature = "vaapi", test))]
+    pub(crate) fn new(
         backend: Box<dyn StatelessDecoderBackend<Handle = T>>,
         blocking_mode: BlockingMode,
     ) -> Result<Self> {
@@ -225,7 +226,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
     /// Handle a single frame.
     fn handle_frame(
         &mut self,
-        frame: Frame<&dyn AsRef<[u8]>>,
+        frame: Frame<&[u8]>,
         timestamp: u64,
         queued_parser_state: Option<Parser>,
     ) -> Result<T> {
@@ -278,7 +279,8 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
     }
 
     #[cfg(test)]
-    pub fn backend(&self) -> &dyn StatelessDecoderBackend<Handle = T> {
+    #[allow(dead_code)]
+    pub(crate) fn backend(&self) -> &dyn StatelessDecoderBackend<Handle = T> {
         self.backend.as_ref()
     }
 }
@@ -289,7 +291,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
     fn decode(
         &mut self,
         timestamp: u64,
-        bitstream: &dyn AsRef<[u8]>,
+        bitstream: &[u8],
     ) -> VideoDecoderResult<Vec<Box<dyn DynDecodedHandle>>> {
         let frame = self.parser.parse_frame(bitstream).map_err(|e| anyhow!(e))?;
 
@@ -317,7 +319,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
                         key_frame: (
                             timestamp,
                             Box::new(frame.header),
-                            Vec::from(frame.bitstream.as_ref()),
+                            Vec::from(frame.bitstream),
                             Box::new(self.parser.clone()),
                         ),
                     }
@@ -338,10 +340,8 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
         if let Some(queued_key_frame) = queued_key_frame {
             let (timestamp, header, bitstream, parser) = queued_key_frame;
 
-            let bitstream = &bitstream as &dyn AsRef<[u8]>;
-
             let key_frame = Frame {
-                bitstream,
+                bitstream: bitstream.as_ref(),
                 header: *header,
             };
 
@@ -393,10 +393,13 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
         if let NegotiationStatus::Possible { key_frame } = &self.negotiation_status {
             let (timestamp, header, bitstream, parser) = key_frame;
 
-            let bitstream = &bitstream.clone() as &dyn AsRef<[u8]>;
+            let bitstream = bitstream.clone();
             let header = header.as_ref().clone();
 
-            let key_frame = Frame { bitstream, header };
+            let key_frame = Frame {
+                bitstream: bitstream.as_ref(),
+                header,
+            };
             let timestamp = *timestamp;
             let parser = *parser.clone();
 
@@ -416,14 +419,6 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
             .collect())
     }
 
-    fn backend(&self) -> &dyn crate::decoders::VideoDecoderBackend {
-        self.backend.as_video_decoder_backend()
-    }
-
-    fn backend_mut(&mut self) -> &mut dyn crate::decoders::VideoDecoderBackend {
-        self.backend.as_video_decoder_backend_mut()
-    }
-
     fn negotiation_possible(&self) -> bool {
         matches!(self.negotiation_status, NegotiationStatus::Possible { .. })
     }
@@ -440,6 +435,14 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
         } else {
             Some(left_in_the_backend)
         }
+    }
+
+    fn num_resources_total(&self) -> usize {
+        self.backend.num_resources_total()
+    }
+
+    fn coded_resolution(&self) -> Option<Resolution> {
+        self.backend.coded_resolution()
     }
 
     fn poll(
@@ -468,7 +471,6 @@ pub mod tests {
     use crate::decoders::DecodedHandle;
     use crate::decoders::DynDecodedHandle;
     use crate::decoders::VideoDecoder;
-    use crate::utils::dummy::Backend;
 
     /// Read and return the data from the next IVF packet. Returns `None` if there is no more data
     /// to read.
@@ -502,8 +504,7 @@ pub mod tests {
         cursor.seek(std::io::SeekFrom::Start(32)).unwrap();
 
         while let Some(packet) = read_ivf_packet(&mut cursor) {
-            let bitstream = packet.as_ref();
-            decoder.decode(frame_num, &bitstream).unwrap();
+            decoder.decode(frame_num, packet.as_ref()).unwrap();
 
             on_new_iteration(decoder);
             frame_num += 1;
@@ -536,8 +537,7 @@ pub mod tests {
 
         for blocking_mode in blocking_modes {
             let mut frame_num = 0;
-            let backend = Box::new(Backend {});
-            let mut decoder = Decoder::new(backend, blocking_mode).unwrap();
+            let mut decoder = Decoder::new_dummy(blocking_mode).unwrap();
 
             run_decoding_loop(&mut decoder, TEST_STREAM, |decoder| {
                 process_ready_frames(decoder, &mut |_, _| frame_num += 1);

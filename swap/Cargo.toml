@@ -7,13 +7,15 @@ edition = "2021"
 [features]
 trace_marker = ["cros_tracing/trace_marker"]
 
-[dependencies]
+[target.'cfg(unix)'.dependencies]
 anyhow = "*"
 base = { path = "../base" }
 cros_tracing = { path = "../cros_tracing" }
-data_model = "*"
+data_model = { path = "../common/data_model" }
 libc = "*"
 minijail = "*"
+num_cpus = "*"
+once_cell = "*"
 remain = "*"
 serde = { version = "1", features = [ "derive" ] }
 serde_json = "*"

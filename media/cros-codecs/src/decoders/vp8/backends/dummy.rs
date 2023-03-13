@@ -6,17 +6,15 @@
 // run so we can test it in isolation.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 
-use crate::decoders::vp8::backends::stateless::StatelessDecoderBackend;
-use crate::decoders::vp8::backends::stateless::Vp8Picture;
-use crate::decoders::VideoDecoderBackend;
+use crate::decoders::vp8::backends::StatelessDecoderBackend;
+use crate::decoders::vp8::backends::Vp8Picture;
+use crate::decoders::vp8::decoder::Decoder;
+use crate::decoders::BlockingMode;
 use crate::utils::dummy::*;
 
-impl StatelessDecoderBackend for Backend {
-    type Handle = Handle<Vp8Picture<BackendHandle>>;
-
+impl StatelessDecoderBackend for Backend<Vp8Picture<BackendHandle>> {
     fn new_sequence(&mut self, _: &crate::decoders::vp8::parser::Header) -> super::Result<()> {
         Ok(())
     }
@@ -27,7 +25,7 @@ impl StatelessDecoderBackend for Backend {
         _: Option<&Self::Handle>,
         _: Option<&Self::Handle>,
         _: Option<&Self::Handle>,
-        _: &dyn AsRef<[u8]>,
+        _: &[u8],
         _: &crate::decoders::vp8::parser::Parser,
         _: u64,
         _: bool,
@@ -37,23 +35,16 @@ impl StatelessDecoderBackend for Backend {
         })
     }
 
-    fn poll(&mut self, _: super::BlockingMode) -> super::Result<VecDeque<Self::Handle>> {
-        Ok(VecDeque::new())
+    #[cfg(test)]
+    fn get_test_params(&self) -> &dyn std::any::Any {
+        // There are no test parameters for the dummy backend.
+        unimplemented!()
     }
+}
 
-    fn handle_is_ready(&self, _: &Self::Handle) -> bool {
-        true
-    }
-
-    fn block_on_handle(&mut self, _: &Self::Handle) -> super::Result<()> {
-        Ok(())
-    }
-
-    fn as_video_decoder_backend_mut(&mut self) -> &mut dyn VideoDecoderBackend {
-        self
-    }
-
-    fn as_video_decoder_backend(&self) -> &dyn VideoDecoderBackend {
-        self
+impl Decoder<Handle<Vp8Picture<BackendHandle>>> {
+    // Creates a new instance of the decoder using the dummy backend.
+    pub fn new_dummy(blocking_mode: BlockingMode) -> anyhow::Result<Self> {
+        Self::new(Box::new(Backend::new()), blocking_mode)
     }
 }

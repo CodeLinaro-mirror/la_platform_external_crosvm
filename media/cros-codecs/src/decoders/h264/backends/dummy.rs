@@ -6,26 +6,23 @@
 //! run so we can test it in isolation.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 
-use crate::decoders::h264::backends::stateless::AsBackendHandle;
-use crate::decoders::h264::backends::stateless::BlockingMode;
-use crate::decoders::h264::backends::stateless::ContainedPicture;
-use crate::decoders::h264::backends::stateless::Result as StatelessBackendResult;
-use crate::decoders::h264::backends::stateless::StatelessDecoderBackend;
+use crate::decoders::h264::backends::AsBackendHandle;
+use crate::decoders::h264::backends::ContainedPicture;
+use crate::decoders::h264::backends::Result as StatelessBackendResult;
+use crate::decoders::h264::backends::StatelessDecoderBackend;
+use crate::decoders::h264::decoder::Decoder;
 use crate::decoders::h264::dpb::Dpb;
 use crate::decoders::h264::parser::Pps;
 use crate::decoders::h264::parser::Slice;
 use crate::decoders::h264::parser::Sps;
 use crate::decoders::h264::picture::H264Picture;
-use crate::decoders::VideoDecoderBackend;
+use crate::decoders::BlockingMode;
 use crate::utils::dummy::*;
 
-impl StatelessDecoderBackend for Backend {
-    type Handle = Handle<H264Picture<BackendHandle>>;
-
-    fn new_sequence(&mut self, _: &Sps, _: usize) -> StatelessBackendResult<()> {
+impl StatelessDecoderBackend for Backend<H264Picture<BackendHandle>> {
+    fn new_sequence(&mut self, _: &Sps) -> StatelessBackendResult<()> {
         Ok(())
     }
 
@@ -36,7 +33,7 @@ impl StatelessDecoderBackend for Backend {
         _: &Sps,
         _: &Pps,
         _: &Dpb<Self::Handle>,
-        _: &Slice<&dyn AsRef<[u8]>>,
+        _: &Slice<&[u8]>,
     ) -> StatelessBackendResult<()> {
         Ok(())
     }
@@ -52,7 +49,7 @@ impl StatelessDecoderBackend for Backend {
 
     fn decode_slice(
         &mut self,
-        _: &Slice<&dyn AsRef<[u8]>>,
+        _: &Slice<&[u8]>,
         _: &Sps,
         _: &Pps,
         _: &Dpb<Self::Handle>,
@@ -70,10 +67,6 @@ impl StatelessDecoderBackend for Backend {
         Ok(Handle {
             handle: Rc::new(RefCell::new(picture)),
         })
-    }
-
-    fn poll(&mut self, _: BlockingMode) -> StatelessBackendResult<VecDeque<Self::Handle>> {
-        Ok(VecDeque::new())
     }
 
     fn new_handle(
@@ -99,19 +92,16 @@ impl StatelessDecoderBackend for Backend {
         Ok(())
     }
 
-    fn handle_is_ready(&self, _: &Self::Handle) -> bool {
-        true
+    #[cfg(test)]
+    fn get_test_params(&self) -> &dyn std::any::Any {
+        // There are no test parameters for the dummy backend.
+        unimplemented!()
     }
+}
 
-    fn as_video_decoder_backend_mut(&mut self) -> &mut dyn VideoDecoderBackend {
-        self
-    }
-
-    fn as_video_decoder_backend(&self) -> &dyn VideoDecoderBackend {
-        self
-    }
-
-    fn block_on_handle(&mut self, _: &Self::Handle) -> StatelessBackendResult<()> {
-        Ok(())
+impl Decoder<Handle<H264Picture<BackendHandle>>> {
+    // Creates a new instance of the decoder using the dummy backend.
+    pub fn new_dummy(blocking_mode: BlockingMode) -> anyhow::Result<Self> {
+        Self::new(Box::new(Backend::new()), blocking_mode)
     }
 }

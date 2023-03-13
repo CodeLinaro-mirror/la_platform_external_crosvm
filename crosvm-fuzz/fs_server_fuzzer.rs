@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![cfg(not(test))]
 #![no_main]
 
-#[cfg(fuzzing)]
-mod fs_server_fuzzer {
+#[cfg(unix)]
+mod fuzzer {
     use std::convert::TryInto;
 
     use cros_fuzz::fuzz_target;
@@ -52,4 +53,11 @@ mod fs_server_fuzzer {
             fuzz_server(r, w);
         });
     });
+}
+
+#[cfg(not(unix))]
+mod fuzzer {
+    use cros_fuzz::fuzz_target;
+
+    fuzz_target!(|_data| {});
 }

@@ -35,6 +35,7 @@ use base::AsRawDescriptor;
 use base::FileFlags;
 use base::FromRawDescriptor;
 use base::RawDescriptor;
+use data_model::zerocopy_from_reader;
 use data_model::DataInit;
 use fuse::filesystem::Context;
 use fuse::filesystem::DirectoryIterator;
@@ -68,6 +69,8 @@ use system_api::UserDataAuth::SetMediaRWDataFileProjectIdRequest;
 use system_api::UserDataAuth::SetMediaRWDataFileProjectInheritanceFlagReply;
 #[cfg(feature = "arc_quota")]
 use system_api::UserDataAuth::SetMediaRWDataFileProjectInheritanceFlagRequest;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::virtio::fs::caps::Capability;
 use crate::virtio::fs::caps::Caps;
@@ -95,7 +98,7 @@ const FS_PROJINHERIT_FL: c_int = 0x20000000;
 const DEFAULT_DBUS_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 struct fscrypt_policy_v1 {
     _version: u8,
     _contents_encryption_mode: u8,
@@ -103,10 +106,9 @@ struct fscrypt_policy_v1 {
     _flags: u8,
     _master_key_descriptor: [u8; FSCRYPT_KEY_DESCRIPTOR_SIZE],
 }
-unsafe impl DataInit for fscrypt_policy_v1 {}
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 struct fscrypt_policy_v2 {
     _version: u8,
     _contents_encryption_mode: u8,
@@ -115,29 +117,28 @@ struct fscrypt_policy_v2 {
     __reserved: [u8; 4],
     master_key_identifier: [u8; FSCRYPT_KEY_IDENTIFIER_SIZE],
 }
-unsafe impl DataInit for fscrypt_policy_v2 {}
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, FromBytes)]
 union fscrypt_policy {
     _version: u8,
     _v1: fscrypt_policy_v1,
     _v2: fscrypt_policy_v2,
 }
-unsafe impl DataInit for fscrypt_policy {}
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, FromBytes)]
 struct fscrypt_get_policy_ex_arg {
     policy_size: u64,       /* input/output */
     policy: fscrypt_policy, /* output */
 }
+
 unsafe impl DataInit for fscrypt_get_policy_ex_arg {}
 
 ioctl_iowr_nr!(FS_IOC_GET_ENCRYPTION_POLICY_EX, 'f' as u32, 22, [u8; 9]);
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 struct fsxattr {
     fsx_xflags: u32,     /* xflags field value (get/set) */
     fsx_extsize: u32,    /* extsize field value (get/set)*/
@@ -146,7 +147,6 @@ struct fsxattr {
     fsx_cowextsize: u32, /* CoW extsize field value (get/set)*/
     fsx_pad: [u8; 8],
 }
-unsafe impl DataInit for fsxattr {}
 
 ioctl_ior_nr!(FS_IOC_FSGETXATTR, 'X' as u32, 31, fsxattr);
 ioctl_iow_nr!(FS_IOC_FSSETXATTR, 'X' as u32, 32, fsxattr);
@@ -161,7 +161,7 @@ ioctl_ior_nr!(FS_IOC64_GETFLAGS, 'f' as u32, 1, u64);
 ioctl_iow_nr!(FS_IOC64_SETFLAGS, 'f' as u32, 2, u64);
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 struct fsverity_enable_arg {
     _version: u32,
     _hash_algorithm: u32,
@@ -173,16 +173,14 @@ struct fsverity_enable_arg {
     sig_ptr: u64,
     __reserved2: [u64; 11],
 }
-unsafe impl DataInit for fsverity_enable_arg {}
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 struct fsverity_digest {
     _digest_algorithm: u16,
     digest_size: u16,
     // __u8 digest[];
 }
-unsafe impl DataInit for fsverity_digest {}
 
 ioctl_iow_nr!(FS_IOC_ENABLE_VERITY, 'f' as u32, 133, fsverity_enable_arg);
 ioctl_iowr_nr!(FS_IOC_MEASURE_VERITY, 'f' as u32, 134, fsverity_digest);
@@ -565,6 +563,9 @@ impl Default for Config {
 /// directory ends up as the root of the file system process. One way to accomplish this is via a
 /// combination of mount namespaces and the pivot_root system call.
 pub struct PassthroughFs {
+    // Mutex that must be acquired before executing a process-wide operation such as fchdir.
+    process_lock: Mutex<()>,
+
     // File descriptors for various points in the file system tree.
     inodes: Mutex<MultikeyBTreeMap<Inode, InodeAltKey, Arc<InodeData>>>,
     next_inode: AtomicU64,
@@ -633,6 +634,7 @@ impl PassthroughFs {
         let proc = unsafe { File::from_raw_descriptor(raw_descriptor) };
 
         Ok(PassthroughFs {
+            process_lock: Mutex::new(()),
             inodes: Mutex::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(ROOT_ID + 1),
 
@@ -852,7 +854,13 @@ impl PassthroughFs {
         } {
             Ok(fd) => fd,
             Err(e) if e.errno() == libc::EACCES => {
-                // fallback to O_PATH for the unreadable file.
+                // If O_RDONLY is unavailable, fall back to O_PATH to get an FD to store in
+                // `InodeData`.
+                // Note that some operations which should be allowed without read permissions
+                // require syscalls that don't support O_PATH fds. For those syscalls, we will
+                // need to fall back to their path-based equivalents with /self/fd/${FD}.
+                // e.g. `fgetxattr()` for an O_PATH FD fails while `getxaattr()` for /self/fd/${FD}
+                // works.
                 flags |= libc::O_PATH;
                 // Safe because this doesn't modify any memory and we check the return value.
                 unsafe {
@@ -950,12 +958,17 @@ impl PassthroughFs {
     // directory. This effectively emulates an *at syscall starting at /proc, which is useful when
     // there is no *at syscall available. Panics if any of the fchdir calls fail or if there is no
     // root inode.
+    //
+    // NOTE: this method acquires an `self`-wide lock. If any locks are acquired in `f`, care must
+    // be taken to avoid the risk of deadlocks.
     fn with_proc_chdir<F, T>(&self, f: F) -> T
     where
         F: FnOnce() -> T,
     {
         let root = self.find_inode(ROOT_ID).expect("failed to find root inode");
 
+        // Acquire a lock for `fchdir`.
+        let _proc_lock = self.process_lock.lock();
         // Safe because this doesn't modify any memory and we check the return value. Since the
         // fchdir should never fail we just use debug_asserts.
         let proc_cwd = unsafe { libc::fchdir(self.proc.as_raw_descriptor()) };
@@ -982,11 +995,13 @@ impl PassthroughFs {
     }
 
     fn do_getxattr(&self, inode: &InodeData, name: &CStr, value: &mut [u8]) -> io::Result<usize> {
-        let res = if inode.filetype == FileType::Other {
-            // For non-regular files and directories, we cannot open the fd normally. Instead we
+        let file = inode.file.lock();
+        let o_path_file = (file.1 & libc::O_PATH) != 0;
+        let res = if o_path_file {
+            // For FDs opened with `O_PATH`, we cannot call `fgetxattr` normally. Instead we
             // emulate an _at syscall by changing the CWD to /proc, running the path based syscall,
-            // and then setting the CWD back to the root directory.
-            let path = CString::new(format!("self/fd/{}", inode.as_raw_descriptor()))
+            //  and then setting the CWD back to the root directory.
+            let path = CString::new(format!("self/fd/{}", file.0.as_raw_descriptor()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             // Safe because this will only modify `value` and we check the return value.
@@ -1003,7 +1018,7 @@ impl PassthroughFs {
             // only write to `value` and we check the return value.
             unsafe {
                 libc::fgetxattr(
-                    inode.as_raw_descriptor(),
+                    file.0.as_raw_descriptor(),
                     name.as_ptr(),
                     value.as_mut_ptr() as *mut libc::c_void,
                     value.len() as libc::size_t,
@@ -1032,7 +1047,7 @@ impl PassthroughFs {
 
         // Safe because this only has integer fields.
         let mut arg = unsafe { MaybeUninit::<fscrypt_get_policy_ex_arg>::zeroed().assume_init() };
-        r.read_exact(arg.policy_size.as_mut_slice())?;
+        r.read_exact(arg.policy_size.as_bytes_mut())?;
 
         let policy_size = cmp::min(arg.policy_size, size_of::<fscrypt_policy>() as u64);
         arg.policy_size = policy_size;
@@ -1064,7 +1079,7 @@ impl PassthroughFs {
         } else {
             // Safe because the kernel guarantees that the policy is now initialized.
             let xattr = unsafe { buf.assume_init() };
-            Ok(IoctlReply::Done(Ok(xattr.as_slice().to_vec())))
+            Ok(IoctlReply::Done(Ok(xattr.as_bytes().to_vec())))
         }
     }
 
@@ -1081,7 +1096,7 @@ impl PassthroughFs {
             self.find_handle(handle, inode)?
         };
 
-        let in_attr = fsxattr::from_reader(r)?;
+        let in_attr: fsxattr = zerocopy_from_reader(r)?;
 
         #[cfg(feature = "arc_quota")]
         let st = stat(&*data)?;
@@ -1172,7 +1187,7 @@ impl PassthroughFs {
         };
 
         // The ioctl encoding is a long but the parameter is actually an int.
-        let in_flags = c_int::from_reader(r)?;
+        let in_flags: c_int = zerocopy_from_reader(r)?;
 
         #[cfg(feature = "arc_quota")]
         let st = stat(&*data)?;
@@ -1290,7 +1305,7 @@ impl PassthroughFs {
             data
         };
 
-        let mut arg = fsverity_enable_arg::from_reader(&mut r)?;
+        let mut arg: fsverity_enable_arg = zerocopy_from_reader(&mut r)?;
 
         let mut salt;
         if arg.salt_size > 0 {
@@ -1342,7 +1357,7 @@ impl PassthroughFs {
             self.find_handle(handle, inode)?
         };
 
-        let digest = fsverity_digest::from_reader(r)?;
+        let digest: fsverity_digest = zerocopy_from_reader(r)?;
 
         // Taken from fs/verity/fsverity_private.h.
         const FS_VERITY_MAX_DIGEST_SIZE: u16 = 64;
@@ -2233,12 +2248,13 @@ impl FileSystem for PassthroughFs {
 
         let data = self.find_inode(inode)?;
         let name = self.rewrite_xattr_name(name);
-
-        if data.filetype == FileType::Other {
-            // For non-regular files and directories, we cannot open the fd normally. Instead we
-            // emulate an _at syscall by changing the CWD to /proc, running the path based syscall,
-            // and then setting the CWD back to the root directory.
-            let path = CString::new(format!("self/fd/{}", data.as_raw_descriptor()))
+        let file = data.file.lock();
+        let o_path_file = (file.1 & libc::O_PATH) != 0;
+        if o_path_file {
+            // For FDs opened with `O_PATH`, we cannot call `fsetxattr` normally. Instead we emulate
+            // an _at syscall by changing the CWD to /proc, running the path based syscall, and then
+            // setting the CWD back to the root directory.
+            let path = CString::new(format!("self/fd/{}", file.0.as_raw_descriptor()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             // Safe because this doesn't modify any memory and we check the return value.
@@ -2258,7 +2274,7 @@ impl FileSystem for PassthroughFs {
             // doesn't modify any memory and we check the return value.
             syscall!(unsafe {
                 libc::fsetxattr(
-                    data.as_raw_descriptor(),
+                    file.0.as_raw_descriptor(),
                     name.as_ptr(),
                     value.as_ptr() as *const libc::c_void,
                     value.len() as libc::size_t,
@@ -2302,11 +2318,13 @@ impl FileSystem for PassthroughFs {
 
         let mut buf = vec![0u8; size as usize];
 
-        let res = if data.filetype == FileType::Other {
-            // For non-regular files and directories, we cannot open the fd normally. Instead we
+        let file = data.file.lock();
+        let o_path_file = (file.1 & libc::O_PATH) != 0;
+        let res = if o_path_file {
+            // For FDs opened with `O_PATH`, we cannot call `flistxattr` normally. Instead we
             // emulate an _at syscall by changing the CWD to /proc, running the path based syscall,
             // and then setting the CWD back to the root directory.
-            let path = CString::new(format!("self/fd/{}", data.as_raw_descriptor()))
+            let path = CString::new(format!("self/fd/{}", file.0.as_raw_descriptor()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             // Safe because this will only modify `buf` and we check the return value.
@@ -2322,7 +2340,7 @@ impl FileSystem for PassthroughFs {
             // write to `buf` and we check the return value.
             syscall!(unsafe {
                 libc::flistxattr(
-                    data.as_raw_descriptor(),
+                    file.0.as_raw_descriptor(),
                     buf.as_mut_ptr() as *mut libc::c_char,
                     buf.len() as libc::size_t,
                 )
@@ -2351,11 +2369,13 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(inode)?;
         let name = self.rewrite_xattr_name(name);
 
-        if data.filetype == FileType::Other {
-            // For non-regular files and directories, we cannot open the fd normally. Instead we
+        let file = data.file.lock();
+        let o_path_file = (file.1 & libc::O_PATH) != 0;
+        if o_path_file {
+            // For files opened with `O_PATH`, we cannot call `fremovexattr` normally. Instead we
             // emulate an _at syscall by changing the CWD to /proc, running the path based syscall,
             // and then setting the CWD back to the root directory.
-            let path = CString::new(format!("self/fd/{}", data.as_raw_descriptor()))
+            let path = CString::new(format!("self/fd/{}", file.0.as_raw_descriptor()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             // Safe because this doesn't modify any memory and we check the return value.
@@ -2365,7 +2385,7 @@ impl FileSystem for PassthroughFs {
         } else {
             // For regular files and directories, we can just use fremovexattr. Safe because this
             // doesn't modify any memory and we check the return value.
-            syscall!(unsafe { libc::fremovexattr(data.as_raw_descriptor(), name.as_ptr()) })?;
+            syscall!(unsafe { libc::fremovexattr(file.0.as_raw_descriptor(), name.as_ptr()) })?;
         }
 
         Ok(())

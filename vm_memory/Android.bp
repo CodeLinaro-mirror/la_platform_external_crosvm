@@ -28,6 +28,7 @@ rust_library {
         "liblibc",
         "libserde",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }
@@ -55,6 +56,7 @@ rust_test {
         "liblibc",
         "libserde",
         "libthiserror",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }

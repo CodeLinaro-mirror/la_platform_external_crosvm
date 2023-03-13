@@ -16,6 +16,7 @@ use std::thread;
 use acpi_tables::aml;
 use acpi_tables::aml::Aml;
 use anyhow::Context;
+use base::custom_serde::serialize_arc_mutex;
 use base::error;
 use base::warn;
 use base::Error as SysError;
@@ -30,9 +31,9 @@ use sync::Mutex;
 use thiserror::Error;
 use vm_control::GpeNotify;
 use vm_control::PmResource;
+use vm_control::PmeNotify;
 
 use crate::pci::CrosvmDeviceId;
-use crate::serialize_arc_mutex;
 use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::BusResumeDevice;
@@ -52,6 +53,8 @@ pub enum ACPIPMError {
     AcpiMcGroupError,
     #[error("Failed to create and bind NETLINK_GENERIC socket for acpi_mc_group: {0}")]
     AcpiEventSockError(base::Error),
+    #[error("GPE {0} is out of bound")]
+    GpeOutOfBound(u32),
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -75,6 +78,12 @@ pub(crate) struct GpeResource {
     enable: [u8; ACPIPM_RESOURCE_GPE0_BLK_LEN as usize / 2],
     #[serde(skip_serializing, skip_deserializing)]
     pub(crate) gpe_notify: BTreeMap<u32, Vec<Arc<Mutex<dyn GpeNotify>>>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct PciResource {
+    #[serde(skip_serializing, skip_deserializing)]
+    pub(crate) pme_notify: BTreeMap<u8, Vec<Arc<Mutex<dyn PmeNotify>>>>,
 }
 
 #[cfg(feature = "direct")]
@@ -122,6 +131,8 @@ pub struct ACPIPMResource {
     pm1: Arc<Mutex<Pm1Resource>>,
     #[serde(serialize_with = "serialize_arc_mutex")]
     gpe0: Arc<Mutex<GpeResource>>,
+    #[serde(serialize_with = "serialize_arc_mutex")]
+    pci: Arc<Mutex<PciResource>>,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +169,9 @@ impl ACPIPMResource {
             enable: Default::default(),
             gpe_notify: BTreeMap::new(),
         };
+        let pci = PciResource {
+            pme_notify: BTreeMap::new(),
+        };
 
         #[cfg(feature = "direct")]
         let (sci_direct_evt, direct_gpe, direct_fixed_evts) = if let Some(info) = direct_evt_info {
@@ -186,6 +200,7 @@ impl ACPIPMResource {
             exit_evt_wrtube,
             pm1: Arc::new(Mutex::new(pm1)),
             gpe0: Arc::new(Mutex::new(gpe0)),
+            pci: Arc::new(Mutex::new(pci)),
         }
     }
 
@@ -392,6 +407,15 @@ impl GpeResource {
                 error!("ACPIPM: failed to trigger sci event for gpe: {}", e);
             }
         }
+    }
+
+    pub fn set_active(&mut self, gpe: u32) -> Result<(), ACPIPMError> {
+        if let Some(status_byte) = self.status.get_mut(gpe as usize / 8) {
+            *status_byte |= 1 << (gpe % 8);
+        } else {
+            return Err(ACPIPMError::GpeOutOfBound(gpe));
+        }
+        Ok(())
     }
 }
 
@@ -686,13 +710,20 @@ impl PmResource for ACPIPMResource {
     fn gpe_evt(&mut self, gpe: u32) {
         let mut gpe0 = self.gpe0.lock();
 
-        let byte = gpe as usize / 8;
-        if byte >= gpe0.status.len() {
-            error!("gpe_evt: GPE register {} does not exist", byte);
-            return;
+        match gpe0.set_active(gpe) {
+            Ok(_) => gpe0.trigger_sci(&self.sci_evt),
+            Err(e) => error!("{}", e),
         }
-        gpe0.status[byte] |= 1 << (gpe % 8);
-        gpe0.trigger_sci(&self.sci_evt);
+    }
+
+    fn pme_evt(&mut self, requester_id: u16) {
+        let bus = ((requester_id >> 8) & 0xFF) as u8;
+        let mut pci = self.pci.lock();
+        if let Some(root_ports) = pci.pme_notify.get_mut(&bus) {
+            for root_port in root_ports {
+                root_port.lock().notify(requester_id);
+            }
+        }
     }
 
     fn register_gpe_notify_dev(&mut self, gpe: u32, notify_dev: Arc<Mutex<dyn GpeNotify>>) {
@@ -701,6 +732,16 @@ impl PmResource for ACPIPMResource {
             Some(v) => v.push(notify_dev),
             None => {
                 gpe0.gpe_notify.insert(gpe, vec![notify_dev]);
+            }
+        }
+    }
+
+    fn register_pme_notify_dev(&mut self, bus: u8, notify_dev: Arc<Mutex<dyn PmeNotify>>) {
+        let mut pci = self.pci.lock();
+        match pci.pme_notify.get_mut(&bus) {
+            Some(v) => v.push(notify_dev),
+            None => {
+                pci.pme_notify.insert(bus, vec![notify_dev]);
             }
         }
     }

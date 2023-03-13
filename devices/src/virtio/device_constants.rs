@@ -10,6 +10,7 @@ use data_model::DataInit;
 use data_model::Le16;
 use data_model::Le32;
 use data_model::Le64;
+use zerocopy::FromBytes;
 
 pub mod block {
     use super::*;
@@ -80,7 +81,7 @@ pub mod block {
     // Safe because it only has data and has no implicit padding.
     unsafe impl DataInit for virtio_blk_config {}
 
-    #[derive(Copy, Clone, Debug, Default)]
+    #[derive(Copy, Clone, Debug, Default, FromBytes)]
     #[repr(C)]
     pub(crate) struct virtio_blk_req_header {
         pub req_type: Le32,
@@ -222,12 +223,7 @@ pub mod video {
 
     /// The same set of virtio features is supported by the vda decoder and encoder.
     pub fn vda_supported_virtio_features() -> u64 {
-        // VDA does not support decoding using guest pages. However this hack
-        // is required for ARCVM.
-        // TODO(b/261818131): remove VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES.
-        1u64 << VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES
-            | 1u64 << VIRTIO_VIDEO_F_RESOURCE_NON_CONTIG
-            | 1u64 << VIRTIO_VIDEO_F_RESOURCE_VIRTIO_OBJECT
+        1u64 << VIRTIO_VIDEO_F_RESOURCE_NON_CONTIG | 1u64 << VIRTIO_VIDEO_F_RESOURCE_VIRTIO_OBJECT
     }
 
     /// Union of the supported features of all decoder and encoder backends.

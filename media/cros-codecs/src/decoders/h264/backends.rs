@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crate::decoders::h264::dpb::Dpb;
@@ -11,11 +10,10 @@ use crate::decoders::h264::parser::Pps;
 use crate::decoders::h264::parser::Slice;
 use crate::decoders::h264::parser::Sps;
 use crate::decoders::h264::picture::H264Picture;
-use crate::decoders::BlockingMode;
 use crate::decoders::DecodedHandle;
 use crate::decoders::VideoDecoderBackend;
 
-pub type Result<T> = std::result::Result<T, crate::decoders::StatelessBackendError>;
+pub type Result<T> = crate::decoders::StatelessBackendResult<T>;
 
 #[cfg(test)]
 pub mod dummy;
@@ -37,15 +35,9 @@ pub type AsBackendHandle<Handle> = <Handle as DecodedHandle>::BackendHandle;
 /// where it will wait until the current decode finishes, or in non-blocking
 /// mode, where it should return immediately with any previously decoded frames
 /// that happen to be ready.
-pub trait StatelessDecoderBackend: VideoDecoderBackend + downcast_rs::Downcast {
-    /// The type that the backend returns as a result of a decode operation.
-    /// This will usually be some backend-specific type with a resource and a
-    /// resource pool so that said buffer can be reused for another decode
-    /// operation when it goes out of scope.
-    type Handle: DecodedHandle;
-
+pub(crate) trait StatelessDecoderBackend: VideoDecoderBackend {
     /// Called when a new SPS is parsed.
-    fn new_sequence(&mut self, sps: &Sps, dpb_size: usize) -> Result<()>;
+    fn new_sequence(&mut self, sps: &Sps) -> Result<()>;
 
     /// Called when the decoder determines that a frame or field was found.
     fn new_picture(
@@ -73,13 +65,13 @@ pub trait StatelessDecoderBackend: VideoDecoderBackend + downcast_rs::Downcast {
         sps: &Sps,
         pps: &Pps,
         dpb: &Dpb<Self::Handle>,
-        slice: &Slice<&dyn AsRef<[u8]>>,
+        slice: &Slice<&[u8]>,
     ) -> Result<()>;
 
     /// Called to dispatch a decode operation to the backend.
     fn decode_slice(
         &mut self,
-        slice: &Slice<&dyn AsRef<[u8]>>,
+        slice: &Slice<&[u8]>,
         sps: &Sps,
         pps: &Pps,
         dpb: &Dpb<Self::Handle>,
@@ -109,10 +101,6 @@ pub trait StatelessDecoderBackend: VideoDecoderBackend + downcast_rs::Downcast {
         block: bool,
     ) -> Result<Self::Handle>;
 
-    /// Poll for any ready pictures. `block` dictates whether this call should
-    /// block on the operation or return immediately.
-    fn poll(&mut self, blocking_mode: BlockingMode) -> Result<VecDeque<Self::Handle>>;
-
     /// Indicates that the decoder has split a picture and that a new Handle
     /// must be obtained.
     fn new_handle(
@@ -120,20 +108,8 @@ pub trait StatelessDecoderBackend: VideoDecoderBackend + downcast_rs::Downcast {
         picture: ContainedPicture<AsBackendHandle<Self::Handle>>,
     ) -> Result<Self::Handle>;
 
-    /// Whether the handle is ready for presentation. The decoder will check
-    /// this before returning the handle to clients.
-    fn handle_is_ready(&self, handle: &Self::Handle) -> bool;
-
-    /// Block on handle `handle`.
-    fn block_on_handle(&mut self, handle: &Self::Handle) -> Result<()>;
-
-    /// Upcast to &mut dyn VideoDecoderBackend. This interface is the one
-    /// exposed to client code. StatelessDecoderBackend is the interface exposed
-    /// to the h264 decoder.
-    fn as_video_decoder_backend_mut(&mut self) -> &mut dyn VideoDecoderBackend;
-    /// Upcast to &dyn VideoDecoderBackend. This interface is the one
-    /// exposed to client code. StatelessDecoderBackend is the interface exposed
-    /// to the decoder.
-    fn as_video_decoder_backend(&self) -> &dyn VideoDecoderBackend;
+    /// Get the test parameters for the backend. The caller is reponsible for
+    /// downcasting them to the correct type, which is backend-dependent.
+    #[cfg(test)]
+    fn get_test_params(&self) -> &dyn std::any::Any;
 }
-downcast_rs::impl_downcast!(StatelessDecoderBackend assoc Handle where Handle: DecodedHandle);
