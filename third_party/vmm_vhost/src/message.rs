@@ -393,6 +393,7 @@ bitflags! {
 // Bit mask for vhost-user protocol feature flags.
 bitflags! {
     /// Vhost-user protocol feature flags.
+    #[derive(Default, Clone, Copy)]
     pub struct VhostUserProtocolFeatures: u64 {
         /// Support multiple queues.
         const MQ = 0x0000_0001;
@@ -680,6 +681,7 @@ impl VhostUserMsgValidator for VhostUserVringAddr {
 // Bit mask for the vhost-user device configuration message.
 bitflags! {
     /// Flags for the device configuration message.
+    #[derive(Default, Clone, Copy)]
     pub struct VhostUserConfigFlags: u32 {
         /// Vhost master messages used for writeable fields.
         const WRITABLE = 0x1;
@@ -799,7 +801,7 @@ pub struct VhostUserIotlb {
 
 // Bit mask for flags in virtio-fs slave messages
 bitflags! {
-    #[derive(Default)]
+    #[derive(Default,Copy,Clone)]
     /// Flags for virtio-fs slave messages.
     pub struct VhostUserFSSlaveMsgFlags: u64 {
         /// Empty permission.
