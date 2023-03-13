@@ -9,15 +9,15 @@ audio = []
 audio_cras = ["libcras"]
 chromeos = ["dbus", "protobuf", "system_api"]
 direct = []
-gpu = ["gpu_display","rutabaga_gfx"]
+#gpu = ["gpu_display","rutabaga_gfx"]
 tpm = ["tpm2"]
 usb = []
 video-decoder = []
 video-encoder = []
 minigbm = ["rutabaga_gfx/minigbm"]
-x = ["gpu_display/x", "rutabaga_gfx/x"]
-virgl_renderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
-gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
+#x = ["gpu_display/x", "rutabaga_gfx/x"]
+#virgl_renderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
+#gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
 slirp = []
 
 [dependencies]
@@ -36,7 +36,7 @@ dbus = { version = "0.9", optional = true }
 disk = { path = "../disk" }
 enumn = "0.1.0"
 fuse = {path = "../fuse" }
-gpu_display = { path = "../gpu_display", optional = true }
+#gpu_display = { path = "../gpu_display", optional = true }
 rutabaga_gfx = { path = "../rutabaga_gfx", optional = true }
 hypervisor = { path = "../hypervisor" }
 kvm_sys = { path = "../kvm_sys" }
@@ -44,6 +44,7 @@ libc = "*"
 libcras = { path = "../libcras_stub", optional = true }
 libvda = { path = "../media/libvda", optional = true }
 linux_input_sys = { path = "../linux_input_sys" }
+log = "*"
 memoffset = { version = "0.6" }
 minijail = { path = "../../minijail/rust/minijail" } # ignored by ebuild
 net_sys = { path = "../net_sys" }

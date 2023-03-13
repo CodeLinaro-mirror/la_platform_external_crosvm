@@ -58,7 +58,6 @@ members = [
     "devices",
     "disk",
     "fuse",
-    "gpu_display",
     "hypervisor",
     "integration_tests",
     "io_uring",
@@ -75,7 +74,6 @@ members = [
     "protos",
     "qcow_utils",
     "resources",
-    "rutabaga_gfx",
     "serde_keyvalue",
     "system_api_stub",
     "tpm2",
@@ -114,21 +112,16 @@ all-linux = [
     "default",
     "gdb",
     "tpm",
-    "virgl_renderer_next",
-    "virgl_renderer",
-    "x",
     ]
 win64 = []
 audio = ["devices/audio"]
 audio_cras = ["devices/audio_cras"]
 chromeos = ["base/chromeos", "audio_cras", "devices/chromeos"]
 composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
-default = ["audio", "gpu", "usb"]
+default = ["audio", "usb"]
 default-no-sandbox = []
 direct = ["devices/direct", "arch/direct", "x86_64/direct"]
 gdb = ["gdbstub", "gdbstub_arch", "arch/gdb", "vm_control/gdb", "x86_64/gdb"]
-gfxstream = ["devices/gfxstream"]
-gpu = ["devices/gpu"]
 libvda = ["devices/libvda"]
 linux-armhf = [
     "composite-disk",
@@ -146,21 +139,17 @@ tpm = ["devices/tpm"]
 usb = ["devices/usb"]
 video-decoder = ["devices/video-decoder"]
 video-encoder = ["devices/video-encoder"]
-virgl_renderer = ["devices/virgl_renderer"]
-virgl_renderer_next = ["rutabaga_gfx/virgl_renderer_next"]
 wl-dmabuf = ["devices/minigbm"]
-x = ["devices/x"]
 
 [dependencies]
 anyhow = "1.0.32"
 arch = { path = "arch" }
 assertions = { path = "common/assertions" }
-audio_streams = "*"
 base = { path = "base" }
 bit_field = { path = "bit_field" }
 cfg-if = "1.0.0"
 crosvm_plugin = { path = "crosvm_plugin", optional = true }
-data_model = "*"
+data_model = { path = "common/data_model" }
 devices = { path = "devices" }
 disk = { path = "disk" }
 enumn = "0.1.0"
@@ -173,10 +162,13 @@ kernel_loader = { path = "kernel_loader" }
 kvm = { path = "kvm", optional = true }
 kvm_sys = { path = "kvm_sys", optional = true }
 libc = "0.2.93"
-libcras = "*"
-minijail = "*" # provided by ebuild
+#libcras = "*"
+libcras = { path = "libcras_stub" } # ignored by ebuild
+#minijail = "*" # provided by ebuild
+minijail = { path = "../minijail/rust/minijail" } # ignored by ebuild
 net_util = { path = "net_util" }
-p9 = "*"
+#p9 = "*"
+p9 = { path = "common/p9" } # ignored by ebuild
 protobuf = { version = "2.3", optional = true }
 protos = { path = "protos", optional = true }
 remain = "*"
@@ -205,7 +197,6 @@ lazy_static = "*"
 
 [patch.crates-io]
 assertions = { path = "common/assertions" }
-audio_streams = { path = "common/audio_streams" }
 base = { path = "base" }
 sys_util_core = { path = "common/sys_util_core" }
 cros_async =  { path = "cros_async" }
