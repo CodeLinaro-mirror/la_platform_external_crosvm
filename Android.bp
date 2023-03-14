@@ -293,6 +293,7 @@ rust_defaults {
         "//external/crosvm:__subpackages__",
         "//external/libchromeos-rs",
         "//packages/modules/Virtualization/authfs",
+        "//vendor:__subpackages__",
     ],
 }
 
@@ -304,5 +305,6 @@ rust_defaults {
     name: "crosvm_inner_defaults",
     defaults: ["crosvm_defaults"],
     defaults_visibility: ["//external/crosvm:__subpackages__"],
-    visibility: ["//external/crosvm:__subpackages__"],
+    visibility: ["//external/crosvm:__subpackages__",
+                 "//vendor:__subpackages__",],
 }
