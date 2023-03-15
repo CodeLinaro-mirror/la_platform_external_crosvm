@@ -10,32 +10,6 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
-rust_test {
-    name: "io_uring_test_tests_uring",
-    defaults: ["crosvm_inner_defaults"],
-    host_supported: true,
-    crate_name: "uring",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.1",
-    srcs: ["tests/uring.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: false,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libbase_rust",
-        "libdata_model",
-        "libio_uring",
-        "liblibc",
-        "libsync_rust",
-        "libtempfile",
-        "libthiserror",
-    ],
-    proc_macros: ["libremain"],
-}
-
 rust_library {
     name: "libio_uring",
     defaults: ["crosvm_inner_defaults"],

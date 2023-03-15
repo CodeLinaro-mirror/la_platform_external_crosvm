@@ -63,6 +63,8 @@
     "libproto_build_tools",
     "libva_test_src_lib",
     "proto_build_tools_test_src_lib",
+    // Flaky with ENOMEM. We don't use io_uring yet, so turning it off for now.
+    "io_uring_test_tests_uring",
     // These are all tests that cargo2android.py ignored, probably because the
     // `cargo test` run reported 0 tests.
     // TODO: replicate the empty test detection if this list is annoying to maintain.
