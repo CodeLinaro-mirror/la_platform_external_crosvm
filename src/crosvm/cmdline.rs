@@ -848,6 +848,10 @@ pub struct RunCommand {
     ///     async-executor=epoll|uring - set the async executor kind
     ///         to simulate the block device with. This takes
     ///         precedence over the global --async-executor option.
+    ///     multiple-workers=BOOL - (Experimental) run multiple
+    ///         worker threads in parallel. this option is not
+    ///         effective for vhost-user blk device.
+    ///         (default: false)
     block: Vec<DiskOptionWithId>,
 
     /// ratelimit enforced on detected bus locks in guest.
@@ -1189,6 +1193,13 @@ pub struct RunCommand {
     ///        Deprecated - use `dpi` instead.
     pub gpu: Vec<FixedGpuParameters>,
 
+    #[cfg(all(unix, feature = "gpu"))]
+    #[argh(option, arg_name = "PATH")]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// move all vGPU threads to this Cgroup (default: nothing moves)
+    pub gpu_cgroup_path: Option<PathBuf>,
+
     #[cfg(feature = "gpu")]
     #[argh(option)]
     #[serde(skip)] // TODO(b/255223604). Deprecated - use `gpu` instead.
@@ -1212,6 +1223,13 @@ pub struct RunCommand {
     ///     foz-db-list-path=PATH - The path to GPU foz db list
     ///         file for dynamically loading RO caches.
     pub gpu_render_server: Option<GpuRenderServerParameters>,
+
+    #[cfg(all(unix, feature = "gpu"))]
+    #[argh(option, arg_name = "PATH")]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// move all vGPU server threads to this Cgroup (default: nothing moves)
+    pub gpu_server_cgroup_path: Option<PathBuf>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -2302,9 +2320,13 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(target_arch = "aarch64")]
         {
-            if cmd.mte && !(cmd.pmem_device.is_empty() && cmd.rw_pmem_device.is_empty()) {
+            if cmd.mte
+                && !(cmd.pmem_device.is_empty()
+                    && cmd.pstore.is_none()
+                    && cmd.rw_pmem_device.is_empty())
+            {
                 return Err(
-                    "--mte cannot be specified together with --pmem-device or --rw-pmem-device"
+                    "--mte cannot be specified together with --pmem-device, --pstore or --rw-pmem-device"
                         .to_string(),
                 );
             }
@@ -2640,6 +2662,12 @@ impl TryFrom<RunCommand> for super::config::Config {
                         num_displays
                     ));
                 }
+            }
+
+            #[cfg(unix)]
+            {
+                cfg.gpu_cgroup_path = cmd.gpu_cgroup_path;
+                cfg.gpu_server_cgroup_path = cmd.gpu_server_cgroup_path;
             }
         }
 

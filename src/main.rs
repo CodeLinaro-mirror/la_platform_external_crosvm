@@ -61,6 +61,7 @@ use vm_control::client::do_swap_status;
 use vm_control::client::do_usb_attach;
 use vm_control::client::do_usb_detach;
 use vm_control::client::do_usb_list;
+#[cfg(feature = "balloon")]
 use vm_control::client::handle_request;
 use vm_control::client::vms_request;
 #[cfg(feature = "gpu")]
@@ -272,7 +273,7 @@ fn modify_vfio(cmd: cmdline::VfioCrosvmCommand) -> std::result::Result<(), ()> {
         return Err(());
     }
 
-    handle_request(&request, socket_path)?;
+    vms_request(&request, socket_path)?;
     Ok(())
 }
 

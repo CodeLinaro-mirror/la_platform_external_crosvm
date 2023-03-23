@@ -1,0 +1,18 @@
+diff --git a/crosvm_control/Android.bp b/crosvm_control/Android.bp
+index efb14fb2d..5d89cc27b 100644
+--- a/crosvm_control/Android.bp
++++ b/crosvm_control/Android.bp
+@@ -25,6 +25,7 @@ rust_ffi_shared {
+         "liblibc",
+         "libvm_control",
+     ],
++    //static_libs: ["libcrosvm_control_test"],
+ }
+ 
+ rust_ffi_static {
+@@ -42,4 +43,5 @@ rust_ffi_static {
+         "liblibc",
+         "libvm_control",
+     ],
++    //static_libs: ["libcrosvm_control_test"],
+ }

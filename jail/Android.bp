@@ -33,6 +33,8 @@ rust_test {
         "libonce_cell",
         "libserde",
         "libserde_keyvalue",
+        "libstatic_assertions",
+        "libzerocopy",
     ],
 }
 
@@ -53,5 +55,7 @@ rust_library {
         "libonce_cell",
         "libserde",
         "libserde_keyvalue",
+        "libstatic_assertions",
+        "libzerocopy",
     ],
 }

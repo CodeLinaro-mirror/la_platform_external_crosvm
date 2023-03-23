@@ -2,19 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::env;
 use std::io::ErrorKind;
-use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
 use std::time::Duration;
 
+use base::AsRawDescriptor;
 use base::UnixSeqpacket;
 use base::UnixSeqpacketListener;
 use base::UnlinkUnixSeqpacketListener;
-
-fn tmpdir() -> PathBuf {
-    env::temp_dir()
-}
+use tempfile::tempdir;
 
 #[test]
 fn unix_seqpacket_path_not_exists() {
@@ -24,8 +19,8 @@ fn unix_seqpacket_path_not_exists() {
 
 #[test]
 fn unix_seqpacket_listener_path() {
-    let mut socket_path = tmpdir();
-    socket_path.push("unix_seqpacket_listener_path");
+    let temp_dir = tempdir().expect("failed to create tempdir");
+    let socket_path = temp_dir.path().join("unix_seqpacket_listener_path");
     let listener = UnlinkUnixSeqpacketListener(
         UnixSeqpacketListener::bind(&socket_path).expect("failed to create UnixSeqpacketListener"),
     );
@@ -35,14 +30,14 @@ fn unix_seqpacket_listener_path() {
 
 #[test]
 fn unix_seqpacket_listener_from_fd() {
-    let mut socket_path = tmpdir();
-    socket_path.push("unix_seqpacket_listener_from_fd");
+    let temp_dir = tempdir().expect("failed to create tempdir");
+    let socket_path = temp_dir.path().join("unix_seqpacket_listener_from_fd");
     let listener = UnlinkUnixSeqpacketListener(
         UnixSeqpacketListener::bind(&socket_path).expect("failed to create UnixSeqpacketListener"),
     );
     // UnixSeqpacketListener should succeed on a valid listening descriptor.
     let good_dup = UnixSeqpacketListener::bind(&format!("/proc/self/fd/{}", unsafe {
-        libc::dup(listener.as_raw_fd())
+        libc::dup(listener.as_raw_descriptor())
     }));
     let good_dup_path = good_dup
         .expect("failed to create dup UnixSeqpacketListener")
@@ -52,15 +47,15 @@ fn unix_seqpacket_listener_from_fd() {
     // UnixSeqpacketListener must fail on an existing non-listener socket.
     let s1 = UnixSeqpacket::connect(socket_path.as_path()).expect("UnixSeqpacket::connect failed");
     let bad_dup = UnixSeqpacketListener::bind(&format!("/proc/self/fd/{}", unsafe {
-        libc::dup(s1.as_raw_fd())
+        libc::dup(s1.as_raw_descriptor())
     }));
     assert!(bad_dup.is_err());
 }
 
 #[test]
 fn unix_seqpacket_path_exists_pass() {
-    let mut socket_path = tmpdir();
-    socket_path.push("path_to_socket");
+    let temp_dir = tempdir().expect("failed to create tempdir");
+    let socket_path = temp_dir.path().join("path_to_socket");
     let _listener = UnlinkUnixSeqpacketListener(
         UnixSeqpacketListener::bind(&socket_path).expect("failed to create UnixSeqpacketListener"),
     );
@@ -70,8 +65,8 @@ fn unix_seqpacket_path_exists_pass() {
 
 #[test]
 fn unix_seqpacket_path_listener_accept_with_timeout() {
-    let mut socket_path = tmpdir();
-    socket_path.push("path_listerner_accept_with_timeout");
+    let temp_dir = tempdir().expect("failed to create tempdir");
+    let socket_path = temp_dir.path().join("path_listerner_accept_with_timeout");
     let listener = UnlinkUnixSeqpacketListener(
         UnixSeqpacketListener::bind(&socket_path).expect("failed to create UnixSeqpacketListener"),
     );
@@ -103,8 +98,8 @@ fn unix_seqpacket_path_listener_accept_with_timeout() {
 
 #[test]
 fn unix_seqpacket_path_listener_accept() {
-    let mut socket_path = tmpdir();
-    socket_path.push("path_listerner_accept");
+    let temp_dir = tempdir().expect("failed to create tempdir");
+    let socket_path = temp_dir.path().join("path_listerner_accept");
     let listener = UnlinkUnixSeqpacketListener(
         UnixSeqpacketListener::bind(&socket_path).expect("failed to create UnixSeqpacketListener"),
     );

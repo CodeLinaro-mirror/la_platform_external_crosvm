@@ -22,7 +22,6 @@ use anyhow::Context;
 use base::warn;
 use base::AsRawDescriptor;
 use base::FromRawDescriptor;
-use base::IntoRawDescriptor;
 use base::SafeDescriptor;
 use memoffset::offset_of;
 use thiserror::Error as ThisError;
@@ -269,9 +268,7 @@ impl TryFrom<base::net::UnixSeqpacket> for SeqPacket {
     type Error = anyhow::Error;
 
     fn try_from(value: base::net::UnixSeqpacket) -> anyhow::Result<Self> {
-        // Safe because `value` owns the fd.
-        let fd =
-            Arc::new(unsafe { SafeDescriptor::from_raw_descriptor(value.into_raw_descriptor()) });
+        let fd = Arc::new(SafeDescriptor::from(value));
         io_driver::prepare(&*fd)?;
         Ok(Self { fd })
     }
@@ -282,9 +279,7 @@ impl TryFrom<SeqPacket> for base::net::UnixSeqpacket {
 
     fn try_from(value: SeqPacket) -> Result<Self, Self::Error> {
         Arc::try_unwrap(value.fd)
-            .map(|fd| unsafe {
-                base::net::UnixSeqpacket::from_raw_descriptor(fd.into_raw_descriptor())
-            })
+            .map(base::net::UnixSeqpacket::from)
             .map_err(|fd| SeqPacket { fd })
     }
 }
@@ -432,7 +427,6 @@ impl Drop for UnlinkSeqPacketListener {
 
 #[cfg(test)]
 mod test {
-    use std::env;
     use std::fs::File;
     use std::io::Write;
     use std::time::Duration;
@@ -440,6 +434,7 @@ mod test {
 
     use base::AsRawDescriptor;
     use base::EventExt;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::with_deadline;
@@ -707,8 +702,8 @@ mod test {
 
     #[test]
     fn unix_seqpacket_listener_path() {
-        let mut socket_path = env::temp_dir();
-        socket_path.push("unix_seqpacket_listener_path");
+        let temp_dir = tempdir().expect("failed to create tempdir");
+        let socket_path = temp_dir.path().join("unix_seqpacket_listener_path");
         let listener = UnlinkSeqPacketListener(
             SeqPacketListener::bind(&socket_path).expect("failed to create SeqPacketListener"),
         );
@@ -720,8 +715,8 @@ mod test {
     fn unix_seqpacket_path_exists_pass() {
         Executor::new()
             .run_until(async {
-                let mut socket_path = env::temp_dir();
-                socket_path.push("path_to_socket");
+                let temp_dir = tempdir().expect("failed to create tempdir");
+                let socket_path = temp_dir.path().join("path_to_socket");
                 let _listener = UnlinkSeqPacketListener(
                     SeqPacketListener::bind(&socket_path)
                         .expect("failed to create SeqPacketListener"),
@@ -737,8 +732,8 @@ mod test {
     fn unix_seqpacket_path_listener_accept() {
         Executor::new()
             .run_until(async {
-                let mut socket_path = env::temp_dir();
-                socket_path.push("path_listerner_accept");
+                let temp_dir = tempdir().expect("failed to create tempdir");
+                let socket_path = temp_dir.path().join("path_listerner_accept");
                 let listener = UnlinkSeqPacketListener(
                     SeqPacketListener::bind(&socket_path)
                         .expect("failed to create SeqPacketListener"),

@@ -25,6 +25,7 @@ rust_ffi_shared {
         "liblibc",
         "libvm_control",
     ],
+    //static_libs: ["libcrosvm_control_test"],
 }
 
 rust_ffi_static {
@@ -42,4 +43,5 @@ rust_ffi_static {
         "liblibc",
         "libvm_control",
     ],
+    //static_libs: ["libcrosvm_control_test"],
 }

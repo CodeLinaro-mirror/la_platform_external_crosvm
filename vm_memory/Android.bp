@@ -33,6 +33,7 @@ rust_library {
         "libzerocopy",
     ],
     proc_macros: ["libremain"],
+    visibility: ["//vendor:__subpackages__"],
 }
 
 rust_test {

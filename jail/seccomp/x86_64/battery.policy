@@ -15,5 +15,5 @@ getresuid: 1
 getsockname: 1
 openat: 1
 socket: arg0 == AF_UNIX
-tgkill: 1
+# tgkill: 1
 prctl: arg0 == PR_SET_NAME

@@ -72,6 +72,8 @@ fn jail_and_fork(
     let pid = unsafe { j.fork(Some(&keep_rds))? };
 
     if pid > 0 {
+        // Current FS driver jail does not use seccomp and jail_and_fork() does not have other
+        // users, so we do nothing here for seccomp_trace
         unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
     }
 
