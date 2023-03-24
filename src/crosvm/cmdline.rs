@@ -39,6 +39,7 @@ use devices::virtio::device_constants::video::VideoDeviceConfig;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vhost::user::device;
+use devices::virtio::vsock::VsockConfig;
 #[cfg(feature = "gpu")]
 use devices::virtio::GpuDisplayParameters;
 #[cfg(feature = "gpu")]
@@ -884,7 +885,7 @@ pub struct RunCommand {
     cfg: Option<Box<Self>>,
 
     #[argh(option, arg_name = "CID")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `vsock` instead.
     #[merge(strategy = overwrite_option)]
     /// context ID for virtual sockets.
     pub cid: Option<u64>,
@@ -1128,6 +1129,12 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// (EXPERIMENTAL) gdb on the given port
     pub gdb: Option<u32>,
+
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(all(unix, feature = "geniezone"))]
+    #[argh(option, long = "geniezone-device", arg_name = "PATH")]
+    /// path to the GZVM device. (default /dev/gzvm)
+    pub geniezone_device_path: Option<PathBuf>,
 
     #[cfg(feature = "gpu")]
     #[argh(option)]
@@ -2097,14 +2104,14 @@ pub struct RunCommand {
 
     #[cfg(unix)]
     #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `vsock` instead.
     #[merge(strategy = overwrite_option)]
     /// path to the vhost-vsock device. (default /dev/vhost-vsock)
     pub vhost_vsock_device: Option<PathBuf>,
 
     #[cfg(unix)]
     #[argh(option, arg_name = "FD")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `vsock` instead.
     #[merge(strategy = overwrite_option)]
     /// open FD to the vhost-vsock device, mutually exclusive with vhost-vsock-device
     pub vhost_vsock_fd: Option<RawDescriptor>,
@@ -2138,12 +2145,16 @@ pub struct RunCommand {
     /// Possible key values:
     ///     capture=(false,true) - Disable/enable audio capture.
     ///         Default is false.
-    ///     backend=(null,[cras]) - Which backend to use for
+    ///     backend=(null,file,[cras]) - Which backend to use for
     ///         virtio-snd.
     ///     client_type=(crosvm,arcvm,borealis) - Set specific
     ///         client type for cras backend. Default is crosvm.
     ///     socket_type=(legacy,unified) Set specific socket type
     ///         for cras backend. Default is unified.
+    ///     playback_path=STR - Set directory of output streams
+    ///         for file backend.
+    ///     playback_size=INT - Set size of the output streams
+    ///         from file backend.
     ///     num_output_devices=INT - Set number of output PCM
     ///         devices.
     ///     num_input_devices=INT - Set number of input PCM devices.
@@ -2152,6 +2163,16 @@ pub struct RunCommand {
     ///     num_input_streams=INT - Set number of input PCM streams
     ///         per device.
     pub virtio_snd: Vec<SndParameters>,
+
+    #[argh(option, arg_name = "cid=CID[,device=VHOST_DEVICE]")]
+    #[serde(default)]
+    #[merge(strategy = overwrite_option)]
+    /// add a vsock device. Since a guest can only have one CID,
+    /// this option can only be specified once.
+    ///     cid=CID - CID to use for the device.
+    ///     device=VHOST_DEVICE - path to the vhost-vsock device to
+    ///         use (Linux only). Defaults to /dev/vhost-vsock.
+    pub vsock: Option<VsockConfig>,
 
     #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     #[argh(switch)]
@@ -2236,6 +2257,12 @@ impl TryFrom<RunCommand> for super::config::Config {
         #[cfg(unix)]
         if let Some(p) = cmd.kvm_device {
             cfg.kvm_device_path = p;
+        }
+
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        #[cfg(all(unix, feature = "geniezone"))]
+        if let Some(p) = cmd.geniezone_device_path {
+            cfg.geniezone_device_path = p;
         }
 
         #[cfg(unix)]
@@ -2530,7 +2557,34 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.balloon_control = cmd.balloon_control;
 
-        cfg.cid = cmd.cid;
+        cfg.vsock = cmd.vsock;
+
+        // Legacy vsock options.
+        if let Some(cid) = cmd.cid {
+            if cfg.vsock.is_some() {
+                return Err(
+                    "`cid` and `vsock` cannot be specified together. Use `vsock` only.".to_string(),
+                );
+            }
+
+            let legacy_vsock_config = VsockConfig::new(
+                cid,
+                #[cfg(unix)]
+                match (cmd.vhost_vsock_device, cmd.vhost_vsock_fd) {
+                    (Some(_), Some(_)) => {
+                        return Err(
+                            "Only one of vhost-vsock-device vhost-vsock-fd has to be specified"
+                                .to_string(),
+                        )
+                    }
+                    (Some(path), None) => Some(path),
+                    (None, Some(fd)) => Some(PathBuf::from(format!("/proc/self/fd/{}", fd))),
+                    (None, None) => None,
+                },
+            );
+
+            cfg.vsock = Some(legacy_vsock_config);
+        }
 
         #[cfg(feature = "plugin")]
         {
@@ -2673,18 +2727,6 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(unix)]
         {
-            if cmd.vhost_vsock_device.is_some() && cmd.vhost_vsock_fd.is_some() {
-                return Err(
-                    "Only one of vhost-vsock-device vhost-vsock-fd has to be specified".to_string(),
-                );
-            }
-
-            cfg.vhost_vsock_device = cmd.vhost_vsock_device;
-
-            if let Some(fd) = cmd.vhost_vsock_fd {
-                cfg.vhost_vsock_device = Some(PathBuf::from(format!("/proc/self/fd/{}", fd)));
-            }
-
             cfg.shared_dirs = cmd.shared_dir;
 
             cfg.net = cmd.net;

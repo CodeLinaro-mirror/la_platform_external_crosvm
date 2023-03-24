@@ -44,6 +44,7 @@ members = [
     "anti_tamper",
     "arch",
     "argh_helpers",
+    "audio_util",
     "base",
     "bit_field",
     "broker_ipc",
@@ -242,6 +243,9 @@ haxm = ["hypervisor/haxm"]
 ## Enables the use of the WHPX hypervisor
 whpx = ["devices/whpx", "hypervisor/whpx"]
 
+## Enables the use of the GenieZone hypervisor
+geniezone = ["devices/geniezone", "hypervisor/geniezone"]
+
 ## Enables a libslirp based network device. Currently only supported on Windows.
 slirp = ["devices/slirp", "net_util/slirp"]
 
@@ -317,6 +321,7 @@ all-aarch64 = [
     "default",
     "ffmpeg",
     "gdb",
+    "geniezone",
     "gfxstream",
     "gfxstream_stub",
     "libvda-stub",

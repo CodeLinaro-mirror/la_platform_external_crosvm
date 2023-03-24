@@ -49,11 +49,6 @@ macro_rules! return_on_error {
     };
 }
 
-const RUTABAGA_COMPONENT_2D: u32 = 1;
-const RUTABAGA_COMPONENT_VIRGL_RENDERER: u32 = 2;
-const RUTABAGA_COMPONENT_GFXSTREAM: u32 = 3;
-const RUTABAGA_COMPONENT_CROSS_DOMAIN: u32 = 4;
-
 #[allow(non_camel_case_types)]
 type rutabaga = Rutabaga;
 
@@ -84,6 +79,12 @@ pub struct rutabaga_handle {
 }
 
 #[repr(C)]
+pub struct rutabaga_mapping {
+    pub ptr: u64,
+    pub size: u64,
+}
+
+#[repr(C)]
 pub struct rutabaga_channel {
     pub channel_name: *const c_char,
     pub channel_type: u32,
@@ -101,7 +102,7 @@ pub type write_fence_cb = extern "C" fn(user_data: u64, fence_data: rutabaga_fen
 #[repr(C)]
 pub struct rutabaga_builder<'a> {
     pub user_data: u64,
-    pub default_component: u32,
+    pub capset_mask: u64,
     pub fence_cb: write_fence_cb,
     pub channels: Option<&'a rutabaga_channels>,
 }
@@ -118,17 +119,6 @@ fn create_ffi_fence_handler(user_data: u64, fence_cb: write_fence_cb) -> Rutabag
 pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mut rutabaga) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let fence_handler = create_ffi_fence_handler((*builder).user_data, (*builder).fence_cb);
-
-        let component = match (*builder).default_component {
-            RUTABAGA_COMPONENT_2D => RutabagaComponentType::Rutabaga2D,
-            RUTABAGA_COMPONENT_VIRGL_RENDERER => RutabagaComponentType::VirglRenderer,
-            RUTABAGA_COMPONENT_GFXSTREAM => RutabagaComponentType::Gfxstream,
-            RUTABAGA_COMPONENT_CROSS_DOMAIN => RutabagaComponentType::CrossDomain,
-            _ => {
-                error!("unknown component type");
-                return -EINVAL;
-            }
-        };
 
         let mut rutabaga_channels_opt = None;
         if let Some(channels) = (*builder).channels {
@@ -150,7 +140,13 @@ pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mu
 
             rutabaga_channels_opt = Some(rutabaga_channels);
         }
-        let result = RutabagaBuilder::new(component, 0)
+
+        let mut component_type = RutabagaComponentType::CrossDomain;
+        if (*builder).capset_mask == 0 {
+            component_type = RutabagaComponentType::Rutabaga2D;
+        }
+
+        let result = RutabagaBuilder::new(component_type, (*builder).capset_mask)
             .set_use_egl(true)
             .set_use_surfaceless(true)
             .set_use_guest_angle(true)
@@ -188,10 +184,10 @@ pub extern "C" fn rutabaga_get_num_capsets() -> u32 {
     // Cross-domain (like virtio_wl with llvmpipe) is always available.
     num_capsets += 1;
 
-    // Three capsets for virgl_renderer
+    // Four capsets for virgl_renderer
     #[cfg(feature = "virgl_renderer")]
     {
-        num_capsets += 3;
+        num_capsets += 4;
     }
 
     // One capset for gfxstream
@@ -464,6 +460,31 @@ pub extern "C" fn rutabaga_resource_export_blob(
         (*handle).handle_type = hnd.handle_type;
         (*handle).os_handle = hnd.os_handle.into_raw_descriptor();
         NO_ERROR
+    }))
+    .unwrap_or(-ESRCH)
+}
+
+#[no_mangle]
+pub extern "C" fn rutabaga_resource_map(
+    ptr: &mut rutabaga,
+    resource_id: u32,
+    mapping: &mut rutabaga_mapping,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let result = ptr.map(resource_id);
+        let internal_map = return_on_error!(result);
+        (*mapping).ptr = internal_map.ptr;
+        (*mapping).size = internal_map.size;
+        NO_ERROR
+    }))
+    .unwrap_or(-ESRCH)
+}
+
+#[no_mangle]
+pub extern "C" fn rutabaga_resource_unmap(ptr: &mut rutabaga, resource_id: u32) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let result = ptr.unmap(resource_id);
+        return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
