@@ -176,6 +176,9 @@
       ],
       "patch": "patches/Android.bp.patch"
     },
+    "crosvm_control": {
+      "patch": "crosvm_control/cargo2android.bp.patch"
+    },
     "devices": {
       "no_presubmit": true,
       "add_module_block": "devices/cargo2android_libs.bp.patch"
