@@ -179,6 +179,7 @@ use vm_control::*;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::MemoryPolicy;
+use vm_memory::MemoryRegionOptions;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use x86_64::msr::get_override_msr_list;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -1256,14 +1257,14 @@ pub enum ExitState {
 // Remove ranges in `guest_mem_layout` that overlap with ranges in `file_backed_mappings`.
 // Returns the updated guest memory layout.
 fn punch_holes_in_guest_mem_layout_for_mappings(
-    guest_mem_layout: Vec<(GuestAddress, u64)>,
+    guest_mem_layout: Vec<(GuestAddress, u64, MemoryRegionOptions)>,
     file_backed_mappings: &[FileBackedMappingParameters],
-) -> Vec<(GuestAddress, u64)> {
+) -> Vec<(GuestAddress, u64, MemoryRegionOptions)> {
     // Create a set containing (start, end) pairs with exclusive end (end = start + size; the byte
     // at end is not included in the range).
     let mut layout_set = BTreeSet::new();
-    for (addr, size) in &guest_mem_layout {
-        layout_set.insert((addr.offset(), addr.offset() + size));
+    for (addr, size, options) in &guest_mem_layout {
+        layout_set.insert((addr.offset(), addr.offset() + size, *options));
     }
 
     for mapping in file_backed_mappings {
@@ -1271,20 +1272,20 @@ fn punch_holes_in_guest_mem_layout_for_mappings(
         let mapping_end = mapping_start + mapping.size;
 
         // Repeatedly split overlapping guest memory regions until no overlaps remain.
-        while let Some((range_start, range_end)) = layout_set
+        while let Some((range_start, range_end, options)) = layout_set
             .iter()
-            .find(|&&(range_start, range_end)| {
+            .find(|&&(range_start, range_end, _)| {
                 mapping_start < range_end && mapping_end > range_start
             })
             .cloned()
         {
-            layout_set.remove(&(range_start, range_end));
+            layout_set.remove(&(range_start, range_end, options));
 
             if range_start < mapping_start {
-                layout_set.insert((range_start, mapping_start));
+                layout_set.insert((range_start, mapping_start, options));
             }
             if range_end > mapping_end {
-                layout_set.insert((mapping_end, range_end));
+                layout_set.insert((mapping_end, range_end, options));
             }
         }
     }
@@ -1292,7 +1293,7 @@ fn punch_holes_in_guest_mem_layout_for_mappings(
     // Build the final guest memory layout from the modified layout_set.
     layout_set
         .iter()
-        .map(|(start, end)| (GuestAddress(*start), end - start))
+        .map(|(start, end, options)| (GuestAddress(*start), end - start, *options))
         .collect()
 }
 
@@ -1307,7 +1308,8 @@ fn create_guest_memory(
     let guest_mem_layout =
         punch_holes_in_guest_mem_layout_for_mappings(guest_mem_layout, &cfg.file_backed_mappings);
 
-    let guest_mem = GuestMemory::new(&guest_mem_layout).context("failed to create guest memory")?;
+    let guest_mem = GuestMemory::new_with_options(&guest_mem_layout)
+        .context("failed to create guest memory")?;
     let mut mem_policy = MemoryPolicy::empty();
     if components.hugepages {
         mem_policy |= MemoryPolicy::USE_HUGEPAGES;
@@ -3927,14 +3929,14 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[]
             ),
             vec![
-                (GuestAddress(0), 0xD000_0000),
-                (GuestAddress(0x1_0000_0000), 0x8_0000),
+                (GuestAddress(0), 0xD000_0000, Default::default()),
+                (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
             ]
         );
 
@@ -3942,14 +3944,14 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0xD000_0000, 0x1000)]
             ),
             vec![
-                (GuestAddress(0), 0xD000_0000),
-                (GuestAddress(0x1_0000_0000), 0x8_0000),
+                (GuestAddress(0), 0xD000_0000, Default::default()),
+                (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
             ]
         );
 
@@ -3957,14 +3959,18 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0, 0x2000)]
             ),
             vec![
-                (GuestAddress(0x2000), 0xD000_0000 - 0x2000),
-                (GuestAddress(0x1_0000_0000), 0x8_0000),
+                (
+                    GuestAddress(0x2000),
+                    0xD000_0000 - 0x2000,
+                    Default::default()
+                ),
+                (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
             ]
         );
 
@@ -3972,14 +3978,14 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0xD000_0000 - 0x2000, 0x2000)]
             ),
             vec![
-                (GuestAddress(0), 0xD000_0000 - 0x2000),
-                (GuestAddress(0x1_0000_0000), 0x8_0000),
+                (GuestAddress(0), 0xD000_0000 - 0x2000, Default::default()),
+                (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
             ]
         );
 
@@ -3987,15 +3993,19 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0x1000, 0x2000)]
             ),
             vec![
-                (GuestAddress(0), 0x1000),
-                (GuestAddress(0x3000), 0xD000_0000 - 0x3000),
-                (GuestAddress(0x1_0000_0000), 0x8_0000),
+                (GuestAddress(0), 0x1000, Default::default()),
+                (
+                    GuestAddress(0x3000),
+                    0xD000_0000 - 0x3000,
+                    Default::default()
+                ),
+                (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
             ]
         );
 
@@ -4003,14 +4013,18 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0x1_0000_0000, 0x2000)]
             ),
             vec![
-                (GuestAddress(0), 0xD000_0000),
-                (GuestAddress(0x1_0000_2000), 0x8_0000 - 0x2000),
+                (GuestAddress(0), 0xD000_0000, Default::default()),
+                (
+                    GuestAddress(0x1_0000_2000),
+                    0x8_0000 - 0x2000,
+                    Default::default()
+                ),
             ]
         );
 
@@ -4018,14 +4032,18 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0x1_0008_0000 - 0x2000, 0x2000)]
             ),
             vec![
-                (GuestAddress(0), 0xD000_0000),
-                (GuestAddress(0x1_0000_0000), 0x8_0000 - 0x2000),
+                (GuestAddress(0), 0xD000_0000, Default::default()),
+                (
+                    GuestAddress(0x1_0000_0000),
+                    0x8_0000 - 0x2000,
+                    Default::default()
+                ),
             ]
         );
 
@@ -4033,15 +4051,19 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0x1_0000_1000, 0x2000)]
             ),
             vec![
-                (GuestAddress(0), 0xD000_0000),
-                (GuestAddress(0x1_0000_0000), 0x1000),
-                (GuestAddress(0x1_0000_3000), 0x8_0000 - 0x3000),
+                (GuestAddress(0), 0xD000_0000, Default::default()),
+                (GuestAddress(0x1_0000_0000), 0x1000, Default::default()),
+                (
+                    GuestAddress(0x1_0000_3000),
+                    0x8_0000 - 0x3000,
+                    Default::default()
+                ),
             ]
         );
 
@@ -4049,14 +4071,18 @@ mod tests {
         assert_eq!(
             punch_holes_in_guest_mem_layout_for_mappings(
                 vec![
-                    (GuestAddress(0), 0xD000_0000),
-                    (GuestAddress(0x1_0000_0000), 0x8_0000),
+                    (GuestAddress(0), 0xD000_0000, Default::default()),
+                    (GuestAddress(0x1_0000_0000), 0x8_0000, Default::default()),
                 ],
                 &[test_file_backed_mapping(0xA000_0000, 0x60002000)]
             ),
             vec![
-                (GuestAddress(0), 0xA000_0000),
-                (GuestAddress(0x1_0000_2000), 0x8_0000 - 0x2000),
+                (GuestAddress(0), 0xA000_0000, Default::default()),
+                (
+                    GuestAddress(0x1_0000_2000),
+                    0x8_0000 - 0x2000,
+                    Default::default()
+                ),
             ]
         );
     }

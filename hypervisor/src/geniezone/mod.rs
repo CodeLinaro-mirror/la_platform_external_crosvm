@@ -39,6 +39,7 @@ use base::Protection;
 use base::RawDescriptor;
 use base::Result;
 use base::SafeDescriptor;
+use cros_fdt::FdtWriter;
 #[cfg(feature = "gdb")]
 use gdbstub::arch::Arch;
 #[cfg(feature = "gdb")]
@@ -60,6 +61,7 @@ use libc::O_RDWR;
 use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use vm_memory::MemoryRegionInformation;
 
 use crate::ClockState;
 use crate::Config;
@@ -182,6 +184,14 @@ impl VmAArch64 for GeniezoneVm {
 
     fn create_vcpu(&self, id: usize) -> Result<Box<dyn VcpuAArch64>> {
         Ok(Box::new(GeniezoneVm::create_vcpu(self, id)?))
+    }
+
+    fn create_fdt(
+        &self,
+        _fdt: &mut FdtWriter,
+        _phandles: &BTreeMap<&str, u32>,
+    ) -> cros_fdt::Result<()> {
+        Ok(())
     }
 }
 
@@ -587,20 +597,28 @@ impl GeniezoneVm {
         }
         // Safe because we verify that ret is valid and we own the fd.
         let vm_descriptor = unsafe { SafeDescriptor::from_raw_descriptor(ret) };
-        guest_mem.with_regions(|index, guest_addr, size, host_addr, _, _| {
-            unsafe {
-                // Safe because the guest regions are guaranteed not to overlap.
-                set_user_memory_region(
-                    &vm_descriptor,
-                    index as MemSlot,
-                    false,
-                    false,
-                    guest_addr.offset(),
-                    size as u64,
-                    host_addr as *mut u8,
-                )
-            }
-        })?;
+        guest_mem.with_regions(
+            |MemoryRegionInformation {
+                 index,
+                 guest_addr,
+                 size,
+                 host_addr,
+                 ..
+             }| {
+                unsafe {
+                    // Safe because the guest regions are guaranteed not to overlap.
+                    set_user_memory_region(
+                        &vm_descriptor,
+                        index as MemSlot,
+                        false,
+                        false,
+                        guest_addr.offset(),
+                        size as u64,
+                        host_addr as *mut u8,
+                    )
+                }
+            },
+        )?;
 
         let vm = GeniezoneVm {
             geniezone: geniezone.try_clone()?,

@@ -66,6 +66,7 @@ use libc::O_RDWR;
 use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use vm_memory::MemoryRegionInformation;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use x86_64::*;
 
@@ -222,20 +223,28 @@ impl KvmVm {
         }
         // Safe because we verify that ret is valid and we own the fd.
         let vm_descriptor = unsafe { SafeDescriptor::from_raw_descriptor(ret) };
-        guest_mem.with_regions(|index, guest_addr, size, host_addr, _, _| {
-            unsafe {
-                // Safe because the guest regions are guaranteed not to overlap.
-                set_user_memory_region(
-                    &vm_descriptor,
-                    index as MemSlot,
-                    false,
-                    false,
-                    guest_addr.offset(),
-                    size as u64,
-                    host_addr as *mut u8,
-                )
-            }
-        })?;
+        guest_mem.with_regions(
+            |MemoryRegionInformation {
+                 index,
+                 guest_addr,
+                 size,
+                 host_addr,
+                 ..
+             }| {
+                unsafe {
+                    // Safe because the guest regions are guaranteed not to overlap.
+                    set_user_memory_region(
+                        &vm_descriptor,
+                        index as MemSlot,
+                        false,
+                        false,
+                        guest_addr.offset(),
+                        size as u64,
+                        host_addr as *mut u8,
+                    )
+                }
+            },
+        )?;
 
         let vm = KvmVm {
             kvm: kvm.try_clone()?,
@@ -1224,6 +1233,7 @@ impl TryFrom<HypervisorCap> for KvmCap {
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             HypervisorCap::CalibratedTscLeafRequired => Err(Error::new(libc::EINVAL)),
             HypervisorCap::StaticSwiotlbAllocationRequired => Err(Error::new(libc::EINVAL)),
+            HypervisorCap::HypervisorInitializedBootContext => Err(Error::new(libc::EINVAL)),
         }
     }
 }
