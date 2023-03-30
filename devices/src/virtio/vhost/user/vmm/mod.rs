@@ -15,6 +15,7 @@ mod snd;
 mod vsock;
 mod wl;
 mod worker;
+mod hab;
 
 pub use self::block::*;
 pub use self::console::*;
@@ -28,6 +29,7 @@ pub use self::net::*;
 pub use self::snd::*;
 pub use self::vsock::*;
 pub use self::wl::*;
+pub use self::hab::*;
 
 use remain::sorted;
 use thiserror::Error as ThisError;
