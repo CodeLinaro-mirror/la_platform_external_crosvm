@@ -52,6 +52,7 @@
     "libfuse": "libfuse_rust",
     "liblog": "liblog_rust",
     "libminijail": "libminijail_rust",
+    "libprotobuf": "libprotobuf_deprecated",
     "libsync": "libsync_rust",
     "libx86_64": "libx86_64_rust"
   },
