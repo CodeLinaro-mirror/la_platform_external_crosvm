@@ -18,6 +18,8 @@ use thiserror::Error as ThisError;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::virtio::resource_bridge;
 use crate::virtio::resource_bridge::ResourceBridgeError;
@@ -45,13 +47,12 @@ impl Default for ResourceType {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 /// A guest resource entry which type is not decided yet.
 pub union UnresolvedResourceEntry {
     pub object: virtio_video_object_entry,
     pub guest_mem: virtio_video_mem_entry,
 }
-unsafe impl data_model::DataInit for UnresolvedResourceEntry {}
 
 impl fmt::Debug for UnresolvedResourceEntry {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

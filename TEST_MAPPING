@@ -29,7 +29,6 @@
     // {"name": "hypervisor_test_tests_real_run_addr"},
     // {"name": "hypervisor_test_tests_remove_memory"},
     // {"name": "hypervisor_test_tests_tsc_offsets"},
-    {"name": "io_uring_test_tests_uring"},
     {"name": "kernel_cmdline_test_src_kernel_cmdline"},
     {"name": "kernel_loader_test_src_lib"},
     // {"name": "kvm_sys_test_tests_basic"},

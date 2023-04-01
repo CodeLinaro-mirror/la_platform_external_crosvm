@@ -18,6 +18,7 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use arch::VirtioDeviceStub;
+use base::ReadNotifier;
 use base::*;
 use devices::serial_device::SerialParameters;
 use devices::serial_device::SerialType;
@@ -61,6 +62,7 @@ use devices::VfioPlatformDevice;
 use devices::VtpmProxy;
 use hypervisor::ProtectionType;
 use hypervisor::Vm;
+use jail::*;
 use minijail::Minijail;
 use net_util::sys::unix::Tap;
 use net_util::MacAddress;
@@ -72,8 +74,6 @@ use resources::SystemAllocator;
 use sync::Mutex;
 use vm_memory::GuestAddress;
 
-use super::jail_helpers::*;
-use crate::crosvm::config::JailConfig;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFsOption;
 use crate::crosvm::config::VhostUserOption;
@@ -87,7 +87,6 @@ pub enum TaggedControlTube {
         /// See devices::virtio::VirtioDevice.expose_shared_memory_region_with_viommu
         expose_with_viommu: bool,
     },
-    VmIrq(Tube),
     VmMsync(Tube),
 }
 
@@ -95,7 +94,7 @@ impl AsRef<Tube> for TaggedControlTube {
     fn as_ref(&self) -> &Tube {
         use self::TaggedControlTube::*;
         match &self {
-            Fs(tube) | Vm(tube) | VmMemory { tube, .. } | VmIrq(tube) | VmMsync(tube) => tube,
+            Fs(tube) | Vm(tube) | VmMemory { tube, .. } | VmMsync(tube) => tube,
         }
     }
 }
@@ -103,6 +102,12 @@ impl AsRef<Tube> for TaggedControlTube {
 impl AsRawDescriptor for TaggedControlTube {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.as_ref().as_raw_descriptor()
+    }
+}
+
+impl ReadNotifier for TaggedControlTube {
+    fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
+        self.as_ref().get_read_notifier()
     }
 }
 
@@ -814,6 +819,7 @@ pub fn create_virtio_vhost_net_device_from_tap<T: TapT + 'static>(
     vcpu_count: usize,
     vhost_net_device_path: PathBuf,
     tap: T,
+    mac: Option<MacAddress>,
 ) -> DeviceResult {
     create_net_device(
         protection_type,
@@ -822,7 +828,7 @@ pub fn create_virtio_vhost_net_device_from_tap<T: TapT + 'static>(
         vcpu_count,
         "vhost_net_device",
         move |features, _vq_pairs| {
-            virtio::vhost::Net::<T, vhost::Net<T>>::new(&vhost_net_device_path, features, tap)
+            virtio::vhost::Net::<T, vhost::Net<T>>::new(&vhost_net_device_path, features, tap, mac)
                 .context("failed to set up virtio-vhost networking")
         },
     )
@@ -1356,6 +1362,7 @@ pub fn create_vfio_device(
     jail_config: &Option<JailConfig>,
     vm: &impl Vm,
     resources: &mut SystemAllocator,
+    irq_control_tubes: &mut Vec<Tube>,
     control_tubes: &mut Vec<TaggedControlTube>,
     vfio_path: &Path,
     hotplug: bool,
@@ -1390,11 +1397,11 @@ pub fn create_vfio_device(
         VfioDeviceType::Pci => {
             let (vfio_host_tube_msi, vfio_device_tube_msi) =
                 Tube::pair().context("failed to create tube")?;
-            control_tubes.push(TaggedControlTube::VmIrq(vfio_host_tube_msi));
+            irq_control_tubes.push(vfio_host_tube_msi);
 
             let (vfio_host_tube_msix, vfio_device_tube_msix) =
                 Tube::pair().context("failed to create tube")?;
-            control_tubes.push(TaggedControlTube::VmIrq(vfio_host_tube_msix));
+            irq_control_tubes.push(vfio_host_tube_msix);
 
             let mut vfio_pci_device = VfioPciDevice::new(
                 vfio_path,

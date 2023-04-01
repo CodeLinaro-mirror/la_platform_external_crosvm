@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::stdin;
 use std::iter;
 use std::mem;
 use std::os::windows::fs::OpenOptionsExt;
@@ -61,6 +62,7 @@ use base::RecvTube;
 use base::SendTube;
 #[cfg(feature = "gpu")]
 use base::StreamChannel;
+use base::Terminal;
 use base::TriggeredEvent;
 use base::Tube;
 use base::TubeError;
@@ -79,13 +81,16 @@ use devices::tsc::standard_deviation;
 use devices::tsc::TscSyncMitigations;
 use devices::virtio;
 use devices::virtio::block::block::DiskOption;
+#[cfg(feature = "audio")]
 use devices::virtio::snd::common_backend::VirtioSnd;
+#[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
-use devices::virtio::snd::parameters::StreamSourceBackend;
 #[cfg(feature = "gpu")]
 use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
+#[cfg(feature = "gpu")]
 use devices::virtio::vhost::user::gpu::sys::windows::product::GpuBackendConfig as GpuBackendConfigProduct;
-use devices::virtio::vhost::user::gpu::sys::windows::GpuBackendConfig;
+#[cfg(feature = "audio")]
+use devices::virtio::vhost::user::snd::sys::windows::product::SndBackendConfig as SndBackendConfigProduct;
 use devices::virtio::BalloonFeatures;
 #[cfg(feature = "balloon")]
 use devices::virtio::BalloonMode;
@@ -103,7 +108,6 @@ use devices::IrqChip;
 use devices::IrqChipAArch64 as IrqChipArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::IrqChipX86_64 as IrqChipArch;
-use devices::Minijail;
 use devices::UserspaceIrqChip;
 use devices::VirtioPciDevice;
 #[cfg(feature = "whpx")]
@@ -155,8 +159,21 @@ use hypervisor::VmAArch64 as VmArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64 as VmArch;
 use irq_wait::IrqWaitWorker;
+use jail::FakeMinijailStub as Minijail;
 #[cfg(not(feature = "crash-report"))]
 pub(crate) use panic_hook::set_panic_hook;
+use product::create_snd_mute_tube_pair;
+#[cfg(any(feature = "haxm", feature = "gvm", feature = "whpx"))]
+use product::create_snd_state_tube;
+use product::handle_pvclock_request;
+use product::merge_session_invariants;
+use product::run_ime_thread;
+use product::set_package_name;
+pub(crate) use product::setup_metrics_reporting;
+use product::start_service_ipc_listener;
+use product::RunControlArgs;
+use product::ServiceVmState;
+use product::Token;
 use resources::SystemAllocator;
 use run_vcpu::run_all_vcpus;
 use run_vcpu::VcpuRunMode;
@@ -192,22 +209,17 @@ use crate::crosvm::sys::config::IrqChipKind;
 use crate::crosvm::sys::windows::broker::BrokerTubes;
 #[cfg(feature = "stats")]
 use crate::crosvm::sys::windows::stats::StatisticsCollector;
+#[cfg(feature = "gpu")]
 pub(crate) use crate::sys::windows::product::get_gpu_product_configs;
+#[cfg(feature = "audio")]
+pub(crate) use crate::sys::windows::product::get_snd_product_configs;
 use crate::sys::windows::product::log_descriptor;
+#[cfg(feature = "audio")]
+pub(crate) use crate::sys::windows::product::num_input_sound_devices;
+#[cfg(feature = "audio")]
+pub(crate) use crate::sys::windows::product::num_input_sound_streams;
 use crate::sys::windows::product::spawn_anti_tamper_thread;
 use crate::sys::windows::product::MetricEventType;
-use product::create_snd_mute_tube_pair;
-#[cfg(any(feature = "haxm", feature = "gvm", feature = "whpx"))]
-use product::create_snd_state_tube;
-use product::handle_pvclock_request;
-use product::merge_session_invariants;
-use product::run_ime_thread;
-use product::set_package_name;
-pub(crate) use product::setup_metrics_reporting;
-use product::start_service_ipc_listener;
-use product::RunControlArgs;
-use product::ServiceVmState;
-use product::Token;
 
 const DEFAULT_GUEST_CID: u64 = 3;
 
@@ -303,6 +315,37 @@ fn create_gpu_device(
         features,
         product_args,
     )?;
+
+    Ok(VirtioDeviceStub {
+        dev: Box::new(dev),
+        jail: None,
+    })
+}
+
+#[cfg(feature = "audio")]
+fn create_snd_device(
+    cfg: &Config,
+    parameters: SndParameters,
+    _product_args: SndBackendConfigProduct,
+) -> DeviceResult {
+    let features = virtio::base_features(cfg.protection_type);
+    let dev = VirtioSnd::new(features, parameters)
+        .exit_context(Exit::VirtioSoundDeviceNew, "failed to create snd device")?;
+
+    Ok(VirtioDeviceStub {
+        dev: Box::new(dev),
+        jail: None,
+    })
+}
+
+#[cfg(feature = "audio")]
+fn create_vhost_user_snd_device(base_features: u64, vhost_user_tube: Tube) -> DeviceResult {
+    let dev =
+        virtio::vhost::user::vmm::VhostUserVirtioDevice::new_snd(base_features, vhost_user_tube)
+            .exit_context(
+                Exit::VhostUserSndDeviceNew,
+                "failed to set up vhost-user snd device",
+            )?;
 
     Ok(VirtioDeviceStub {
         dev: Box::new(dev),
@@ -472,17 +515,36 @@ fn create_virtio_devices(
 
     #[cfg(feature = "audio")]
     if product::virtio_sound_enabled() {
-        let features = virtio::base_features(cfg.protection_type);
-        let snd_params = SndParameters {
-            backend: "winaudio".try_into().unwrap(),
-            num_input_devices: product::num_input_sound_devices(cfg),
-            num_input_streams: product::num_input_sound_streams(cfg),
-            ..Default::default()
-        };
-        devs.push(VirtioDeviceStub {
-            dev: Box::new(VirtioSnd::new(features, snd_params)?),
-            jail: None,
-        });
+        let snd_split_config = cfg
+            .snd_split_config
+            .as_mut()
+            .expect("snd_split_config must exist");
+        let snd_vmm_config = snd_split_config
+            .vmm_config
+            .as_mut()
+            .expect("snd_vmm_config must exist");
+        product::push_snd_control_tubes(control_tubes, snd_vmm_config);
+
+        match snd_split_config.backend_config.take() {
+            None => {
+                // No backend config present means the backend is running in another process.
+                devs.push(create_vhost_user_snd_device(
+                    virtio::base_features(cfg.protection_type),
+                    snd_vmm_config
+                        .main_vhost_user_tube
+                        .take()
+                        .expect("Snd VMM vhost-user tube should be set"),
+                )?);
+            }
+            Some(backend_config) => {
+                // Backend config present, so initialize Snd in this process.
+                devs.push(create_snd_device(
+                    cfg,
+                    backend_config.parameters,
+                    backend_config.product_config,
+                )?);
+            }
+        }
     }
 
     if let Some(tube) = pvclock_device_tube {
@@ -913,6 +975,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     let (device_ctrl_tube, device_ctrl_resp) = Tube::pair().context("failed to create tube")?;
     guest_os.devices_thread = match create_devices_worker_thread(
+        guest_os.vm.get_memory().clone(),
         guest_os.io_bus.clone(),
         guest_os.mmio_bus.clone(),
         device_ctrl_resp,
@@ -948,6 +1011,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     }
 
     let ime_thread = run_ime_thread(product_args, &exit_evt)?;
+
+    let original_terminal_mode = stdin().set_raw_mode().ok();
 
     let vcpu_boxes: Arc<Mutex<Vec<Box<dyn VcpuArch>>>> = Arc::new(Mutex::new(Vec::new()));
     let run_mode_arc = Arc::new(VcpuRunMode::default());
@@ -1110,6 +1175,12 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     if let Some(stats) = stats {
         println!("Statistics Collected:\n{}", stats.lock());
         println!("Statistics JSON:\n{}", stats.lock().json());
+    }
+
+    if let Some(mode) = original_terminal_mode {
+        if let Err(e) = stdin().restore_mode(mode) {
+            warn!("failed to restore terminal mode: {}", e);
+        }
     }
 
     // Explicitly drop the VM structure here to allow the devices to clean up before the

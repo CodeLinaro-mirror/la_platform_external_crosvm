@@ -13,11 +13,9 @@ use std::arch::x86_64::_rdtsc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
 
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use base::error;
@@ -33,6 +31,7 @@ use base::RawDescriptor;
 use base::ReadNotifier;
 use base::Tube;
 use base::WaitContext;
+use base::WorkerThread;
 use data_model::DataInit;
 use data_model::Le32;
 use data_model::Le64;
@@ -41,6 +40,7 @@ use vm_control::PvClockCommandResponse;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 
 use super::copy_config;
@@ -83,7 +83,7 @@ struct virtio_pvclock_config {
 // Safe because it only has data and has no implicit padding.
 unsafe impl DataInit for virtio_pvclock_config {}
 
-#[derive(Debug, Clone, Copy, Default, FromBytes)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, AsBytes)]
 #[repr(C)]
 struct virtio_pvclock_set_pvclock_page_req {
     // Physical address of pvclock page.
@@ -205,8 +205,7 @@ pub struct PvClock {
     // by the PvClockWorker thread but read by PvClock from the mmio bus in the main thread.
     total_suspend_ns: Arc<AtomicU64>,
     features: u64,
-    kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<Tube>>,
+    worker_thread: Option<WorkerThread<Tube>>,
 }
 
 impl PvClock {
@@ -219,7 +218,6 @@ impl PvClock {
                 | 1 << VIRTIO_PVCLOCK_F_TSC_STABLE
                 | 1 << VIRTIO_PVCLOCK_F_INJECT_SLEEP
                 | 1 << VIRTIO_PVCLOCK_F_CLOCKSOURCE_RATING,
-            kill_evt: None,
             worker_thread: None,
         }
     }
@@ -596,11 +594,6 @@ impl VirtioDevice for PvClock {
 
         let (set_pvclock_page_queue, set_pvclock_page_queue_evt) = queues.remove(0);
 
-        let (self_kill_evt, kill_evt) = Event::new()
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .context("failed to create kill Event pair")?;
-        self.kill_evt = Some(self_kill_evt);
-
         let suspend_tube = self
             .suspend_tube
             .take()
@@ -608,9 +601,9 @@ impl VirtioDevice for PvClock {
         let tsc_frequency = self.tsc_frequency;
         let total_suspend_ns = self.total_suspend_ns.clone();
 
-        let worker_result = thread::Builder::new()
-            .name("virtio_pvclock".to_string())
-            .spawn(move || {
+        self.worker_thread = Some(WorkerThread::start(
+            "virtio_pvclock".to_string(),
+            move |kill_evt| {
                 let worker = PvClockWorker::new(tsc_frequency, total_suspend_ns, mem);
                 run_worker(
                     worker,
@@ -620,49 +613,18 @@ impl VirtioDevice for PvClock {
                     interrupt,
                     kill_evt,
                 )
-            });
+            },
+        ));
 
-        match worker_result {
-            Err(e) => {
-                bail!("failed to spawn virtio_pvclock worker: {}", e);
-            }
-            Ok(join_handle) => {
-                self.worker_thread = Some(join_handle);
-            }
-        }
         Ok(())
     }
 
     fn reset(&mut self) -> bool {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            if kill_evt.signal().is_err() {
-                error!("{}: failed to notify the kill event", self.debug_label());
-                return false;
-            }
-        }
-
         if let Some(worker_thread) = self.worker_thread.take() {
-            return match worker_thread.join() {
-                Err(e) => {
-                    error!(
-                        "{}: failed to get back resources: {:?}",
-                        self.debug_label(),
-                        e
-                    );
-                    false
-                }
-                Ok(suspend_tube) => {
-                    self.suspend_tube = Some(suspend_tube);
-                    true
-                }
-            };
+            let suspend_tube = worker_thread.stop();
+            self.suspend_tube = Some(suspend_tube);
+            return true;
         }
         false
-    }
-}
-
-impl Drop for PvClock {
-    fn drop(&mut self) {
-        self.reset();
     }
 }

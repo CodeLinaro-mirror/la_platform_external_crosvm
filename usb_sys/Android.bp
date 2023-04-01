@@ -12,7 +12,7 @@ package {
 
 rust_library {
     name: "libusb_sys",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "usb_sys",
     cargo_env_compat: true,

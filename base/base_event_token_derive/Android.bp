@@ -12,7 +12,7 @@ package {
 
 rust_test_host {
     name: "base_event_token_derive_test_event_token_derive",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     crate_name: "base_event_token_derive",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
@@ -32,7 +32,7 @@ rust_test_host {
 
 rust_proc_macro {
     name: "libbase_event_token_derive",
-    defaults: ["crosvm_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     crate_name: "base_event_token_derive",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",

@@ -11,17 +11,15 @@ use devices::virtio::block::block::DiskOption;
 use devices::virtio::vhost::user::device;
 use devices::virtio::vhost::user::VhostUserParams;
 use devices::SerialParameters;
+use jail::JailConfig;
 
 use crate::crosvm::config::validate_serial_parameters;
-use crate::crosvm::config::JailConfig;
 
 #[derive(FromArgs)]
 #[argh(subcommand)]
 /// Unix Devices
 pub enum DeviceSubcommand {
     Console(device::ConsoleOptions),
-    #[cfg(feature = "audio")]
-    Snd(device::SndOptions),
     Fs(device::FsOptions),
     Vsock(device::VsockOptions),
     Wl(device::WlOptions),

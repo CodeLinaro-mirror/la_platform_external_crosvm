@@ -185,7 +185,7 @@ struct fsverity_digest {
 ioctl_iow_nr!(FS_IOC_ENABLE_VERITY, 'f' as u32, 133, fsverity_enable_arg);
 ioctl_iowr_nr!(FS_IOC_MEASURE_VERITY, 'f' as u32, 134, fsverity_digest);
 
-type Inode = u64;
+pub type Inode = u64;
 type Handle = u64;
 
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
@@ -554,6 +554,70 @@ impl Default for Config {
             use_dax: false,
             posix_acl: true,
         }
+    }
+}
+
+impl FromStr for Config {
+    type Err = &'static str;
+
+    fn from_str(params: &str) -> Result<Self, Self::Err> {
+        let mut cfg = Self::default();
+        if params.is_empty() {
+            return Ok(cfg);
+        }
+        for opt in params.split(':') {
+            let mut o = opt.splitn(2, '=');
+            let kind = o.next().ok_or("`cfg` options mut not be empty")?;
+            let value = o
+                .next()
+                .ok_or("`cfg` options must be of the form `kind=value`")?;
+            match kind {
+                #[cfg(feature = "arc_quota")]
+                "privileged_quota_uids" => {
+                    cfg.privileged_quota_uids =
+                        value.split(' ').map(|s| s.parse().unwrap()).collect();
+                }
+                "timeout" => {
+                    let seconds = value.parse().map_err(|_| "`timeout` must be an integer")?;
+
+                    let dur = Duration::from_secs(seconds);
+                    cfg.entry_timeout = dur;
+                    cfg.attr_timeout = dur;
+                }
+                "cache" => {
+                    let policy = value
+                        .parse()
+                        .map_err(|_| "`cache` must be one of `never`, `always`, or `auto`")?;
+                    cfg.cache_policy = policy;
+                }
+                "writeback" => {
+                    let writeback = value.parse().map_err(|_| "`writeback` must be a boolean")?;
+                    cfg.writeback = writeback;
+                }
+                "rewrite-security-xattrs" => {
+                    let rewrite_security_xattrs = value
+                        .parse()
+                        .map_err(|_| "`rewrite-security-xattrs` must be a boolean")?;
+                    cfg.rewrite_security_xattrs = rewrite_security_xattrs;
+                }
+                "ascii_casefold" => {
+                    let ascii_casefold = value
+                        .parse()
+                        .map_err(|_| "`ascii_casefold` must be a boolean")?;
+                    cfg.ascii_casefold = ascii_casefold;
+                }
+                "dax" => {
+                    let use_dax = value.parse().map_err(|_| "`dax` must be a boolean")?;
+                    cfg.use_dax = use_dax;
+                }
+                "posix_acl" => {
+                    let posix_acl = value.parse().map_err(|_| "`posix_acl` must be a boolean")?;
+                    cfg.posix_acl = posix_acl;
+                }
+                _ => return Err("unrecognized option for virtio-fs config"),
+            }
+        }
+        Ok(cfg)
     }
 }
 

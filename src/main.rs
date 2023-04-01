@@ -30,6 +30,8 @@ use devices::virtio::vhost::user::device::run_block_device;
 #[cfg(feature = "gpu")]
 use devices::virtio::vhost::user::device::run_gpu_device;
 use devices::virtio::vhost::user::device::run_net_device;
+#[cfg(feature = "audio")]
+use devices::virtio::vhost::user::device::run_snd_device;
 #[cfg(feature = "composite-disk")]
 use disk::create_composite_disk;
 #[cfg(feature = "composite-disk")]
@@ -85,7 +87,7 @@ use crate::sys::init_log;
 static ALLOCATOR: scudo::GlobalScudoAllocator = scudo::GlobalScudoAllocator;
 
 #[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Exit code from crosvm,
 enum CommandStatus {
     /// Exit with success. Also used to mean VM stopped successfully.
@@ -181,10 +183,6 @@ fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
         SwapOut(params) => (VmRequest::Swap(SwapCommand::SwapOut), &params.socket_path),
         Disable(params) => (VmRequest::Swap(SwapCommand::Disable), &params.socket_path),
         Status(params) => (VmRequest::Swap(SwapCommand::Status), &params.socket_path),
-        LogPageFault(params) => (
-            VmRequest::Swap(SwapCommand::StartPageFaultLogging),
-            &params.socket_path,
-        ),
     };
     if let VmRequest::Swap(SwapCommand::Status) = req {
         do_swap_status(path)
@@ -434,6 +432,8 @@ fn start_device(opts: cmdline::DeviceCommand) -> std::result::Result<(), ()> {
             #[cfg(feature = "gpu")]
             CrossPlatformDevicesCommands::Gpu(cfg) => run_gpu_device(cfg),
             CrossPlatformDevicesCommands::Net(cfg) => run_net_device(cfg),
+            #[cfg(feature = "audio")]
+            CrossPlatformDevicesCommands::Snd(cfg) => run_snd_device(cfg),
         },
         cmdline::DeviceSubcommand::Sys(command) => sys::start_device(command),
     };
@@ -536,20 +536,11 @@ fn snapshot_vm(cmd: cmdline::SnapshotCommand) -> std::result::Result<(), ()> {
             });
             (path.socket_path, req)
         }
-    };
-    let socket_path = Path::new(&socket_path);
-    vms_request(&request, socket_path)
-}
-
-fn restore_vm(cmd: cmdline::RestoreCommand) -> std::result::Result<(), ()> {
-    use cmdline::RestoreSubCommands::*;
-    let (socket_path, request) = match cmd.restore_command {
-        Apply(cmd) => {
-            let file_path = cmd.restore_path;
+        Restore(path) => {
             let req = VmRequest::Restore(RestoreCommand::Apply {
-                restore_path: file_path,
+                restore_path: path.snapshot_path,
             });
-            (cmd.socket_path, req)
+            (path.socket_path, req)
         }
     };
     let socket_path = Path::new(&socket_path);
@@ -733,9 +724,6 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
                     }
                     CrossPlatformCommands::Snapshot(cmd) => {
                         snapshot_vm(cmd).map_err(|_| anyhow!("snapshot subcommand failed"))
-                    }
-                    CrossPlatformCommands::Restore(cmd) => {
-                        restore_vm(cmd).map_err(|_| anyhow!("restore subcommand failed"))
                     }
                 }
                 .map(|_| CommandStatus::SuccessOrVmStop)

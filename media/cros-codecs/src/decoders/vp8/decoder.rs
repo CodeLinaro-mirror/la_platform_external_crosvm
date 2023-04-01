@@ -12,7 +12,6 @@ use crate::decoders::vp8::parser::Parser;
 use crate::decoders::BlockingMode;
 use crate::decoders::DecodedHandle;
 use crate::decoders::DynDecodedHandle;
-use crate::decoders::Picture;
 use crate::decoders::Result as VideoDecoderResult;
 use crate::decoders::VideoDecoder;
 use crate::Resolution;
@@ -62,7 +61,7 @@ impl Default for NegotiationStatus {
     }
 }
 
-pub struct Decoder<T: DecodedHandle<CodecData = Header>> {
+pub struct Decoder<T: DecodedHandle> {
     /// A parser to extract bitstream data and build frame data in turn
     parser: Parser,
 
@@ -76,13 +75,6 @@ pub struct Decoder<T: DecodedHandle<CodecData = Header>> {
     /// backend.
     negotiation_status: NegotiationStatus,
 
-    /// The picture used as the last reference picture.
-    last_picture: Option<T>,
-    /// The picture used as the golden reference picture.
-    golden_ref_picture: Option<T>,
-    /// The picture used as the alternate reference picture.
-    alt_ref_picture: Option<T>,
-
     /// The current resolution
     coded_resolution: Resolution,
 
@@ -93,11 +85,18 @@ pub struct Decoder<T: DecodedHandle<CodecData = Header>> {
     /// order
     current_display_order: u64,
 
+    /// The picture used as the last reference picture.
+    last_picture: Option<T>,
+    /// The picture used as the golden reference picture.
+    golden_ref_picture: Option<T>,
+    /// The picture used as the alternate reference picture.
+    alt_ref_picture: Option<T>,
+
     #[cfg(test)]
     test_params: TestParams<T>,
 }
 
-impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<T> {
+impl<T: DecodedHandle + DynDecodedHandle + 'static> Decoder<T> {
     /// Create a new codec backend for VP8.
     #[cfg(any(feature = "vaapi", test))]
     pub(crate) fn new(
@@ -128,20 +127,19 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
     }
 
     fn update_references(
-        decoded_frame: &T,
+        header: &Header,
+        decoded_handle: &T,
         last_picture: &mut Option<T>,
         golden_ref_picture: &mut Option<T>,
         alt_ref_picture: &mut Option<T>,
     ) -> Result<()> {
-        let header = &decoded_frame.picture().data;
-
         if header.key_frame() {
-            Decoder::replace_reference(last_picture, decoded_frame);
-            Decoder::replace_reference(golden_ref_picture, decoded_frame);
-            Decoder::replace_reference(alt_ref_picture, decoded_frame);
+            Decoder::replace_reference(last_picture, decoded_handle);
+            Decoder::replace_reference(golden_ref_picture, decoded_handle);
+            Decoder::replace_reference(alt_ref_picture, decoded_handle);
         } else {
             if header.refresh_alternate_frame() {
-                Decoder::replace_reference(alt_ref_picture, decoded_frame);
+                Decoder::replace_reference(alt_ref_picture, decoded_handle);
             } else {
                 match header.copy_buffer_to_alternate() {
                     0 => { /* do nothing */ }
@@ -163,7 +161,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
             }
 
             if header.refresh_golden_frame() {
-                Decoder::replace_reference(golden_ref_picture, decoded_frame);
+                Decoder::replace_reference(golden_ref_picture, decoded_handle);
             } else {
                 match header.copy_buffer_to_golden() {
                     0 => { /* do nothing */ }
@@ -185,7 +183,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
             }
 
             if header.refresh_last() {
-                Decoder::replace_reference(last_picture, decoded_frame);
+                Decoder::replace_reference(last_picture, decoded_handle);
             }
         }
 
@@ -230,8 +228,6 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
         timestamp: u64,
         queued_parser_state: Option<Parser>,
     ) -> Result<T> {
-        let picture = Picture::new_vp8(frame.header, None, timestamp);
-
         let parser = match &queued_parser_state {
             Some(parser) => parser,
             None => &self.parser,
@@ -246,20 +242,21 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
         let decoded_handle = self
             .backend
             .submit_picture(
-                picture,
+                &frame.header,
                 self.last_picture.as_ref(),
                 self.golden_ref_picture.as_ref(),
                 self.alt_ref_picture.as_ref(),
                 frame.bitstream,
-                parser,
+                parser.segmentation(),
+                parser.mb_lf_adjust(),
                 timestamp,
                 block,
             )
             .map_err(|e| anyhow!(e))?;
-        // .map_err(DecoderError::StatelessBackendError)?;
 
         // Do DPB management
         Self::update_references(
+            &frame.header,
             &decoded_handle,
             &mut self.last_picture,
             &mut self.golden_ref_picture,
@@ -285,9 +282,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> Decoder<
     }
 }
 
-impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDecoder
-    for Decoder<T>
-{
+impl<T: DecodedHandle + DynDecodedHandle + 'static> VideoDecoder for Decoder<T> {
     fn decode(
         &mut self,
         timestamp: u64,
@@ -345,9 +340,10 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
                 header: *header,
             };
 
+            let show_frame = frame.header.show_frame();
             let mut handle = self.handle_frame(key_frame, timestamp, Some(*parser))?;
 
-            if handle.picture().data.show_frame() {
+            if show_frame {
                 let order = self.current_display_order;
 
                 handle.set_display_order(order);
@@ -359,6 +355,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
             self.negotiation_status = NegotiationStatus::Negotiated;
         }
 
+        let show_frame = frame.header.show_frame();
         let mut handle = self.handle_frame(frame, timestamp, None)?;
 
         if self.backend.num_resources_left() == 0 {
@@ -367,7 +364,7 @@ impl<T: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static> VideoDec
 
         self.backend.poll(self.blocking_mode)?;
 
-        if handle.picture().data.show_frame() {
+        if show_frame {
             let order = self.current_display_order;
 
             handle.set_display_order(order);
@@ -466,7 +463,6 @@ pub mod tests {
     use bytes::Buf;
 
     use crate::decoders::vp8::decoder::Decoder;
-    use crate::decoders::vp8::parser::Header;
     use crate::decoders::BlockingMode;
     use crate::decoders::DecodedHandle;
     use crate::decoders::DynDecodedHandle;
@@ -490,7 +486,7 @@ pub mod tests {
     }
 
     pub fn run_decoding_loop<
-        Handle: DecodedHandle<CodecData = Header> + DynDecodedHandle + 'static,
+        Handle: DecodedHandle + DynDecodedHandle + 'static,
         F: FnMut(&mut Decoder<Handle>),
     >(
         decoder: &mut Decoder<Handle>,
@@ -519,7 +515,7 @@ pub mod tests {
         }
     }
 
-    pub fn process_ready_frames<Handle: DecodedHandle<CodecData = Header> + DynDecodedHandle>(
+    pub fn process_ready_frames<Handle: DecodedHandle + DynDecodedHandle>(
         decoder: &mut Decoder<Handle>,
         action: &mut dyn FnMut(&mut Decoder<Handle>, &Handle),
     ) {

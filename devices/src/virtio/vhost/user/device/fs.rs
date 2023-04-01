@@ -19,7 +19,6 @@ use base::RawDescriptor;
 use base::Tube;
 use cros_async::EventAsync;
 use cros_async::Executor;
-use data_model::DataInit;
 use data_model::Le32;
 use fuse::Server;
 use futures::future::AbortHandle;
@@ -31,10 +30,12 @@ use virtio_sys::virtio_fs::virtio_fs_config;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
+use zerocopy::AsBytes;
 
 use crate::virtio;
 use crate::virtio::copy_config;
 use crate::virtio::device_constants::fs::FS_MAX_TAG_LEN;
+use crate::virtio::fs::passthrough::Config;
 use crate::virtio::fs::passthrough::PassthroughFs;
 use crate::virtio::fs::process_fs_queue;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
@@ -77,7 +78,7 @@ struct FsBackend {
 }
 
 impl FsBackend {
-    pub fn new(ex: &Executor, tag: &str) -> anyhow::Result<Self> {
+    pub fn new(ex: &Executor, tag: &str, cfg: Option<Config>) -> anyhow::Result<Self> {
         if tag.len() > FS_MAX_TAG_LEN {
             bail!(
                 "fs tag is too long: {} (max supported: {})",
@@ -92,7 +93,7 @@ impl FsBackend {
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
         // Use default passthroughfs config
-        let fs = PassthroughFs::new(Default::default())?;
+        let fs = PassthroughFs::new(cfg.unwrap_or_default())?;
 
         let mut keep_rds: Vec<RawDescriptor> = [0, 1, 2].to_vec();
         keep_rds.append(&mut fs.keep_rds());
@@ -160,7 +161,7 @@ impl VhostUserBackend for FsBackend {
             tag: self.tag,
             num_request_queues: Le32::from(1),
         };
-        copy_config(data, 0, config.as_slice(), offset);
+        copy_config(data, 0, config.as_bytes(), offset);
     }
 
     fn reset(&mut self) {
@@ -234,4 +235,10 @@ pub struct Options {
     #[argh(option, arg_name = "GIDMAP")]
     /// gid map to use
     gid_map: Option<String>,
+    #[argh(option, arg_name = "CFG")]
+    /// colon-separated options for configuring a directory to be
+    /// shared with the VM through virtio-fs. The format is the same as
+    /// `crosvm run --shared-dir` flag except only the keys related to virtio-fs
+    /// are valid here.
+    cfg: Option<Config>,
 }

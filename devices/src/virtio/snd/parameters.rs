@@ -5,11 +5,15 @@
 use std::num::ParseIntError;
 use std::str::ParseBoolError;
 
+use audio_streams::StreamEffect;
 #[cfg(all(unix, feature = "audio_cras"))]
 use libcras::CrasClientType;
 #[cfg(all(unix, feature = "audio_cras"))]
 use libcras::CrasSocketType;
+#[cfg(all(unix, feature = "audio_cras"))]
+use libcras::CrasStreamType;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
 use thiserror::Error as ThisError;
 
@@ -34,11 +38,21 @@ pub enum Error {
     UnknownParameter(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "&str")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(into = "String", try_from = "&str")]
 pub enum StreamSourceBackend {
     NULL,
     Sys(SysStreamSourceBackend),
+}
+
+// Implemented to make backend serialization possible, since we deserialize from str.
+impl From<StreamSourceBackend> for String {
+    fn from(backend: StreamSourceBackend) -> Self {
+        match backend {
+            StreamSourceBackend::NULL => "null".to_owned(),
+            StreamSourceBackend::Sys(sys_backend) => sys_backend.into(),
+        }
+    }
 }
 
 impl TryFrom<&str> for StreamSourceBackend {
@@ -52,8 +66,19 @@ impl TryFrom<&str> for StreamSourceBackend {
     }
 }
 
+/// Holds the parameters for each PCM device
+#[derive(Debug, Clone, Default, Deserialize, Serialize, FromKeyValues, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct PCMDeviceParameters {
+    #[cfg(all(unix, feature = "audio_cras"))]
+    pub client_type: Option<CrasClientType>,
+    #[cfg(all(unix, feature = "audio_cras"))]
+    pub stream_type: Option<CrasStreamType>,
+    pub effects: Option<Vec<StreamEffect>>,
+}
+
 /// Holds the parameters for a cras sound device
-#[derive(Debug, Clone, Deserialize, FromKeyValues)]
+#[derive(Debug, Clone, Deserialize, Serialize, FromKeyValues)]
 #[serde(deny_unknown_fields, default)]
 pub struct Parameters {
     pub capture: bool,
@@ -67,6 +92,8 @@ pub struct Parameters {
     pub client_type: CrasClientType,
     #[cfg(all(unix, feature = "audio_cras"))]
     pub socket_type: CrasSocketType,
+    pub output_device_config: Vec<PCMDeviceParameters>,
+    pub input_device_config: Vec<PCMDeviceParameters>,
 }
 
 impl Default for Parameters {
@@ -82,6 +109,8 @@ impl Default for Parameters {
             client_type: CrasClientType::CRAS_CLIENT_TYPE_CROSVM,
             #[cfg(all(unix, feature = "audio_cras"))]
             socket_type: CrasSocketType::Unified,
+            output_device_config: vec![],
+            input_device_config: vec![],
         }
     }
 }
@@ -101,6 +130,7 @@ impl Parameters {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_update)]
 mod tests {
     use super::*;
 
@@ -116,6 +146,8 @@ mod tests {
         num_input_devices: u32,
         num_output_streams: u32,
         num_input_streams: u32,
+        output_device_config: Vec<PCMDeviceParameters>,
+        input_device_config: Vec<PCMDeviceParameters>,
     ) {
         let params: Parameters =
             serde_keyvalue::from_key_values(s).expect("parse should have succeded");
@@ -125,6 +157,8 @@ mod tests {
         assert_eq!(params.num_input_devices, num_input_devices);
         assert_eq!(params.num_output_streams, num_output_streams);
         assert_eq!(params.num_input_streams, num_input_streams);
+        assert_eq!(params.output_device_config, output_device_config);
+        assert_eq!(params.input_device_config, input_device_config);
     }
 
     #[test]
@@ -138,6 +172,8 @@ mod tests {
             1,
             1,
             1,
+            vec![],
+            vec![],
         );
         check_success(
             "capture=true,num_output_streams=2,num_input_streams=3",
@@ -147,6 +183,8 @@ mod tests {
             1,
             2,
             3,
+            vec![],
+            vec![],
         );
         check_success(
             "capture=true,num_output_devices=3,num_input_devices=2",
@@ -156,6 +194,8 @@ mod tests {
             2,
             1,
             1,
+            vec![],
+            vec![],
         );
         check_success(
             "capture=true,num_output_devices=2,num_input_devices=3,\
@@ -166,6 +206,8 @@ mod tests {
             3,
             3,
             2,
+            vec![],
+            vec![],
         );
         check_success(
             "capture=true,backend=null,num_output_devices=2,num_input_devices=3,\
@@ -176,7 +218,46 @@ mod tests {
             3,
             3,
             2,
+            vec![],
+            vec![],
         );
+        check_success(
+            "output_device_config=[[effects=[aec]],[]]",
+            false,
+            StreamSourceBackend::NULL,
+            1,
+            1,
+            1,
+            1,
+            vec![
+                PCMDeviceParameters {
+                    effects: Some(vec![StreamEffect::EchoCancellation]),
+                    ..Default::default()
+                },
+                Default::default(),
+            ],
+            vec![],
+        );
+        check_success(
+            "input_device_config=[[effects=[aec]],[]]",
+            false,
+            StreamSourceBackend::NULL,
+            1,
+            1,
+            1,
+            1,
+            vec![],
+            vec![
+                PCMDeviceParameters {
+                    effects: Some(vec![StreamEffect::EchoCancellation]),
+                    ..Default::default()
+                },
+                Default::default(),
+            ],
+        );
+
+        // Invalid effect in device config
+        check_failure("output_device_config=[[effects=[none]]]");
     }
 
     #[test]
@@ -187,12 +268,16 @@ mod tests {
             backend: StreamSourceBackend,
             client_type: CrasClientType,
             socket_type: CrasSocketType,
+            output_device_config: Vec<PCMDeviceParameters>,
+            input_device_config: Vec<PCMDeviceParameters>,
         ) {
             let params: Parameters =
                 serde_keyvalue::from_key_values(s).expect("parse should have succeded");
             assert_eq!(params.backend, backend);
             assert_eq!(params.client_type, client_type);
             assert_eq!(params.socket_type, socket_type);
+            assert_eq!(params.output_device_config, output_device_config);
+            assert_eq!(params.input_device_config, input_device_config);
         }
 
         cras_check_success(
@@ -200,18 +285,24 @@ mod tests {
             StreamSourceBackend::Sys(SysStreamSourceBackend::CRAS),
             CrasClientType::CRAS_CLIENT_TYPE_CROSVM,
             CrasSocketType::Unified,
+            vec![],
+            vec![],
         );
         cras_check_success(
             "backend=cras,client_type=crosvm",
             StreamSourceBackend::Sys(SysStreamSourceBackend::CRAS),
             CrasClientType::CRAS_CLIENT_TYPE_CROSVM,
             CrasSocketType::Unified,
+            vec![],
+            vec![],
         );
         cras_check_success(
             "backend=cras,client_type=arcvm",
             StreamSourceBackend::Sys(SysStreamSourceBackend::CRAS),
             CrasClientType::CRAS_CLIENT_TYPE_ARCVM,
             CrasSocketType::Unified,
+            vec![],
+            vec![],
         );
         check_failure("backend=cras,client_type=none");
         cras_check_success(
@@ -219,12 +310,67 @@ mod tests {
             StreamSourceBackend::Sys(SysStreamSourceBackend::CRAS),
             CrasClientType::CRAS_CLIENT_TYPE_CROSVM,
             CrasSocketType::Legacy,
+            vec![],
+            vec![],
         );
         cras_check_success(
             "backend=cras,socket_type=unified",
             StreamSourceBackend::Sys(SysStreamSourceBackend::CRAS),
             CrasClientType::CRAS_CLIENT_TYPE_CROSVM,
             CrasSocketType::Unified,
+            vec![],
+            vec![],
         );
+        cras_check_success(
+            "output_device_config=[[client_type=crosvm],[client_type=arcvm,stream_type=pro_audio],[]]",
+            StreamSourceBackend::NULL,
+            CrasClientType::CRAS_CLIENT_TYPE_CROSVM,
+            CrasSocketType::Unified,
+            vec![
+                PCMDeviceParameters{
+                    client_type: Some(CrasClientType::CRAS_CLIENT_TYPE_CROSVM),
+                    stream_type: None,
+                    effects: None,
+                },
+                PCMDeviceParameters{
+                    client_type: Some(CrasClientType::CRAS_CLIENT_TYPE_ARCVM),
+                    stream_type: Some(CrasStreamType::CRAS_STREAM_TYPE_PRO_AUDIO),
+                    effects: None,
+                },
+                Default::default(),
+                ],
+            vec![],
+        );
+        cras_check_success(
+            "input_device_config=[[client_type=crosvm],[client_type=arcvm,effects=[aec],stream_type=pro_audio],[effects=[EchoCancellation]],[]]",
+            StreamSourceBackend::NULL,
+            CrasClientType::CRAS_CLIENT_TYPE_CROSVM,
+            CrasSocketType::Unified,
+            vec![],
+            vec![
+                PCMDeviceParameters{
+                    client_type: Some(CrasClientType::CRAS_CLIENT_TYPE_CROSVM),
+                    stream_type: None,
+                    effects: None,
+                },
+                PCMDeviceParameters{
+                    client_type: Some(CrasClientType::CRAS_CLIENT_TYPE_ARCVM),
+                    stream_type: Some(CrasStreamType::CRAS_STREAM_TYPE_PRO_AUDIO),
+                    effects: Some(vec![StreamEffect::EchoCancellation]),
+                },
+                PCMDeviceParameters{
+                    client_type: None,
+                    stream_type: None,
+                    effects: Some(vec![StreamEffect::EchoCancellation]),
+                },
+                Default::default(),
+                ],
+        );
+
+        // Invalid client_type in device config
+        check_failure("output_device_config=[[client_type=none]]");
+
+        // Invalid stream type in device config
+        check_failure("output_device_config=[[stream_type=none]]");
     }
 }

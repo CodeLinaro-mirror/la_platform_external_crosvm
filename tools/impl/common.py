@@ -12,52 +12,25 @@ our command line tools.
 
 Refer to the scripts in ./tools for example usage.
 """
+
+# Import preamble before anything else
+from . import preamble  # type: ignore
+
+import argparse
+import contextlib
+import csv
 import datetime
 import functools
+import getpass
 import json
+import os
+import re
 import shlex
-import sys
+import shutil
 import subprocess
-
-
-def ensure_packages_exist(*packages: str):
-    """Installs the specified packages via pip if it does not exist."""
-    missing_packages: List[str] = []
-
-    for package in packages:
-        try:
-            __import__(package)
-        except ImportError:
-            missing_packages.append(package)
-
-    if missing_packages:
-        try:
-            __import__("pip")
-        except ImportError:
-            print(f"Missing the 'pip' package. Please install 'python3-pip'.")
-            sys.exit(1)
-
-        package_list = ", ".join(missing_packages)
-        print(
-            f"Missing python dependencies. Do you want to install {package_list}? [y/N] ",
-            end="",
-            flush=True,
-        )
-        response = sys.stdin.readline()
-        if response[:1].lower() == "y":
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--user", *missing_packages]
-            )
-            print("Success. Please re-run the command.")
-            sys.exit(0)
-        else:
-            sys.exit(1)
-
-
-# Note: These packages can be installed automatically on developer machines, but need to be
-# provided as CIPD packages for vpython in Luci CI. See tools/.vpython3 for how to add them.
-ensure_packages_exist("argh", "rich")
-
+import sys
+import traceback
+from copy import deepcopy
 from io import StringIO
 from math import ceil
 from multiprocessing.pool import ThreadPool
@@ -77,20 +50,14 @@ from typing import (
     Union,
     cast,
 )
-from rich.console import Console
+
 import argh  # type: ignore
-import argparse
-import contextlib
-import csv
-import getpass
-import os
-import re
-import shutil
-import traceback
-from rich.console import Group
-from rich.text import Text
-from rich.live import Live
-from rich.spinner import Spinner
+import rich
+import rich.console
+import rich.live
+import rich.spinner
+import rich.text
+
 
 # File where to store http headers for gcloud authentication
 AUTH_HEADERS_FILE = Path(gettempdir()) / f"crosvm_gcloud_auth_headers_{getpass.getuser()}"
@@ -127,6 +94,9 @@ to this file.
 """
 TOOLS_ROOT = Path(__file__).parent.parent.resolve()
 
+"Cache directory that is preserved between builds in CI."
+CACHE_DIR = Path(os.environ.get("CROSVM_CACHE_DIR", os.environ.get("TMPDIR", "/tmp")))
+
 "Url of crosvm's gerrit review host"
 GERRIT_URL = "https://chromium-review.googlesource.com"
 
@@ -135,6 +105,17 @@ assert 'name = "crosvm"' in CROSVM_TOML.read_text()
 
 # List of times recorded by `record_time` which will be printed if --timing-info is provided.
 global_time_records: List[Tuple[str, datetime.timedelta]] = []
+
+
+def crosvm_target_dir():
+    crosvm_target = os.environ.get("CROSVM_TARGET_DIR")
+    cargo_target = os.environ.get("CARGO_TARGET_DIR")
+    if crosvm_target:
+        return Path(crosvm_target)
+    elif cargo_target:
+        return Path(cargo_target) / "crosvm"
+    else:
+        return CROSVM_ROOT / "target/crosvm"
 
 
 class CommandResult(NamedTuple):
@@ -180,7 +161,7 @@ class Command(object):
 
     In contrast to bash, globs are *not* evaluated, but can easily be provided using Path:
 
-    >>> Command('ls -l', *Path('.').glob('*.toml'))
+    >>> Command('ls -l', *Path(CROSVM_ROOT).glob('*.toml'))
     Command('ls', '-l', ...)
 
     None or False are ignored to make it easy to include conditional arguments:
@@ -224,10 +205,12 @@ class Command(object):
         *args: Any,
         stdin_cmd: Optional["Command"] = None,
         env_vars: Dict[str, str] = {},
+        cwd: Optional[Path] = None,
     ):
         self.args = Command.__parse_cmd(args)
         self.stdin_cmd = stdin_cmd
         self.env_vars = env_vars
+        self.cwd = cwd
 
     ### Builder API to construct commands
 
@@ -238,9 +221,19 @@ class Command(object):
         >>> cargo.with_args('clippy')
         Command('cargo', 'clippy')
         """
-        cmd = Command()
+        cmd = deepcopy(self)
         cmd.args = [*self.args, *Command.__parse_cmd(args)]
-        cmd.env_vars = self.env_vars
+        return cmd
+
+    def with_cwd(self, cwd: Optional[Path]):
+        """Changes the working directory the command is executed in.
+
+        >>> cargo = Command('pwd')
+        >>> cargo.with_cwd('/tmp').stdout()
+        '/tmp'
+        """
+        cmd = deepcopy(self)
+        cmd.cwd = cwd
         return cmd
 
     def __call__(self, *args: Any):
@@ -261,9 +254,7 @@ class Command(object):
 
         The variable is removed if value is None.
         """
-        cmd = Command()
-        cmd.args = self.args
-        cmd.env_vars = self.env_vars
+        cmd = deepcopy(self)
         for key, value in envs.items():
             if value is not None:
                 cmd.env_vars[key] = value
@@ -275,10 +266,7 @@ class Command(object):
     def with_path_env(self, new_path: str):
         """Returns a command with a path added to the PATH variable."""
         path_var = self.env_vars.get("PATH", os.environ.get("PATH", ""))
-        cmd = Command()
-        cmd.args = self.args
-        cmd.env_vars = {**self.env_vars, "PATH": f"{path_var}:{new_path}"}
-        return cmd
+        return self.with_env("PATH", f"{path_var}:{new_path}")
 
     def with_color_arg(
         self,
@@ -358,7 +346,7 @@ class Command(object):
         >>> Command('false').fg()
         Traceback (most recent call last):
         ...
-        subprocess.CalledProcessError: Command 'false' returned non-zero exit status 1.
+        subprocess.CalledProcessError...
 
         But can be disabled:
 
@@ -375,6 +363,9 @@ class Command(object):
         More sophisticated means of outputting stdout/err are available via `Styles`:
 
         >>> Command("echo foo").fg(style=Styles.live_truncated())
+        …
+        foo
+        0
 
         Will output the results of the command but truncate output after a few lines. See `Styles`
         for more options.
@@ -397,9 +388,9 @@ class Command(object):
             print(f"$ {self}")
 
         if style is None or verbose():
-            return self.__run(stdout=None, stderr=None, check=False).returncode
+            return self.__run(stdout=None, stderr=None, check=check).returncode
         else:
-            process = self.__popen(stderr=STDOUT)
+            process = self.popen(stderr=STDOUT)
             style(process)
             returncode = process.wait()
             if returncode != 0 and check:
@@ -449,7 +440,7 @@ class Command(object):
             print(f"$ {self}")
         return self.__run(stdout=PIPE, stderr=PIPE, check=False).returncode == 0
 
-    def stdout(self, check: bool = True):
+    def stdout(self, check: bool = True, stderr: int = PIPE):
         """
         Runs a program and returns stdout.
 
@@ -457,7 +448,7 @@ class Command(object):
         """
         if very_verbose():
             print(f"$ {self}")
-        return self.__run(stdout=PIPE, stderr=PIPE, check=check).stdout.strip()
+        return self.__run(stdout=PIPE, stderr=stderr, check=check).stdout.strip()
 
     def json(self, check: bool = True) -> Any:
         """
@@ -471,13 +462,13 @@ class Command(object):
         else:
             return None
 
-    def lines(self, check: bool = True):
+    def lines(self, check: bool = True, stderr: int = PIPE):
         """
         Runs a program and returns stdout line by line.
 
         The program will not be visible to the user unless --very-verbose is specified.
         """
-        return self.stdout(check=check).splitlines()
+        return self.stdout(check=check, stderr=stderr).splitlines()
 
     ### Utilities
 
@@ -508,6 +499,7 @@ class Command(object):
                 print(f"env: {k}={v}")
         result = subprocess.run(
             self.args,
+            cwd=self.cwd,
             stdout=stdout,
             stderr=stderr,
             stdin=self.__stdin_stream(),
@@ -529,15 +521,16 @@ class Command(object):
 
     def __stdin_stream(self):
         if self.stdin_cmd:
-            return self.stdin_cmd.__popen().stdout
+            return self.stdin_cmd.popen().stdout
         return None
 
-    def __popen(self, stderr: Optional[int] = PIPE) -> "subprocess.Popen[str]":
+    def popen(self, stderr: Optional[int] = PIPE) -> "subprocess.Popen[str]":
         """
         Runs a program and returns the Popen object of the running process.
         """
         return subprocess.Popen(
             self.args,
+            cwd=self.cwd,
             stdout=subprocess.PIPE,
             stderr=stderr,
             stdin=self.__stdin_stream(),
@@ -583,18 +576,18 @@ class Styles(object):
 
         def output(process: "subprocess.Popen[str]"):
             assert process.stdout
-            spinner = Spinner("dots")
-            lines: List[Text] = []
+            spinner = rich.spinner.Spinner("dots")
+            lines: List[rich.text.Text] = []
             stdout: List[str] = []
-            with Live(refresh_per_second=30, transient=True) as live:
+            with rich.live.Live(refresh_per_second=30, transient=True) as live:
                 for line in iter(process.stdout.readline, ""):
                     stdout.append(line.strip())
-                    lines.append(Text.from_ansi(line.strip(), no_wrap=True))
+                    lines.append(rich.text.Text.from_ansi(line.strip(), no_wrap=True))
                     while len(lines) > num_lines:
                         lines.pop(0)
-                    live.update(Group(Text("…"), *lines, spinner))
+                    live.update(rich.console.Group(rich.text.Text("…"), *lines, spinner))
             if process.wait() == 0:
-                console.print(Group(Text("…"), *lines))
+                console.print(rich.console.Group(rich.text.Text("…"), *lines))
             else:
                 for line in stdout:
                     print(line)
@@ -607,7 +600,9 @@ class Styles(object):
 
         def output(process: "subprocess.Popen[str]"):
             assert process.stdout
-            with Live(Spinner("dots", title), refresh_per_second=30, transient=True):
+            with rich.live.Live(
+                rich.spinner.Spinner("dots", title), refresh_per_second=30, transient=True
+            ):
                 stdout = process.stdout.read()
 
             if process.wait() == 0:
@@ -647,16 +642,8 @@ class ParallelCommands(object):
 
 
 class Remote(object):
-    """ "
-    Wrapper around the cmd() API and allow execution of commands via SSH.
-
-    >>> remote = Remote("foobar", {"opt": "value"})
-    >>> remote.cmd('printf "(%s)"', quoted("a b c"))
-    Command('ssh', 'foobar', '-T', '-oopt=value', 'bash -O huponexit -c \\'printf (%s) "a b c"\\'')
-
-    A remote working directory can be set:
-    >>> remote.cmd('printf "(%s)"', quoted("a b c")).with_cwd(Path("target_dir"))
-    Command('ssh', 'foobar', '-T', '-oopt=value', 'cd target_dir && bash -O huponexit -c \\'printf (%s) "a b c"\\'')
+    """
+    Wrapper around the cmd() API and allow execution of commands via SSH."
     """
 
     def __init__(self, host: str, opts: Dict[str, str]):
@@ -757,8 +744,8 @@ cwd = cwd_context
 parallel = ParallelCommands
 
 
-def run_main(main_fn: Callable[..., Any]):
-    run_commands(default_fn=main_fn)
+def run_main(main_fn: Callable[..., Any], usage: Optional[str] = None):
+    run_commands(default_fn=main_fn, usage=usage)
 
 
 def run_commands(
@@ -820,7 +807,7 @@ def parse_common_args():
     These args are parsed separately of the run_main/run_commands method so we can access
     verbose/etc before the commands arguments are parsed.
     """
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(add_help=False)
     add_common_args(parser)
     return parser.parse_known_args()[0]
 
@@ -1074,9 +1061,97 @@ def sudo_is_passwordless():
     return ret == 0
 
 
-console = Console()
+SHORTHANDS = {
+    "mingw64": "x86_64-pc-windows-gnu",
+    "msvc64": "x86_64-pc-windows-msvc",
+    "armhf": "armv7-unknown-linux-gnueabihf",
+    "aarch64": "aarch64-unknown-linux-gnu",
+    "x86_64": "x86_64-unknown-linux-gnu",
+}
+
+
+class Triple(NamedTuple):
+    """
+    Build triple in cargo format.
+
+    The format is: <arch><sub>-<vendor>-<sys>-<abi>, However, we will treat <arch><sub> as a single
+    arch to simplify things.
+    """
+
+    arch: str
+    vendor: str
+    sys: Optional[str]
+    abi: Optional[str]
+
+    @classmethod
+    def from_shorthand(cls, shorthand: str):
+        "These shorthands make it easier to specify triples on the command line."
+        if "-" in shorthand:
+            triple = shorthand
+        elif shorthand in SHORTHANDS:
+            triple = SHORTHANDS[shorthand]
+        else:
+            raise Exception(f"Not a valid build triple shorthand: {shorthand}")
+        return cls.from_str(triple)
+
+    @classmethod
+    def from_str(cls, triple: str):
+        parts = triple.split("-")
+        if len(parts) < 2:
+            raise Exception(f"Unsupported triple {triple}")
+        return cls(
+            parts[0],
+            parts[1],
+            parts[2] if len(parts) > 2 else None,
+            parts[3] if len(parts) > 3 else None,
+        )
+
+    @classmethod
+    def from_linux_arch(cls, arch: str):
+        "Rough logic to convert the output of `arch` into a corresponding linux build triple."
+        if arch == "armhf":
+            return cls.from_str("armv7-unknown-linux-gnueabihf")
+        else:
+            return cls.from_str(f"{arch}-unknown-linux-gnu")
+
+    @classmethod
+    def host_default(cls):
+        "Returns the default build triple of the host."
+        rustc_info = subprocess.check_output(["rustc", "-vV"], text=True)
+        match = re.search(r"host: (\S+)", rustc_info)
+        if not match:
+            raise Exception(f"Cannot parse rustc info: {rustc_info}")
+        return cls.from_str(match.group(1))
+
+    @property
+    def feature_flag(self):
+        triple_to_shorthand = {v: k for k, v in SHORTHANDS.items()}
+        shorthand = triple_to_shorthand.get(str(self))
+        if not shorthand:
+            raise Exception(f"No feature set for triple {self}")
+        return f"all-{shorthand}"
+
+    @property
+    def target_dir(self):
+        return crosvm_target_dir() / str(self)
+
+    def get_cargo_env(self):
+        """Environment variables to make cargo use the test target."""
+        env: Dict[str, str] = {}
+        cargo_target = str(self)
+        env["CARGO_BUILD_TARGET"] = cargo_target
+        env["CARGO_TARGET_DIR"] = str(self.target_dir)
+        env["CROSVM_TARGET_DIR"] = str(crosvm_target_dir())
+        return env
+
+    def __str__(self):
+        return f"{self.arch}-{self.vendor}-{self.sys}-{self.abi}"
+
+
+console = rich.console.Console()
 
 if __name__ == "__main__":
     import doctest
 
-    doctest.testmod(optionflags=doctest.ELLIPSIS)
+    (failures, num_tests) = doctest.testmod(optionflags=doctest.ELLIPSIS)
+    sys.exit(1 if failures > 0 else 0)

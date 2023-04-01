@@ -18,7 +18,6 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvError;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 
 use base::error;
 use base::AsRawDescriptor;
@@ -35,13 +34,15 @@ use base::SafeDescriptor;
 use base::ScmSocket;
 use base::UnixSeqpacket;
 use base::WaitContext;
-use data_model::DataInit;
+use base::WorkerThread;
 use data_model::VolatileMemory;
 use data_model::VolatileMemoryError;
 use data_model::VolatileSlice;
 use remain::sorted;
 use sync::Mutex;
 use thiserror::Error as ThisError;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::virtio::snd::constants::*;
 use crate::virtio::snd::layout::*;
@@ -144,8 +145,7 @@ pub struct VioSClient {
     tx_subscribers: Arc<Mutex<HashMap<usize, Sender<BufferReleaseMsg>>>>,
     rx_subscribers: Arc<Mutex<HashMap<usize, Sender<BufferReleaseMsg>>>>,
     recv_thread_state: Arc<Mutex<ThreadFlags>>,
-    recv_event: Event,
-    recv_thread: Mutex<Option<JoinHandle<Result<()>>>>,
+    recv_thread: Mutex<Option<WorkerThread<Result<()>>>>,
 }
 
 impl VioSClient {
@@ -158,7 +158,7 @@ impl VioSClient {
         const NUM_FDS: usize = 5;
         fds.resize(NUM_FDS, 0);
         let (recv_size, fd_count) = client_socket
-            .recv_with_fds(IoSliceMut::new(config.as_mut_slice()), &mut fds)
+            .recv_with_fds(IoSliceMut::new(config.as_bytes_mut()), &mut fds)
             .map_err(Error::ServerError)?;
 
         // Resize the vector to the actual number of file descriptors received and wrap them in
@@ -221,10 +221,8 @@ impl VioSClient {
         let rx_subscribers: Arc<Mutex<HashMap<usize, Sender<BufferReleaseMsg>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let recv_thread_state = Arc::new(Mutex::new(ThreadFlags {
-            running: true,
             reporting_events: false,
         }));
-        let recv_event = Event::new().map_err(Error::EventCreateError)?;
 
         let mut client = VioSClient {
             config,
@@ -240,7 +238,6 @@ impl VioSClient {
             tx_subscribers,
             rx_subscribers,
             recv_thread_state,
-            recv_event,
             recv_thread: Mutex::new(None),
         };
         client.request_and_cache_info()?;
@@ -285,7 +282,6 @@ impl VioSClient {
         if self.recv_thread.lock().is_some() {
             return Ok(());
         }
-        let recv_event = self.recv_event.try_clone().map_err(Error::EventDupError)?;
         let tx_socket = self.tx.try_clone_socket()?;
         let rx_socket = self.rx.try_clone_socket()?;
         let event_socket = self
@@ -303,7 +299,6 @@ impl VioSClient {
                     .try_clone()
                     .map_err(Error::EventDupError)?,
                 self.events.clone(),
-                recv_event,
                 self.recv_thread_state.clone(),
                 tx_socket,
                 rx_socket,
@@ -315,19 +310,8 @@ impl VioSClient {
 
     /// Stops the background thread.
     pub fn stop_bg_thread(&self) -> Result<()> {
-        if self.recv_thread.lock().is_none() {
-            return Ok(());
-        }
-        self.recv_thread_state.lock().running = false;
-        self.recv_event.signal().map_err(Error::EventWriteError)?;
-        if let Some(handle) = self.recv_thread.lock().take() {
-            return match handle.join() {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("Recv thread panicked: {:?}", e);
-                    Ok(())
-                }
-            };
+        if let Some(recv_thread) = self.recv_thread.lock().take() {
+            recv_thread.stop()?;
         }
         Ok(())
     }
@@ -469,9 +453,8 @@ impl VioSClient {
     pub fn keep_rds(&self) -> Vec<RawDescriptor> {
         let control_desc = self.control_socket.lock().as_raw_descriptor();
         let event_desc = self.event_socket.as_raw_descriptor();
-        let recv_event = self.recv_event.as_raw_descriptor();
         let event_notifier = self.event_notifier.as_raw_descriptor();
-        let mut ret = vec![control_desc, event_desc, recv_event, event_notifier];
+        let mut ret = vec![control_desc, event_desc, event_notifier];
         ret.append(&mut self.tx.keep_rds());
         ret.append(&mut self.rx.keep_rds());
         ret
@@ -496,7 +479,7 @@ impl VioSClient {
         Ok(())
     }
 
-    fn request_info<T: DataInit + Default + Copy + Clone>(
+    fn request_info<T: AsBytes + FromBytes + Default + Copy + Clone>(
         &self,
         req_code: u32,
         count: usize,
@@ -518,7 +501,7 @@ impl VioSClient {
             .map_err(Error::ServerIOError)?;
         let mut status: virtio_snd_hdr = Default::default();
         status
-            .as_mut_slice()
+            .as_bytes_mut()
             .copy_from_slice(&reply[0..status_size]);
         if status.code.to_native() != VIRTIO_SND_S_OK {
             return Err(Error::CommandFailed(status.code.to_native()));
@@ -534,7 +517,7 @@ impl VioSClient {
                 let mut info: T = Default::default();
                 // Need to use copy_from_slice instead of T::from_slice because the info_buffer may
                 // not be aligned correctly
-                info.as_mut_slice().copy_from_slice(info_buffer);
+                info.as_bytes_mut().copy_from_slice(info_buffer);
                 info
             })
             .collect())
@@ -568,17 +551,8 @@ impl VioSClient {
     }
 }
 
-impl Drop for VioSClient {
-    fn drop(&mut self) {
-        if let Err(e) = self.stop_bg_thread() {
-            error!("Error stopping Recv thread: {}", e);
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct ThreadFlags {
-    running: bool,
     reporting_events: bool,
 }
 
@@ -596,7 +570,7 @@ fn recv_buffer_status_msg(
 ) -> Result<()> {
     let mut msg: IoStatusMsg = Default::default();
     let size = socket
-        .recv(msg.as_mut_slice())
+        .recv(msg.as_bytes_mut())
         .map_err(Error::ServerIOError)?;
     if size != std::mem::size_of::<IoStatusMsg>() {
         return Err(Error::ProtocolError(
@@ -634,7 +608,7 @@ fn recv_buffer_status_msg(
 fn recv_event(socket: &UnixSeqpacket) -> Result<virtio_snd_event> {
     let mut msg: virtio_snd_event = Default::default();
     let size = socket
-        .recv(msg.as_mut_slice())
+        .recv(msg.as_bytes_mut())
         .map_err(Error::ServerIOError)?;
     if size != std::mem::size_of::<virtio_snd_event>() {
         return Err(Error::ProtocolError(
@@ -649,13 +623,12 @@ fn spawn_recv_thread(
     rx_subscribers: Arc<Mutex<HashMap<usize, Sender<BufferReleaseMsg>>>>,
     event_notifier: Event,
     event_queue: Arc<Mutex<VecDeque<virtio_snd_event>>>,
-    event: Event,
     state: Arc<Mutex<ThreadFlags>>,
     tx_socket: UnixSeqpacket,
     rx_socket: UnixSeqpacket,
     event_socket: UnixSeqpacket,
-) -> JoinHandle<Result<()>> {
-    std::thread::spawn(move || {
+) -> WorkerThread<Result<()>> {
+    WorkerThread::start("shm_vios", move |event| {
         let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
             (&tx_socket, Token::TxBufferMsg),
             (&rx_socket, Token::RxBufferMsg),
@@ -663,11 +636,8 @@ fn spawn_recv_thread(
             (&event, Token::Notification),
         ])
         .map_err(Error::WaitContextCreateError)?;
-        loop {
-            let state_cpy = *state.lock();
-            if !state_cpy.running {
-                break;
-            }
+        let mut running = true;
+        while running {
             let events = wait_ctx.wait().map_err(Error::WaitError)?;
             for evt in events {
                 match evt.token {
@@ -687,6 +657,7 @@ fn spawn_recv_thread(
                         if let Err(e) = event.wait() {
                             error!("Failed to consume notification from recv thread: {:?}", e);
                         }
+                        running = false;
                     }
                 }
             }
@@ -804,7 +775,7 @@ impl From<(u32, VioSStreamParams)> for virtio_snd_pcm_set_params {
     }
 }
 
-fn send_cmd<T: DataInit>(control_socket: &UnixSeqpacket, data: T) -> Result<()> {
+fn send_cmd<T: AsBytes>(control_socket: &UnixSeqpacket, data: T) -> Result<()> {
     seq_socket_send(control_socket, data)?;
     recv_cmd_status(control_socket)
 }
@@ -812,7 +783,7 @@ fn send_cmd<T: DataInit>(control_socket: &UnixSeqpacket, data: T) -> Result<()> 
 fn recv_cmd_status(control_socket: &UnixSeqpacket) -> Result<()> {
     let mut status: virtio_snd_hdr = Default::default();
     control_socket
-        .recv(status.as_mut_slice())
+        .recv(status.as_bytes_mut())
         .map_err(Error::ServerIOError)?;
     if status.code.to_native() == VIRTIO_SND_S_OK {
         Ok(())
@@ -821,9 +792,9 @@ fn recv_cmd_status(control_socket: &UnixSeqpacket) -> Result<()> {
     }
 }
 
-fn seq_socket_send<T: DataInit>(socket: &UnixSeqpacket, data: T) -> Result<()> {
+fn seq_socket_send<T: AsBytes>(socket: &UnixSeqpacket, data: T) -> Result<()> {
     loop {
-        let send_res = socket.send(data.as_slice());
+        let send_res = socket.send(data.as_bytes());
         if let Err(e) = send_res {
             match e.kind() {
                 // Retry if interrupted
@@ -840,15 +811,13 @@ fn seq_socket_send<T: DataInit>(socket: &UnixSeqpacket, data: T) -> Result<()> {
 const VIOS_VERSION: u32 = 2;
 
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 struct VioSConfig {
     version: u32,
     jacks: u32,
     streams: u32,
     chmaps: u32,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VioSConfig {}
 
 struct BufferReleaseMsg {
     status: u32,
@@ -857,14 +826,12 @@ struct BufferReleaseMsg {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, AsBytes, FromBytes)]
 struct IoTransferMsg {
     io_xfer: virtio_snd_pcm_xfer,
     buffer_offset: u32,
     buffer_len: u32,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for IoTransferMsg {}
 
 impl IoTransferMsg {
     fn new(stream_id: u32, buffer_offset: usize, buffer_len: usize) -> IoTransferMsg {
@@ -879,11 +846,9 @@ impl IoTransferMsg {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 struct IoStatusMsg {
     status: virtio_snd_pcm_status,
     buffer_offset: u32,
     consumed_len: u32,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for IoStatusMsg {}

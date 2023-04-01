@@ -19,6 +19,7 @@ pub mod syslog;
 mod timer;
 mod tube;
 mod wait_context;
+mod worker_thread;
 mod write_zeroes;
 
 pub mod sys;
@@ -63,6 +64,7 @@ pub use wait_context::EventToken;
 pub use wait_context::EventType;
 pub use wait_context::TriggeredEvent;
 pub use wait_context::WaitContext;
+pub use worker_thread::WorkerThread;
 pub use write_zeroes::PunchHole;
 pub use write_zeroes::WriteZeroesAt;
 
@@ -127,6 +129,7 @@ cfg_if::cfg_if! {
         };
         pub use tube::ProtoTube;
         pub use platform::{set_audio_thread_priorities, thread};
+        pub use platform::Terminal;
     } else {
         compile_error!("Unsupported platform");
     }
@@ -139,8 +142,6 @@ pub use log::trace;
 pub use log::warn;
 pub use mmap::Protection;
 pub use platform::deserialize_with_descriptors;
-pub(crate) use platform::file_punch_hole;
-pub(crate) use platform::file_write_zeroes_at;
 pub use platform::get_cpu_affinity;
 pub use platform::get_filesystem_type;
 pub use platform::getpid;

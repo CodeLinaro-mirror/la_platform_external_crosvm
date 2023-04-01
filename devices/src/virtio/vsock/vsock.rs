@@ -48,6 +48,8 @@ use futures::StreamExt;
 use remain::sorted;
 use thiserror::Error as ThisError;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::virtio::async_utils;
 use crate::virtio::copy_config;
@@ -65,6 +67,7 @@ use crate::virtio::VirtioDevice;
 use crate::virtio::Writer;
 use crate::virtio::TYPE_STREAM_SOCKET;
 use crate::Suspendable;
+use base::WorkerThread;
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -139,8 +142,7 @@ pub struct Vsock {
     guest_cid: u64,
     host_guid: Option<String>,
     features: u64,
-    kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<()>>,
+    worker_thread: Option<WorkerThread<()>>,
 }
 
 impl Vsock {
@@ -149,7 +151,6 @@ impl Vsock {
             guest_cid,
             host_guid,
             features: base_features,
-            kill_evt: None,
             worker_thread: None,
         })
     }
@@ -161,30 +162,13 @@ impl Vsock {
     }
 }
 
-impl Drop for Vsock {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.signal();
-        }
-
-        if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
-        }
-    }
-}
-
 impl VirtioDevice for Vsock {
     fn keep_rds(&self) -> Vec<RawHandle> {
-        let mut keep_rds = Vec::new();
-        if let Some(kill_evt) = &self.kill_evt {
-            keep_rds.push(kill_evt.as_raw_descriptor());
-        }
-        keep_rds
+        Vec::new()
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        copy_config(data, 0, self.get_config().as_slice(), offset);
+        copy_config(data, 0, self.get_config().as_bytes(), offset);
     }
 
     fn device_type(&self) -> DeviceType {
@@ -221,15 +205,11 @@ impl VirtioDevice for Vsock {
         let (tx_queue, tx_queue_evt) = queues.remove(0);
         let (event_queue, event_queue_evt) = queues.remove(0);
 
-        let (self_kill_evt, worker_kill_evt) = Event::new()
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .context("failed to create kill Event pair")?;
-        self.kill_evt = Some(self_kill_evt);
         let host_guid = self.host_guid.clone();
         let guest_cid = self.guest_cid;
-        let worker_thread = thread::Builder::new()
-            .name("userspace_virtio_vsock".to_string())
-            .spawn(move || {
+        self.worker_thread = Some(WorkerThread::start(
+            "userspace_virtio_vsock",
+            move |kill_evt| {
                 let mut worker = Worker::new(mem, interrupt, host_guid, guest_cid);
                 let result = worker.run(
                     rx_queue,
@@ -238,15 +218,15 @@ impl VirtioDevice for Vsock {
                     rx_queue_evt,
                     tx_queue_evt,
                     event_queue_evt,
-                    worker_kill_evt,
+                    kill_evt,
                 );
 
                 if let Err(e) = result {
                     error!("userspace vsock worker thread exited with error: {:?}", e);
                 }
-            })
-            .context("failed to spawn virtio-vsock worker")?;
-        self.worker_thread = Some(worker_thread);
+            },
+        ));
+
         Ok(())
     }
 }
@@ -501,7 +481,7 @@ impl Worker {
                 const HEADER_SIZE: usize = std::mem::size_of::<virtio_vsock_hdr>();
                 let data_read = &buffer[..data_size];
                 let mut header_and_data = vec![0u8; HEADER_SIZE + data_size];
-                header_and_data[..HEADER_SIZE].copy_from_slice(response_header.as_slice());
+                header_and_data[..HEADER_SIZE].copy_from_slice(response_header.as_bytes());
                 header_and_data[HEADER_SIZE..].copy_from_slice(data_read);
                 self.write_bytes_to_queue(
                     &mut *recv_queue.lock().await,
@@ -649,7 +629,7 @@ impl Worker {
                 // by allocating the buffer and overlapped struct
                 // on the heap.
                 unsafe {
-                    match pipe_connection.read_overlapped(&mut buffer[..], &mut *overlapped_wrapper)
+                    match pipe_connection.read_overlapped(&mut buffer[..], &mut overlapped_wrapper)
                     {
                         Ok(()) => {}
                         Err(e) => {
@@ -936,7 +916,7 @@ impl Worker {
                 self.write_bytes_to_queue(
                     &mut *send_queue.lock().await,
                     rx_queue_evt,
-                    response_header.as_slice(),
+                    response_header.as_bytes(),
                 )
                 .await
                 .expect("vsock: failed to write to queue");
@@ -973,7 +953,7 @@ impl Worker {
                     self.write_bytes_to_queue(
                         &mut *send_queue.lock().await,
                         rx_queue_evt,
-                        response.as_mut_slice(),
+                        response.as_bytes_mut(),
                     )
                     .await
                     .expect("vsock: failed to write to queue");
@@ -1080,7 +1060,7 @@ impl Worker {
             self.write_bytes_to_queue(
                 &mut *send_queue.lock().await,
                 rx_queue_evt,
-                response.as_mut_slice(),
+                response.as_bytes_mut(),
             )
             .await
             .expect("vsock: failed to write to queue");
@@ -1119,7 +1099,7 @@ impl Worker {
             self.write_bytes_to_queue(
                 &mut *send_queue.lock().await,
                 rx_queue_evt,
-                response.as_mut_slice(),
+                response.as_bytes_mut(),
             )
             .await
             .expect("failed to write to queue");
