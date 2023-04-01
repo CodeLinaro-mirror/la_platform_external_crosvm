@@ -60,6 +60,7 @@ use libc::EINVAL;
 use libc::EIO;
 use libc::ENOENT;
 use libc::ENOSPC;
+use libc::ENOSYS;
 use libc::EOVERFLOW;
 use libc::O_CLOEXEC;
 use libc::O_RDWR;
@@ -149,9 +150,25 @@ impl Kvm {
             return errno_result();
         }
         // Safe because we verify that ret is valid and we own the fd.
-        Ok(Kvm {
-            kvm: unsafe { SafeDescriptor::from_raw_descriptor(ret) },
-        })
+        let kvm = unsafe { SafeDescriptor::from_raw_descriptor(ret) };
+
+        // Safe because we know that the descriptor is valid and we verify the return result.
+        let version = unsafe { ioctl(&kvm, KVM_GET_API_VERSION()) };
+        if version < 0 {
+            return errno_result();
+        }
+
+        // Per the kernel KVM API documentation: "Applications should refuse to run if
+        // KVM_GET_API_VERSION returns a value other than 12."
+        if version as u32 != KVM_API_VERSION {
+            error!(
+                "KVM_GET_API_VERSION: expected {}, got {}",
+                KVM_API_VERSION, version,
+            );
+            return Err(Error::new(ENOSYS));
+        }
+
+        Ok(Kvm { kvm })
     }
 
     /// Opens `/dev/kvm/` and returns a Kvm object on success.
@@ -276,6 +293,7 @@ impl KvmVm {
             .map_err(|_| Error::new(ENOSPC))?;
 
         Ok(KvmVcpu {
+            kvm: self.kvm.try_clone()?,
             vm: self.vm.try_clone()?,
             vcpu,
             id,
@@ -748,6 +766,7 @@ impl AsRawDescriptor for KvmVm {
 
 /// A wrapper around using a KVM Vcpu.
 pub struct KvmVcpu {
+    kvm: Kvm,
     vm: SafeDescriptor,
     vcpu: SafeDescriptor,
     id: usize,
@@ -773,6 +792,7 @@ impl Vcpu for KvmVcpu {
         let vcpu_run_handle_fingerprint = self.vcpu_run_handle_fingerprint.clone();
 
         Ok(KvmVcpu {
+            kvm: self.kvm.try_clone()?,
             vm,
             vcpu,
             id: self.id,

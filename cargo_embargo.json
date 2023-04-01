@@ -156,7 +156,15 @@
       "add_module_block": "aarch64/cargo2android_arch.bp"
     },
     "base": {
-      "patch": "base/patches/Android.bp.patch"
+      "patch": "base/patches/Android.bp.patch",
+      "dep_blocklist": [
+        // "libtest_mimic" is needed for "base_test_tests_process" which is
+        // currently ignored by cargo_embargo because it is a "harness-less"
+        // test. cargo_embargo incorrectly thinks the dependency is needed for
+        // other tests in the "process" package, so we need to manually block
+        // it here.
+        "liblibtest_mimic"
+      ]
     },
     "base_event_token_derive": {
       // TODO: This is a proc macro crate. Should disable device tests by default for them.

@@ -15,8 +15,7 @@ use std::collections::HashMap as Map;
 use std::convert::TryInto;
 use std::sync::Arc;
 
-use base::warn;
-use base::MappedRegion;
+use log::warn;
 use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::Device;
 use vulkano::device::DeviceCreateInfo;
@@ -51,6 +50,7 @@ use vulkano::VulkanLibrary;
 use crate::rutabaga_gralloc::gralloc::Gralloc;
 use crate::rutabaga_gralloc::gralloc::ImageAllocationInfo;
 use crate::rutabaga_gralloc::gralloc::ImageMemoryRequirements;
+use crate::rutabaga_os::MappedRegion;
 use crate::rutabaga_utils::*;
 
 /// A gralloc implementation capable of allocation `VkDeviceMemory`.

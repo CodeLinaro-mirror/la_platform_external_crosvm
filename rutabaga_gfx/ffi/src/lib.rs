@@ -16,14 +16,11 @@ use std::ptr::null_mut;
 use std::slice::from_raw_parts;
 use std::slice::from_raw_parts_mut;
 
-use base::error;
-use base::FromRawDescriptor;
-use base::IntoRawDescriptor;
-use base::SafeDescriptor;
 use data_model::VolatileSlice;
 use libc::iovec;
 use libc::EINVAL;
 use libc::ESRCH;
+use log::error;
 use rutabaga_gfx::*;
 
 const NO_ERROR: i32 = 0;
@@ -149,14 +146,11 @@ pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mu
         let result = RutabagaBuilder::new(component_type, (*builder).capset_mask)
             .set_use_egl(true)
             .set_use_surfaceless(true)
-            .set_use_guest_angle(true)
+            .set_use_guest_angle(false)
             .set_use_vulkan(true)
-            .set_use_external_blob(true)
+            .set_use_external_blob(false)
             .set_rutabaga_channels(rutabaga_channels_opt)
-            .build(
-                fence_handler,
-                #[cfg(feature = "virgl_renderer_next")] /* render_server_fd= */ None,
-            );
+            .build(fence_handler, None);
 
         let rtbg = return_on_error!(result);
         *ptr = Box::into_raw(Box::new(rtbg)) as _;
@@ -178,25 +172,12 @@ pub extern "C" fn rutabaga_finish(ptr: &mut *mut rutabaga) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn rutabaga_get_num_capsets() -> u32 {
-    let mut num_capsets = 0;
-
-    // Cross-domain (like virtio_wl with llvmpipe) is always available.
-    num_capsets += 1;
-
-    // Four capsets for virgl_renderer
-    #[cfg(feature = "virgl_renderer")]
-    {
-        num_capsets += 4;
-    }
-
-    // One capset for gfxstream
-    #[cfg(feature = "gfxstream")]
-    {
-        num_capsets += 1;
-    }
-
-    num_capsets
+pub extern "C" fn rutabaga_get_num_capsets(ptr: &mut rutabaga, num_capsets: &mut u32) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        *num_capsets = ptr.get_num_capsets();
+        NO_ERROR
+    }))
+    .unwrap_or(-ESRCH)
 }
 
 #[no_mangle]
@@ -423,7 +404,7 @@ pub unsafe extern "C" fn rutabaga_resource_create_blob(
         let mut handle_opt: Option<RutabagaHandle> = None;
         if let Some(hnd) = handle {
             handle_opt = Some(RutabagaHandle {
-                os_handle: SafeDescriptor::from_raw_descriptor((*hnd).os_handle),
+                os_handle: RutabagaDescriptor::from_raw_descriptor((*hnd).os_handle),
                 handle_type: (*hnd).handle_type,
             });
         }

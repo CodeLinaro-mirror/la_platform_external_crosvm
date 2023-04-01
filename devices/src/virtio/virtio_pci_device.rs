@@ -10,6 +10,7 @@ use acpi_tables::sdt::SDT;
 use anyhow::anyhow;
 use anyhow::Context;
 use base::error;
+use base::info;
 use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::Event;
@@ -17,13 +18,14 @@ use base::Protection;
 use base::RawDescriptor;
 use base::Result;
 use base::Tube;
-use data_model::DataInit;
 use data_model::Le32;
 use hypervisor::Datamatch;
 use libc::ERANGE;
 use resources::Alloc;
 use resources::AllocOptions;
 use resources::SystemAllocator;
+use serde::Deserialize;
+use serde::Serialize;
 use sync::Mutex;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_ACKNOWLEDGE;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER;
@@ -38,6 +40,7 @@ use vm_control::VmMemoryResponse;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 
 use self::virtio_pci_common_config::VirtioPciCommonConfig;
@@ -83,7 +86,7 @@ pub enum PciCapabilityType {
 
 #[allow(dead_code)]
 #[repr(C)]
-#[derive(Clone, Copy, FromBytes)]
+#[derive(Clone, Copy, FromBytes, AsBytes)]
 pub struct VirtioPciCap {
     // cap_vndr and cap_next are autofilled based on id() in pci configuration
     pub cap_vndr: u8, // Generic PCI field: PCI_CAP_ID_VNDR
@@ -96,12 +99,10 @@ pub struct VirtioPciCap {
     pub offset: Le32, // Offset within bar.
     pub length: Le32, // Length of the structure, in bytes.
 }
-// It is safe to implement DataInit; all members are simple numbers and any value is valid.
-unsafe impl DataInit for VirtioPciCap {}
 
 impl PciCapability for VirtioPciCap {
     fn bytes(&self) -> &[u8] {
-        self.as_slice()
+        self.as_bytes()
     }
 
     fn id(&self) -> PciCapabilityID {
@@ -135,17 +136,15 @@ impl VirtioPciCap {
 
 #[allow(dead_code)]
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 pub struct VirtioPciNotifyCap {
     cap: VirtioPciCap,
     notify_off_multiplier: Le32,
 }
-// It is safe to implement DataInit; all members are simple numbers and any value is valid.
-unsafe impl DataInit for VirtioPciNotifyCap {}
 
 impl PciCapability for VirtioPciNotifyCap {
     fn bytes(&self) -> &[u8] {
-        self.as_slice()
+        self.as_bytes()
     }
 
     fn id(&self) -> PciCapabilityID {
@@ -183,18 +182,16 @@ impl VirtioPciNotifyCap {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 pub struct VirtioPciShmCap {
     cap: VirtioPciCap,
     offset_hi: Le32, // Most sig 32 bits of offset
     length_hi: Le32, // Most sig 32 bits of length
 }
-// It is safe to implement DataInit; all members are simple numbers and any value is valid.
-unsafe impl DataInit for VirtioPciShmCap {}
 
 impl PciCapability for VirtioPciShmCap {
     fn bytes(&self) -> &[u8] {
-        self.as_slice()
+        self.as_bytes()
     }
 
     fn id(&self) -> PciCapabilityID {
@@ -756,6 +753,9 @@ impl PciDevice for VirtioPciDevice {
 
     fn read_config_register(&self, reg_idx: usize) -> u32 {
         let mut data: u32 = self.config_regs.read_reg(reg_idx);
+        if reg_idx < 5 && self.debug_label() == "pcivirtio-gpu" {
+            info!("virtio gpu read config register {}", reg_idx);
+        }
         if let Some(msix_cap_reg_idx) = self.msix_cap_reg_idx {
             if msix_cap_reg_idx == reg_idx {
                 data = self.msix_config.lock().read_msix_capability(data);
@@ -920,6 +920,12 @@ impl PciDevice for VirtioPciDevice {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct VirtioPciDeviceSnapshot {
+    inner_device: serde_json::Value,
+    msix_config: serde_json::Value,
+}
+
 impl Suspendable for VirtioPciDevice {
     fn sleep(&mut self) -> anyhow::Result<()> {
         if let Some(state) = self.device.stop()? {
@@ -936,11 +942,17 @@ impl Suspendable for VirtioPciDevice {
     }
 
     fn snapshot(&self) -> anyhow::Result<serde_json::Value> {
-        self.device.snapshot()
+        serde_json::to_value(VirtioPciDeviceSnapshot {
+            inner_device: self.device.snapshot()?,
+            msix_config: self.msix_config.lock().snapshot()?,
+        })
+        .context("failed to serialize VirtioPciDeviceSnapshot")
     }
 
     fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
-        self.device.restore(data)
+        let deser: VirtioPciDeviceSnapshot = serde_json::from_value(data)?;
+        self.msix_config.lock().restore(deser.msix_config)?;
+        self.device.restore(deser.inner_device)
     }
 }
 

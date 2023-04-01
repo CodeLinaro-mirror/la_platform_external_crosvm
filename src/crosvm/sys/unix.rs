@@ -31,6 +31,7 @@ use std::os::unix::prelude::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -213,9 +214,7 @@ fn create_virtio_devices(
     pmem_device_tubes: &mut Vec<Tube>,
     fs_device_tubes: &mut Vec<Tube>,
     #[cfg(feature = "gpu")] gpu_control_tube: Tube,
-    #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))] render_server_fd: Option<
-        SafeDescriptor,
-    >,
+    #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
     vvu_proxy_device_tubes: &mut Vec<Tube>,
     vvu_proxy_max_sibling_mem_size: u64,
     registered_evt_q: &SendTube,
@@ -348,7 +347,6 @@ fn create_virtio_devices(
                 // Use the unnamed socket for GPU display screens.
                 cfg.wayland_socket_paths.get(""),
                 cfg.x_display.clone(),
-                #[cfg(feature = "virgl_renderer_next")]
                 render_server_fd,
                 event_devices,
             )?);
@@ -717,9 +715,7 @@ fn create_devices(
     fs_device_tubes: &mut Vec<Tube>,
     #[cfg(feature = "usb")] usb_provider: HostBackendDeviceProvider,
     #[cfg(feature = "gpu")] gpu_control_tube: Tube,
-    #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))] render_server_fd: Option<
-        SafeDescriptor,
-    >,
+    #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
     vvu_proxy_device_tubes: &mut Vec<Tube>,
     vvu_proxy_max_sibling_mem_size: u64,
     iova_max_addr: &mut Option<u64>,
@@ -850,7 +846,7 @@ fn create_devices(
         fs_device_tubes,
         #[cfg(feature = "gpu")]
         gpu_control_tube,
-        #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
+        #[cfg(feature = "gpu")]
         render_server_fd,
         vvu_proxy_device_tubes,
         vvu_proxy_max_sibling_mem_size,
@@ -1703,7 +1699,7 @@ where
 
     create_file_backed_mappings(&cfg, &mut vm, &mut sys_allocator)?;
 
-    #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
+    #[cfg(feature = "gpu")]
     // Hold on to the render server jail so it keeps running until we exit run_vm()
     let (_render_server_jail, render_server_fd) =
         if let Some(parameters) = &cfg.gpu_render_server_parameters {
@@ -1813,7 +1809,7 @@ where
         usb_provider,
         #[cfg(feature = "gpu")]
         gpu_control_device_tube,
-        #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
+        #[cfg(feature = "gpu")]
         render_server_fd,
         &mut vvu_proxy_device_tubes,
         components.memory_size,
@@ -1934,6 +1930,10 @@ where
         swap_controller.as_ref(),
     )
     .context("the architecture failed to build the vm")?;
+
+    if let Some(tube) = linux.vm_request_tube.take() {
+        control_tubes.push(TaggedControlTube::Vm(tube));
+    }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let (hp_control_tube, hp_worker_tube) = mpsc::channel();
@@ -2499,7 +2499,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     // Tube keyed on the socket path used to create it.
     struct AddressedTube {
-        tube: Tube,
+        tube: Rc<Tube>,
         socket_addr: String,
     }
 
@@ -2520,6 +2520,53 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     impl AddressedTube {
         pub fn send<T: Serialize>(&self, msg: &T) -> Result<(), base::TubeError> {
             self.tube.send(msg)
+        }
+    }
+
+    fn find_registered_tube<'a>(
+        registered_tubes: &'a HashMap<RegisteredEvent, HashSet<AddressedTube>>,
+        socket_addr: &str,
+        event: RegisteredEvent,
+    ) -> (Option<&'a Rc<Tube>>, bool) {
+        let mut registered_tube: Option<&Rc<Tube>> = None;
+        let mut already_registered = false;
+        'outer: for (evt, addr_tubes) in registered_tubes {
+            for addr_tube in addr_tubes {
+                if addr_tube.socket_addr == socket_addr {
+                    if *evt == event {
+                        already_registered = true;
+                        break 'outer;
+                    }
+                    // Since all tubes of the same addr should
+                    // be an RC to the same tube, it doesn't
+                    // matter which one we get. But we do need
+                    // to check for a registration for the
+                    // current event, so can't break here.
+                    registered_tube = Some(&addr_tube.tube);
+                }
+            }
+        }
+        (registered_tube, already_registered)
+    }
+
+    fn make_addr_tube_from_maybe_existing(
+        tube: Option<&Rc<Tube>>,
+        addr: String,
+    ) -> Result<AddressedTube> {
+        if let Some(registered_tube) = tube {
+            Ok(AddressedTube {
+                tube: registered_tube.clone(),
+                socket_addr: addr,
+            })
+        } else {
+            let sock = UnixSeqpacket::connect(addr.clone()).with_context(|| {
+                format!("failed to connect to registered listening socket {}", addr)
+            })?;
+            let tube = Tube::new_from_unix_seqpacket(sock);
+            Ok(AddressedTube {
+                tube: Rc::new(tube),
+                socket_addr: addr,
+            })
         }
     }
 
@@ -2772,18 +2819,15 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     // Restore VM (if applicable).
     // Must happen after the vCPU barrier to avoid deadlock.
     if let Some(path) = &cfg.restore_path {
-        device_ctrl_tube
-            .send(&DeviceControlCommand::RestoreDevices {
-                restore_path: path.clone(),
-            })
-            .context("send command to devices control socket")?;
-        let response = device_ctrl_tube
-            .recv()
-            .context("receive from devices control socket")?;
-        match response {
-            vm_control::VmResponse::Ok => {}
-            _ => bail!("unexpected restore response: {response:?}"),
-        };
+        vm_control::do_restore(
+            path.clone(),
+            |msg| vcpu::kick_all_vcpus(&vcpu_handles, linux.irq_chip.as_irq_chip(), msg),
+            |msg, index| {
+                vcpu::kick_vcpu(&vcpu_handles.get(index), linux.irq_chip.as_irq_chip(), msg)
+            },
+            &device_ctrl_tube,
+            linux.vcpu_count,
+        )?;
         // Allow the vCPUs to start for real.
         vcpu::kick_all_vcpus(
             &vcpu_handles,
@@ -2981,35 +3025,28 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                             }
                                         }
                                         VmRequest::RegisterListener { socket_addr, event } => {
-                                            let mut already_registered = false;
-
-                                            if let Some(tubes) = registered_evt_tubes.get(&event) {
-                                                for addr_tube in tubes {
-                                                    if addr_tube.socket_addr == socket_addr {
-                                                        already_registered = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
+                                            let (registered_tube, already_registered) =
+                                                find_registered_tube(
+                                                    &registered_evt_tubes,
+                                                    &socket_addr,
+                                                    event,
+                                                );
 
                                             if !already_registered {
-                                                if let Ok(socket) =
-                                                    UnixSeqpacket::connect(socket_addr.clone())
+                                                let addr_tube = make_addr_tube_from_maybe_existing(
+                                                    registered_tube,
+                                                    socket_addr,
+                                                )?;
+
+                                                if let Some(tubes) =
+                                                    registered_evt_tubes.get_mut(&event)
                                                 {
-                                                    let addr_tube = AddressedTube {
-                                                        tube: Tube::new_from_unix_seqpacket(socket),
-                                                        socket_addr,
-                                                    };
-                                                    if let Some(tubes) =
-                                                        registered_evt_tubes.get_mut(&event)
-                                                    {
-                                                        tubes.insert(addr_tube);
-                                                    } else {
-                                                        registered_evt_tubes.insert(
-                                                            event,
-                                                            vec![addr_tube].into_iter().collect(),
-                                                        );
-                                                    }
+                                                    tubes.insert(addr_tube);
+                                                } else {
+                                                    registered_evt_tubes.insert(
+                                                        event,
+                                                        vec![addr_tube].into_iter().collect(),
+                                                    );
                                                 }
                                             }
                                             VmResponse::Ok
@@ -3051,6 +3088,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 |msg| {
                                                     vcpu::kick_all_vcpus(
                                                         &vcpu_handles,
+                                                        linux.irq_chip.as_irq_chip(),
+                                                        msg,
+                                                    )
+                                                },
+                                                |msg, index| {
+                                                    vcpu::kick_vcpu(
+                                                        &vcpu_handles.get(index),
                                                         linux.irq_chip.as_irq_chip(),
                                                         msg,
                                                     )

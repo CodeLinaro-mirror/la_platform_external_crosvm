@@ -29,6 +29,7 @@ use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Display;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::result::Result as StdResult;
 use std::str::FromStr;
@@ -50,6 +51,7 @@ use base::AsRawDescriptor;
 use base::Error as SysError;
 use base::Event;
 use base::ExternalMapping;
+use base::IntoRawDescriptor;
 use base::MappedRegion;
 use base::MemoryMappingBuilder;
 use base::MmapError;
@@ -63,6 +65,7 @@ use hypervisor::IoEventAddress;
 use hypervisor::IrqRoute;
 use hypervisor::IrqSource;
 pub use hypervisor::MemSlot;
+use hypervisor::VcpuInnerSnapshot;
 use hypervisor::Vm;
 use libc::EINVAL;
 use libc::EIO;
@@ -73,8 +76,11 @@ use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
 use rutabaga_gfx::DeviceId;
+use rutabaga_gfx::RutabagaDescriptor;
+use rutabaga_gfx::RutabagaFromRawDescriptor;
 use rutabaga_gfx::RutabagaGralloc;
 use rutabaga_gfx::RutabagaHandle;
+use rutabaga_gfx::RutabagaMappedRegion;
 use rutabaga_gfx::VulkanInfo;
 use serde::Deserialize;
 use serde::Serialize;
@@ -115,6 +121,14 @@ pub enum VcpuControl {
     MakeRT,
     // Request the current state of the vCPU. The result is sent back over the included channel.
     GetStates(mpsc::Sender<VmRunMode>),
+    Snapshot(mpsc::Sender<anyhow::Result<VcpuSnapshot>>),
+    Restore(mpsc::Sender<anyhow::Result<()>>, Box<VcpuSnapshot>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VcpuSnapshot {
+    pub vcpu: VcpuInnerSnapshot,
+    pub vcpu_id: usize,
 }
 
 /// Mode of execution for the VM.
@@ -162,6 +176,7 @@ pub trait PmeNotify: Send {
 pub trait PmResource {
     fn pwrbtn_evt(&mut self) {}
     fn slpbtn_evt(&mut self) {}
+    fn rtc_evt(&mut self) {}
     fn gpe_evt(&mut self, _gpe: u32) {}
     fn pme_evt(&mut self, _requester_id: u16) {}
     fn register_gpe_notify_dev(&mut self, _gpe: u32, _notify_dev: Arc<Mutex<dyn GpeNotify>>) {}
@@ -345,6 +360,32 @@ pub enum VmMemorySource {
     ExternalMapping { ptr: u64, size: u64 },
 }
 
+// The following are wrappers to avoid base dependencies in the rutabaga crate
+fn to_rutabaga_desciptor(s: SafeDescriptor) -> RutabagaDescriptor {
+    // Safe because we own the SafeDescriptor at this point.
+    unsafe { RutabagaDescriptor::from_raw_descriptor(s.into_raw_descriptor()) }
+}
+
+struct RutabagaMemoryRegion {
+    region: Box<dyn RutabagaMappedRegion>,
+}
+
+impl RutabagaMemoryRegion {
+    pub fn new(region: Box<dyn RutabagaMappedRegion>) -> RutabagaMemoryRegion {
+        RutabagaMemoryRegion { region }
+    }
+}
+
+unsafe impl MappedRegion for RutabagaMemoryRegion {
+    fn as_ptr(&self) -> *mut u8 {
+        self.region.as_ptr()
+    }
+
+    fn size(&self) -> usize {
+        self.region.size()
+    }
+}
+
 impl VmMemorySource {
     /// Map the resource and return its mapping and size in bytes.
     pub fn map(
@@ -375,7 +416,7 @@ impl VmMemorySource {
             } => {
                 let mapped_region = match gralloc.import_and_map(
                     RutabagaHandle {
-                        os_handle: descriptor,
+                        os_handle: to_rutabaga_desciptor(descriptor),
                         handle_type,
                     },
                     VulkanInfo {
@@ -384,7 +425,11 @@ impl VmMemorySource {
                     },
                     size,
                 ) {
-                    Ok(mapped_region) => mapped_region,
+                    Ok(mapped_region) => {
+                        let mapped_region: Box<dyn MappedRegion> =
+                            Box::new(RutabagaMemoryRegion::new(mapped_region));
+                        mapped_region
+                    }
                     Err(e) => {
                         error!("gralloc failed to import and map: {}", e);
                         return Err(SysError::new(EINVAL));
@@ -1021,6 +1066,7 @@ pub enum PvClockCommandResponse {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SwapCommand {
     Enable,
+    Trim,
     SwapOut,
     Disable,
     Status,
@@ -1047,6 +1093,8 @@ pub enum VmRequest {
     Powerbtn,
     /// Trigger a sleep button event in the guest.
     Sleepbtn,
+    /// Trigger a RTC interrupt in the guest.
+    Rtc,
     /// Suspend the VM's VCPUs until resume.
     Suspend,
     /// Swap the memory content into files on a disk
@@ -1285,6 +1333,7 @@ impl VmRequest {
         usb_control_tube: Option<&Tube>,
         bat_control: &mut Option<BatControl>,
         kick_vcpus: impl Fn(VcpuControl),
+        kick_vcpu: impl Fn(VcpuControl, usize),
         force_s2idle: bool,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
         device_control_tube: &Tube,
@@ -1314,6 +1363,15 @@ impl VmRequest {
                     VmResponse::Err(SysError::new(ENOTSUP))
                 }
             }
+            VmRequest::Rtc => {
+                if let Some(pm) = pm {
+                    pm.lock().rtc_evt();
+                    VmResponse::Ok
+                } else {
+                    error!("{:#?} not supported", *self);
+                    VmResponse::Err(SysError::new(ENOTSUP))
+                }
+            }
             VmRequest::Suspend => {
                 *run_mode = Some(VmRunMode::Suspending);
                 VmResponse::Ok
@@ -1325,6 +1383,19 @@ impl VmRequest {
                         Ok(()) => VmResponse::Ok,
                         Err(e) => {
                             error!("swap enable failed: {}", e);
+                            VmResponse::Err(SysError::new(EINVAL))
+                        }
+                    };
+                }
+                VmResponse::Err(SysError::new(ENOTSUP))
+            }
+            VmRequest::Swap(SwapCommand::Trim) => {
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    return match swap_controller.trim() {
+                        Ok(()) => VmResponse::Ok,
+                        Err(e) => {
+                            error!("swap trim failed: {}", e);
                             VmResponse::Err(SysError::new(EINVAL))
                         }
                     };
@@ -1589,7 +1660,29 @@ impl VmRequest {
                         }
                     }
                     info!("flushed IRQs in {} iterations", flush_attempts);
-
+                    let vcpu_path = snapshot_path.with_extension("vcpu");
+                    let cpu_file = OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .truncate(true)
+                        .open(&vcpu_path)
+                        .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
+                    let (send_chan, recv_chan) = mpsc::channel();
+                    kick_vcpus(VcpuControl::Snapshot(send_chan));
+                    // Validate all Vcpus snapshot successfully
+                    let mut cpu_vec = Vec::with_capacity(vcpu_size);
+                    for _ in 0..vcpu_size {
+                        match recv_chan
+                            .recv()
+                            .context("Failed to snapshot Vcpu, aborting snapshot")?
+                        {
+                            Ok(snap) => {
+                                cpu_vec.push(snap);
+                            }
+                            Err(e) => bail!("Failed to snapshot Vcpu, aborting snapshot: {}", e),
+                        }
+                    }
+                    serde_json::to_writer(cpu_file, &cpu_vec).expect("Failed to write Vcpu state");
                     device_control_tube
                         .send(&DeviceControlCommand::SnapshotDevices {
                             snapshot_path: snapshot_path.clone(),
@@ -1608,19 +1701,14 @@ impl VmRequest {
                 }
             }
             VmRequest::Restore(RestoreCommand::Apply { ref restore_path }) => {
-                let f = || {
-                    let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
-                    device_control_tube
-                        .send(&DeviceControlCommand::RestoreDevices {
-                            restore_path: restore_path.clone(),
-                        })
-                        .context("send command to devices control socket")?;
-                    device_control_tube
-                        .recv()
-                        .context("receive from devices control socket")
-                };
-                match f() {
-                    Ok(r) => r,
+                match do_restore(
+                    restore_path.clone(),
+                    kick_vcpus,
+                    kick_vcpu,
+                    device_control_tube,
+                    vcpu_size,
+                ) {
+                    Ok(()) => VmResponse::Ok,
                     Err(e) => {
                         error!("failed to handle restore: {:?}", e);
                         VmResponse::Err(SysError::new(EIO))
@@ -1637,6 +1725,53 @@ impl VmRequest {
             } => VmResponse::Ok,
             VmRequest::Unregister { socket_addr: _ } => VmResponse::Ok,
         }
+    }
+}
+
+/// Restore the VM to the snapshot at `restore_path`.
+///
+/// Same as `VmRequest::execute` with a `VmRequest::Restore`. Exposed as a separate function
+/// because not all the `VmRequest::execute` arguments are available in the "cold restore" flow.
+pub fn do_restore(
+    restore_path: PathBuf,
+    kick_vcpus: impl Fn(VcpuControl),
+    kick_vcpu: impl Fn(VcpuControl, usize),
+    device_control_tube: &Tube,
+    vcpu_size: usize,
+) -> anyhow::Result<()> {
+    let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
+    let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
+    let vcpu_path = restore_path.with_extension("vcpu");
+    let cpu_file = OpenOptions::new()
+        .read(true)
+        .write(false)
+        .open(&vcpu_path)
+        .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
+    let vcpus_data: Vec<serde_json::Value> = serde_json::from_reader(cpu_file)?;
+    let (send_chan, recv_chan) = mpsc::channel();
+    for data in vcpus_data {
+        let vcpu_snap: VcpuSnapshot =
+            serde_json::from_value(data).context("failed to deserialize vcpu snapshot")?;
+        let vcpu_id = vcpu_snap.vcpu_id;
+        kick_vcpu(
+            VcpuControl::Restore(send_chan.clone(), Box::new(vcpu_snap)),
+            vcpu_id,
+        );
+    }
+    for _ in 0..vcpu_size {
+        if let Err(e) = recv_chan.recv() {
+            bail!("Failed to restore vcpu: {}", e);
+        }
+    }
+    device_control_tube
+        .send(&DeviceControlCommand::RestoreDevices { restore_path })
+        .context("send command to devices control socket")?;
+    let resp = device_control_tube
+        .recv()
+        .context("receive from devices control socket")?;
+    match resp {
+        VmResponse::Ok => Ok(()),
+        _ => bail!("unexpected RestoreDevices response: {resp}"),
     }
 }
 

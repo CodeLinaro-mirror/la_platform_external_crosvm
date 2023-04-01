@@ -27,8 +27,6 @@ use std::io::stdout;
 use std::ops::Range;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::thread::Scope;
 use std::thread::ScopedJoinHandle;
 use std::time::Duration;
@@ -45,9 +43,7 @@ use base::unix::process::Child;
 use base::warn;
 use base::AsRawDescriptor;
 use base::AsRawDescriptors;
-use base::Event;
 use base::EventToken;
-use base::EventWaitResult;
 use base::FromRawDescriptor;
 use base::RawDescriptor;
 use base::SharedMemory;
@@ -78,10 +74,13 @@ use crate::userfaultfd::unregister_regions;
 use crate::userfaultfd::Factory as UffdFactory;
 use crate::userfaultfd::UffdEvent;
 use crate::userfaultfd::Userfaultfd;
+use crate::worker::BackgroundJobControl;
 use crate::worker::Worker;
 
 /// The max size of chunks to swap out/in at once.
 const MAX_SWAP_CHUNK_SIZE: usize = 2 * 1024 * 1024; // = 2MB
+/// The max pages to trim at once.
+const MAX_TRIM_PAGES: usize = 1024;
 
 /// Current state of vmm-swap.
 ///
@@ -93,6 +92,8 @@ pub enum State {
     Ready,
     /// Pages in guest memory are moved to the staging memory.
     Pending,
+    /// Trimming staging memory.
+    TrimInProgress,
     /// swap-out is in progress.
     SwapOutInProgress,
     /// swap out succeeded.
@@ -107,6 +108,7 @@ impl From<&SwapState<'_>> for State {
     fn from(state: &SwapState<'_>) -> Self {
         match state {
             SwapState::SwapOutPending => State::Pending,
+            SwapState::Trim(_) => State::TrimInProgress,
             SwapState::SwapOutInProgress { .. } => State::SwapOutInProgress,
             SwapState::SwapOutCompleted => State::Active,
             SwapState::SwapInInProgress(_) => State::SwapInInProgress,
@@ -208,6 +210,7 @@ impl Status {
 #[derive(Serialize, Deserialize, Debug)]
 enum Command {
     Enable,
+    Trim,
     SwapOut,
     Disable,
     Exit,
@@ -283,7 +286,7 @@ impl SwapController {
             Tube::pair().context("create swap vm-request tube")?;
 
         // Allocate eventfd before creating sandbox.
-        let swap_in_event = Event::new().context("create event")?;
+        let bg_job_control = BackgroundJobControl::new().context("create background job event")?;
 
         #[cfg(feature = "log_page_fault")]
         let page_fault_logger = PageFaultEventLogger::create(&swap_dir, &guest_memory)
@@ -296,7 +299,7 @@ impl SwapController {
             swap_file.as_raw_descriptor(),
             command_tube_monitor.as_raw_descriptor(),
             vm_tube_monitor.as_raw_descriptor(),
-            swap_in_event.as_raw_descriptor(),
+            bg_job_control.get_completion_event().as_raw_descriptor(),
             #[cfg(feature = "log_page_fault")]
             page_fault_logger.as_raw_descriptor(),
         ];
@@ -335,7 +338,7 @@ impl SwapController {
                     guest_memory,
                     uffd,
                     swap_file,
-                    swap_in_event,
+                    bg_job_control,
                     #[cfg(feature = "log_page_fault")]
                     page_fault_logger,
                 ) {
@@ -390,6 +393,17 @@ impl SwapController {
         self.command_tube
             .send(&Command::Enable)
             .context("send swap enable request")?;
+        Ok(())
+    }
+
+    /// Trim pages in the staging memory which are needless to be written back to the swap file.
+    ///
+    /// * zero pages
+    /// * pages which are the same as the pages in the swap file.
+    pub fn trim(&self) -> anyhow::Result<()> {
+        self.command_tube
+            .send(&Command::Trim)
+            .context("send swap trim request")?;
         Ok(())
     }
 
@@ -479,7 +493,7 @@ impl AsRawDescriptors for SwapController {
 enum Token {
     UffdEvents(u32),
     Command,
-    SwapInCompleted,
+    BackgroundJobCompleted,
 }
 
 struct UffdList<'a> {
@@ -547,7 +561,7 @@ fn monitor_process(
     guest_memory: GuestMemory,
     uffd: Userfaultfd,
     swap_file: File,
-    swap_in_event: Event,
+    bg_job_control: BackgroundJobControl,
     #[cfg(feature = "log_page_fault")] mut page_fault_logger: PageFaultEventLogger,
 ) -> anyhow::Result<()> {
     info!("monitor_process started");
@@ -558,7 +572,10 @@ fn monitor_process(
         // start waiting on the main uffd here so that uffd fork events can be processed, because
         // child processes will block until their corresponding uffd fork event is read.
         (&uffd, Token::UffdEvents(UffdList::ID_MAIN_UFFD)),
-        (&swap_in_event, Token::SwapInCompleted),
+        (
+            bg_job_control.get_completion_event(),
+            Token::BackgroundJobCompleted,
+        ),
     ])
     .context("create wait context")?;
 
@@ -640,8 +657,8 @@ fn monitor_process(
                         drop(events);
 
                         let mutex_transition = Mutex::new(state_transition);
-                        let abort_flag = AbortFlag::new();
 
+                        bg_job_control.reset()?;
                         let exit = std::thread::scope(|scope| {
                             let exit = handle_vmm_swap(
                                 scope,
@@ -653,14 +670,13 @@ fn monitor_process(
                                 &vm_tube,
                                 &worker,
                                 &mutex_transition,
-                                &abort_flag,
-                                &swap_in_event,
+                                &bg_job_control,
                                 #[cfg(feature = "log_page_fault")]
                                 &mut page_fault_logger,
                             );
                             // Abort background jobs to unblock ScopedJoinHandle eariler on a
                             // failure.
-                            abort_flag.abort();
+                            bg_job_control.abort();
                             exit
                         })?;
                         if exit {
@@ -680,6 +696,9 @@ fn monitor_process(
                         // events are obsolete. Run `WaitContext::wait()` again
                         break;
                     }
+                    Command::Trim => {
+                        warn!("swap trim while disabled");
+                    }
                     Command::SwapOut => {
                         warn!("swap out while disabled");
                     }
@@ -695,9 +714,9 @@ fn monitor_process(
                         info!("swap status: {:?}", status);
                     }
                 },
-                Token::SwapInCompleted => {
-                    error!("unexpected swap in completed event while swap is disabled");
-                    swap_in_event.reset()?;
+                Token::BackgroundJobCompleted => {
+                    error!("unexpected background job completed event while swap is disabled");
+                    bg_job_control.reset()?;
                 }
             };
         }
@@ -706,34 +725,11 @@ fn monitor_process(
 
 enum SwapState<'scope> {
     SwapOutPending,
+    Trim(ScopedJoinHandle<'scope, anyhow::Result<()>>),
     SwapOutInProgress { started_time: Instant },
     SwapOutCompleted,
     SwapInInProgress(ScopedJoinHandle<'scope, anyhow::Result<()>>),
     Failed,
-}
-
-struct AbortFlag {
-    flag: AtomicBool,
-}
-
-impl AbortFlag {
-    fn new() -> Self {
-        Self {
-            flag: AtomicBool::new(false),
-        }
-    }
-
-    fn abort(&self) {
-        self.flag.store(true, Ordering::Relaxed);
-    }
-
-    fn reset(&self) {
-        self.flag.store(false, Ordering::Relaxed);
-    }
-
-    fn is_aborted(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
-    }
 }
 
 fn move_guest_to_staging(
@@ -804,6 +800,19 @@ fn move_guest_to_staging(
     }
 }
 
+fn abort_background_job<T>(
+    join_handle: ScopedJoinHandle<'_, T>,
+    bg_job_control: &BackgroundJobControl,
+) -> anyhow::Result<T> {
+    bg_job_control.abort();
+    // Wait until the background job is aborted and the thread finishes.
+    let result = join_handle
+        .join()
+        .expect("panic on the background job thread");
+    bg_job_control.reset().context("reset swap in event")?;
+    Ok(result)
+}
+
 fn handle_vmm_swap<'scope, 'env>(
     scope: &'scope Scope<'scope, 'env>,
     wait_ctx: &WaitContext<Token>,
@@ -814,8 +823,7 @@ fn handle_vmm_swap<'scope, 'env>(
     vm_tube: &Tube,
     worker: &Worker<MoveToStaging>,
     state_transition: &'env Mutex<StateTransition>,
-    abort_flag: &'env AbortFlag,
-    swap_in_event: &'env Event,
+    bg_job_control: &'env BackgroundJobControl,
     #[cfg(feature = "log_page_fault")] page_fault_logger: &mut PageFaultEventLogger,
 ) -> anyhow::Result<bool> {
     let mut state = match move_guest_to_staging(page_handler, guest_memory, vm_tube, worker) {
@@ -913,16 +921,21 @@ fn handle_vmm_swap<'scope, 'env>(
                         bail!("child process is forked while swap is enabled");
                     }
                     Command::Enable => {
-                        if let SwapState::SwapInInProgress(join_handle) = state {
-                            info!("abort swap-in");
-                            abort_flag.abort();
-                            // Wait until swap-in is aborted and the swap-in thread finishes.
-                            if let Err(e) = join_handle.join() {
-                                bail!("failed to join swap in thread: {:?}", e);
+                        match state {
+                            SwapState::SwapInInProgress(join_handle) => {
+                                info!("abort swap-in");
+                                abort_background_job(join_handle, bg_job_control)
+                                    .context("abort swap in")?
+                                    .context("swap_in failure")?;
                             }
-                            swap_in_event.reset().context("reset swap_in_event")?;
-                            abort_flag.reset();
-                        };
+                            SwapState::Trim(join_handle) => {
+                                info!("abort trim");
+                                abort_background_job(join_handle, bg_job_control)
+                                    .context("abort trim")?
+                                    .context("trim failure")?;
+                            }
+                            _ => {}
+                        }
 
                         info!("start moving memory to staging");
                         match move_guest_to_staging(page_handler, guest_memory, vm_tube, worker) {
@@ -941,6 +954,46 @@ fn handle_vmm_swap<'scope, 'env>(
                             }
                         }
                     }
+                    Command::Trim => match &state {
+                        SwapState::SwapOutPending => {
+                            *state_transition.lock() = StateTransition::default();
+                            let join_handle = scope.spawn(|| {
+                                let mut ctx = page_handler.start_trim();
+                                let job = bg_job_control.new_job();
+                                let start_time = std::time::Instant::now();
+
+                                while !job.is_aborted() {
+                                    if let Some(trimmed_pages) =
+                                        ctx.trim_pages(MAX_TRIM_PAGES).context("trim pages")?
+                                    {
+                                        let mut state_transition = state_transition.lock();
+                                        state_transition.pages += trimmed_pages;
+                                        state_transition.time_ms = start_time.elapsed().as_millis();
+                                    } else {
+                                        // Traversed all pages.
+                                        break;
+                                    }
+                                }
+
+                                if job.is_aborted() {
+                                    info!("trim is aborted");
+                                } else {
+                                    info!(
+                                        "trimmed {} clean pages and {} zero pages",
+                                        ctx.trimmed_clean_pages(),
+                                        ctx.trimmed_zero_pages()
+                                    );
+                                }
+                                Ok(())
+                            });
+
+                            state = SwapState::Trim(join_handle);
+                            info!("start trimming staging memory");
+                        }
+                        state => {
+                            warn!("swap trim is not ready. state: {:?}", State::from(state));
+                        }
+                    },
                     Command::SwapOut => match &state {
                         SwapState::SwapOutPending => {
                             state = SwapState::SwapOutInProgress {
@@ -954,7 +1007,13 @@ fn handle_vmm_swap<'scope, 'env>(
                         }
                     },
                     Command::Disable => {
-                        match &state {
+                        match state {
+                            SwapState::Trim(join_handle) => {
+                                info!("abort trim");
+                                abort_background_job(join_handle, bg_job_control)
+                                    .context("abort trim")?
+                                    .context("trim failure")?;
+                            }
                             SwapState::SwapOutInProgress { .. } => {
                                 info!("swap out is aborted");
                             }
@@ -969,28 +1028,27 @@ fn handle_vmm_swap<'scope, 'env>(
                         let join_handle = scope.spawn(|| {
                             let mut ctx = page_handler.start_swap_in();
                             let uffd = uffd_list.main_uffd();
+                            let job = bg_job_control.new_job();
                             let start_time = std::time::Instant::now();
-                            let success = loop {
-                                if abort_flag.is_aborted() {
-                                    info!("swap in aborted on the background thread");
-                                    break Ok(());
-                                }
+                            while !job.is_aborted() {
                                 match ctx.swap_in(uffd, MAX_SWAP_CHUNK_SIZE) {
                                     Ok(num_pages) => {
                                         if num_pages == 0 {
-                                            break Ok(());
+                                            break;
                                         }
                                         let mut state_transition = state_transition.lock();
                                         state_transition.pages += num_pages;
                                         state_transition.time_ms = start_time.elapsed().as_millis();
                                     }
                                     Err(e) => {
-                                        break Err(anyhow::anyhow!("failed to swap in: {:?}", e));
+                                        bail!("failed to swap in: {:?}", e);
                                     }
                                 }
-                            };
-                            swap_in_event.signal().expect("sending signal");
-                            success
+                            }
+                            if job.is_aborted() {
+                                info!("swap in is aborted");
+                            }
+                            Ok(())
                         });
                         state = SwapState::SwapInInProgress(join_handle);
 
@@ -1003,16 +1061,19 @@ fn handle_vmm_swap<'scope, 'env>(
                                 if let Err(e) = join_handle.join() {
                                     bail!("failed to join swap in thread: {:?}", e);
                                 }
+                                return Ok(true);
                             }
-                            _ => {
-                                let mut ctx = page_handler.start_swap_in();
-                                let uffd = uffd_list.main_uffd();
-                                // Swap-in all before exit.
-                                while ctx.swap_in(uffd, MAX_SWAP_CHUNK_SIZE).context("swap in")? > 0
-                                {
-                                }
+                            SwapState::Trim(join_handle) => {
+                                abort_background_job(join_handle, bg_job_control)
+                                    .context("abort trim")?
+                                    .context("trim failure")?;
                             }
+                            _ => {}
                         }
+                        let mut ctx = page_handler.start_swap_in();
+                        let uffd = uffd_list.main_uffd();
+                        // Swap-in all before exit.
+                        while ctx.swap_in(uffd, MAX_SWAP_CHUNK_SIZE).context("swap in")? > 0 {}
                         return Ok(true);
                     }
                     Command::Status => {
@@ -1021,41 +1082,48 @@ fn handle_vmm_swap<'scope, 'env>(
                         info!("swap status: {:?}", status);
                     }
                 },
-                Token::SwapInCompleted => {
-                    // Reset the swap in complete event.
-                    if matches!(
-                        swap_in_event
-                            .wait_timeout(Duration::ZERO)
-                            .context("failed to get swapin complete event")?,
-                        EventWaitResult::TimedOut
-                    ) {
-                        // On `Command::Enable`, it resets the event but the token
-                        // `Token::SwapInCompleted` may remain in the `events`. Just ignore the
-                        // obsolete token here.
+                Token::BackgroundJobCompleted => {
+                    // Reset the completed event.
+                    if !bg_job_control
+                        .reset()
+                        .context("reset background job event")?
+                    {
+                        // When the job is aborted and the event is comsumed by reset(), the token
+                        // `Token::BackgroundJobCompleted` may remain in the `events`. Just ignore
+                        // the obsolete token here.
                         continue;
                     }
-                    if let SwapState::SwapInInProgress(join_handle) = state {
-                        match join_handle.join() {
-                            Ok(Ok(_)) => {
-                                let state_transition = state_transition.lock();
-                                info!(
-                                    "swap in all {} pages in {} ms.",
-                                    state_transition.pages, state_transition.time_ms
-                                );
-                                return Ok(false);
-                            }
-                            Ok(Err(e)) => {
-                                bail!("swap in failed: {:?}", e)
-                            }
-                            Err(e) => {
-                                bail!("failed to wait for the swap in thread: {:?}", e);
-                            }
+                    match state {
+                        SwapState::SwapInInProgress(join_handle) => {
+                            join_handle
+                                .join()
+                                .expect("panic on the background job thread")
+                                .context("swap in finish")?;
+                            let state_transition = state_transition.lock();
+                            info!(
+                                "swap in all {} pages in {} ms.",
+                                state_transition.pages, state_transition.time_ms
+                            );
+                            return Ok(false);
                         }
-                    } else {
-                        bail!(
-                            "swap in completed but the actual state is {:?}",
-                            State::from(&state)
-                        );
+                        SwapState::Trim(join_handle) => {
+                            join_handle
+                                .join()
+                                .expect("panic on the background job thread")
+                                .context("trim finish")?;
+                            let state_transition = state_transition.lock();
+                            info!(
+                                "trimmed {} pages in {} ms.",
+                                state_transition.pages, state_transition.time_ms
+                            );
+                            state = SwapState::SwapOutPending;
+                        }
+                        state => {
+                            bail!(
+                                "background job completed but the actual state is {:?}",
+                                State::from(&state)
+                            );
+                        }
                     }
                 }
             };

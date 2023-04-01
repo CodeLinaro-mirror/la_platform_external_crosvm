@@ -8,7 +8,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+#if defined(__WIN32__)
+struct iovec {
+   void *iov_base; /* Starting address */
+   size_t iov_len; /* Length in bytes */
+};
+#else
 #include <sys/uio.h>
+#endif
 
 #ifndef RUTABAGA_GFX_FFI_H
 #define RUTABAGA_GFX_FFI_H
@@ -136,7 +144,7 @@ struct rutabaga_mapping {
  * Assumes null-terminated C-string.
  */
 struct rutabaga_channel {
-	char *channel_name;
+	const char *channel_name;
 	uint32_t channel_type;
 };
 
@@ -174,7 +182,7 @@ int32_t rutabaga_init(const struct rutabaga_builder *builder, struct rutabaga **
  */
 int32_t rutabaga_finish(struct rutabaga **ptr);
 
-uint32_t rutabaga_get_num_capsets(void);
+int32_t rutabaga_get_num_capsets(struct rutabaga *ptr, uint32_t *num_capsets);
 
 int32_t rutabaga_get_capset_info(struct rutabaga *ptr, uint32_t capset_index, uint32_t *capset_id,
 				 uint32_t *capset_version, uint32_t *capset_size);
