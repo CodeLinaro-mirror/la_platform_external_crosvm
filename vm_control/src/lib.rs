@@ -43,6 +43,8 @@ use balloon_control::BalloonTubeCommand;
 #[cfg(feature = "balloon")]
 use balloon_control::BalloonTubeResult;
 use base::error;
+use base::info;
+use base::warn;
 use base::with_as_descriptor;
 use base::AsRawDescriptor;
 use base::Error as SysError;
@@ -111,7 +113,8 @@ pub enum VcpuControl {
     Debug(VcpuDebug),
     RunState(VmRunMode),
     MakeRT,
-    GetStates,
+    // Request the current state of the vCPU. The result is sent back over the included channel.
+    GetStates(mpsc::Sender<VmRunMode>),
 }
 
 /// Mode of execution for the VM.
@@ -279,37 +282,40 @@ pub enum SnapshotCommand {
     Take { snapshot_path: PathBuf },
 }
 
-/// Response for [SnapshotCommand]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum SnapshotControlResult {
-    /// The request is accepted successfully.
-    Ok,
-    /// The command fails.
-    Failed(String),
-    /// Request VM shut down in case of major failures.
-    Shutdown,
-}
 /// Commands for restore feature
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RestoreCommand {
     Apply { restore_path: PathBuf },
 }
 
-/// Response for [RestoreCommand]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum RestoreControlResult {
-    /// The request is accepted successfully.
-    Ok,
-    /// The command fails.
-    Failed(String),
-}
-
 /// Commands for actions on devices and the devices control thread.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DeviceControlCommand {
+    SleepDevices,
+    WakeDevices,
     SnapshotDevices { snapshot_path: PathBuf },
     RestoreDevices { restore_path: PathBuf },
     Exit,
+}
+
+/// Commands to control the IRQ handler thread.
+#[derive(Serialize, Deserialize)]
+pub enum IrqHandlerRequest {
+    /// No response is sent for this command.
+    AddIrqControlTubes(Vec<Tube>),
+    WakeAndNotifyIteration,
+    /// No response is sent for this command.
+    Exit,
+}
+
+const EXPECTED_MAX_IRQ_FLUSH_ITERATIONS: usize = 100;
+
+/// Response for [IrqHandlerRequest].
+#[derive(Serialize, Deserialize, Debug)]
+pub enum IrqHandlerResponse {
+    /// Specifies the number of tokens serviced in the requested iteration
+    /// (less the token for the `WakeAndNotifyIteration` request).
+    HandlerIterationComplete(usize),
 }
 
 /// Source of a `VmMemoryRequest::RegisterMemory` mapping.
@@ -421,6 +427,15 @@ impl VmMemoryDestination {
     }
 }
 
+/// Request to register or unregister an ioevent.
+#[derive(Serialize, Deserialize)]
+pub struct IoEventUpdateRequest {
+    pub event: Event,
+    pub addr: u64,
+    pub datamatch: Datamatch,
+    pub register: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum VmMemoryRequest {
     RegisterMemory {
@@ -444,13 +459,14 @@ pub enum VmMemoryRequest {
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
     UnregisterMemory(MemSlot),
     /// Register an ioeventfd
-    IoEvent {
+    IoEventWithAlloc {
         evt: Event,
         allocation: Alloc,
         offset: u64,
         datamatch: Datamatch,
         register: bool,
     },
+    IoEventRaw(IoEventUpdateRequest),
 }
 
 /// Struct for managing `VmMemoryRequest`s IOMMU related state.
@@ -576,7 +592,7 @@ impl VmMemoryRequest {
                 Ok(_) => VmMemoryResponse::Ok,
                 Err(e) => VmMemoryResponse::Err(e),
             },
-            IoEvent {
+            IoEventWithAlloc {
                 evt,
                 allocation,
                 offset,
@@ -604,6 +620,25 @@ impl VmMemoryRequest {
                     vm.register_ioevent(&evt, IoEventAddress::Mmio(addr), datamatch)
                 } else {
                     vm.unregister_ioevent(&evt, IoEventAddress::Mmio(addr), datamatch)
+                };
+                match res {
+                    Ok(_) => VmMemoryResponse::Ok,
+                    Err(e) => VmMemoryResponse::Err(e),
+                }
+            }
+            IoEventRaw(request) => {
+                let res = if request.register {
+                    vm.register_ioevent(
+                        &request.event,
+                        IoEventAddress::Mmio(request.addr),
+                        request.datamatch,
+                    )
+                } else {
+                    vm.unregister_ioevent(
+                        &request.event,
+                        IoEventAddress::Mmio(request.addr),
+                        request.datamatch,
+                    )
                 };
                 match res {
                     Ok(_) => VmMemoryResponse::Ok,
@@ -1019,6 +1054,27 @@ pub enum VmRequest {
     Snapshot(SnapshotCommand),
     /// Command to Restore devices
     Restore(RestoreCommand),
+    /// Register for event notification
+    RegisterListener {
+        socket_addr: String,
+        event: RegisteredEvent,
+    },
+    /// Unregister for notifications for event
+    UnregisterListener {
+        socket_addr: String,
+        event: RegisteredEvent,
+    },
+    /// Unregister for all event notification
+    Unregister { socket_addr: String },
+}
+
+/// NOTE: when making any changes to this enum please also update
+/// RegisteredEventFfi in crosvm_control/src/lib.rs
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub enum RegisteredEvent {
+    VirtioBalloonWssReport,
+    VirtioBalloonResize,
+    VirtioBalloonOOMDeflation,
 }
 
 pub fn handle_disk_command(command: &DiskControlCommand, disk_host_tube: &Tube) -> VmResponse {
@@ -1061,18 +1117,15 @@ fn map_descriptor(
 
 // Get vCPU state. vCPUs are expected to all hold the same state.
 // In this function, there may be a time where vCPUs are not
-fn get_vcpu_state(
-    kick_vcpus: impl Fn(VcpuControl),
-    state_from_vcpu_channel: &mpsc::Receiver<VmRunMode>,
-    vcpu_num: usize,
-) -> anyhow::Result<VmRunMode> {
-    kick_vcpus(VcpuControl::GetStates);
+fn get_vcpu_state(kick_vcpus: impl Fn(VcpuControl), vcpu_num: usize) -> anyhow::Result<VmRunMode> {
+    let (send_chan, recv_chan) = mpsc::channel();
+    kick_vcpus(VcpuControl::GetStates(send_chan));
     if vcpu_num == 0 {
         bail!("vcpu_num is zero");
     }
     let mut current_mode_vec: Vec<VmRunMode> = Vec::new();
     for _ in 0..vcpu_num {
-        match state_from_vcpu_channel.recv() {
+        match recv_chan.recv() {
             Ok(state) => current_mode_vec.push(state),
             Err(e) => {
                 bail!("Failed to get vCPU state: {}", e);
@@ -1090,30 +1143,46 @@ fn get_vcpu_state(
     Ok(first_state)
 }
 
-struct VcpuSuspendGuard<'a> {
+/// A guard to guarantee that all the vCPUs are suspended during the scope.
+///
+/// When this guard is dropped, it rolls back the state of CPUs.
+pub struct VcpuSuspendGuard<'a> {
     saved_run_mode: VmRunMode,
     kick_vcpus: &'a dyn Fn(VcpuControl),
 }
 
 impl<'a> VcpuSuspendGuard<'a> {
-    fn new(
-        kick_vcpus: &'a impl Fn(VcpuControl),
-        state_from_vcpu_channel: &mpsc::Receiver<VmRunMode>,
-        vcpu_num: usize,
-    ) -> anyhow::Result<Self> {
+    /// Check the all vCPU state and suspend the vCPUs if they are running.
+    ///
+    /// This returns [VcpuSuspendGuard] to rollback the vcpu state.
+    ///
+    /// # Arguments
+    ///
+    /// * `kick_vcpus` - A funtion to send [VcpuControl] message to all the vCPUs and interrupt
+    ///   them.
+    /// * `vcpu_num` - The number of vCPUs.
+    pub fn new(kick_vcpus: &'a impl Fn(VcpuControl), vcpu_num: usize) -> anyhow::Result<Self> {
         // get initial vcpu state
-        let saved_run_mode = get_vcpu_state(kick_vcpus, state_from_vcpu_channel, vcpu_num)?;
-        if saved_run_mode != VmRunMode::Suspending {
-            kick_vcpus(VcpuControl::RunState(VmRunMode::Suspending));
-            // Blocking call, waiting for response to ensure vCPU state was updated.
-            // In case of failure, where a vCPU still has the state running, start up vcpus and
-            // abort operation.
-            let current_mode = get_vcpu_state(kick_vcpus, state_from_vcpu_channel, vcpu_num)?;
-            if current_mode != VmRunMode::Suspending {
-                kick_vcpus(VcpuControl::RunState(saved_run_mode));
-                bail!("vCPUs failed to all suspend. Kicking back all vCPUs to their previous state: {saved_run_mode}");
+        let saved_run_mode = get_vcpu_state(kick_vcpus, vcpu_num)?;
+        match saved_run_mode {
+            VmRunMode::Running => {
+                kick_vcpus(VcpuControl::RunState(VmRunMode::Suspending));
+                // Blocking call, waiting for response to ensure vCPU state was updated.
+                // In case of failure, where a vCPU still has the state running, start up vcpus and
+                // abort operation.
+                let current_mode = get_vcpu_state(kick_vcpus, vcpu_num)?;
+                if current_mode != VmRunMode::Suspending {
+                    kick_vcpus(VcpuControl::RunState(saved_run_mode));
+                    bail!("vCPUs failed to all suspend. Kicking back all vCPUs to their previous state: {saved_run_mode}");
+                }
             }
-        }
+            VmRunMode::Suspending => {
+                // do nothing. keep the state suspending.
+            }
+            other => {
+                bail!("vcpus are not in running/suspending state, but {}", other);
+            }
+        };
         Ok(Self {
             saved_run_mode,
             kick_vcpus,
@@ -1125,6 +1194,47 @@ impl Drop for VcpuSuspendGuard<'_> {
     fn drop(&mut self) {
         if self.saved_run_mode != VmRunMode::Suspending {
             (self.kick_vcpus)(VcpuControl::RunState(self.saved_run_mode));
+        }
+    }
+}
+
+/// A guard to guarantee that all devices are sleeping during its scope.
+///
+/// When this guard is dropped, it wakes the devices.
+pub struct DeviceSleepGuard<'a> {
+    device_control_tube: &'a Tube,
+}
+
+impl<'a> DeviceSleepGuard<'a> {
+    fn new(device_control_tube: &'a Tube) -> anyhow::Result<Self> {
+        device_control_tube
+            .send(&DeviceControlCommand::SleepDevices)
+            .context("send command to devices control socket")?;
+        match device_control_tube
+            .recv()
+            .context("receive from devices control socket")?
+        {
+            VmResponse::Ok => (),
+            resp => bail!("device sleep failed: {}", resp),
+        }
+        Ok(Self {
+            device_control_tube,
+        })
+    }
+}
+
+impl Drop for DeviceSleepGuard<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self
+            .device_control_tube
+            .send(&DeviceControlCommand::WakeDevices)
+        {
+            panic!("failed to request device wake after snapshot: {}", e);
+        }
+        match self.device_control_tube.recv() {
+            Ok(VmResponse::Ok) => (),
+            Ok(resp) => panic!("unexpected response to device wake request: {}", resp),
+            Err(e) => panic!("failed to get reply for device wake request: {}", e),
         }
     }
 }
@@ -1149,8 +1259,8 @@ impl VmRequest {
         force_s2idle: bool,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
         device_control_tube: &Tube,
-        state_from_vcpu_channel: &mpsc::Receiver<VmRunMode>,
         vcpu_size: usize,
+        irq_handler_control: &Tube,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1405,9 +1515,52 @@ impl VmRequest {
             }
             VmRequest::HotPlugCommand { device: _, add: _ } => VmResponse::Ok,
             VmRequest::Snapshot(SnapshotCommand::Take { ref snapshot_path }) => {
-                let f = || {
-                    let _guard =
-                        VcpuSuspendGuard::new(&kick_vcpus, state_from_vcpu_channel, vcpu_size)?;
+                let f = || -> anyhow::Result<VmResponse> {
+                    let _vcpu_guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
+                    let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
+
+                    // We want to flush all pending IRQs to the LAPICs. There are two cases:
+                    //
+                    // MSIs: these are directly delivered to the LAPIC. We must verify the handler
+                    // thread cycles once to deliver these interrupts.
+                    //
+                    // Legacy interrupts: in the case of a split IRQ chip, these interrupts may
+                    // flow through the userspace IOAPIC. If the hypervisor does not support
+                    // irqfds (e.g. WHPX), a single iteration will only flush the IRQ to the
+                    // IOAPIC. The underlying MSI will be asserted at this point, but if the
+                    // IRQ handler doesn't run another iteration, it won't be delivered to the
+                    // LAPIC. This is why we cycle the handler thread twice (doing so ensures we
+                    // process the underlying MSI).
+                    //
+                    // We can handle both of these cases by iterating until there are no tokens
+                    // serviced on the requested iteration. Note that in the legacy case, this
+                    // ensures at least two iterations.
+                    //
+                    // Note: within CrosVM, *all* interrupts are eventually converted into the
+                    // same mechanicism that MSIs use. This is why we say "underlying" MSI for
+                    // a legacy IRQ.
+                    let mut flush_attempts = 0;
+                    loop {
+                        irq_handler_control
+                            .send(&IrqHandlerRequest::WakeAndNotifyIteration)
+                            .context("failed to send flush command to IRQ handler thread")?;
+                        let resp = irq_handler_control
+                            .recv()
+                            .context("failed to recv flush response from IRQ handler thread")?;
+                        match resp {
+                            IrqHandlerResponse::HandlerIterationComplete(tokens_serviced) => {
+                                if tokens_serviced == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                        flush_attempts += 1;
+                        if flush_attempts > EXPECTED_MAX_IRQ_FLUSH_ITERATIONS {
+                            warn!("flushing IRQs for snapshot may be stalled after iteration {}, expected <= {} iterations", flush_attempts, EXPECTED_MAX_IRQ_FLUSH_ITERATIONS);
+                        }
+                    }
+                    info!("flushed IRQs in {} iterations", flush_attempts);
+
                     device_control_tube
                         .send(&DeviceControlCommand::SnapshotDevices {
                             snapshot_path: snapshot_path.clone(),
@@ -1418,7 +1571,7 @@ impl VmRequest {
                         .context("receive from devices control socket")
                 };
                 match f() {
-                    Ok(res) => VmResponse::SnapshotResponse(res),
+                    Ok(r) => r,
                     Err(e) => {
                         error!("failed to handle snapshot: {:?}", e);
                         VmResponse::Err(SysError::new(EIO))
@@ -1427,8 +1580,7 @@ impl VmRequest {
             }
             VmRequest::Restore(RestoreCommand::Apply { ref restore_path }) => {
                 let f = || {
-                    let _guard =
-                        VcpuSuspendGuard::new(&kick_vcpus, state_from_vcpu_channel, vcpu_size)?;
+                    let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
                     device_control_tube
                         .send(&DeviceControlCommand::RestoreDevices {
                             restore_path: restore_path.clone(),
@@ -1439,13 +1591,22 @@ impl VmRequest {
                         .context("receive from devices control socket")
                 };
                 match f() {
-                    Ok(res) => VmResponse::RestoreResponse(res),
+                    Ok(r) => r,
                     Err(e) => {
-                        error!("failed to handle snapshot: {:?}", e);
+                        error!("failed to handle restore: {:?}", e);
                         VmResponse::Err(SysError::new(EIO))
                     }
                 }
             }
+            VmRequest::RegisterListener {
+                socket_addr: _,
+                event: _,
+            } => VmResponse::Ok,
+            VmRequest::UnregisterListener {
+                socket_addr: _,
+                event: _,
+            } => VmResponse::Ok,
+            VmRequest::Unregister { socket_addr: _ } => VmResponse::Ok,
         }
     }
 }
@@ -1454,11 +1615,14 @@ impl VmRequest {
 ///
 /// Success is usually indicated `VmResponse::Ok` unless there is data associated with the response.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[must_use]
 pub enum VmResponse {
     /// Indicates the request was executed successfully.
     Ok,
     /// Indicates the request encountered some error during execution.
     Err(SysError),
+    /// Indicates the request encountered some error during execution.
+    ErrString(String),
     /// The request to register memory into guest address space was successfully done at page frame
     /// number `pfn` and memory slot number `slot`.
     RegisterMemory { pfn: u64, slot: u32 },
@@ -1476,10 +1640,6 @@ pub enum VmResponse {
     BatResponse(BatControlResult),
     /// Results of swap status command.
     SwapStatus(SwapStatus),
-    /// Results of snapshot commands.
-    SnapshotResponse(SnapshotControlResult),
-    /// Results of restore commands.
-    RestoreResponse(RestoreControlResult),
 }
 
 impl Display for VmResponse {
@@ -1489,6 +1649,7 @@ impl Display for VmResponse {
         match self {
             Ok => write!(f, "ok"),
             Err(e) => write!(f, "error: {}", e),
+            ErrString(e) => write!(f, "error: {}", e),
             RegisterMemory { pfn, slot } => write!(
                 f,
                 "memory registered to page frame number {:#x} and memory slot {}",
@@ -1518,8 +1679,6 @@ impl Display for VmResponse {
                         .unwrap_or_else(|_| "invalid_response".to_string()),
                 )
             }
-            SnapshotResponse(result) => write!(f, "snapshot control request result {:?}", result),
-            RestoreResponse(result) => write!(f, "restore control request result {:?}", result),
         }
     }
 }

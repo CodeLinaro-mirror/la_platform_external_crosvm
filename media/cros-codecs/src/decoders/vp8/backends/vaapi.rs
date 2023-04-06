@@ -4,12 +4,10 @@
 
 #[cfg(test)]
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::rc::Rc;
 
-use anyhow::anyhow;
 use anyhow::Result;
 use libva::BufferType;
 use libva::Display;
@@ -32,7 +30,6 @@ use crate::decoders::VideoDecoderBackend;
 use crate::utils::vaapi::DecodedHandle as VADecodedHandle;
 use crate::utils::vaapi::GenericBackendHandle;
 use crate::utils::vaapi::NegotiationStatus;
-use crate::utils::vaapi::PendingJob;
 use crate::utils::vaapi::StreamInfo;
 use crate::utils::vaapi::VaapiBackend;
 use crate::Resolution;
@@ -305,7 +302,7 @@ impl StatelessDecoderBackend for Backend {
         segmentation: &Segmentation,
         mb_lf_adjust: &MbLfAdjustments,
         timestamp: u64,
-        block: bool,
+        block: BlockingMode,
     ) -> StatelessBackendResult<Self::Handle> {
         self.backend.negotiation_status = NegotiationStatus::Negotiated;
 
@@ -338,8 +335,6 @@ impl StatelessDecoderBackend for Backend {
             .get_surface()
             .ok_or(StatelessBackendError::OutOfResources)?;
 
-        let surface_id = surface.id();
-
         let mut va_picture = VaPicture::new(timestamp, Rc::clone(context), surface);
 
         // Add buffers with the parsed data.
@@ -348,8 +343,6 @@ impl StatelessDecoderBackend for Backend {
         va_picture.add_buffer(pic_param);
         va_picture.add_buffer(slice_param);
         va_picture.add_buffer(slice_data);
-
-        let va_picture = va_picture.begin()?.render()?.end()?;
 
         #[cfg(test)]
         self.save_params(
@@ -368,31 +361,7 @@ impl StatelessDecoderBackend for Backend {
             Backend::build_probability_table(picture),
         );
 
-        let metadata = self.backend.metadata_state.get_parsed()?;
-
-        let backend_handle = if block {
-            let va_picture = va_picture.sync()?;
-
-            Rc::new(RefCell::new(GenericBackendHandle::new_ready(
-                va_picture,
-                Rc::clone(&metadata.map_format),
-                metadata.display_resolution,
-            )))
-        } else {
-            let backend_handle =
-                Rc::new(RefCell::new(GenericBackendHandle::new_pending(surface_id)));
-
-            self.backend.pending_jobs.push_back(PendingJob {
-                va_picture,
-                codec_picture: Rc::clone(&backend_handle),
-            });
-
-            backend_handle
-        };
-
-        self.backend
-            .build_va_decoded_handle(&backend_handle, timestamp)
-            .map_err(|e| StatelessBackendError::Other(anyhow!(e)))
+        self.backend.process_picture(va_picture, block)
     }
 
     #[cfg(test)]

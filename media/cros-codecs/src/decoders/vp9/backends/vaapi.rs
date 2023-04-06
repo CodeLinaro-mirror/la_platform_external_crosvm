@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -34,7 +33,6 @@ use crate::decoders::VideoDecoderBackend;
 use crate::utils::vaapi::DecodedHandle as VADecodedHandle;
 use crate::utils::vaapi::GenericBackendHandle;
 use crate::utils::vaapi::NegotiationStatus;
-use crate::utils::vaapi::PendingJob;
 use crate::utils::vaapi::StreamInfo;
 use crate::utils::vaapi::VaapiBackend;
 use crate::Resolution;
@@ -321,7 +319,7 @@ impl StatelessDecoderBackend for Backend {
         bitstream: &[u8],
         timestamp: u64,
         segmentation: &[Segmentation; MAX_SEGMENTS],
-        block: bool,
+        block: BlockingMode,
     ) -> StatelessBackendResult<Self::Handle> {
         self.backend.negotiation_status = NegotiationStatus::Negotiated;
 
@@ -352,8 +350,6 @@ impl StatelessDecoderBackend for Backend {
             .get_surface()
             .ok_or(StatelessBackendError::OutOfResources)?;
 
-        let surface_id = surface.id();
-
         let mut va_picture = VaPicture::new(timestamp, Rc::clone(context), surface);
 
         // Add buffers with the parsed data.
@@ -361,31 +357,7 @@ impl StatelessDecoderBackend for Backend {
         va_picture.add_buffer(slice_param);
         va_picture.add_buffer(slice_data);
 
-        let va_picture = va_picture.begin()?.render()?.end()?;
-
-        let backend_handle = if block {
-            let va_picture = va_picture.sync()?;
-
-            Rc::new(RefCell::new(GenericBackendHandle::new_ready(
-                va_picture,
-                Rc::clone(&metadata.map_format),
-                metadata.display_resolution,
-            )))
-        } else {
-            let backend_handle =
-                Rc::new(RefCell::new(GenericBackendHandle::new_pending(surface_id)));
-
-            self.backend.pending_jobs.push_back(PendingJob {
-                va_picture,
-                codec_picture: Rc::clone(&backend_handle),
-            });
-
-            backend_handle
-        };
-
-        self.backend
-            .build_va_decoded_handle(&backend_handle, timestamp)
-            .map_err(|e| StatelessBackendError::Other(anyhow!(e)))
+        self.backend.process_picture(va_picture, block)
     }
 
     #[cfg(test)]

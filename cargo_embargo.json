@@ -104,19 +104,51 @@
     "wire_format_derive_test_wire_format_derive"
   ],
   "module_visibility": {
-    "crosvm": ["//visibility:public"],
-    "libbase_rust": ["//packages/modules/Virtualization/virtualizationmanager"],
+    "crosvm": [
+      "//visibility:public"
+    ],
+    "libaarch64": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libbase_rust": [
+      "//packages/modules/Virtualization/virtualizationmanager",
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
     "libdata_model": [
       "//external/libchromeos-rs",
       "//packages/modules/Virtualization/apkdmverity",
       "//packages/modules/Virtualization/libs/devicemapper"
     ],
-    "libdisk": ["//packages/modules/Virtualization/virtualizationmanager"],
+    "libdevices": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libdisk": [
+      "//packages/modules/Virtualization/virtualizationmanager",
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
     "libfuse_rust": [
         "//packages/modules/Virtualization/authfs",
         "//packages/modules/Virtualization/zipfuse"
     ],
-    "libvm_control": ["//packages/modules/Virtualization/virtualizationmanager"]
+    "libhypervisor": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libsync_rust": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libvm_control": [
+      "//packages/modules/Virtualization/virtualizationmanager"
+    ],
+    "libvm_memory": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ]
   },
   "package": {
     "aarch64": {

@@ -330,4 +330,5 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libenumn"],
+    visibility: ["//vendor:__subpackages__"],
 }
