@@ -241,9 +241,11 @@ impl VhostUserHandler {
         self.vu
             .set_vring_kick(queue_index, queue_evt)
             .map_err(Error::SetVringKick)?;
-        self.vu
+       // TODO: TO implement set_vring-enable in vhost-usr-qti backend code to support latest
+       // vhost-user Protocol  
+        /*self.vu
             .set_vring_enable(queue_index, true)
-            .map_err(Error::SetVringEnable)?;
+            .map_err(Error::SetVringEnable)?;*/
 
         Ok(())
     }
