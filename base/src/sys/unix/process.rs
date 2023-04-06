@@ -6,13 +6,14 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "seccomp_trace")]
+use log::debug;
+use log::warn;
+use minijail::Minijail;
 use std::ffi::CString;
 use std::mem::ManuallyDrop;
 use std::os::unix::process::ExitStatusExt;
 use std::process;
-
-use log::warn;
-use minijail::Minijail;
 
 use crate::error;
 use crate::unix::wait_for_pid;
@@ -138,5 +139,18 @@ where
         }
         pid => pid,
     };
+    #[cfg(feature = "seccomp_trace")]
+    debug!(
+            // Proxy and swap devices fork here
+            "seccomp_trace {{\"event\": \"minijail_fork\", \"pid\": \"{}\", \"name\": \"{}\", \"jail_addr\": \"0x{:x}\"}}",
+            pid,
+            match debug_label {
+                Some(debug_label) => debug_label,
+                None => "process.rs: no debug label".to_owned(),
+            },
+            // Can't use safe wrapper because jail crate depends on base
+            // Safe because it's only doing a read within bound checked by static assert
+            unsafe {*(&jail as *const Minijail as *const usize)}
+        );
     Ok(Child { pid })
 }

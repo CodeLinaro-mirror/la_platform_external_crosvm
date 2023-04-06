@@ -119,7 +119,7 @@ exclude = [
 
 [features]
 ## Default features of crosvm. This selection is somewhat arbitrary for historical reasons.
-default = ["audio", "balloon", "config-file", "document-features", "gpu", "qcow", "usb", "libvda-stub"]
+default = ["audio", "balloon", "config-file", "document-features", "gpu", "qcow", "usb", "libvda-stub", "slirp"]
 
 ## Enables support for the Android [sparse image format](https://android.googlesource.com/platform/system/core/+/HEAD/libsparse/sparse_format.h)
 ## in the block device.
@@ -228,6 +228,9 @@ vaapi = ["devices/vaapi"]
 ## supported on Linux systems. It sends all cros_tracing tracepoints to the tracefs
 ## filesystem if mounted, for easier debugging with tools like trace-cmd.
 trace_marker = ["cros_tracing/trace_marker"]
+
+## Facilitate tracing all syscalls by sandboxed processes.
+seccomp_trace = ["jail/seccomp_trace","base/seccomp_trace","devices/seccomp_trace"]
 
 #! ### Windows-specific feature flags
 #!

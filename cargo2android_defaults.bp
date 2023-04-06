@@ -31,6 +31,8 @@ rust_defaults {
         "//external/crosvm:__subpackages__",
         "//external/libchromeos-rs",
         "//packages/modules/Virtualization/authfs",
+        // For QCOM's crosvm fork.
+        "//vendor:__subpackages__",
     ],
 }
 

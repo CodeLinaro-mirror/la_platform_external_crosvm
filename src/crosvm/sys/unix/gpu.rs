@@ -18,6 +18,9 @@ use serde_keyvalue::FromKeyValues;
 use super::*;
 use crate::crosvm::config::Config;
 
+#[cfg(feature = "virgl_renderer_next")]
+use base::platform::move_proc_to_cgroup;
+
 pub struct GpuCacheInfo<'a> {
     directory: Option<&'a str>,
     environment: Vec<(&'a str, &'a str)>,
@@ -125,6 +128,7 @@ pub fn create_gpu_device(
         /*system_blob=*/ false,
         virtio::base_features(cfg.protection_type),
         cfg.wayland_socket_paths.clone(),
+        cfg.gpu_cgroup_path.as_ref(),
     );
 
     let jail = if let Some(jail_config) = &cfg.jail_config {
@@ -178,6 +182,7 @@ pub struct GpuRenderServerParameters {
     pub cache_path: Option<String>,
     pub cache_size: Option<String>,
     pub foz_db_list_path: Option<String>,
+    pub precompiled_cache_path: Option<String>,
 }
 
 #[cfg(feature = "virgl_renderer_next")]
@@ -241,6 +246,9 @@ pub fn start_gpu_render_server(
             // to be propagated to the GPU process.
             jail.mount(dir, dir, "", (libc::MS_BIND | libc::MS_REC) as usize)?;
         }
+        if let Some(precompiled_cache_dir) = &render_server_parameters.precompiled_cache_path {
+            jail.mount_bind(precompiled_cache_dir, precompiled_cache_dir, true)?;
+        }
 
         // bind mount /dev/log for syslog
         let log_path = Path::new("/dev/log");
@@ -272,13 +280,18 @@ pub fn start_gpu_render_server(
         envp = Some(env.iter().map(AsRef::as_ref).collect());
     }
 
-    jail.run_command(minijail::Command::new_for_path(
-        cmd,
-        &inheritable_fds,
-        &args,
-        envp.as_deref(),
-    )?)
-    .context("failed to start gpu render server")?;
+    let render_server_pid = jail
+        .run_command(minijail::Command::new_for_path(
+            cmd,
+            &inheritable_fds,
+            &args,
+            envp.as_deref(),
+        )?)
+        .context("failed to start gpu render server")?;
+
+    if let Some(gpu_server_cgroup_path) = &cfg.gpu_server_cgroup_path {
+        move_proc_to_cgroup(gpu_server_cgroup_path.to_path_buf(), render_server_pid)?;
+    }
 
     Ok((jail, SafeDescriptor::from(client_socket)))
 }
@@ -298,6 +311,7 @@ mod tests {
                 cache_path: None,
                 cache_size: None,
                 foz_db_list_path: None,
+                precompiled_cache_path: None,
             }
         );
 
@@ -309,6 +323,7 @@ mod tests {
                 cache_path: None,
                 cache_size: None,
                 foz_db_list_path: None,
+                precompiled_cache_path: None,
             }
         );
 
@@ -321,11 +336,12 @@ mod tests {
                 cache_path: Some("/cache/path".into()),
                 cache_size: Some("16M".into()),
                 foz_db_list_path: None,
+                precompiled_cache_path: None,
             }
         );
 
         let res: GpuRenderServerParameters = from_key_values(
-            "path=/some/path,cache-path=/cache/path,cache-size=16M,foz-db-list-path=/db/list/path",
+            "path=/some/path,cache-path=/cache/path,cache-size=16M,foz-db-list-path=/db/list/path,precompiled-cache-path=/precompiled/path",
         )
         .unwrap();
         assert_eq!(
@@ -335,6 +351,7 @@ mod tests {
                 cache_path: Some("/cache/path".into()),
                 cache_size: Some("16M".into()),
                 foz_db_list_path: Some("/db/list/path".into()),
+                precompiled_cache_path: Some("/precompiled/path".into()),
             }
         );
 

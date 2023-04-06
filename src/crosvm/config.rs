@@ -1047,10 +1047,14 @@ pub struct Config {
     pub gdb: Option<u32>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_backend_config: Option<GpuBackendConfig>,
+    #[cfg(all(unix, feature = "gpu"))]
+    pub gpu_cgroup_path: Option<PathBuf>,
     #[cfg(feature = "gpu")]
     pub gpu_parameters: Option<GpuParameters>,
     #[cfg(all(unix, feature = "gpu"))]
     pub gpu_render_server_parameters: Option<GpuRenderServerParameters>,
+    #[cfg(all(unix, feature = "gpu"))]
+    pub gpu_server_cgroup_path: Option<PathBuf>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_vmm_config: Option<GpuVmmConfig>,
     pub host_cpu_topology: bool,
@@ -1269,6 +1273,10 @@ impl Default for Config {
             gpu_parameters: None,
             #[cfg(all(unix, feature = "gpu"))]
             gpu_render_server_parameters: None,
+            #[cfg(all(unix, feature = "gpu"))]
+            gpu_cgroup_path: None,
+            #[cfg(all(unix, feature = "gpu"))]
+            gpu_server_cgroup_path: None,
             #[cfg(all(windows, feature = "gpu"))]
             gpu_vmm_config: None,
             host_cpu_topology: false,
@@ -1574,6 +1582,13 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
     #[cfg(unix)]
     if cfg.lock_guest_memory && cfg.jail_config.is_none() {
         return Err("'lock-guest-memory' and 'disable-sandbox' are mutually exclusive".to_string());
+    }
+
+    // TODO(b/253386409): Vmm-swap only support sandboxed devices until vmm-swap use
+    // `devices::Suspendable` to suspend devices.
+    #[cfg(feature = "swap")]
+    if cfg.swap_dir.is_some() && cfg.jail_config.is_none() {
+        return Err("'swap' and 'disable-sandbox' are mutually exclusive".to_string());
     }
 
     set_default_serial_parameters(
@@ -2243,6 +2258,28 @@ mod tests {
         assert_eq!(shared_dir.fs_cfg.attr_timeout, Duration::from_secs(3600));
         assert_eq!(shared_dir.fs_cfg.entry_timeout, Duration::from_secs(3600));
         assert_eq!(shared_dir.fs_cfg.writeback, true);
+        assert_eq!(
+            shared_dir.fs_cfg.cache_policy,
+            passthrough::CachePolicy::Always
+        );
+        assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
+        assert_eq!(shared_dir.fs_cfg.use_dax, false);
+        assert_eq!(shared_dir.fs_cfg.posix_acl, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_shared_dir_oem() {
+        let shared_dir: SharedDir = "/:oem_etc:type=fs:cache=always:uidmap=0 299 1, 5000 600 50:gidmap=0 300 1, 5000 600 50:timeout=3600:rewrite-security-xattrs=true".parse().unwrap();
+        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
+        assert_eq!(shared_dir.tag, "oem_etc");
+        assert!(shared_dir.kind == SharedDirKind::FS);
+        assert_eq!(shared_dir.uid_map, "0 299 1, 5000 600 50");
+        assert_eq!(shared_dir.gid_map, "0 300 1, 5000 600 50");
+        assert_eq!(shared_dir.fs_cfg.ascii_casefold, false);
+        assert_eq!(shared_dir.fs_cfg.attr_timeout, Duration::from_secs(3600));
+        assert_eq!(shared_dir.fs_cfg.entry_timeout, Duration::from_secs(3600));
+        assert_eq!(shared_dir.fs_cfg.writeback, false);
         assert_eq!(
             shared_dir.fs_cfg.cache_policy,
             passthrough::CachePolicy::Always

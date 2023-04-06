@@ -27,6 +27,7 @@ rust_test {
     rustlibs: [
         "libbase_rust",
         "libbitflags",
+        "libcros_tracing",
         "libcrossbeam_utils",
         "libdata_model",
         "liblibc",
@@ -52,6 +53,7 @@ rust_library {
     rustlibs: [
         "libbase_rust",
         "libbitflags",
+        "libcros_tracing",
         "libcrossbeam_utils",
         "libdata_model",
         "liblibc",

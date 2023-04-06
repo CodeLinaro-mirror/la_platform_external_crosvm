@@ -95,6 +95,18 @@ pub trait VcpuX86_64: Vcpu {
     /// Sets the VCPU extended control registers.
     fn set_xcrs(&self, xcrs: &[Register]) -> Result<()>;
 
+    /// Gets the VCPU x87 FPU, MMX, XMM, YMM and MXCSR registers.
+    fn get_xsave(&self) -> Result<Xsave>;
+
+    /// Sets the VCPU x87 FPU, MMX, XMM, YMM and MXCSR registers.
+    fn set_xsave(&self, xsave: &Xsave) -> Result<()>;
+
+    /// Gets the VCPU Events states.
+    fn get_vcpu_events(&self) -> Result<VcpuEvents>;
+
+    /// Sets the VCPU Events states.
+    fn set_vcpu_events(&self, vcpu_evts: &VcpuEvents) -> Result<()>;
+
     /// Gets the model-specific registers.  `msrs` specifies the MSR indexes to be queried, and
     /// on success contains their indexes and values.
     fn get_msrs(&self, msrs: &mut Vec<Register>) -> Result<()>;
@@ -834,6 +846,54 @@ impl Default for Fpu {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuEvents {
+    pub exception: VcpuExceptionState,
+    pub interrupt: VcpuInterruptState,
+    pub nmi: VcpuNmiState,
+    pub sipi_vector: Option<u32>,
+    pub smi: VcpuSmiState,
+    pub triple_fault: VcpuTripleFaultState,
+    pub exception_payload: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuExceptionState {
+    pub injected: bool,
+    pub nr: u8,
+    pub has_error_code: bool,
+    pub pending: Option<bool>,
+    pub error_code: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuInterruptState {
+    pub injected: bool,
+    pub nr: u8,
+    pub soft: bool,
+    pub shadow: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuNmiState {
+    pub injected: bool,
+    pub pending: Option<bool>,
+    pub masked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuSmiState {
+    pub smm: Option<bool>,
+    pub pending: bool,
+    pub smm_inside_nmi: bool,
+    pub latched_init: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuTripleFaultState {
+    pub pending: Option<bool>,
+}
+
 /// State of a VCPU's debug registers.
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -858,3 +918,7 @@ pub enum CpuHybridType {
     /// Intel Core.
     Core,
 }
+
+/// State of the VCPU's x87 FPU, MMX, XMM, YMM registers.
+/// May contain more state depending on enabled extensions.
+pub struct Xsave(pub Vec<u32>);
