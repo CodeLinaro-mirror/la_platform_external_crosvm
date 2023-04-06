@@ -20,6 +20,8 @@ pub enum HypervisorKind {
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     #[cfg(feature = "geniezone")]
     Geniezone,
+    #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
+    Gunyah,
 }
 
 impl FromStr for HypervisorKind {
@@ -31,6 +33,8 @@ impl FromStr for HypervisorKind {
             #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
             #[cfg(feature = "geniezone")]
             "geniezone" => Ok(HypervisorKind::Geniezone),
+            #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
+            "gunyah" => Ok(HypervisorKind::Gunyah),
             _ => Err("invalid hypervisor backend"),
         }
     }

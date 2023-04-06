@@ -84,6 +84,8 @@ cfg_if::cfg_if! {
         #[cfg(any(target_arch = "aarch64"))]
         #[cfg(all(unix, feature = "geniezone"))]
         static GENIEZONE_PATH: &str = "/dev/gzvm";
+        #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
+        static GUNYAH_PATH: &str = "/dev/gunyah";
         static VHOST_NET_PATH: &str = "/dev/vhost-net";
     } else if #[cfg(windows)] {
         use base::{Event, Tube};
@@ -1063,6 +1065,12 @@ pub struct Config {
     pub gpu_server_cgroup_path: Option<PathBuf>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_vmm_config: Option<GpuVmmConfig>,
+    #[cfg(all(
+        unix,
+        any(target_arch = "arm", target_arch = "aarch64"),
+        feature = "gunyah"
+    ))]
+    pub gunyah_device_path: PathBuf,
     pub host_cpu_topology: bool,
     #[cfg(windows)]
     pub host_guid: Option<String>,
@@ -1286,6 +1294,12 @@ impl Default for Config {
             #[cfg(any(target_arch = "aarch64"))]
             #[cfg(all(unix, feature = "geniezone"))]
             geniezone_device_path: PathBuf::from(GENIEZONE_PATH),
+            #[cfg(all(
+                unix,
+                any(target_arch = "arm", target_arch = "aarch64"),
+                feature = "gunyah"
+            ))]
+            gunyah_device_path: PathBuf::from(GUNYAH_PATH),
             host_cpu_topology: false,
             #[cfg(windows)]
             host_guid: None,

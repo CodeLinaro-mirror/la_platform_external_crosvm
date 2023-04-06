@@ -27,6 +27,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [
@@ -123,6 +124,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [
@@ -220,6 +222,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [
@@ -312,6 +315,7 @@ rust_library {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [

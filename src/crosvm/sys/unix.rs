@@ -1479,6 +1479,50 @@ fn run_kvm(cfg: Config, components: VmComponents) -> Result<ExitState> {
     )
 }
 
+#[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
+fn run_gunyah(cfg: Config, components: VmComponents) -> Result<ExitState> {
+    use devices::GunyahIrqChip;
+    use hypervisor::gunyah::{Gunyah, GunyahVcpu, GunyahVm};
+
+    let gunyah = Gunyah::new_with_path(&cfg.gunyah_device_path).with_context(|| {
+        format!(
+            "failed to open Gunyah device {}",
+            cfg.gunyah_device_path.display()
+        )
+    })?;
+
+    let guest_mem = create_guest_memory(&cfg, &components, &gunyah)?;
+
+    #[cfg(feature = "swap")]
+    let swap_controller = if let Some(swap_dir) = cfg.swap_dir.as_ref() {
+        Some(
+            SwapController::launch(guest_mem.clone(), swap_dir, &cfg.jail_config)
+                .context("launch vmm-swap monitor process")?,
+        )
+    } else {
+        None
+    };
+
+    let vm = GunyahVm::new(&gunyah, guest_mem, components.hv_cfg).context("failed to create vm")?;
+
+    // Check that the VM was actually created in protected mode as expected.
+    if cfg.protection_type.isolates_memory() && !vm.check_capability(VmCap::Protected) {
+        bail!("Failed to create protected VM");
+    }
+
+    let vm_clone = vm.try_clone()?;
+
+    run_vm::<GunyahVcpu, GunyahVm>(
+        cfg,
+        components,
+        vm,
+        &mut GunyahIrqChip::new(vm_clone)?,
+        None,
+        #[cfg(feature = "swap")]
+        swap_controller,
+    )
+}
+
 fn get_default_hypervisor(cfg: &Config) -> Result<HypervisorKind> {
     if cfg.kvm_device_path.exists() {
         return Ok(HypervisorKind::Kvm);
@@ -1487,6 +1531,14 @@ fn get_default_hypervisor(cfg: &Config) -> Result<HypervisorKind> {
     #[cfg(feature = "geniezone")]
     if cfg.geniezone_device_path.exists() {
         return Ok(HypervisorKind::Geniezone);
+    }
+    #[cfg(all(
+        unix,
+        any(target_arch = "arm", target_arch = "aarch64"),
+        feature = "gunyah"
+    ))]
+    if cfg.gunyah_device_path.exists() {
+        return Ok(HypervisorKind::Gunyah);
     }
     bail!("failed to get default hypervisor!");
 }
@@ -1511,6 +1563,12 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         #[cfg(feature = "geniezone")]
         HypervisorKind::Geniezone => run_gz(cfg, components),
+        #[cfg(all(
+            unix,
+            any(target_arch = "arm", target_arch = "aarch64"),
+            feature = "gunyah"
+        ))]
+        HypervisorKind::Gunyah => run_gunyah(cfg, components),
     }
 }
 
