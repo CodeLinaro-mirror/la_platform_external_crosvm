@@ -50,12 +50,12 @@
 //! long as kernels < 5.4 are supported.
 //! The other method submits operations to io_uring and is signaled when they complete. This is more
 //! efficient, but only supported on kernel 5.4+.
-//! If `IoSourceExt::new` is used to interface with async IO, then the correct backend will be chosen
+//! If `IoSource::new` is used to interface with async IO, then the correct backend will be chosen
 //! automatically.
 //!
 //! # Examples
 //!
-//! See the docs for `IoSourceExt` if support for kernels <5.4 is required. Focus on `UringSource` if
+//! See the docs for `IoSource` if support for kernels <5.4 is required. Focus on `UringSource` if
 //! all systems have support for io_uring.
 
 mod async_types;
@@ -64,6 +64,7 @@ mod blocking;
 mod complete;
 mod event;
 mod io_ext;
+mod io_source;
 pub mod mem;
 mod queue;
 mod select;
@@ -92,14 +93,12 @@ pub use event::EventAsync;
 #[cfg(windows)]
 pub use futures::executor::block_on;
 use futures::stream::FuturesUnordered;
-pub use io_ext::AllocateMode;
 pub use io_ext::AsyncWrapper;
 pub use io_ext::Error as AsyncError;
 pub use io_ext::IntoAsync;
-pub use io_ext::IoSourceExt;
-pub use io_ext::ReadAsync;
 pub use io_ext::Result as AsyncResult;
-pub use io_ext::WriteAsync;
+pub use io_source::AllocateMode;
+pub use io_source::IoSource;
 pub use mem::BackingMemory;
 pub use mem::MemRegion;
 pub use mem::VecIoWrapper;

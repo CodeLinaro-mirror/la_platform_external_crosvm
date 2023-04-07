@@ -191,7 +191,12 @@
     },
     "devices": {
       "no_presubmit": true,
-      "add_module_block": "devices/cargo2android_libs.bp.patch"
+      "add_module_block": "devices/cargo2android_libs.bp.patch",
+      "dep_blocklist": [
+        // See the comment for base's "dep_blocklist" above (in this case
+        // "devices_test_tests_passthroughfs_main" is the culprit).
+        "liblibtest_mimic"
+      ]
     },
     "disk": {
       "patch": "disk/patches/Android.bp.patch"

@@ -76,9 +76,9 @@ pub struct gh_fn_desc {
     pub arg_size: u32,
     pub arg: u64,
 }
-pub const gh_vm_status_GH_VM_STATUS_LOAD_FAILED: gh_vm_status = 1;
-pub const gh_vm_status_GH_VM_STATUS_EXITED: gh_vm_status = 2;
-pub const gh_vm_status_GH_VM_STATUS_CRASHED: gh_vm_status = 3;
+pub const GH_VM_STATUS_GH_VM_STATUS_LOAD_FAILED: gh_vm_status = 1;
+pub const GH_VM_STATUS_GH_VM_STATUS_EXITED: gh_vm_status = 2;
+pub const GH_VM_STATUS_GH_VM_STATUS_CRASHED: gh_vm_status = 3;
 pub type gh_vm_status = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]

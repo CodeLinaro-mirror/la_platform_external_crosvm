@@ -29,7 +29,6 @@ use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Display;
 use std::fs::File;
-use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::result::Result as StdResult;
 use std::str::FromStr;
@@ -65,7 +64,7 @@ use hypervisor::IoEventAddress;
 use hypervisor::IrqRoute;
 use hypervisor::IrqSource;
 pub use hypervisor::MemSlot;
-use hypervisor::VcpuInnerSnapshot;
+use hypervisor::VcpuSnapshot;
 use hypervisor::Vm;
 use libc::EINVAL;
 use libc::EIO;
@@ -125,16 +124,11 @@ pub enum VcpuControl {
     Restore(mpsc::Sender<anyhow::Result<()>>, Box<VcpuSnapshot>),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct VcpuSnapshot {
-    pub vcpu: VcpuInnerSnapshot,
-    pub vcpu_id: usize,
-}
-
 /// Mode of execution for the VM.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub enum VmRunMode {
     /// The default run mode indicating the VCPUs are running.
+    #[default]
     Running,
     /// Indicates that the VCPUs are suspending execution until the `Running` mode is set.
     Suspending,
@@ -154,12 +148,6 @@ impl Display for VmRunMode {
             Exiting => write!(f, "exiting"),
             Breakpoint => write!(f, "breakpoint"),
         }
-    }
-}
-
-impl Default for VmRunMode {
-    fn default() -> Self {
-        VmRunMode::Running
     }
 }
 
@@ -503,7 +491,7 @@ pub enum VmMemoryRequest {
     },
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
     UnregisterMemory(MemSlot),
-    /// Register an ioeventfd
+    /// Register an ioeventfd by looking up using Alloc info.
     IoEventWithAlloc {
         evt: Event,
         allocation: Alloc,
@@ -511,6 +499,7 @@ pub enum VmMemoryRequest {
         datamatch: Datamatch,
         register: bool,
     },
+    /// Register an eventfd with raw guest memory address.
     IoEventRaw(IoEventUpdateRequest),
 }
 
@@ -862,16 +851,11 @@ impl Display for BatControlResult {
     }
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum BatteryType {
+    #[default]
     Goldfish,
-}
-
-impl Default for BatteryType {
-    fn default() -> Self {
-        BatteryType::Goldfish
-    }
 }
 
 impl FromStr for BatteryType {
@@ -1379,6 +1363,26 @@ impl VmRequest {
             VmRequest::Swap(SwapCommand::Enable) => {
                 #[cfg(feature = "swap")]
                 if let Some(swap_controller) = swap_controller {
+                    // Suspend all vcpus and devices while vmm-swap is enabling (move the guest
+                    // memory contents to the staging memory) to guarantee no processes other than
+                    // the swap monitor process access the guest memory.
+                    let _vcpu_guard = match VcpuSuspendGuard::new(&kick_vcpus, vcpu_size) {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            error!("failed to suspend vcpus: {:?}", e);
+                            return VmResponse::Err(SysError::new(EINVAL));
+                        }
+                    };
+                    // TODO(b/253386409): Use `devices::Suspendable::sleep()` instead of sending
+                    // `SIGSTOP` signal.
+                    let _devices_guard = match swap_controller.suspend_devices() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            error!("failed to suspend devices: {:?}", e);
+                            return VmResponse::Err(SysError::new(EINVAL));
+                        }
+                    };
+
                     return match swap_controller.enable() {
                         Ok(()) => VmResponse::Ok,
                         Err(e) => {
@@ -1661,11 +1665,7 @@ impl VmRequest {
                     }
                     info!("flushed IRQs in {} iterations", flush_attempts);
                     let vcpu_path = snapshot_path.with_extension("vcpu");
-                    let cpu_file = OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(&vcpu_path)
+                    let cpu_file = File::create(&vcpu_path)
                         .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
                     let (send_chan, recv_chan) = mpsc::channel();
                     kick_vcpus(VcpuControl::Snapshot(send_chan));
@@ -1742,16 +1742,18 @@ pub fn do_restore(
     let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
     let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
     let vcpu_path = restore_path.with_extension("vcpu");
-    let cpu_file = OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(&vcpu_path)
+    let cpu_file = File::open(&vcpu_path)
         .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
-    let vcpus_data: Vec<serde_json::Value> = serde_json::from_reader(cpu_file)?;
+    let vcpu_snapshots: Vec<VcpuSnapshot> = serde_json::from_reader(cpu_file)?;
+    if vcpu_snapshots.len() != vcpu_size {
+        bail!(
+            "bad cpu count in snapshot: expected={} got={}",
+            vcpu_size,
+            vcpu_snapshots.len()
+        );
+    }
     let (send_chan, recv_chan) = mpsc::channel();
-    for data in vcpus_data {
-        let vcpu_snap: VcpuSnapshot =
-            serde_json::from_value(data).context("failed to deserialize vcpu snapshot")?;
+    for vcpu_snap in vcpu_snapshots {
         let vcpu_id = vcpu_snap.vcpu_id;
         kick_vcpu(
             VcpuControl::Restore(send_chan.clone(), Box::new(vcpu_snap)),
