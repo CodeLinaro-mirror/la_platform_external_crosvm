@@ -28,6 +28,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
@@ -73,6 +74,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
@@ -118,6 +120,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
@@ -163,6 +166,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
@@ -208,6 +212,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
@@ -253,6 +258,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
@@ -298,6 +304,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
@@ -338,6 +345,7 @@ rust_library {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "geniezone",
         "gunyah",
     ],
     rustlibs: [
