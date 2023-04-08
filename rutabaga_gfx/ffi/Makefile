@@ -4,7 +4,7 @@
 
 prefix ?= /usr/local
 libdir = ${prefix}/lib
-includedir = ${prefix}/lib
+includedir = ${prefix}/include
 
 ifdef debug
   release :=
@@ -26,7 +26,7 @@ RUTABAGA_VERSION := $(RUTABAGA_VERSION_MAJOR).1.1-alpha.1
 all: build
 
 build:
-	cargo build $(release)
+	cargo build --features=gfxstream $(release)
 
 install: build
 	mkdir -p $(DESTDIR)$(prefix)

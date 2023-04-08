@@ -27,6 +27,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [
@@ -35,6 +36,7 @@ rust_test {
         "libargh",
         "libasync_task",
         "libaudio_streams",
+        "libaudio_util",
         "libballoon_control",
         "libbase_rust",
         "libbit_field",
@@ -122,6 +124,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [
@@ -130,6 +133,7 @@ rust_test {
         "libargh",
         "libasync_task",
         "libaudio_streams",
+        "libaudio_util",
         "libballoon_control",
         "libbase_rust",
         "libbit_field",
@@ -218,6 +222,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [
@@ -226,6 +231,7 @@ rust_test {
         "libargh",
         "libasync_task",
         "libaudio_streams",
+        "libaudio_util",
         "libballoon_control",
         "libbase_rust",
         "libbit_field",
@@ -309,6 +315,7 @@ rust_library {
     features: [
         "audio",
         "balloon",
+        "gunyah",
         "usb",
     ],
     rustlibs: [
@@ -317,6 +324,7 @@ rust_library {
         "libargh",
         "libasync_task",
         "libaudio_streams",
+        "libaudio_util",
         "libballoon_control",
         "libbase_rust",
         "libbit_field",

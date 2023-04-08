@@ -9,6 +9,7 @@ use std::sync::Arc;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
 use anyhow::bail;
+use anyhow::Context;
 use base::error;
 use base::Event;
 use base::MemoryMapping;
@@ -21,6 +22,7 @@ use resources::SystemAllocator;
 use sync::Mutex;
 use thiserror::Error;
 use vm_control::IoEventUpdateRequest;
+use vm_control::VmMemoryRequest;
 use vm_control::VmMemoryResponse;
 
 use super::PciId;
@@ -30,13 +32,11 @@ use crate::bus::BusType;
 use crate::bus::ConfigWriteResult;
 use crate::pci::pci_configuration;
 use crate::pci::pci_configuration::PciBarConfiguration;
-use crate::pci::pci_configuration::BAR0_REG;
 use crate::pci::pci_configuration::COMMAND_REG;
 use crate::pci::pci_configuration::COMMAND_REG_IO_SPACE_MASK;
 use crate::pci::pci_configuration::COMMAND_REG_MEMORY_SPACE_MASK;
 use crate::pci::pci_configuration::NUM_BAR_REGS;
 use crate::pci::pci_configuration::PCI_ID_REG;
-use crate::pci::pci_configuration::ROM_BAR_REG;
 use crate::pci::PciAddress;
 use crate::pci::PciAddressError;
 use crate::pci::PciInterruptPin;
@@ -475,6 +475,44 @@ pub trait PciDevice: Send + Suspendable {
     }
 }
 
+fn update_ranges(
+    old_enabled: bool,
+    new_enabled: bool,
+    bus_type_filter: BusType,
+    old_ranges: &[(BusRange, BusType)],
+    new_ranges: &[(BusRange, BusType)],
+) -> (Vec<BusRange>, Vec<BusRange>) {
+    let mut remove_ranges = Vec::new();
+    let mut add_ranges = Vec::new();
+
+    let old_ranges_filtered = old_ranges
+        .iter()
+        .filter(|(_range, bus_type)| *bus_type == bus_type_filter)
+        .map(|(range, _bus_type)| *range);
+    let new_ranges_filtered = new_ranges
+        .iter()
+        .filter(|(_range, bus_type)| *bus_type == bus_type_filter)
+        .map(|(range, _bus_type)| *range);
+
+    if old_enabled && !new_enabled {
+        // Bus type was enabled and is now disabled; remove all old ranges.
+        remove_ranges.extend(old_ranges_filtered);
+    } else if !old_enabled && new_enabled {
+        // Bus type was disabled and is now enabled; add all new ranges.
+        add_ranges.extend(new_ranges_filtered);
+    } else if old_enabled && new_enabled {
+        // Bus type was enabled before and is still enabled; diff old and new ranges.
+        for (old_range, new_range) in old_ranges_filtered.zip(new_ranges_filtered) {
+            if old_range.base != new_range.base {
+                remove_ranges.push(old_range);
+                add_ranges.push(new_range);
+            }
+        }
+    }
+
+    (remove_ranges, add_ranges)
+}
+
 impl<T: PciDevice> BusDevice for T {
     fn debug_label(&self) -> String {
         PciDevice::debug_label(self)
@@ -500,141 +538,72 @@ impl<T: PciDevice> BusDevice for T {
         offset: u64,
         data: &[u8],
     ) -> ConfigWriteResult {
-        let mut result = ConfigWriteResult {
-            ..Default::default()
-        };
         if offset as usize + data.len() > 4 {
-            return result;
+            return Default::default();
         }
 
-        if reg_idx == COMMAND_REG {
-            let old_command_reg = self.read_config_register(COMMAND_REG);
-            let old_ranges = self.get_ranges();
-            self.write_config_register(reg_idx, offset, data);
-            let new_command_reg = self.read_config_register(COMMAND_REG);
-            let new_ranges = self.get_ranges();
+        let old_command_reg = self.read_config_register(COMMAND_REG);
+        let old_ranges =
+            if old_command_reg & (COMMAND_REG_MEMORY_SPACE_MASK | COMMAND_REG_IO_SPACE_MASK) != 0 {
+                self.get_ranges()
+            } else {
+                Vec::new()
+            };
 
-            // Inform the caller of state changes.
-            if (old_command_reg ^ new_command_reg) & COMMAND_REG_MEMORY_SPACE_MASK != 0 {
-                // Enable memory, add new_mmio into mmio_bus
-                if new_command_reg & COMMAND_REG_MEMORY_SPACE_MASK != 0 {
-                    for (range, bus_type) in new_ranges.iter() {
-                        if *bus_type == BusType::Mmio && range.base != 0 {
-                            result.mmio_add.push(*range);
-                        }
-                    }
-                } else {
-                    // Disable memory, remove old_mmio from mmio_bus
-                    for (range, bus_type) in old_ranges.iter() {
-                        if *bus_type == BusType::Mmio && range.base != 0 {
-                            result.mmio_remove.push(*range);
-                        }
-                    }
-                }
-            }
-            if (old_command_reg ^ new_command_reg) & COMMAND_REG_IO_SPACE_MASK != 0 {
-                // Enable IO, add new_io into io_bus
-                if new_command_reg & COMMAND_REG_IO_SPACE_MASK != 0 {
-                    for (range, bus_type) in new_ranges.iter() {
-                        if *bus_type == BusType::Io && range.base != 0 {
-                            result.io_add.push(*range);
-                        }
-                    }
-                } else {
-                    // Disable IO, remove old_io from io_bus
-                    for (range, bus_type) in old_ranges.iter() {
-                        if *bus_type == BusType::Io && range.base != 0 {
-                            result.io_remove.push(*range);
-                        }
-                    }
-                }
-            }
-        } else if (BAR0_REG..=BAR0_REG + 5).contains(&reg_idx) || reg_idx == ROM_BAR_REG {
-            let old_ranges = self.get_ranges();
-            self.write_config_register(reg_idx, offset, data);
-            let new_ranges = self.get_ranges();
+        self.write_config_register(reg_idx, offset, data);
 
-            for ((old_range, old_type), (new_range, new_type)) in
-                old_ranges.iter().zip(new_ranges.iter())
-            {
-                if *old_type != *new_type {
+        let new_command_reg = self.read_config_register(COMMAND_REG);
+        let new_ranges =
+            if new_command_reg & (COMMAND_REG_MEMORY_SPACE_MASK | COMMAND_REG_IO_SPACE_MASK) != 0 {
+                self.get_ranges()
+            } else {
+                Vec::new()
+            };
+
+        let (mmio_remove, mmio_add) = update_ranges(
+            old_command_reg & COMMAND_REG_MEMORY_SPACE_MASK != 0,
+            new_command_reg & COMMAND_REG_MEMORY_SPACE_MASK != 0,
+            BusType::Mmio,
+            &old_ranges,
+            &new_ranges,
+        );
+
+        let (io_remove, io_add) = update_ranges(
+            old_command_reg & COMMAND_REG_IO_SPACE_MASK != 0,
+            new_command_reg & COMMAND_REG_IO_SPACE_MASK != 0,
+            BusType::Io,
+            &old_ranges,
+            &new_ranges,
+        );
+
+        let result = ConfigWriteResult {
+            mmio_remove,
+            mmio_add,
+            io_remove,
+            io_add,
+            removed_pci_devices: self.get_removed_children_devices(),
+        };
+
+        // Handle ioevent changes
+        if !(result.io_add.is_empty()
+            && result.io_remove.is_empty()
+            && result.mmio_add.is_empty()
+            && result.mmio_remove.is_empty())
+        {
+            let ioevents = self.ioevents();
+            if !ioevents.is_empty() {
+                if let Err(e) = send_ioevent_updates(
+                    self.get_vm_memory_request_tube(),
+                    ioevents,
+                    old_ranges,
+                    new_ranges,
+                ) {
                     error!(
-                        "{}: bar {:x} type changed after a bar write",
+                        "send_ioevent_updates failed for {}: {:#}",
                         self.debug_label(),
-                        reg_idx
-                    );
-                    continue;
-                }
-                if old_range.base != new_range.base {
-                    if *new_type == BusType::Mmio {
-                        if old_range.base != 0 {
-                            result.mmio_remove.push(*old_range);
-                        }
-                        if new_range.base != 0 {
-                            result.mmio_add.push(*new_range);
-                        }
-                    } else {
-                        if old_range.base != 0 {
-                            result.io_remove.push(*old_range);
-                        }
-                        if new_range.base != 0 {
-                            result.io_add.push(*new_range);
-                        }
-                    }
-                }
-            }
-            // Handles ioevent changes:
-            if !(result.io_add.is_empty()
-                || result.io_remove.is_empty()
-                || result.mmio_add.is_empty()
-                || result.mmio_remove.is_empty())
-            {
-                let (ioevent_unregister_requests, ioevent_register_requests) =
-                    match get_ioevent_requests(self.ioevents(), old_ranges, new_ranges) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            error!("Failed to get ioevent requests: {:?}", e);
-                            return result;
-                        }
-                    };
-                if let Some(tube) = self.get_vm_memory_request_tube() {
-                    for request in ioevent_unregister_requests {
-                        if let Err(e) = send_ioevent_update_request(tube, request) {
-                            match &e {
-                                IoEventError::SystemError(_) => {
-                                    // Do nothing, as unregister may fail due to placeholder value
-                                }
-                                _ => {
-                                    error!(
-                                        "IoEvent unregister failed for {}: {:?}",
-                                        self.debug_label(),
-                                        &e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    for request in ioevent_register_requests {
-                        if let Err(e) = send_ioevent_update_request(tube, request) {
-                            error!(
-                                "IoEvent register failed for {}: {:?}",
-                                self.debug_label(),
-                                &e
-                            );
-                        }
-                    }
-                } else {
-                    error!(
-                        "get_vm_memory_request_tube not implemented for {}, device may malfunction",
-                        self.debug_label()
+                        e
                     );
                 }
-            }
-        } else {
-            self.write_config_register(reg_idx, offset, data);
-            let children_pci_addr = self.get_removed_children_devices();
-            if !children_pci_addr.is_empty() {
-                result.removed_pci_devices = children_pci_addr;
             }
         }
 
@@ -728,6 +697,9 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
     }
     fn write_virtual_config_register(&mut self, reg_idx: usize, value: u32) {
         (**self).write_virtual_config_register(reg_idx, value)
+    }
+    fn get_vm_memory_request_tube(&self) -> Option<&Tube> {
+        (**self).get_vm_memory_request_tube()
     }
     fn read_config_register(&self, reg_idx: usize) -> u32 {
         (**self).read_config_register(reg_idx)
@@ -874,13 +846,45 @@ fn send_ioevent_update_request(
     tube: &Tube,
     request: IoEventUpdateRequest,
 ) -> std::result::Result<(), IoEventError> {
-    tube.send(&request).map_err(|_| IoEventError::TubeFail)?;
+    tube.send(&VmMemoryRequest::IoEventRaw(request))
+        .map_err(|_| IoEventError::TubeFail)?;
     if let VmMemoryResponse::Err(e) = tube
         .recv::<VmMemoryResponse>()
         .map_err(|_| IoEventError::TubeFail)?
     {
         return Err(IoEventError::SystemError(e));
     }
+    Ok(())
+}
+
+/// Sends register/unregister messages for ioevents based on the updated ranges.
+fn send_ioevent_updates(
+    vm_memory_request_tube: Option<&Tube>,
+    ioevents: Vec<(&Event, u64, Datamatch)>,
+    old_ranges: Vec<(BusRange, BusType)>,
+    new_ranges: Vec<(BusRange, BusType)>,
+) -> anyhow::Result<()> {
+    let tube = vm_memory_request_tube
+        .context("get_vm_memory_request_tube not implemented, device may malfunction")?;
+
+    let (ioevent_unregister_requests, ioevent_register_requests) =
+        get_ioevent_requests(ioevents, old_ranges, new_ranges)
+            .context("Failed to get ioevent requests")?;
+
+    for request in ioevent_unregister_requests {
+        match send_ioevent_update_request(tube, request) {
+            Err(IoEventError::SystemError(_)) => {
+                // Do nothing, as unregister may fail due to placeholder value
+            }
+            Err(e) => return Err(e).context("IoEvent unregister failed"),
+            Ok(()) => {}
+        }
+    }
+
+    for request in ioevent_register_requests {
+        send_ioevent_update_request(tube, request).context("IoEvent register failed")?;
+    }
+
     Ok(())
 }
 
@@ -894,6 +898,7 @@ mod tests {
     use pci_configuration::PciMultimediaSubclass;
 
     use super::*;
+    use crate::pci::pci_configuration::BAR0_REG;
 
     const BAR0_SIZE: u64 = 0x1000;
     const BAR2_SIZE: u64 = 0x20;

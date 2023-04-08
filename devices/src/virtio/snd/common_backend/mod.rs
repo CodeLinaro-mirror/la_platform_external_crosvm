@@ -14,6 +14,8 @@ use audio_streams::BoxError;
 use base::debug;
 use base::error;
 use base::warn;
+use base::AsRawDescriptor;
+use base::Descriptor;
 use base::Error as SysError;
 use base::Event;
 use base::RawDescriptor;
@@ -42,7 +44,10 @@ use crate::virtio::copy_config;
 use crate::virtio::device_constants::snd::virtio_snd_config;
 use crate::virtio::snd::common_backend::async_funcs::*;
 use crate::virtio::snd::common_backend::stream_info::StreamInfo;
+use crate::virtio::snd::common_backend::stream_info::StreamInfoBuilder;
 use crate::virtio::snd::constants::*;
+use crate::virtio::snd::file_backend::create_file_stream_source_generators;
+use crate::virtio::snd::file_backend::Error as FileError;
 use crate::virtio::snd::layout::*;
 use crate::virtio::snd::null_backend::create_null_stream_source_generators;
 use crate::virtio::snd::parameters::Parameters;
@@ -84,6 +89,8 @@ pub enum Error {
     /// Creating WaitContext failed.
     #[error("Failed to create wait context: {0}")]
     CreateWaitContext(SysError),
+    #[error("Failed to create file stream source generator")]
+    CreateFileStreamSourceGenerator(FileError),
     /// Cloning kill event failed.
     #[error("Failed to clone kill event: {0}")]
     CloneKillEvent(SysError),
@@ -158,9 +165,9 @@ pub enum WorkerStatus {
 // Stores constant data
 #[derive(Clone)]
 pub struct SndData {
-    jack_info: Vec<virtio_snd_jack_info>,
-    pcm_info: Vec<virtio_snd_pcm_info>,
-    chmap_info: Vec<virtio_snd_chmap_info>,
+    pub(crate) jack_info: Vec<virtio_snd_jack_info>,
+    pub(crate) pcm_info: Vec<virtio_snd_pcm_info>,
+    pub(crate) chmap_info: Vec<virtio_snd_chmap_info>,
 }
 
 impl SndData {
@@ -196,11 +203,12 @@ pub struct PcmResponse {
 pub struct VirtioSnd {
     cfg: virtio_snd_config,
     snd_data: SndData,
-    stream_source_generators: Vec<Arc<SysAudioStreamSourceGenerator>>,
+    stream_info_builders: Vec<StreamInfoBuilder>,
     avail_features: u64,
     acked_features: u64,
     queue_sizes: Box<[u16]>,
     worker_thread: Option<WorkerThread<()>>,
+    keep_rds: Vec<Descriptor>,
 }
 
 impl VirtioSnd {
@@ -209,33 +217,58 @@ impl VirtioSnd {
         let cfg = hardcoded_virtio_snd_config(&params);
         let snd_data = hardcoded_snd_data(&params);
         let avail_features = base_features;
-        let stream_source_generators = create_stream_source_generators(&params, &snd_data)
-            .into_iter()
-            .map(Arc::new)
-            .collect();
+        let mut keep_rds: Vec<RawDescriptor> = Vec::new();
+
+        let stream_info_builders = create_stream_info_builders(&params, &snd_data, &mut keep_rds)?;
 
         Ok(VirtioSnd {
             cfg,
             snd_data,
-            stream_source_generators,
+            stream_info_builders,
             avail_features,
             acked_features: 0,
             queue_sizes: vec![MAX_VRING_LEN; MAX_QUEUE_NUM].into_boxed_slice(),
             worker_thread: None,
+            keep_rds: keep_rds.iter().map(|rd| Descriptor(*rd)).collect(),
         })
     }
 }
 
-pub(crate) fn create_stream_source_generators(
+fn create_stream_source_generators(
     params: &Parameters,
     snd_data: &SndData,
-) -> Vec<SysAudioStreamSourceGenerator> {
-    match params.backend {
+    keep_rds: &mut Vec<RawDescriptor>,
+) -> Result<Vec<SysAudioStreamSourceGenerator>, Error> {
+    let generators = match params.backend {
         StreamSourceBackend::NULL => create_null_stream_source_generators(snd_data),
+        StreamSourceBackend::FILE => {
+            create_file_stream_source_generators(params, snd_data, keep_rds)
+                .map_err(Error::CreateFileStreamSourceGenerator)?
+        }
         StreamSourceBackend::Sys(backend) => {
             sys_create_stream_source_generators(backend, params, snd_data)
         }
-    }
+    };
+    Ok(generators)
+}
+
+/// Creates [`StreamInfoBuilder`]s by calling [`create_stream_source_generators()`] then zip
+/// them with [`crate::virtio::snd::parameters::PCMDeviceParameters`] from the params to set
+/// the parameters on each [`StreamInfoBuilder`] (e.g. effects).
+pub(crate) fn create_stream_info_builders(
+    params: &Parameters,
+    snd_data: &SndData,
+    keep_rds: &mut Vec<RawDescriptor>,
+) -> Result<Vec<StreamInfoBuilder>, Error> {
+    Ok(create_stream_source_generators(params, snd_data, keep_rds)?
+        .into_iter()
+        .map(Arc::new)
+        .zip(snd_data.pcm_info_iter())
+        .map(|(generator, pcm_info)| {
+            let device_params = params.get_device_params(pcm_info).unwrap_or_default();
+            StreamInfo::builder(generator).effects(device_params.effects.unwrap_or_default())
+        })
+        .collect())
 }
 
 // To be used with hardcoded_snd_data
@@ -363,7 +396,10 @@ fn resize_parameters_pcm_device_config(mut params: Parameters) -> Parameters {
 
 impl VirtioDevice for VirtioSnd {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
-        Vec::new()
+        self.keep_rds
+            .iter()
+            .map(|descr| descr.as_raw_descriptor())
+            .collect()
     }
 
     fn device_type(&self) -> DeviceType {
@@ -409,7 +445,7 @@ impl VirtioDevice for VirtioSnd {
         }
 
         let snd_data = self.snd_data.clone();
-        let stream_source_generators = self.stream_source_generators.to_vec();
+        let stream_info_builders = self.stream_info_builders.to_vec();
 
         self.worker_thread = Some(WorkerThread::start("v_snd_common", move |kill_evt| {
             set_audio_thread_priority();
@@ -419,7 +455,7 @@ impl VirtioDevice for VirtioSnd {
                 guest_mem,
                 snd_data,
                 kill_evt,
-                stream_source_generators,
+                stream_info_builders,
             ) {
                 error!("{}", err_string);
             }
@@ -451,20 +487,20 @@ fn run_worker(
     mem: GuestMemory,
     snd_data: SndData,
     kill_evt: Event,
-    stream_source_generators: Vec<Arc<SysAudioStreamSourceGenerator>>,
+    stream_info_builders: Vec<StreamInfoBuilder>,
 ) -> Result<(), String> {
     let ex = Executor::new().expect("Failed to create an executor");
 
-    if snd_data.pcm_info_len() != stream_source_generators.len() {
+    if snd_data.pcm_info_len() != stream_info_builders.len() {
         error!(
             "snd: expected {} streams, got {}",
             snd_data.pcm_info_len(),
-            stream_source_generators.len(),
+            stream_info_builders.len(),
         );
     }
-    let streams = stream_source_generators
+    let streams = stream_info_builders
         .into_iter()
-        .map(StreamInfo::new)
+        .map(StreamInfoBuilder::build)
         .map(AsyncMutex::new)
         .collect();
     let streams = Rc::new(AsyncMutex::new(streams));

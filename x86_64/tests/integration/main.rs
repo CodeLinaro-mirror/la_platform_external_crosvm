@@ -59,6 +59,7 @@ use x86_64::ZERO_PAGE_OFFSET;
 enum TaggedControlTube {
     VmMemory(Tube),
     VmIrq(Tube),
+    Vm(Tube),
 }
 
 /// Tests the integration of x86_64 with some hypervisor and devices setup. This test can help
@@ -98,7 +99,7 @@ where
     );
     // guest mem is 400 pages
     let arch_mem_regions = arch_memory_regions(memory_size, None);
-    let guest_mem = GuestMemory::new(&arch_mem_regions).unwrap();
+    let guest_mem = GuestMemory::new_with_options(&arch_mem_regions).unwrap();
 
     let (hyp, mut vm) = create_vm(guest_mem.clone());
     let mut resources =
@@ -156,7 +157,9 @@ where
     )
     .unwrap();
 
-    X8664arch::setup_legacy_cmos_device(&io_bus, memory_size).unwrap();
+    let (host_cmos_tube, cmos_tube) = Tube::pair().unwrap();
+    X8664arch::setup_legacy_cmos_device(&io_bus, &mut irq_chip, cmos_tube, memory_size).unwrap();
+    control_tubes.push(TaggedControlTube::Vm(host_cmos_tube));
 
     let mut serial_params = BTreeMap::new();
 
