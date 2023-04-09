@@ -17,7 +17,7 @@ index ab4c44322..75dbbb9d5 100644
          "libdata_model",
          "libfutures",
          "liblibc",
-+        "libprotobuf", // Added manually
++        "libprotobuf_deprecated", // Added manually
 +        "libprotos", // Added manually
          "libserde",
          "libsync_rust",
@@ -42,7 +42,7 @@ index ab4c44322..75dbbb9d5 100644
          "libdata_model",
          "libfutures",
          "liblibc",
-+        "libprotobuf", // Added manually
++        "libprotobuf_deprecated", // Added manually
 +        "libprotos", // Added manually
          "libserde",
          "libsync_rust",

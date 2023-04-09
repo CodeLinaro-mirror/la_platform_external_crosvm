@@ -30,7 +30,6 @@ use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::Event;
 use base::SendTube;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
 use base::Tube;
 use devices::virtio::VirtioDevice;
 use devices::BarRange;
@@ -113,6 +112,7 @@ use vm_control::PmResource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use vm_memory::MemoryRegionOptions;
 
 pub enum VmImage {
     Kernel(File),
@@ -380,6 +380,7 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     /// If it's Some, then `build_vm` already created the vcpus.
     pub vcpus: Option<Vec<Vcpu>>,
     pub vm: V,
+    pub vm_request_tube: Option<Tube>,
 }
 
 /// The device and optional jail.
@@ -402,7 +403,7 @@ pub trait LinuxArch {
     fn guest_memory_layout(
         components: &VmComponents,
         hypervisor: &impl hypervisor::Hypervisor,
-    ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error>;
+    ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error>;
 
     /// Gets the configuration for a new `SystemAllocator` that fits the given `Vm`'s memory layout.
     ///

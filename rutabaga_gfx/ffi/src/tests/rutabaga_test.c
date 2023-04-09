@@ -70,15 +70,15 @@ static void rutabaga_test_write_fence(uint64_t user_data, struct rutabaga_fence 
 	test->value = fence_data.fence_id;
 }
 
-static int test_rutabaga_init(struct rutabaga_test *test, uint32_t component)
+static int test_rutabaga_init(struct rutabaga_test *test, uint64_t capset_mask)
 {
 	int result;
 	struct rutabaga_builder builder = { 0 };
 	struct rutabaga_channels channels = { 0 };
 
 	builder.fence_cb = rutabaga_test_write_fence;
-	builder.rutabaga_component = component;
-	if (component == RUTABAGA_COMPONENT_CROSS_DOMAIN) {
+	builder.capset_mask = capset_mask;
+	if (capset_mask & (1 << RUTABAGA_CAPSET_CROSS_DOMAIN)) {
 		builder.user_data = (uint64_t)(uintptr_t *)(void *)test;
 		channels.channels =
 		    (struct rutabaga_channel *)calloc(1, sizeof(struct rutabaga_channel));
@@ -92,7 +92,7 @@ static int test_rutabaga_init(struct rutabaga_test *test, uint32_t component)
 
 	result = rutabaga_init(&builder, &test->rutabaga);
 
-	if (component == RUTABAGA_COMPONENT_CROSS_DOMAIN)
+	if (capset_mask & (1 << RUTABAGA_CAPSET_CROSS_DOMAIN))
 		free(channels.channels);
 
 	CHECK_RESULT(result);
@@ -107,8 +107,9 @@ static int test_create_context(struct rutabaga_test *test, const char *context_n
 	bool found_cross_domain = false;
 	struct CrossDomainCapabilities *capset;
 
-	num_capsets = rutabaga_get_num_capsets();
-	CHECK(num_capsets > 0);
+	result = rutabaga_get_num_capsets(test->rutabaga, &num_capsets);
+	CHECK_RESULT(result);
+	CHECK(num_capsets == 1);
 
 	for (uint32_t i = 0; i < num_capsets; i++) {
 		result = rutabaga_get_capset_info(test->rutabaga, i, &capset_id, &capset_version,
@@ -378,7 +379,7 @@ int main(int argc, char *argv[])
 	for (uint32_t i = 0; i < num_context_names; i++) {
 		const char *context_name = context_names[i];
 		for (uint32_t j = 0; j < NUM_ITERATIONS; j++) {
-			result = test_rutabaga_init(&test, RUTABAGA_COMPONENT_CROSS_DOMAIN);
+			result = test_rutabaga_init(&test, 1 << RUTABAGA_CAPSET_CROSS_DOMAIN);
 			CHECK_RESULT(result);
 
 			result |= test_create_context(&test, context_name);
@@ -399,7 +400,7 @@ int main(int argc, char *argv[])
 	}
 
 	for (uint32_t i = 0; i < NUM_ITERATIONS; i++) {
-		result = test_rutabaga_init(&test, RUTABAGA_COMPONENT_2D);
+		result = test_rutabaga_init(&test, 0);
 		CHECK_RESULT(result);
 
 		result |= test_rutabaga_2d(&test);

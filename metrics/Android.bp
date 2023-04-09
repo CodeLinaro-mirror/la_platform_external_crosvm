@@ -36,7 +36,7 @@ rust_library {
         "libanyhow",
         "libbase_rust",
         "libcfg_if",
-        "libprotobuf",
+        "libprotobuf_deprecated",
         "libserde",
     ],
 }

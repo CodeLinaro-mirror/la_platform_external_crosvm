@@ -29,6 +29,7 @@ use base::AsRawDescriptor;
 use base::Error as SysError;
 use base::Event;
 use base::EventExt;
+use base::WorkerThread;
 use cros_async::select2;
 use cros_async::select6;
 use cros_async::sync::Mutex;
@@ -36,7 +37,6 @@ use cros_async::AsyncError;
 use cros_async::EventAsync;
 use cros_async::Executor;
 use cros_async::SelectResult;
-use data_model::DataInit;
 use data_model::Le32;
 use data_model::Le64;
 use futures::channel::mpsc;
@@ -53,10 +53,11 @@ use zerocopy::FromBytes;
 
 use crate::virtio::async_utils;
 use crate::virtio::copy_config;
-use crate::virtio::virtio_vsock_config;
-use crate::virtio::virtio_vsock_event;
-use crate::virtio::virtio_vsock_hdr;
-use crate::virtio::vsock_op;
+use crate::virtio::vsock::sys::windows::protocol::virtio_vsock_config;
+use crate::virtio::vsock::sys::windows::protocol::virtio_vsock_event;
+use crate::virtio::vsock::sys::windows::protocol::virtio_vsock_hdr;
+use crate::virtio::vsock::sys::windows::protocol::vsock_op;
+use crate::virtio::vsock::sys::windows::protocol::TYPE_STREAM_SOCKET;
 use crate::virtio::DescriptorError;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
@@ -65,9 +66,7 @@ use crate::virtio::Reader;
 use crate::virtio::SignalableInterrupt;
 use crate::virtio::VirtioDevice;
 use crate::virtio::Writer;
-use crate::virtio::TYPE_STREAM_SOCKET;
 use crate::Suspendable;
-use base::WorkerThread;
 
 #[sorted]
 #[derive(ThisError, Debug)]
