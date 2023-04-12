@@ -77,8 +77,6 @@ use devices::virtio::BalloonFeatures;
 use devices::virtio::BalloonMode;
 #[cfg(feature = "gpu")]
 use devices::virtio::EventDevice;
-use devices::virtio::NetParameters;
-use devices::virtio::NetParametersMode;
 use devices::virtio::VirtioTransportType;
 #[cfg(feature = "audio")]
 use devices::Ac97Dev;
@@ -221,7 +219,7 @@ fn create_virtio_devices(
     #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
     vvu_proxy_device_tubes: &mut Vec<Tube>,
     vvu_proxy_max_sibling_mem_size: u64,
-    registered_evt_q: &SendTube,
+    #[cfg_attr(not(feature = "balloon"), allow(unused_variables))] registered_evt_q: &SendTube,
 ) -> DeviceResult<Vec<VirtioDeviceStub>> {
     let mut devs = Vec::new();
 
@@ -509,42 +507,8 @@ fn create_virtio_devices(
         )?);
     }
 
-    let mut net_cfg_extra: Vec<_> = cfg
-        .tap_fd
-        .iter()
-        .map(|fd| NetParameters {
-            vhost_net: cfg.vhost_net,
-            mode: NetParametersMode::TapFd {
-                tap_fd: *fd,
-                mac: None,
-            },
-        })
-        .collect();
-
-    if let (Some(host_ip), Some(netmask), Some(mac)) = (cfg.host_ip, cfg.netmask, cfg.mac_address) {
-        if !cfg.vhost_user_net.is_empty() {
-            bail!("vhost-user-net cannot be used with any of --host-ip, --netmask or --mac");
-        }
-        net_cfg_extra.push(NetParameters {
-            vhost_net: cfg.vhost_net,
-            mode: NetParametersMode::RawConfig {
-                host_ip,
-                netmask,
-                mac,
-            },
-        });
-    }
-
-    net_cfg_extra.extend(cfg.tap_name.iter().map(|tap_name| NetParameters {
-        vhost_net: cfg.vhost_net,
-        mode: NetParametersMode::TapName {
-            mac: None,
-            tap_name: tap_name.to_owned(),
-        },
-    }));
-
-    for opt in [&cfg.net, &net_cfg_extra].into_iter().flatten() {
-        let vq_pairs = cfg.net_vq_pairs.unwrap_or(1);
+    for opt in &cfg.net {
+        let vq_pairs = opt.vq_pairs.unwrap_or(1);
         let vcpu_count = cfg.vcpu_count.unwrap_or(1);
         let multi_vq = vq_pairs > 1 && !opt.vhost_net;
         let (tap, mac) = create_tap_for_net_device(&opt.mode, multi_vq)?;
@@ -844,6 +808,7 @@ fn create_devices(
         vm_evt_wrtube,
         #[cfg(feature = "balloon")]
         balloon_device_tube,
+        #[cfg(feature = "balloon")]
         balloon_wss_device_tube,
         #[cfg(feature = "balloon")]
         balloon_inflate_tube,
@@ -2912,6 +2877,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let mut pvpanic_code = PvPanicCode::Unknown;
     #[cfg(feature = "balloon")]
     let mut balloon_stats_id: u64 = 0;
+    #[cfg(feature = "balloon")]
     let mut balloon_wss_id: u64 = 0;
     let mut registered_evt_tubes: HashMap<RegisteredEvent, HashSet<AddressedTube>> = HashMap::new();
 
