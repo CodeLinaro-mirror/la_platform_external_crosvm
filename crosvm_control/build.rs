@@ -79,5 +79,8 @@ fn main() -> Result<()> {
         .file(test_file)
         .compile("crosvm_control_test");
 
+    // The above outputs cargo:rerun-if-env-changed directives, so we need to explicitly tell cargo
+    // to rerun this script if anything in src/ is changed.
+    println!("cargo:rerun-if-changed=src");
     Ok(())
 }

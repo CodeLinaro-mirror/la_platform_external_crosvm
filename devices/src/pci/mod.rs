@@ -30,6 +30,8 @@ mod stub;
 mod vfio_pci;
 
 use libc::EINVAL;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[cfg(feature = "audio")]
 pub use self::ac97::Ac97Backend;
@@ -67,6 +69,7 @@ pub use self::pci_configuration::PciSubclass;
 pub use self::pci_configuration::CAPABILITY_LIST_HEAD_OFFSET;
 pub use self::pci_device::BarRange;
 pub use self::pci_device::Error as PciDeviceError;
+pub use self::pci_device::IoEventError as PciIoEventError;
 pub use self::pci_device::PciBus;
 pub use self::pci_device::PciDevice;
 pub use self::pci_device::PreferredIrq;
@@ -111,7 +114,7 @@ pub const PCI_VENDOR_ID_INTEL: u16 = 0x8086;
 pub const PCI_VENDOR_ID_REDHAT: u16 = 0x1b36;
 
 #[repr(u16)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrosvmDeviceId {
     Pit = 1,
     Pic = 2,
@@ -166,7 +169,7 @@ impl TryFrom<u16> for CrosvmDeviceId {
 }
 
 /// A wrapper structure for pci device and vendor id.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PciId {
     vendor_id: u16,
     device_id: u16,

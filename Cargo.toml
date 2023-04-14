@@ -50,7 +50,6 @@ members = [
     "broker_ipc",
     "common/audio_streams",
     "common/balloon_control",
-    "common/cros_asyncv2",
     "common/cros-fuzz",
     "common/data_model",
     "common/p9",
@@ -435,7 +434,7 @@ static_assertions = "1.1"
 sync = { path = "common/sync" }
 tempfile = "3"
 thiserror = { version = "1.0.20" }
-uuid = { version = "0.8.2", features = [ "serde" ] }
+uuid = { version = "1", features = [ "serde" ] }
 vhost = { path = "vhost" }
 vm_control = { path = "vm_control" }
 acpi_tables = { path = "acpi_tables" }

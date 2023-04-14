@@ -80,12 +80,6 @@ cfg_if::cfg_if! {
         use crate::crosvm::sys::GpuRenderServerParameters;
         use libc::{getegid, geteuid};
 
-        static KVM_PATH: &str = "/dev/kvm";
-        #[cfg(any(target_arch = "aarch64"))]
-        #[cfg(all(unix, feature = "geniezone"))]
-        static GENIEZONE_PATH: &str = "/dev/gzvm";
-        #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
-        static GUNYAH_PATH: &str = "/dev/gunyah";
         static VHOST_NET_PATH: &str = "/dev/vhost-net";
     } else if #[cfg(windows)] {
         use base::{Event, Tube};
@@ -392,9 +386,10 @@ impl FromStr for TouchDeviceOption {
     }
 }
 
-#[derive(Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SharedDirKind {
     FS,
+    #[default]
     P9,
 }
 
@@ -408,12 +403,6 @@ impl FromStr for SharedDirKind {
             "9p" | "9P" | "p9" | "P9" => Ok(P9),
             _ => Err("invalid file system type"),
         }
-    }
-}
-
-impl Default for SharedDirKind {
-    fn default() -> SharedDirKind {
-        SharedDirKind::P9
     }
 }
 
@@ -1050,9 +1039,6 @@ pub struct Config {
     pub force_s2idle: bool,
     #[cfg(feature = "gdb")]
     pub gdb: Option<u32>,
-    #[cfg(any(target_arch = "aarch64"))]
-    #[cfg(all(unix, feature = "geniezone"))]
-    pub geniezone_device_path: PathBuf,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_backend_config: Option<GpuBackendConfig>,
     #[cfg(all(unix, feature = "gpu"))]
@@ -1065,12 +1051,6 @@ pub struct Config {
     pub gpu_server_cgroup_path: Option<PathBuf>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_vmm_config: Option<GpuVmmConfig>,
-    #[cfg(all(
-        unix,
-        any(target_arch = "arm", target_arch = "aarch64"),
-        feature = "gunyah"
-    ))]
-    pub gunyah_device_path: PathBuf,
     pub host_cpu_topology: bool,
     #[cfg(windows)]
     pub host_guid: Option<String>,
@@ -1085,8 +1065,6 @@ pub struct Config {
     pub jail_config: Option<JailConfig>,
     #[cfg(windows)]
     pub kernel_log_file: Option<String>,
-    #[cfg(unix)]
-    pub kvm_device_path: PathBuf,
     #[cfg(unix)]
     pub lock_guest_memory: bool,
     #[cfg(windows)]
@@ -1291,15 +1269,6 @@ impl Default for Config {
             gpu_server_cgroup_path: None,
             #[cfg(all(windows, feature = "gpu"))]
             gpu_vmm_config: None,
-            #[cfg(any(target_arch = "aarch64"))]
-            #[cfg(all(unix, feature = "geniezone"))]
-            geniezone_device_path: PathBuf::from(GENIEZONE_PATH),
-            #[cfg(all(
-                unix,
-                any(target_arch = "arm", target_arch = "aarch64"),
-                feature = "gunyah"
-            ))]
-            gunyah_device_path: PathBuf::from(GUNYAH_PATH),
             host_cpu_topology: false,
             #[cfg(windows)]
             host_guid: None,
@@ -1322,8 +1291,6 @@ impl Default for Config {
             },
             #[cfg(windows)]
             kernel_log_file: None,
-            #[cfg(unix)]
-            kvm_device_path: PathBuf::from(KVM_PATH),
             #[cfg(unix)]
             lock_guest_memory: false,
             #[cfg(windows)]

@@ -1,4 +1,7 @@
-use base::Error;
+// Copyright 2023 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 use base::Event;
 use base::Result;
 use hypervisor::gunyah::GunyahVm;
@@ -6,7 +9,6 @@ use hypervisor::DeviceKind;
 use hypervisor::IrqRoute;
 use hypervisor::MPState;
 use hypervisor::Vcpu;
-use libc::ENOTSUP;
 
 use crate::IrqChip;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
