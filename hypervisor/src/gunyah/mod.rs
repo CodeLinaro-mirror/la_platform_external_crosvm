@@ -1,3 +1,7 @@
+// Copyright 2023 The ChromiumOS Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 mod aarch64;
 
@@ -752,11 +756,11 @@ impl Vcpu for GunyahVcpu {
             GH_VCPU_EXIT_STATUS => {
                 let status = unsafe { &mut run.__bindgen_anon_1.status };
                 match status.status {
-                    gh_vm_status_GH_VM_STATUS_LOAD_FAILED => Ok(VcpuExit::FailEntry {
+                    GH_VM_STATUS_GH_VM_STATUS_LOAD_FAILED => Ok(VcpuExit::FailEntry {
                         hardware_entry_failure_reason: 0,
                     }),
-                    gh_vm_status_GH_VM_STATUS_CRASHED => Ok(VcpuExit::SystemEventCrash),
-                    gh_vm_status_GH_VM_STATUS_EXITED => {
+                    GH_VM_STATUS_GH_VM_STATUS_CRASHED => Ok(VcpuExit::SystemEventCrash),
+                    GH_VM_STATUS_GH_VM_STATUS_EXITED => {
                         info!("exit type {}", status.exit_info.type_);
                         match status.exit_info.type_ {
                             GH_RM_EXIT_TYPE_VM_EXIT => Ok(VcpuExit::SystemEventShutdown),

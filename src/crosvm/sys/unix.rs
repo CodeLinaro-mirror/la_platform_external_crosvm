@@ -170,10 +170,6 @@ use serde::Serialize;
 use smallvec::SmallVec;
 #[cfg(feature = "swap")]
 use swap::SwapController;
-#[cfg(feature = "swap")]
-use swap::VmSwapCommand;
-#[cfg(feature = "swap")]
-use swap::VmSwapResponse;
 use sync::Condvar;
 use sync::Mutex;
 use vm_control::*;
@@ -201,6 +197,13 @@ use crate::crosvm::gdb::GdbStub;
 #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
 use crate::crosvm::ratelimit::Ratelimit;
 use crate::crosvm::sys::cmdline::DevicesCommand;
+
+const KVM_PATH: &str = "/dev/kvm";
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(feature = "geniezone")]
+const GENIEZONE_PATH: &str = "/dev/gzvm";
+#[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
+static GUNYAH_PATH: &str = "/dev/gunyah";
 
 fn create_virtio_devices(
     cfg: &Config,
@@ -872,12 +875,17 @@ fn create_devices(
                     None
                 };
 
+                let (ioevent_host_tube, ioevent_device_tube) =
+                    Tube::pair().context("failed to create ioevent tube")?;
+                irq_control_tubes.push(ioevent_host_tube);
+
                 let dev = VirtioPciDevice::new(
                     vm.get_memory().clone(),
                     stub.dev,
                     msi_device_tube,
                     cfg.disable_virtio_intx,
                     shared_memory_tube,
+                    ioevent_device_tube,
                 )
                 .context("failed to create virtio pci dev")?;
 
@@ -1331,13 +1339,10 @@ fn create_guest_memory(
 
 #[cfg(any(target_arch = "aarch64"))]
 #[cfg(feature = "geniezone")]
-fn run_gz(cfg: Config, components: VmComponents) -> Result<ExitState> {
-    let gzvm = Geniezone::new_with_path(&cfg.geniezone_device_path).with_context(|| {
-        format!(
-            "failed to open GenieZone device {}",
-            cfg.geniezone_device_path.display(),
-        )
-    })?;
+fn run_gz(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> Result<ExitState> {
+    let device_path = device_path.unwrap_or(Path::new(GENIEZONE_PATH));
+    let gzvm = Geniezone::new_with_path(device_path)
+        .with_context(|| format!("failed to open GenieZone device {}", device_path.display()))?;
 
     let guest_mem = create_guest_memory(&cfg, &components, &gzvm)?;
 
@@ -1381,13 +1386,10 @@ fn run_gz(cfg: Config, components: VmComponents) -> Result<ExitState> {
     )
 }
 
-fn run_kvm(cfg: Config, components: VmComponents) -> Result<ExitState> {
-    let kvm = Kvm::new_with_path(&cfg.kvm_device_path).with_context(|| {
-        format!(
-            "failed to open KVM device {}",
-            cfg.kvm_device_path.display(),
-        )
-    })?;
+fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> Result<ExitState> {
+    let device_path = device_path.unwrap_or(Path::new(KVM_PATH));
+    let kvm = Kvm::new_with_path(device_path)
+        .with_context(|| format!("failed to open KVM device {}", device_path.display()))?;
 
     let guest_mem = create_guest_memory(&cfg, &components, &kvm)?;
 
@@ -1480,16 +1482,17 @@ fn run_kvm(cfg: Config, components: VmComponents) -> Result<ExitState> {
 }
 
 #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
-fn run_gunyah(cfg: Config, components: VmComponents) -> Result<ExitState> {
+fn run_gunyah(
+    device_path: Option<&Path>,
+    cfg: Config,
+    components: VmComponents,
+) -> Result<ExitState> {
     use devices::GunyahIrqChip;
     use hypervisor::gunyah::{Gunyah, GunyahVcpu, GunyahVm};
 
-    let gunyah = Gunyah::new_with_path(&cfg.gunyah_device_path).with_context(|| {
-        format!(
-            "failed to open Gunyah device {}",
-            cfg.gunyah_device_path.display()
-        )
-    })?;
+    let device_path = device_path.unwrap_or(Path::new(GUNYAH_PATH));
+    let gunyah = Gunyah::new_with_path(device_path)
+        .with_context(|| format!("failed to open Gunyah device {}", device_path.display()))?;
 
     let guest_mem = create_guest_memory(&cfg, &components, &gunyah)?;
 
@@ -1523,24 +1526,41 @@ fn run_gunyah(cfg: Config, components: VmComponents) -> Result<ExitState> {
     )
 }
 
-fn get_default_hypervisor(cfg: &Config) -> Result<HypervisorKind> {
-    if cfg.kvm_device_path.exists() {
-        return Ok(HypervisorKind::Kvm);
+/// Choose a default hypervisor if no `--hypervisor` option was specified.
+fn get_default_hypervisor() -> Option<HypervisorKind> {
+    let kvm_path = Path::new(KVM_PATH);
+    if kvm_path.exists() {
+        return Some(HypervisorKind::Kvm {
+            device: Some(kvm_path.to_path_buf()),
+        });
     }
+
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     #[cfg(feature = "geniezone")]
-    if cfg.geniezone_device_path.exists() {
-        return Ok(HypervisorKind::Geniezone);
+    {
+        let gz_path = Path::new(GENIEZONE_PATH);
+        if gz_path.exists() {
+            return Some(HypervisorKind::Geniezone {
+                device: Some(gz_path.to_path_buf()),
+            });
+        }
     }
+
     #[cfg(all(
         unix,
         any(target_arch = "arm", target_arch = "aarch64"),
         feature = "gunyah"
     ))]
-    if cfg.gunyah_device_path.exists() {
-        return Ok(HypervisorKind::Gunyah);
+    {
+        let gunyah_path = Path::new(GUNYAH_PATH);
+        if gunyah_path.exists() {
+            return Some(HypervisorKind::Gunyah {
+                device: Some(gunyah_path.to_path_buf()),
+            });
+        }
     }
-    bail!("failed to get default hypervisor!");
+
+    None
 }
 
 pub fn run_config(cfg: Config) -> Result<ExitState> {
@@ -1553,22 +1573,23 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
 
     let hypervisor = cfg
         .hypervisor
-        .or_else(|| get_default_hypervisor(&cfg).ok())
+        .clone()
+        .or_else(get_default_hypervisor)
         .context("no enabled hypervisor")?;
 
-    debug!("creating {:?} hypervisor", hypervisor);
+    debug!("creating hypervisor: {:?}", hypervisor);
 
     match hypervisor {
-        HypervisorKind::Kvm => run_kvm(cfg, components),
+        HypervisorKind::Kvm { device } => run_kvm(device.as_deref(), cfg, components),
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         #[cfg(feature = "geniezone")]
-        HypervisorKind::Geniezone => run_gz(cfg, components),
+        HypervisorKind::Geniezone { device } => run_gz(device.as_deref(), cfg, components),
         #[cfg(all(
             unix,
             any(target_arch = "arm", target_arch = "aarch64"),
             feature = "gunyah"
         ))]
-        HypervisorKind::Gunyah => run_gunyah(cfg, components),
+        HypervisorKind::Gunyah { device } => run_gunyah(device.as_deref(), cfg, components),
     }
 }
 
@@ -1578,7 +1599,7 @@ fn run_vm<Vcpu, V>(
     mut vm: V,
     irq_chip: &mut dyn IrqChipArch,
     ioapic_host_tube: Option<Tube>,
-    #[cfg(feature = "swap")] swap_controller: Option<(SwapController, Tube)>,
+    #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
 ) -> Result<ExitState>
 where
     Vcpu: VcpuArch + 'static,
@@ -1613,14 +1634,6 @@ where
 
     let mut control_tubes = Vec::new();
     let mut irq_control_tubes = Vec::new();
-
-    #[cfg(feature = "swap")]
-    let swap_controller = if let Some((swap_controller, tube)) = swap_controller {
-        control_tubes.push(TaggedControlTube::SwapMonitor(tube));
-        Some(swap_controller)
-    } else {
-        None
-    };
 
     #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
     if let Some(port) = cfg.gdb {
@@ -1931,12 +1944,16 @@ where
 
         let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
         irq_control_tubes.push(msi_host_tube);
+        let (ioevent_host_tube, ioevent_device_tube) =
+            Tube::pair().context("failed to create ioevent tube")?;
+        irq_control_tubes.push(ioevent_host_tube);
         let mut dev = VirtioPciDevice::new(
             vm.get_memory().clone(),
             iommu_dev.dev,
             msi_device_tube,
             cfg.disable_virtio_intx,
             None,
+            ioevent_device_tube,
         )
         .context("failed to create virtio pci dev")?;
         // early reservation for viommu.
@@ -2490,35 +2507,6 @@ fn handle_hotplug_command<V: VmArch, Vcpu: VcpuArch>(
             VmResponse::Err(base::Error::new(libc::EINVAL))
         }
     }
-}
-
-#[cfg(feature = "swap")]
-fn handle_swap_suspend_command(
-    tube: &Tube,
-    swap_controller: &SwapController,
-    kick_vcpus: impl Fn(VcpuControl),
-    vcpu_num: usize,
-) -> anyhow::Result<()> {
-    info!("suspending vcpus");
-    let _vcpu_guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_num).context("suspend vcpus")?;
-    info!("suspending devices");
-    // TODO(b/253386409): Use `devices::Suspendable::sleep()` instead of sending `SIGSTOP` signal.
-    let _devices_guard = swap_controller
-        .suspend_devices()
-        .context("suspend devices")?;
-
-    tube.send(&VmSwapResponse::SuspendCompleted)
-        .context("send completed")?;
-
-    // Wait for a resume command.
-    if !matches!(
-        tube.recv().context("wait for VmSwapCommand::Resume")?,
-        VmSwapCommand::Resume
-    ) {
-        anyhow::bail!("the vmm-swap command is not resume.");
-    }
-    info!("resuming vm");
-    Ok(())
 }
 
 fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
@@ -3303,43 +3291,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                     }
                                 }
                             },
-                            #[cfg(feature = "swap")]
-                            TaggedControlTube::SwapMonitor(tube) => {
-                                match tube.recv::<VmSwapCommand>() {
-                                    Ok(VmSwapCommand::Suspend) => {
-                                        if let Err(e) = handle_swap_suspend_command(
-                                            tube,
-                                            // swap_controller must be present if the tube exists.
-                                            swap_controller.as_ref().unwrap(),
-                                            |msg| {
-                                                vcpu::kick_all_vcpus(
-                                                    &vcpu_handles,
-                                                    linux.irq_chip.as_irq_chip(),
-                                                    msg,
-                                                )
-                                            },
-                                            vcpu_handles.len(),
-                                        ) {
-                                            error!("failed to suspend vm: {:?}", e);
-                                            if let Err(e) =
-                                                tube.send(&VmSwapResponse::SuspendFailed)
-                                            {
-                                                error!("failed to send SuspendFailed: {:?}", e);
-                                            }
-                                        }
-                                    }
-                                    Ok(VmSwapCommand::Resume) => {
-                                        // Ignore resume command.
-                                    }
-                                    Err(e) => {
-                                        if let TubeError::Disconnected = e {
-                                            vm_control_indices_to_remove.push(index);
-                                        } else {
-                                            error!("failed to recv VmSwapCommand: {}", e);
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

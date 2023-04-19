@@ -4,6 +4,14 @@ version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
+# The passthroughfs test must execute each test case in single thread, which requires a custom test
+# harness.
+[[test]]
+name = "passthroughfs"
+path = "tests/passthroughfs/main.rs"
+harness = false
+
+
 [features]
 arc_quota = ["dbus", "protobuf", "system_api"]
 audio = []
@@ -82,7 +90,7 @@ system_api = { path = "../system_api", optional = true }
 thiserror = "1.0.20"
 tpm2 = { path = "../tpm2", optional = true }
 cros_tracing = { path = "../cros_tracing" }
-uuid = { version = "0.8.2", features = [ "serde" ] }
+uuid = { version = "1", features = [ "serde" ] }
 vhost = { path = "../vhost" }
 vmm_vhost = { path = "../third_party/vmm_vhost", features = ["vmm", "device", "vfio-device"] }
 virtio_sys = { path = "../virtio_sys" }
@@ -116,5 +124,6 @@ default-features = false
 
 [dev-dependencies]
 bytes = "1.1.0"
-tempfile = "3"
 crc32fast = "1"
+libtest-mimic = "0.6"
+tempfile = "3"
