@@ -8,6 +8,7 @@
     // we can remove a some patch files and enable "composite-disk" here.
     // "composite-disk",
     "gdb",
+    "geniezone",
     "gunyah",
     "qcow",
     "usb",

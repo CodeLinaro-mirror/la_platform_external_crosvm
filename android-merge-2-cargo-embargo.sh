@@ -35,6 +35,8 @@ rustup which --toolchain $RUST_TOOLCHAIN cargo || \
   rustup toolchain install $RUST_TOOLCHAIN
 CARGO_BIN="$(dirname $(rustup which --toolchain $RUST_TOOLCHAIN cargo))"
 
+cd $ANDROID_BUILD_TOP/external/crosvm
+
 if [ ! "$REUSE" ]; then
   rm -f cargo.out cargo.metadata
   rm -rf target.tmp || /bin/true

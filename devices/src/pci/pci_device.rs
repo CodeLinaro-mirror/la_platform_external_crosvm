@@ -584,10 +584,6 @@ impl<T: PciDevice> BusDevice for T {
             removed_pci_devices: self.get_removed_children_devices(),
         };
 
-        // ANDROID: This functionality is broken and keeps pKVM from booting.
-        // Context: http://b/271204121#comment12
-        return result;
-
         // Handle ioevent changes
         if !(result.io_add.is_empty()
             && result.io_remove.is_empty()
