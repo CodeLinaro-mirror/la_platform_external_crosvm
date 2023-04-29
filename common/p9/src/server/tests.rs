@@ -976,7 +976,7 @@ fn setup_simple_lock(flags: u32) -> Server {
         ROOT_FID,
         filename,
         ROOT_FID + 1,
-        flags as u32,
+        flags,
     )
     .expect("failed to open file");
 
@@ -1113,7 +1113,7 @@ macro_rules! open_test {
             let md =
                 fs::symlink_metadata(test_dir.join(name)).expect("failed to get metadata for file");
             check_qid(&rlopen.qid, &md);
-            assert_eq!(rlopen.iounit, md.blksize() as u32);
+            assert_eq!(rlopen.iounit, 0);
 
             check_attr(&mut server, fid, &md);
 
@@ -1248,7 +1248,7 @@ macro_rules! create_test {
 
             let md =
                 fs::symlink_metadata(test_dir.join(name)).expect("failed to get metadata for file");
-            assert_eq!(rlcreate.iounit, md.blksize() as u32);
+            assert_eq!(rlcreate.iounit, 0);
             check_qid(&rlcreate.qid, &md);
             check_attr(&mut server, fid, &md);
 

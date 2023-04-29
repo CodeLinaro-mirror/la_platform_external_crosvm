@@ -454,7 +454,7 @@ impl AvCodecContext {
     ///
     /// Error codes are the same as those returned by `avcodec_send_packet` with the exception of
     /// EAGAIN which is converted into `Ok(false)` as it is not actually an error.
-    pub fn try_send_packet<'a>(&mut self, packet: &AvPacket<'a>) -> Result<bool, AvError> {
+    pub fn try_send_packet(&mut self, packet: &AvPacket) -> Result<bool, AvError> {
         // Safe because the context is valid through the life of this object, and `packet`'s
         // lifetime properties ensures its memory area is readable.
         match unsafe { ffi::avcodec_send_packet(self.0, &packet.packet) } {
@@ -625,7 +625,7 @@ impl AvBuffer {
     /// Return a slice to the data contained in this buffer.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // Safe because the data has been initialized from valid storage in the constructor.
-        unsafe { std::slice::from_raw_parts_mut((*self.0).data, (*self.0).size as usize) }
+        unsafe { std::slice::from_raw_parts_mut((*self.0).data, (*self.0).size) }
     }
 
     /// Consumes the `AVBuffer`, returning a `AVBufferRef` that can be used in `AVFrame`, `AVPacket`

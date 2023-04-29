@@ -705,7 +705,6 @@ pub fn create_balloon_device(
     jail_config: &Option<JailConfig>,
     mode: BalloonMode,
     tube: Tube,
-    wss_tube: Option<Tube>,
     inflate_tube: Option<Tube>,
     init_balloon_size: u64,
     enabled_features: u64,
@@ -714,7 +713,6 @@ pub fn create_balloon_device(
     let dev = virtio::Balloon::new(
         virtio::base_features(protection_type),
         tube,
-        wss_tube,
         inflate_tube,
         init_balloon_size,
         mode,
@@ -1084,6 +1082,7 @@ impl VirtioDeviceBuilder for &VsockConfig {
 pub fn create_fs_device(
     protection_type: ProtectionType,
     jail_config: &Option<JailConfig>,
+    ugid: (Option<u32>, Option<u32>),
     uid_map: &str,
     gid_map: &str,
     src: &Path,
@@ -1100,6 +1099,11 @@ pub fn create_fs_device(
         // We want bind mounts from the parent namespaces to propagate into the fs device's
         // namespace.
         config.remount_mode = Some(libc::MS_SLAVE);
+        config.run_as = if ugid == (None, None) {
+            RunAsUser::Unspecified
+        } else {
+            RunAsUser::Specified(ugid.0.unwrap_or(0), ugid.1.unwrap_or(0))
+        };
         create_sandbox_minijail(src, max_open_files, &config)?
     } else {
         create_base_minijail(src, max_open_files)?
@@ -1120,6 +1124,7 @@ pub fn create_fs_device(
 pub fn create_9p_device(
     protection_type: ProtectionType,
     jail_config: &Option<JailConfig>,
+    ugid: (Option<u32>, Option<u32>),
     uid_map: &str,
     gid_map: &str,
     src: &Path,
@@ -1135,6 +1140,11 @@ pub fn create_9p_device(
         // We want bind mounts from the parent namespaces to propagate into the 9p server's
         // namespace.
         config.remount_mode = Some(libc::MS_SLAVE);
+        config.run_as = if ugid == (None, None) {
+            RunAsUser::Unspecified
+        } else {
+            RunAsUser::Specified(ugid.0.unwrap_or(0), ugid.1.unwrap_or(0))
+        };
         let jail = create_sandbox_minijail(src, max_open_files, &config)?;
 
         //  The shared directory becomes the root of the device's file system.

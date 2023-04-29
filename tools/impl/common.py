@@ -18,7 +18,6 @@ from . import preamble  # type: ignore
 
 import argparse
 import contextlib
-import csv
 import datetime
 import functools
 import getpass
@@ -34,7 +33,6 @@ import urllib
 import urllib.request
 import urllib.error
 from copy import deepcopy
-from io import StringIO
 from math import ceil
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
@@ -61,6 +59,8 @@ import rich.live
 import rich.spinner
 import rich.text
 
+# Hack: argh does not support type annotations. This prevents type errors.
+argh: Any  # type: ignore
 
 # File where to store http headers for gcloud authentication
 AUTH_HEADERS_FILE = Path(gettempdir()) / f"crosvm_gcloud_auth_headers_{getpass.getuser()}"
@@ -108,6 +108,9 @@ assert 'name = "crosvm"' in CROSVM_TOML.read_text()
 
 # List of times recorded by `record_time` which will be printed if --timing-info is provided.
 global_time_records: List[Tuple[str, datetime.timedelta]] = []
+
+# Regex that matches ANSI escape sequences
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 def crosvm_target_dir():
@@ -393,7 +396,7 @@ class Command(object):
         if style is None or verbose():
             return self.__run(stdout=None, stderr=None, check=check).returncode
         else:
-            process = self.popen(stderr=STDOUT)
+            process = self.popen(stdout=PIPE, stderr=STDOUT)
             style(process)
             returncode = process.wait()
             if returncode != 0 and check:
@@ -524,21 +527,20 @@ class Command(object):
 
     def __stdin_stream(self):
         if self.stdin_cmd:
-            return self.stdin_cmd.popen().stdout
+            return self.stdin_cmd.popen(stdout=PIPE, stderr=PIPE).stdout
         return None
 
-    def popen(self, stderr: Optional[int] = PIPE) -> "subprocess.Popen[str]":
+    def popen(self, **kwargs: Any) -> "subprocess.Popen[str]":
         """
         Runs a program and returns the Popen object of the running process.
         """
         return subprocess.Popen(
             self.args,
             cwd=self.cwd,
-            stdout=subprocess.PIPE,
-            stderr=stderr,
             stdin=self.__stdin_stream(),
             env={**os.environ, **self.env_vars},
             text=True,
+            **kwargs,
         )
 
     @staticmethod
@@ -575,7 +577,7 @@ class Styles(object):
 
     @staticmethod
     def live_truncated(num_lines: int = 8):
-        "Prints only the last `num_lines` of output while the program is running and succeessful."
+        "Prints only the last `num_lines` of output while the program is running and successful."
 
         def output(process: "subprocess.Popen[str]"):
             assert process.stdout
@@ -599,7 +601,7 @@ class Styles(object):
 
     @staticmethod
     def quiet_with_progress(title: str):
-        "Prints only the last `num_lines` of output while the program is running and succeessful."
+        "Prints only the last `num_lines` of output while the program is running and successful."
 
         def output(process: "subprocess.Popen[str]"):
             assert process.stdout
@@ -1163,6 +1165,10 @@ def download_file(url: str, filename: Path, attempts: int = 3):
                 raise e
             else:
                 console.print("Download failed:", e)
+
+
+def strip_ansi_escape_sequences(line: str) -> str:
+    return ANSI_ESCAPE.sub("", line)
 
 
 console = rich.console.Console()

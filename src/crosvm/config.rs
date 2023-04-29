@@ -81,8 +81,6 @@ cfg_if::cfg_if! {
         static VHOST_NET_PATH: &str = "/dev/vhost-net";
     } else if #[cfg(windows)] {
         use base::{Event, Tube};
-
-        use crate::crosvm::sys::windows::config::IrqChipKind;
     }
 }
 
@@ -106,9 +104,20 @@ pub enum Executable {
     Plugin(PathBuf),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub enum IrqChipKind {
+    /// All interrupt controllers are emulated in the kernel.
+    Kernel,
+    /// APIC is emulated in the kernel.  All other interrupt controllers are in userspace.
+    Split,
+    /// All interrupt controllers are emulated in userspace.
+    Userspace,
+}
+
 /// The core types in hybrid architecture.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CpuCoreType {
     /// Intel Atom.
@@ -117,7 +126,7 @@ pub struct CpuCoreType {
     pub core: CpuSet,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Deserialize, FromKeyValues)]
+#[derive(Debug, Default, PartialEq, Eq, Deserialize, Serialize, FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CpuOptions {
     /// Number of CPU cores.
@@ -131,7 +140,7 @@ pub struct CpuOptions {
     pub core_types: Option<CpuCoreType>,
 }
 
-#[derive(Debug, Default, Deserialize, FromKeyValues)]
+#[derive(Debug, Default, Deserialize, Serialize, FromKeyValues, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct MemOptions {
     /// Amount of guest memory in MiB.
@@ -409,6 +418,7 @@ pub struct SharedDir {
     pub src: PathBuf,
     pub tag: String,
     pub kind: SharedDirKind,
+    pub ugid: (Option<u32>, Option<u32>),
     pub uid_map: String,
     pub gid_map: String,
     pub fs_cfg: passthrough::Config,
@@ -422,6 +432,7 @@ impl Default for SharedDir {
             src: Default::default(),
             tag: Default::default(),
             kind: Default::default(),
+            ugid: (None, None),
             uid_map: format!("0 {} 1", unsafe { geteuid() }),
             gid_map: format!("0 {} 1", unsafe { getegid() }),
             fs_cfg: Default::default(),
@@ -450,6 +461,20 @@ impl FromStr for SharedDir {
         //   and directory contents should be considered valid (default: 5)
         // * cache=CACHE - one of "never", "always", or "auto" (default: auto)
         // * writeback=BOOL - indicates whether writeback caching should be enabled (default: false)
+        // * uid=UID - uid of the device process in the user namespace created by minijail.
+        //   (default: 0)
+        // * gid=GID - gid of the device process in the user namespace created by minijail.
+        //   (default: 0)
+        // These two options (uid/gid) are useful when the crosvm process has no
+        // CAP_SETGID/CAP_SETUID but an identity mapping of the current user/group
+        // between the VM and the host is required.
+        // Say the current user and the crosvm process has uid 5000, a user can use
+        // "uid=5000" and "uidmap=5000 5000 1" such that files owned by user 5000
+        // still appear to be owned by user 5000 in the VM. These 2 options are
+        // useful only when there is 1 user in the VM accessing shared files.
+        // If multiple users want to access the shared file, gid/uid options are
+        // useless. It'd be better to create a new user namespace and give
+        // CAP_SETUID/CAP_SETGID to the crosvm.
         let mut components = param.split(':');
         let src = PathBuf::from(
             components
@@ -486,6 +511,12 @@ impl FromStr for SharedDir {
                 }
                 "uidmap" => shared_dir.uid_map = value.into(),
                 "gidmap" => shared_dir.gid_map = value.into(),
+                "uid" => {
+                    shared_dir.ugid.0 = Some(value.parse().map_err(|_| "`uid` must be an integer")?)
+                }
+                "gid" => {
+                    shared_dir.ugid.1 = Some(value.parse().map_err(|_| "`gid` must be an integer")?)
+                }
                 _ => type_opts.push(opt),
             }
         }
@@ -1057,7 +1088,6 @@ pub struct Config {
     pub hypervisor: Option<HypervisorKind>,
     pub init_memory: Option<u64>,
     pub initrd_path: Option<PathBuf>,
-    #[cfg(windows)]
     pub irq_chip: Option<IrqChipKind>,
     pub itmt: bool,
     pub jail_config: Option<JailConfig>,
@@ -1132,13 +1162,10 @@ pub struct Config {
     pub software_tpm: bool,
     #[cfg(feature = "audio")]
     pub sound: Option<PathBuf>,
-    pub split_irqchip: bool,
     pub strict_balloon: bool,
     pub stub_pci_devices: Vec<StubPciParameters>,
     pub swap_dir: Option<PathBuf>,
     pub swiotlb: Option<u64>,
-    #[cfg(windows)]
-    pub syslog_tag: Option<String>,
     #[cfg(target_os = "android")]
     pub task_profiles: Vec<String>,
     #[cfg(unix)]
@@ -1272,7 +1299,6 @@ impl Default for Config {
             hypervisor: None,
             init_memory: None,
             initrd_path: None,
-            #[cfg(windows)]
             irq_chip: None,
             itmt: false,
             jail_config: if !cfg!(feature = "default-no-sandbox") {
@@ -1345,12 +1371,9 @@ impl Default for Config {
             software_tpm: false,
             #[cfg(feature = "audio")]
             sound: None,
-            split_irqchip: false,
             strict_balloon: false,
             stub_pci_devices: Vec::new(),
             swiotlb: None,
-            #[cfg(windows)]
-            syslog_tag: None,
             #[cfg(target_os = "android")]
             task_profiles: Vec::new(),
             #[cfg(unix)]
@@ -1999,6 +2022,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_irqchip_kernel() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--irqchip", "kernel", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.irq_chip, Some(IrqChipKind::Kernel));
+    }
+
+    #[test]
+    fn parse_irqchip_split() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--irqchip", "split", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.irq_chip, Some(IrqChipKind::Split));
+    }
+
+    #[test]
+    fn parse_irqchip_userspace() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--irqchip", "userspace", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.irq_chip, Some(IrqChipKind::Userspace));
+    }
+
+    #[test]
     fn parse_stub_pci() {
         let params = from_key_values::<StubPciParameters>("0000:01:02.3,vendor=0xfffe,device=0xfffd,class=0xffc1c2,subsystem_vendor=0xfffc,subsystem_device=0xfffb,revision=0xa").unwrap();
         assert_eq!(params.address.bus, 1);
@@ -2237,6 +2302,7 @@ mod tests {
         assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
         assert_eq!(shared_dir.fs_cfg.use_dax, false);
         assert_eq!(shared_dir.fs_cfg.posix_acl, true);
+        assert_eq!(shared_dir.ugid, (None, None));
     }
 
     #[cfg(unix)]
@@ -2259,5 +2325,21 @@ mod tests {
         assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
         assert_eq!(shared_dir.fs_cfg.use_dax, false);
         assert_eq!(shared_dir.fs_cfg.posix_acl, true);
+        assert_eq!(shared_dir.ugid, (None, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_shared_dir_ugid_set() {
+        let shared_dir: SharedDir =
+            "/:hostRoot:type=fs:uidmap=40417 40417 1:gidmap=5000 5000 1:uid=40417:gid=5000"
+                .parse()
+                .unwrap();
+        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
+        assert_eq!(shared_dir.tag, "hostRoot");
+        assert!(shared_dir.kind == SharedDirKind::FS);
+        assert_eq!(shared_dir.uid_map, "40417 40417 1");
+        assert_eq!(shared_dir.gid_map, "5000 5000 1");
+        assert_eq!(shared_dir.ugid, (Some(40417), Some(5000)));
     }
 }

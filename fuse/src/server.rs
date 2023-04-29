@@ -539,6 +539,7 @@ impl<F: FileSystem + Sync> Server<F> {
         let Rename2In { newdir, flags, .. } =
             zerocopy_from_reader(&mut r).map_err(Error::DecodeMessage)?;
 
+        // ANDROID: Libc on android requires a specific cast.
         let flags = flags & (libc::RENAME_EXCHANGE | libc::RENAME_NOREPLACE) as u32;
 
         self.do_rename(in_header, size_of::<Rename2In>(), newdir, flags, r, w)
@@ -1093,10 +1094,10 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn lookup_dirent_attribute<'d>(
+    fn lookup_dirent_attribute(
         &self,
         in_header: &InHeader,
-        dir_entry: &DirEntry<'d>,
+        dir_entry: &DirEntry,
     ) -> io::Result<Entry> {
         let parent = in_header.nodeid.into();
         let name = dir_entry.name.to_bytes();

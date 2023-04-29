@@ -11,13 +11,9 @@ resolver = "1"
 name = "crosvm"
 path = "src/main.rs"
 
-[[bin]]
-name = "crosvm-direct"
-path = "src/main.rs"
-required-features = [ "direct" ]
-
 [profile.release]
 panic = 'abort'
+opt-level = 3
 overflow-checks = true
 
 [profile.release-test]
@@ -27,7 +23,6 @@ panic = 'unwind'
 # Reproduces the options used when building crosvm for ChromeOS.
 [profile.chromeos]
 inherits = "release"
-opt-level = "s"
 strip = "symbols"
 
 # Enables LTO to further reduce the size of the binary.
@@ -387,7 +382,7 @@ chromeos = ["all-chromeos"]
 [dependencies]
 anyhow = "1.0.32"
 arch = { path = "arch" }
-argh = "0.1"
+argh = "0.1.10"
 argh_helpers = { path = "argh_helpers" }
 audio_streams = "*"
 base = "*"
@@ -435,10 +430,12 @@ sync = { path = "common/sync" }
 tempfile = "3"
 thiserror = { version = "1.0.20" }
 uuid = { version = "1", features = [ "serde" ] }
-vhost = { path = "vhost" }
 vm_control = { path = "vm_control" }
 acpi_tables = { path = "acpi_tables" }
 vm_memory = { path = "vm_memory" }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv64 = { path = "riscv64" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { path = "x86_64" }
@@ -449,6 +446,7 @@ aarch64 = { path = "aarch64" }
 [target.'cfg(unix)'.dependencies]
 minijail = "*" # provided by ebuild
 p9 = "*"
+vhost = { path = "vhost" }
 
 [target.'cfg(target_os="linux")'.dependencies]
 swap = { path = "swap", optional = true }

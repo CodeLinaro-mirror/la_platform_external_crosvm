@@ -276,18 +276,29 @@ def main(
     if not dut:
         console.print(
             "[green]Tip:[/green] To run integration tests on a built-in VM: "
-            + "Use [bold]--dut=vm[/bold]"
+            + "Use [bold]--dut=vm[/bold] (preferred)"
         )
         console.print(
             "[green]Tip:[/green] To run integration tests on the host: Use "
-            + "[bold]--dut=host[/bold]"
+            + "[bold]--dut=host[/bold] (fast, but unreliable)"
+        )
+    if dut == "vm":
+        vm_arch = get_vm_arch(triple)
+        if vm_arch == "x86_64":
+            cli_tool = "tools/x86vm"
+        elif vm_arch == "aarch64":
+            cli_tool = "tools/aarch64vm"
+        else:
+            raise Exception(f"Unknown vm arch '{vm_arch}'")
+        console.print(
+            f"[green]Tip:[/green] The test VM will remain alive between tests. You can manage this VM with [bold]{cli_tool}[/bold]"
         )
 
     # Prepare the dut for test execution
     if dut == "host":
         check_host_prerequisites(run_root_tests)
     if dut == "vm":
-        testvm.build_if_needed(get_vm_arch(triple))
+        # Start VM ahead of time but don't wait for it to boot.
         testvm.up(get_vm_arch(triple))
 
     nextest_args = [
@@ -354,7 +365,7 @@ def main(
         if dut == "host":
             target = HostTarget(package_dir)
         elif dut == "vm":
-            testvm.wait(get_vm_arch(triple))
+            testvm.up(get_vm_arch(triple), wait=True)
             remote = Remote("localhost", testvm.ssh_opts(get_vm_arch(triple)))
             target = SshTarget(package_archive, remote)
 
@@ -376,6 +387,11 @@ def main(
                         console.print(
                             "[green]Tip:[/green] Tests may fail when run in parallel on some platforms. "
                             + "Try re-running with `--no-parallel`"
+                        )
+                    if dut == "host":
+                        console.print(
+                            f"[yellow]Tip:[/yellow] Running tests on the host may not be reliable. "
+                            "Prefer [bold]--dut=vm[/bold]."
                         )
                     sys.exit(returncode)
 

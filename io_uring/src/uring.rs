@@ -297,7 +297,7 @@ impl URingAllowlist {
 ///
 /// # Example polling an FD for readable status.
 ///
-/// ```
+/// ```no_run
 /// # use std::fs::File;
 /// # use std::os::unix::io::AsRawFd;
 /// # use std::path::Path;
@@ -874,7 +874,7 @@ impl SubmitQueueState {
         // Safe because self being constructed from the correct mmap guaratees that the memory is
         // valid to written.
         unsafe {
-            std::ptr::write_volatile(self.array.load(Ordering::Relaxed).add(index), value as u32);
+            std::ptr::write_volatile(self.array.load(Ordering::Relaxed).add(index), value);
         }
     }
 }

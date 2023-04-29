@@ -4,6 +4,7 @@
     "android-sparse",
     "audio",
     "balloon",
+    "config-file",
     // TODO: The "protos" crate has been modified such that it doesn't work with cargo. If we fix that,
     // we can remove a some patch files and enable "composite-disk" here.
     // "composite-disk",

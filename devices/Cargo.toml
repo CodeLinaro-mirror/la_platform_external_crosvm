@@ -4,14 +4,6 @@ version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
-# The passthroughfs test must execute each test case in single thread, which requires a custom test
-# harness.
-[[test]]
-name = "passthroughfs"
-path = "tests/passthroughfs/main.rs"
-harness = false
-
-
 [features]
 arc_quota = ["dbus", "protobuf", "system_api"]
 audio = []
@@ -51,7 +43,7 @@ balloon_control = { path = "../common/balloon_control" }
 base = { path = "../base" }
 bit_field = { path = "../bit_field" }
 cfg-if = "1.0.0"
-chrono = "*"
+chrono = { version = "*", features = [ "serde" ] }
 crc32fast = { version = "1.2.1", optional = true }
 cros_async = { path = "../cros_async" }
 cros-codecs = { path = "../media/cros-codecs", optional = true }
@@ -91,7 +83,6 @@ thiserror = "1.0.20"
 tpm2 = { path = "../tpm2", optional = true }
 cros_tracing = { path = "../cros_tracing" }
 uuid = { version = "1", features = [ "serde" ] }
-vhost = { path = "../vhost" }
 vmm_vhost = { path = "../third_party/vmm_vhost", features = ["vmm", "device", "vfio-device"] }
 virtio_sys = { path = "../virtio_sys" }
 vm_control = { path = "../vm_control" }
@@ -105,6 +96,7 @@ minijail = "*"
 p9 = "*"
 usb_util = { path = "../usb_util" }
 vfio_sys = { path = "../vfio_sys" }
+vhost = { path = "../vhost" }
 
 [target.'cfg(target_os="linux")'.dependencies]
 swap = { path = "../swap", optional = true }
@@ -126,4 +118,5 @@ default-features = false
 bytes = "1.1.0"
 crc32fast = "1"
 libtest-mimic = "0.6"
+named-lock = "0.3"
 tempfile = "3"

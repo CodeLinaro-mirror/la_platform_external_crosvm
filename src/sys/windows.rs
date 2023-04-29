@@ -73,6 +73,7 @@ use broker_ipc::CommonChildStartupArgs;
 use crosvm_cli::sys::windows::exit::Exit;
 use crosvm_cli::sys::windows::exit::ExitContext;
 use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
+use crosvm_cli::sys::windows::exit::ExitContextOption;
 use devices::create_devices_worker_thread;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
@@ -183,6 +184,7 @@ use tube_transporter::TubeToken;
 use tube_transporter::TubeTransporterReader;
 use vm_control::BalloonControlCommand;
 use vm_control::DeviceControlCommand;
+use vm_control::VmMemoryRegionState;
 use vm_control::VmMemoryRequest;
 use vm_control::VmRunMode;
 use vm_memory::GuestAddress;
@@ -201,11 +203,11 @@ use x86_64::X8664arch as Arch;
 
 use crate::crosvm::config::Config;
 use crate::crosvm::config::Executable;
+#[cfg(any(feature = "gvm", feature = "whpx"))]
+use crate::crosvm::config::IrqChipKind;
 #[cfg(feature = "gpu")]
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::sys::config::HypervisorKind;
-#[cfg(any(feature = "gvm", feature = "whpx"))]
-use crate::crosvm::sys::config::IrqChipKind;
 use crate::crosvm::sys::windows::broker::BrokerTubes;
 #[cfg(feature = "stats")]
 use crate::crosvm::sys::windows::stats::StatisticsCollector;
@@ -437,7 +439,6 @@ fn create_balloon_device(
     let dev = virtio::Balloon::new(
         virtio::base_features(cfg.protection_type),
         balloon_device_tube,
-        None,
         dynamic_mapping_device_tube,
         inflate_tube,
         init_balloon_size,
@@ -780,6 +781,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
     pvclock_host_tube: &Option<Tube>,
     run_mode_arc: &VcpuRunMode,
+    region_state: &mut VmMemoryRegionState,
 ) -> Result<(bool, Option<ExitState>)> {
     match event.token {
         Token::VmEvent => match vm_evt_rdtube.recv::<VmEventType>() {
@@ -828,6 +830,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 &mut sys_allocator_mutex.lock(),
                                 gralloc,
                                 None,
+                                region_state,
                             );
                             if let Err(e) = tube.send(&response) {
                                 error!("failed to send VmMemoryControlResponse: {}", e);
@@ -1042,6 +1045,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     }
 
     let mut exit_state = ExitState::Stop;
+    let mut region_state = VmMemoryRegionState::new();
 
     'poll: loop {
         let events = {
@@ -1075,6 +1079,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 vcpu_boxes.as_ref(),
                 &pvclock_host_tube,
                 run_mode_arc.as_ref(),
+                &mut region_state,
             )?;
             if let Some(state) = state {
                 exit_state = state;
@@ -1352,28 +1357,31 @@ where
     Ok(irq_chip)
 }
 
-pub fn get_default_hypervisor() -> Result<HypervisorKind> {
+pub fn get_default_hypervisor() -> Option<HypervisorKind> {
     // The ordering here matters from most preferable to the least.
     #[cfg(feature = "whpx")]
     match hypervisor::whpx::Whpx::is_enabled() {
-        true => return Ok(HypervisorKind::Whpx),
+        true => return Some(HypervisorKind::Whpx),
         false => warn!("Whpx not enabled."),
     };
+
     #[cfg(feature = "haxm")]
     if get_cpu_manufacturer() == CpuManufacturer::Intel {
         // Make sure Haxm device can be opened before selecting it.
         match Haxm::new() {
-            Ok(_) => return Ok(HypervisorKind::Ghaxm),
+            Ok(_) => return Some(HypervisorKind::Ghaxm),
             Err(e) => warn!("Cannot initialize HAXM: {}", e),
         };
     }
+
     #[cfg(feature = "gvm")]
     // Make sure Gvm device can be opened before selecting it.
     match Gvm::new() {
-        Ok(_) => return Ok(HypervisorKind::Gvm),
+        Ok(_) => return Some(HypervisorKind::Gvm),
         Err(e) => warn!("Cannot initialize GVM: {}", e),
     };
-    bail!("no hypervisor enabled!");
+
+    None
 }
 
 fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
@@ -1678,10 +1686,11 @@ fn run_config_inner(
 
     let components: VmComponents = setup_vm_components(&cfg)?;
 
-    let default_hypervisor = get_default_hypervisor()
-        .exit_context(Exit::NoDefaultHypervisor, "no enabled hypervisor")?;
     #[allow(unused_mut)]
-    let mut hypervisor = cfg.hypervisor.unwrap_or(default_hypervisor);
+    let mut hypervisor = cfg
+        .hypervisor
+        .or_else(get_default_hypervisor)
+        .exit_context(Exit::NoDefaultHypervisor, "no enabled hypervisor")?;
 
     #[cfg(feature = "whpx")]
     if hypervisor::whpx::Whpx::is_enabled() {

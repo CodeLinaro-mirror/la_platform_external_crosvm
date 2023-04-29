@@ -11,9 +11,6 @@ cfg_if::cfg_if! {
 
         use super::sys::config::VfioOption;
         use super::config::SharedDir;
-    } else if #[cfg(windows)] {
-        use crate::crosvm::sys::config::IrqChipKind;
-
     }
 }
 
@@ -57,10 +54,12 @@ use devices::StubPciParameters;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::CpuHybridType;
 use hypervisor::ProtectionType;
-use merge::bool::overwrite_false;
 use merge::vec::append;
 use resources::AddressRange;
+use serde::de::Error as SerdeError;
 use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
 #[cfg(feature = "gpu")]
 use serde_keyvalue::FromKeyValues;
 
@@ -102,6 +101,7 @@ use crate::crosvm::config::GidMap;
 #[cfg(feature = "direct")]
 use crate::crosvm::config::HostPcieRootPortParameters;
 use crate::crosvm::config::HypervisorKind;
+use crate::crosvm::config::IrqChipKind;
 use crate::crosvm::config::MemOptions;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFsOption;
@@ -135,6 +135,8 @@ pub enum CrossPlatformCommands {
     Balloon(BalloonCommand),
     #[cfg(feature = "balloon")]
     BalloonStats(BalloonStatsCommand),
+    #[cfg(feature = "balloon")]
+    BalloonWss(BalloonWssCommand),
     Battery(BatteryCommand),
     #[cfg(feature = "composite-disk")]
     CreateComposite(CreateCompositeCommand),
@@ -184,6 +186,15 @@ pub struct BalloonCommand {
 pub struct BalloonStatsCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(argh::FromArgs)]
+#[argh(subcommand, name = "balloon_wss")]
+/// Prints virtio balloon working set size for a `VM_SOCKET`
+pub struct BalloonWssCommand {
+    #[argh(positional, arg_name = "VM_SOOCKET")]
+    /// VM control socket path.
     pub socket_path: String,
 }
 
@@ -586,8 +597,8 @@ pub struct UsbListCommand {
 /// This allows the letters assigned to each disk to reflect the order of their declaration, as
 /// we have several options for specifying disks (rwroot, root, etc) and order can thus be lost
 /// when they are aggregated.
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields, from = "DiskOption")]
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields, from = "DiskOption", into = "DiskOption")]
 struct DiskOptionWithId {
     disk_option: DiskOption,
     index: usize,
@@ -611,6 +622,12 @@ impl From<DiskOption> for DiskOptionWithId {
             disk_option,
             index: DISK_COUNTER.fetch_add(1, Ordering::Relaxed),
         }
+    }
+}
+
+impl From<DiskOptionWithId> for DiskOption {
+    fn from(disk_option_with_id: DiskOptionWithId) -> Self {
+        disk_option_with_id.disk_option
     }
 }
 
@@ -691,12 +708,54 @@ impl TryFrom<GpuDisplayParameters> for FixedGpuDisplayParameters {
 
 /// Deserialize `config_file` into a `RunCommand`.
 #[cfg(feature = "config-file")]
-fn load_config_file<P: AsRef<Path>>(config_file: P) -> Result<Box<RunCommand>, String> {
+fn load_config_file<P: AsRef<Path>>(config_file: P) -> Result<RunCommand, String> {
     let config = std::fs::read_to_string(config_file).map_err(|e| e.to_string())?;
 
-    serde_json::from_str(&config)
-        .map_err(|e| e.to_string())
-        .map(Box::new)
+    serde_json::from_str(&config).map_err(|e| e.to_string())
+}
+
+/// Return a vector configuration loaded from the files pointed by strings in a sequence.
+///
+/// Used for including configuration files from another one.
+#[cfg(feature = "config-file")]
+fn include_config_file<'de, D>(deserializer: D) -> Result<Vec<RunCommand>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::SeqAccess;
+
+    struct ConfigVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ConfigVisitor {
+        type Value = Vec<RunCommand>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an array of paths to configuration file to include")
+        }
+
+        fn visit_seq<S>(self, mut seq: S) -> Result<Self::Value, S::Error>
+        where
+            S: SeqAccess<'de>,
+        {
+            let mut ret = Vec::new();
+
+            while let Some(path) = seq.next_element::<&'de str>()? {
+                let config =
+                    load_config_file(path).map_err(<S as SeqAccess<'de>>::Error::custom)?;
+                ret.push(config);
+            }
+
+            Ok(ret)
+        }
+    }
+
+    deserializer.deserialize_seq(ConfigVisitor)
+}
+
+#[cfg(feature = "config-file")]
+fn write_config_file(config_file: &Path, cmd: &RunCommand) -> Result<(), String> {
+    let file = std::fs::File::create(config_file).map_err(|e| e.to_string())?;
+    serde_json::to_writer_pretty(file, cmd).map_err(|e| e.to_string())
 }
 
 /// Overwrite an `Option<T>` if the right member is set.
@@ -717,12 +776,18 @@ fn overwrite<T>(left: &mut T, right: T) {
     let _ = std::mem::replace(left, right);
 }
 
+/// User-specified configuration for the `crosvm run` command.
+///
+/// All fields of this structure MUST be either an `Option` or a `Vec` of their type. Arguments of
+/// type `Option` can only be specified once, whereas `Vec` arguments can be specified several
+/// times.
+///
 /// Each field of this structure has a dual use:
 ///
 /// 1) As a command-line parameter, controlled by the `#[argh]` helper attribute.
 /// 2) As a configuration file parameter, controlled by the `#[serde]` helper attribute.
 ///
-/// For consistency, the names should be the same and use kebab-case for both uses, so please
+/// For consistency, field names should be the same and use kebab-case for both uses, so please
 /// refrain from using renaming directives and give the field the desired parameter name (it will
 /// automatically be converted to kebab-case).
 ///
@@ -733,16 +798,25 @@ fn overwrite<T>(left: &mut T, right: T) {
 /// `#[serde(deny_unknown_fields, rename_all = "kebab-case")]` so invalid fields are properly
 /// rejected and all members are converted to kebab-case.
 ///
-/// Each member should also have a `#[merge]` helper attribute, which defines the strategy to use
+/// Each field should also have a `#[merge]` helper attribute, which defines the strategy to use
 /// when merging two configurations into one. This happens when e.g. the user has specified extra
 /// command-line arguments along with a configuration file. In this case, the `RunCommand` created
 /// from the command-line arguments will be merged into the `RunCommand` deserialized from the
 /// configuration file.
 ///
 /// The rule of thumb for `#[merge]` attributes is that parameters that can only be specified once
-/// (typically of `Option` type) should be overridden (`#[merge(strategy = overwrite_option)]`),
-/// while parameters that can be specified several times (typically of `Vec` type) should be
-/// appended (`#[merge(strategy = append)]`), but there might also be exceptions.
+/// (of `Option` type) should be overridden (`#[merge(strategy = overwrite_option)]`), while
+/// parameters that can be specified several times (typically of `Vec` type) should be appended
+/// (`#[merge(strategy = append)]`), but there might also be exceptions.
+///
+/// The command-line is the root configuration source, but one or more configuration files can be
+/// specified for inclusion using the `--cfg` argument. Configuration files are applied in the
+/// order they are mentioned, overriding (for `Option` fields) or augmenting (for `Vec` fields)
+/// their fields, and the command-line options are finally applied last.
+///
+/// A configuration files can also include other configuration files by using `cfg` itself.
+/// Included configuration files are applied first, with the parent configuration file applied
+/// last.
 ///
 /// The doccomment of the member will be displayed as its help message with `--help`.
 ///
@@ -751,18 +825,18 @@ fn overwrite<T>(left: &mut T, right: T) {
 /// review to make sure they won't be obsoleted.
 #[remain::sorted]
 #[argh_helpers::pad_description_for_argh]
-#[derive(FromArgs, Deserialize, merge::Merge)]
+#[derive(FromArgs, Default, Deserialize, Serialize, merge::Merge)]
 #[argh(subcommand, name = "run", description = "Start a new crosvm instance")]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct RunCommand {
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
     #[argh(switch)]
     #[serde(default)]
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable AC adapter device
     /// It purpose is to emulate ACPI ACPI0003 device, replicate and propagate the
     /// ac adapter status from the host to the guest.
-    pub ac_adapter: bool,
+    pub ac_adapter: Option<bool>,
 
     #[cfg(feature = "audio")]
     #[argh(
@@ -818,15 +892,15 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable page reporting in balloon.
-    pub balloon_page_reporting: bool,
+    pub balloon_page_reporting: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable working set size reporting in balloon.
-    pub balloon_wss_reporting: bool,
+    pub balloon_wss_reporting: Option<bool>,
 
     #[argh(option)]
     /// comma separated key=value pairs for setting up battery
@@ -882,25 +956,13 @@ pub struct RunCommand {
 
     #[cfg(feature = "config-file")]
     #[argh(option, arg_name = "CONFIG_FILE", from_str_fn(load_config_file))]
-    // TODO(b/218223240) We only allow one configuration file because accurate merging is not
-    // possible on boolean fields. We would need to convert these to `Option<bool>` but
-    // unfortunately argh is currently unable to recognize these as switches.
-    //
-    // For now, we only allow one configuration file to be specified. Since argh's switches can
-    // only be true, and the command-line parameters are merged last, merging using
-    // `merging::overwrite_false` is guaranteed to be accurate since only true values can be
-    // explicitly specified through the command-line.
-    //
-    // Eventually we will want to turn this into a `Vec<Self>` so several configuration files can
-    // be passed, and remove the `#[serde(skip)]` attribute so they can be included from other
-    // configuration files as well.
-    #[serde(skip)]
+    #[serde(default, deserialize_with = "include_config_file")]
     #[merge(skip)]
     /// path to a JSON configuration file to load.
     ///
-    /// The options specified in the file can be overridden or augmented by other command-line
-    /// parameters.
-    cfg: Option<Box<Self>>,
+    /// The options specified in the file can be overridden or augmented by subsequent uses of
+    /// this argument, or other command-line parameters.
+    cfg: Vec<Self>,
 
     #[argh(option, arg_name = "CID")]
     #[serde(skip)] // Deprecated - use `vsock` instead.
@@ -985,9 +1047,9 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't set VCPUs real-time until make-rt command is run
-    pub delay_rt: bool,
+    pub delay_rt: Option<bool>,
 
     #[cfg(feature = "direct")]
     #[argh(option, arg_name = "irq")]
@@ -1041,15 +1103,15 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// run all devices in one, non-sandboxed process
-    pub disable_sandbox: bool,
+    pub disable_sandbox: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// disable INTx in virtio devices
-    pub disable_virtio_intx: bool,
+    pub disable_virtio_intx: Option<bool>,
 
     #[argh(option, short = 'd', arg_name = "PATH[,key=value[,key=value[,...]]]")]
     #[serde(skip)] // Deprecated - use `block` instead.
@@ -1068,21 +1130,28 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// capture keyboard input from the display window
-    pub display_window_keyboard: bool,
+    pub display_window_keyboard: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// capture keyboard input from the display window
-    pub display_window_mouse: bool,
+    pub display_window_mouse: Option<bool>,
 
     #[argh(option, arg_name = "DIR")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// directory with smbios_entry_point/DMI files
     pub dmi: Option<PathBuf>,
+
+    #[cfg(feature = "config-file")]
+    #[argh(option, arg_name = "CONFIG_FILE")]
+    #[serde(skip)]
+    #[merge(skip)]
+    /// path to a JSON configuration file to write the current configuration.
+    dump_cfg: Option<PathBuf>,
 
     #[argh(option, long = "dump-device-tree-blob", arg_name = "FILE")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1092,15 +1161,15 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// expose HWP feature to the guest
-    pub enable_hwp: bool,
+    pub enable_hwp: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// expose Power and Perfomance (PnP) data to guest and guest can show these PnP data
-    pub enable_pnp_data: bool,
+    pub enable_pnp_data: Option<bool>,
 
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1111,9 +1180,9 @@ pub struct RunCommand {
     #[cfg(windows)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// gather and display statistics on Vm Exits and Bus Reads/Writes.
-    pub exit_stats: bool,
+    pub exit_stats: Option<bool>,
 
     #[argh(
         option,
@@ -1137,10 +1206,10 @@ pub struct RunCommand {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// force use of a calibrated TSC cpuid leaf (0x15) even if the hypervisor
     /// doesn't require one.
-    pub force_calibrated_tsc_leaf: bool,
+    pub force_calibrated_tsc_leaf: Option<bool>,
 
     #[cfg(feature = "gdb")]
     #[argh(option, arg_name = "PORT")]
@@ -1252,9 +1321,9 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// use mirror cpu topology of Host for Guest VM, also copy some cpu feature to Guest VM
-    pub host_cpu_topology: bool,
+    pub host_cpu_topology: Option<bool>,
 
     #[cfg(windows)]
     #[argh(option, arg_name = "PATH")]
@@ -1272,9 +1341,9 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// advise the kernel to use Huge Pages for guest memory mappings
-    pub hugepages: bool,
+    pub hugepages: Option<bool>,
 
     /// hypervisor backend
     #[argh(option)]
@@ -1292,18 +1361,16 @@ pub struct RunCommand {
     /// initial ramdisk to load
     pub initrd: Option<PathBuf>,
 
-    #[cfg(windows)]
     #[argh(option, arg_name = "kernel|split|userspace")]
-    #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// type of interrupt controller emulation.  \"split\" is only available for x86 KVM.
+    /// type of interrupt controller emulation. "split" is only available for x86 KVM.
     pub irqchip: Option<IrqChipKind>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// allow to enable ITMT scheduling feature in VM. The success of enabling depends on HWP and ACPI CPPC support on hardware
-    pub itmt: bool,
+    pub itmt: Option<bool>,
 
     #[argh(positional, arg_name = "KERNEL")]
     #[merge(strategy = overwrite_option)]
@@ -1333,9 +1400,9 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// disable host swap on guest VM pages.
-    pub lock_guest_memory: bool,
+    pub lock_guest_memory: Option<bool>,
 
     #[cfg(windows)]
     #[argh(option, arg_name = "PATH")]
@@ -1380,9 +1447,9 @@ pub struct RunCommand {
     #[cfg(target_arch = "aarch64")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable the Memory Tagging Extension in the guest
-    pub mte: bool,
+    pub mte: Option<bool>,
 
     #[argh(option, arg_name = "PATH:WIDTH:HEIGHT")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1444,41 +1511,41 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't use virtio-balloon device in the guest
-    pub no_balloon: bool,
+    pub no_balloon: Option<bool>,
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't use legacy KBD devices emulation
-    pub no_i8042: bool,
+    pub no_i8042: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't create RNG device in the guest
-    pub no_rng: bool,
+    pub no_rng: Option<bool>,
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't use legacy RTC devices emulation
-    pub no_rtc: bool,
+    pub no_rtc: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't use SMT in the guest
-    pub no_smt: bool,
+    pub no_smt: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't use usb devices in the guest
-    pub no_usb: bool,
+    pub no_usb: Option<bool>,
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[argh(option, arg_name = "OEM_STRING")]
@@ -1524,11 +1591,11 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable per-VM core scheduling intead of the default one (per-vCPU core scheduing) by
     /// making all vCPU threads share same cookie for core scheduling.
     /// This option is no-op on devices that have neither MDS nor L1TF vulnerability
-    pub per_vm_core_scheduling: bool,
+    pub per_vm_core_scheduling: Option<bool>,
 
     #[argh(
         option,
@@ -1598,9 +1665,9 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// grant this Guest VM certain privileges to manage Host resources, such as power management
-    pub privileged_vm: bool,
+    pub privileged_vm: Option<bool>,
 
     #[cfg(feature = "process-invariants")]
     #[argh(option, arg_name = "PATH")]
@@ -1639,9 +1706,9 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// prevent host access to guest memory
-    pub protected_vm: bool,
+    pub protected_vm: Option<bool>,
 
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1651,9 +1718,9 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// (EXPERIMENTAL) prevent host access to guest memory, but don't use protected VM firmware
-    protected_vm_without_firmware: bool,
+    protected_vm_without_firmware: Option<bool>,
 
     #[argh(option, arg_name = "path=PATH,size=SIZE")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1665,9 +1732,9 @@ pub struct RunCommand {
     #[cfg(windows)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable virtio-pvclock.
-    pub pvclock: bool,
+    pub pvclock: Option<bool>,
 
     #[argh(option, long = "restore", arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1734,18 +1801,18 @@ pub struct RunCommand {
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// set Low Power S0 Idle Capable Flag for guest Fixed ACPI
     /// Description Table, additionally use enhanced crosvm suspend and resume
     /// routines to perform full guest suspension/resumption
-    pub s2idle: bool,
+    pub s2idle: Option<bool>,
 
     #[cfg(unix)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// instead of seccomp filter failures being fatal, they will be logged instead
-    pub seccomp_log_failures: bool,
+    pub seccomp_log_failures: Option<bool>,
 
     #[cfg(unix)]
     #[argh(option, arg_name = "PATH")]
@@ -1850,6 +1917,22 @@ pub struct RunCommand {
     ///        supports POSIX ACLs.  This should only be enabled
     ///        when the underlying file system supports POSIX ACLs.
     ///        The default value for this option is "true".
+    ///     uid=UID - uid of the device process in the user
+    ///        namespace created by minijail. (default: 0)
+    ///     gid=GID - gid of the device process in the user
+    ///        namespace created by minijail. (default: 0)
+    ///     Options uid and gid are useful when the crosvm process
+    ///     has no CAP_SETGID/CAP_SETUID but an identity mapping of
+    ///     the current user/group between the VM and the host is
+    ///     required. Say the current user and the crosvm process
+    ///     has uid 5000, a user can use "uid=5000" and
+    ///     "uidmap=5000 5000 1" such that files owned by user
+    ///     5000 still appear to be owned by user 5000 in the VM.
+    ///     These 2 options are useful only when there is 1 user
+    ///     in the VM accessing shared files. If multiple users
+    ///     want to access the shared file, gid/uid options are
+    ///     useless. It'd be better to create a new user namespace
+    ///     and give CAP_SETUID/CAP_SETGID to the crosvm.
     pub shared_dir: Vec<SharedDir>,
 
     #[argh(option, arg_name = "PATH:WIDTH:HEIGHT")]
@@ -1873,9 +1956,9 @@ pub struct RunCommand {
     #[cfg(feature = "tpm")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable a software emulated trusted platform module device
-    pub software_tpm: bool,
+    pub software_tpm: Option<bool>,
 
     #[cfg(feature = "audio")]
     #[argh(option, arg_name = "PATH")]
@@ -1886,16 +1969,16 @@ pub struct RunCommand {
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[argh(switch)]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[serde(skip)] // Deprecated - use `irq_chip` instead.
+    #[merge(strategy = overwrite_option)]
     /// (EXPERIMENTAL) enable split-irqchip support
-    pub split_irqchip: bool,
+    pub split_irqchip: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// don't allow guest to use pages from the balloon
-    pub strict_balloon: bool,
+    pub strict_balloon: Option<bool>,
 
     #[argh(
         option,
@@ -1936,7 +2019,7 @@ pub struct RunCommand {
     pub switches: Vec<PathBuf>,
 
     #[argh(option, arg_name = "TAG")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `CrosvmCmdlineArgs::syslog_tag` instead.
     #[merge(strategy = overwrite_option)]
     /// when logging to syslog, use the provided tag
     pub syslog_tag: Option<String>,
@@ -1971,7 +2054,7 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// set MADV_DONTFORK on guest memory
     ///
     /// Intended for use in combination with --protected-vm, where the guest memory can be
@@ -1979,7 +2062,7 @@ pub struct RunCommand {
     /// their memory. This flag effectively hides the guest memory from those tools.
     ///
     /// Not compatible with sandboxing or vvu devices.
-    pub unmap_guest_memory_on_fork: bool,
+    pub unmap_guest_memory_on_fork: Option<bool>,
 
     // Must be `Some` iff `protection_type == ProtectionType::UnprotectedWithFirmware`.
     #[argh(option, arg_name = "PATH")]
@@ -2032,9 +2115,9 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// isolate all hotplugged passthrough vfio device behind virtio-iommu
-    pub vfio_isolate_hotplug: bool,
+    pub vfio_isolate_hotplug: Option<bool>,
 
     #[cfg(unix)]
     #[argh(option, arg_name = "PATH")]
@@ -2046,9 +2129,9 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(switch)]
     #[serde(skip)] // Deprecated - use `net` instead.
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// use vhost for networking
-    pub vhost_net: bool,
+    pub vhost_net: Option<bool>,
 
     #[cfg(unix)]
     #[argh(option, arg_name = "PATH")]
@@ -2192,9 +2275,9 @@ pub struct RunCommand {
     #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_false)]
+    #[merge(strategy = overwrite_option)]
     /// enable the virtio-tpm connection to vtpm daemon
-    pub vtpm_proxy: bool,
+    pub vtpm_proxy: Option<bool>,
 
     #[argh(
         option,
@@ -2229,14 +2312,13 @@ pub struct RunCommand {
 #[cfg(feature = "config-file")]
 impl RunCommand {
     /// Merge the content of `self` into `self.cfg` if it exists, and return the merged
-    /// configuration which `self.cfg` is empty.
+    /// configuration in which `self.cfg` is empty.
     pub fn squash(mut self) -> Self {
         use merge::Merge;
 
-        self.cfg
-            .take()
-            .map(|b| *b)
+        std::mem::take(&mut self.cfg)
             .into_iter()
+            .map(|c| c.squash())
             .chain(std::iter::once(self))
             .reduce(|mut acc: Self, cfg| {
                 acc.merge(cfg);
@@ -2253,13 +2335,18 @@ impl TryFrom<RunCommand> for super::config::Config {
         // Squash the configuration file (if any) and command-line arguments together.
         #[cfg(feature = "config-file")]
         let cmd = {
-            if cmd.cfg.is_some() {
+            if !cmd.cfg.is_empty() {
                 log::warn!(
                     "`--cfg` is still experimental and the configuration file format may change"
                 );
             }
             cmd.squash()
         };
+
+        #[cfg(feature = "config-file")]
+        if let Some(cfg_path) = &cmd.dump_cfg {
+            write_config_file(cfg_path, &cmd)?;
+        }
 
         let mut cfg = Self::default();
         // TODO: we need to factor out some(?) of the checks into config::validate_config
@@ -2301,7 +2388,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.params.extend(cmd.params);
 
-        cfg.per_vm_core_scheduling = cmd.per_vm_core_scheduling;
+        cfg.per_vm_core_scheduling = cmd.per_vm_core_scheduling.unwrap_or_default();
 
         // `--cpu` parameters.
         {
@@ -2351,20 +2438,20 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.vcpu_cgroup_path = cmd.vcpu_cgroup_path;
 
-        cfg.no_smt = cmd.no_smt;
+        cfg.no_smt = cmd.no_smt.unwrap_or_default();
 
         if let Some(rt_cpus) = cmd.rt_cpus {
             cfg.rt_cpus = rt_cpus;
         }
 
-        cfg.delay_rt = cmd.delay_rt;
+        cfg.delay_rt = cmd.delay_rt.unwrap_or_default();
 
         let mem = cmd.mem.unwrap_or_default();
         cfg.memory = mem.size;
 
         #[cfg(target_arch = "aarch64")]
         {
-            if cmd.mte
+            if cmd.mte.unwrap_or_default()
                 && !(cmd.pmem_device.is_empty()
                     && cmd.pstore.is_none()
                     && cmd.rw_pmem_device.is_empty())
@@ -2374,11 +2461,11 @@ impl TryFrom<RunCommand> for super::config::Config {
                         .to_string(),
                 );
             }
-            cfg.mte = cmd.mte;
+            cfg.mte = cmd.mte.unwrap_or_default();
             cfg.swiotlb = cmd.swiotlb;
         }
 
-        cfg.hugepages = cmd.hugepages;
+        cfg.hugepages = cmd.hugepages.unwrap_or_default();
 
         // `cfg.hypervisor` may have been set by the deprecated `--kvm-device` option above.
         // TODO(b/274817652): remove this workaround when `--kvm-device` is removed.
@@ -2388,7 +2475,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(unix)]
         {
-            cfg.lock_guest_memory = cmd.lock_guest_memory;
+            cfg.lock_guest_memory = cmd.lock_guest_memory.unwrap_or_default();
         }
 
         #[cfg(feature = "audio")]
@@ -2523,9 +2610,8 @@ impl TryFrom<RunCommand> for super::config::Config {
                 cfg.crash_pipe_name = cmd.crash_pipe_name;
             }
             cfg.product_name = cmd.product_name;
-            cfg.exit_stats = cmd.exit_stats;
+            cfg.exit_stats = cmd.exit_stats.unwrap_or_default();
             cfg.host_guid = cmd.host_guid;
-            cfg.irq_chip = cmd.irqchip;
             cfg.kernel_log_file = cmd.kernel_log_file;
             cfg.log_file = cmd.log_file;
             cfg.logs_directory = cmd.logs_directory;
@@ -2535,7 +2621,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
                 cfg.process_invariants_data_size = cmd.process_invariants_size;
             }
-            cfg.pvclock = cmd.pvclock;
+            cfg.pvclock = cmd.pvclock.unwrap_or_default();
             #[cfg(windows)]
             {
                 cfg.service_pipe_name = cmd.service_pipe_name;
@@ -2544,7 +2630,6 @@ impl TryFrom<RunCommand> for super::config::Config {
             {
                 cfg.slirp_capture_file = cmd.slirp_capture_file;
             }
-            cfg.syslog_tag = cmd.syslog_tag;
             cfg.product_channel = cmd.product_channel;
             cfg.product_version = cmd.product_version;
         }
@@ -2563,8 +2648,8 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.x_display = cmd.x_display;
         }
 
-        cfg.display_window_keyboard = cmd.display_window_keyboard;
-        cfg.display_window_mouse = cmd.display_window_mouse;
+        cfg.display_window_keyboard = cmd.display_window_keyboard.unwrap_or_default();
+        cfg.display_window_mouse = cmd.display_window_mouse.unwrap_or_default();
 
         cfg.swap_dir = cmd.swap_dir;
         cfg.restore_path = cmd.restore;
@@ -2658,12 +2743,12 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(feature = "tpm")]
         {
-            cfg.software_tpm = cmd.software_tpm;
+            cfg.software_tpm = cmd.software_tpm.unwrap_or_default();
         }
 
         #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
         {
-            cfg.vtpm_proxy = cmd.vtpm_proxy;
+            cfg.vtpm_proxy = cmd.vtpm_proxy.unwrap_or_default();
         }
 
         cfg.virtio_single_touch = cmd.single_touch;
@@ -2674,9 +2759,16 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.virtio_switches = cmd.switches;
         cfg.virtio_input_evdevs = cmd.evdev;
 
+        cfg.irq_chip = cmd.irqchip;
+
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            cfg.split_irqchip = cmd.split_irqchip;
+        if cmd.split_irqchip.unwrap_or_default() {
+            if cmd.irqchip.is_some() {
+                return Err("cannot use `--irqchip` and `--split-irqchip` together".to_string());
+            }
+
+            log::warn!("`--split-irqchip` is deprecated; please use `--irqchip=split`");
+            cfg.irq_chip = Some(IrqChipKind::Split);
         }
 
         cfg.initrd_path = cmd.initrd;
@@ -2703,11 +2795,11 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.acpi_tables = cmd.acpi_table;
 
-        cfg.usb = !cmd.no_usb;
-        cfg.rng = !cmd.no_rng;
-        cfg.balloon = !cmd.no_balloon;
-        cfg.balloon_page_reporting = cmd.balloon_page_reporting;
-        cfg.balloon_wss_reporting = cmd.balloon_wss_reporting;
+        cfg.usb = !cmd.no_usb.unwrap_or_default();
+        cfg.rng = !cmd.no_rng.unwrap_or_default();
+        cfg.balloon = !cmd.no_balloon.unwrap_or_default();
+        cfg.balloon_page_reporting = cmd.balloon_page_reporting.unwrap_or_default();
+        cfg.balloon_wss_reporting = cmd.balloon_wss_reporting.unwrap_or_default();
         #[cfg(feature = "audio")]
         {
             cfg.virtio_snds = cmd.virtio_snd;
@@ -2751,7 +2843,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
             cfg.net = cmd.net;
 
-            let vhost_net_msg = match cmd.vhost_net {
+            let vhost_net_msg = match cmd.vhost_net.unwrap_or_default() {
                 true => ",vhost-net=true",
                 false => "",
             };
@@ -2770,7 +2862,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                         tap_name,
                         mac: None,
                     },
-                    vhost_net: cmd.vhost_net,
+                    vhost_net: cmd.vhost_net.unwrap_or_default(),
                     vq_pairs: cmd.net_vq_pairs,
                 });
             }
@@ -2782,7 +2874,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                 );
                 cfg.net.push(NetParameters {
                     mode: NetParametersMode::TapFd { tap_fd, mac: None },
-                    vhost_net: cmd.vhost_net,
+                    vhost_net: cmd.vhost_net.unwrap_or_default(),
                     vq_pairs: cmd.net_vq_pairs,
                 });
             }
@@ -2819,7 +2911,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                         netmask,
                         mac,
                     },
-                    vhost_net: cmd.vhost_net,
+                    vhost_net: cmd.vhost_net.unwrap_or_default(),
                     vq_pairs: cmd.net_vq_pairs,
                 });
             }
@@ -2837,7 +2929,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                     .seccomp_policy_dir = Some(d);
             }
 
-            if cmd.seccomp_log_failures {
+            if cmd.seccomp_log_failures.unwrap_or_default() {
                 cfg.jail_config
                     .get_or_insert_with(Default::default)
                     .seccomp_log_failures = true;
@@ -2851,9 +2943,9 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         let protection_flags = [
-            cmd.protected_vm,
+            cmd.protected_vm.unwrap_or_default(),
             cmd.protected_vm_with_firmware.is_some(),
-            cmd.protected_vm_without_firmware,
+            cmd.protected_vm_without_firmware.unwrap_or_default(),
             cmd.unprotected_vm_with_firmware.is_some(),
         ];
 
@@ -2861,9 +2953,9 @@ impl TryFrom<RunCommand> for super::config::Config {
             return Err("Only one protection mode has to be specified".to_string());
         }
 
-        cfg.protection_type = if cmd.protected_vm {
+        cfg.protection_type = if cmd.protected_vm.unwrap_or_default() {
             ProtectionType::Protected
-        } else if cmd.protected_vm_without_firmware {
+        } else if cmd.protected_vm_without_firmware.unwrap_or_default() {
             ProtectionType::ProtectedWithoutFirmware
         } else if let Some(p) = cmd.protected_vm_with_firmware {
             if !p.exists() || !p.is_file() {
@@ -2895,7 +2987,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.battery_config = cmd.battery;
         #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
         {
-            cfg.ac_adapter = cmd.ac_adapter;
+            cfg.ac_adapter = cmd.ac_adapter.unwrap_or_default();
         }
 
         #[cfg(feature = "gdb")]
@@ -2903,16 +2995,16 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.gdb = cmd.gdb;
         }
 
-        cfg.host_cpu_topology = cmd.host_cpu_topology;
+        cfg.host_cpu_topology = cmd.host_cpu_topology.unwrap_or_default();
 
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         {
-            cfg.enable_hwp = cmd.enable_hwp;
-            cfg.force_s2idle = cmd.s2idle;
+            cfg.enable_hwp = cmd.enable_hwp.unwrap_or_default();
+            cfg.force_s2idle = cmd.s2idle.unwrap_or_default();
             cfg.pcie_ecam = cmd.pcie_ecam;
             cfg.pci_low_start = cmd.pci_start;
-            cfg.no_i8042 = cmd.no_i8042;
-            cfg.no_rtc = cmd.no_rtc;
+            cfg.no_i8042 = cmd.no_i8042.unwrap_or_default();
+            cfg.no_rtc = cmd.no_rtc.unwrap_or_default();
             cfg.oem_strings = cmd.oem_strings;
 
             if !cfg.oem_strings.is_empty() && cfg.dmi_path.is_some() {
@@ -2952,30 +3044,32 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.mmio_address_ranges = cmd.mmio_address_range.unwrap_or_default();
         }
 
-        cfg.disable_virtio_intx = cmd.disable_virtio_intx;
+        cfg.disable_virtio_intx = cmd.disable_virtio_intx.unwrap_or_default();
 
         cfg.dmi_path = cmd.dmi;
 
         cfg.dump_device_tree_blob = cmd.dump_device_tree_blob;
 
-        cfg.itmt = cmd.itmt;
+        cfg.itmt = cmd.itmt.unwrap_or_default();
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        if cmd.enable_pnp_data && cmd.force_calibrated_tsc_leaf {
+        if cmd.enable_pnp_data.unwrap_or_default()
+            && cmd.force_calibrated_tsc_leaf.unwrap_or_default()
+        {
             return Err(
                 "Only one of [enable_pnp_data,force_calibrated_tsc_leaf] can be specified"
                     .to_string(),
             );
         }
 
-        cfg.enable_pnp_data = cmd.enable_pnp_data;
+        cfg.enable_pnp_data = cmd.enable_pnp_data.unwrap_or_default();
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            cfg.force_calibrated_tsc_leaf = cmd.force_calibrated_tsc_leaf;
+            cfg.force_calibrated_tsc_leaf = cmd.force_calibrated_tsc_leaf.unwrap_or_default();
         }
 
-        cfg.privileged_vm = cmd.privileged_vm;
+        cfg.privileged_vm = cmd.privileged_vm.unwrap_or_default();
 
         cfg.stub_pci_devices = cmd.stub_pci_device;
 
@@ -2985,7 +3079,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.init_memory = cmd.init_mem;
 
-        cfg.strict_balloon = cmd.strict_balloon;
+        cfg.strict_balloon = cmd.strict_balloon.unwrap_or_default();
 
         #[cfg(target_os = "android")]
         {
@@ -2994,22 +3088,24 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(unix)]
         {
-            if cmd.unmap_guest_memory_on_fork && !cmd.disable_sandbox {
+            if cmd.unmap_guest_memory_on_fork.unwrap_or_default()
+                && !cmd.disable_sandbox.unwrap_or_default()
+            {
                 return Err("--unmap-guest-memory-on-fork requires --disable-sandbox".to_string());
             }
-            cfg.unmap_guest_memory_on_fork = cmd.unmap_guest_memory_on_fork;
+            cfg.unmap_guest_memory_on_fork = cmd.unmap_guest_memory_on_fork.unwrap_or_default();
         }
 
         #[cfg(unix)]
         {
             cfg.vfio.extend(cmd.vfio);
             cfg.vfio.extend(cmd.vfio_platform);
-            cfg.vfio_isolate_hotplug = cmd.vfio_isolate_hotplug;
+            cfg.vfio_isolate_hotplug = cmd.vfio_isolate_hotplug.unwrap_or_default();
         }
 
         // `--disable-sandbox` has the effect of disabling sandboxing altogether, so make sure
         // to handle it after other sandboxing options since they implicitly enable it.
-        if cmd.disable_sandbox {
+        if cmd.disable_sandbox.unwrap_or_default() {
             cfg.jail_config = None;
         }
 
@@ -3017,5 +3113,47 @@ impl TryFrom<RunCommand> for super::config::Config {
         super::config::validate_config(&mut cfg)?;
 
         Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_runcommands() {
+        let cmd2 = RunCommand {
+            mem: Some(MemOptions { size: Some(4096) }),
+            kernel: Some("/path/to/kernel".into()),
+            params: vec!["firstparam".into()],
+            ..Default::default()
+        };
+
+        let cmd3 = RunCommand {
+            mem: Some(MemOptions { size: Some(8192) }),
+            params: vec!["secondparam".into()],
+            ..Default::default()
+        };
+
+        let cmd1 = RunCommand {
+            mem: Some(MemOptions { size: Some(2048) }),
+            params: vec!["thirdparam".into(), "fourthparam".into()],
+            cfg: vec![cmd2, cmd3],
+            ..Default::default()
+        };
+
+        let merged_cmd = cmd1.squash();
+
+        assert_eq!(merged_cmd.mem, Some(MemOptions { size: Some(2048) }));
+        assert_eq!(merged_cmd.kernel, Some("/path/to/kernel".into()));
+        assert_eq!(
+            merged_cmd.params,
+            vec![
+                String::from("firstparam"),
+                String::from("secondparam"),
+                String::from("thirdparam"),
+                String::from("fourthparam"),
+            ]
+        );
     }
 }

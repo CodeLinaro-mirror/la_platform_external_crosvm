@@ -15,11 +15,13 @@ use base::Error;
 use base::Result;
 use libc::EBUSY;
 use libc::EINVAL;
+use libc::EIO;
 use libc::ENOENT;
 use libc::ENXIO;
 use libc::EOPNOTSUPP;
 use vm_memory::GuestAddress;
 use winapi::shared::winerror::E_UNEXPECTED;
+use windows::Win32::Foundation::WHV_E_INSUFFICIENT_BUFFER;
 
 use super::types::*;
 use super::*;
@@ -36,7 +38,6 @@ use crate::Register;
 use crate::Regs;
 use crate::Sregs;
 use crate::Vcpu;
-use crate::VcpuEvents;
 use crate::VcpuExit;
 use crate::VcpuRunHandle;
 use crate::VcpuX86_64;
@@ -1051,27 +1052,94 @@ impl VcpuX86_64 for WhpxVcpu {
     }
 
     /// Gets the VCPU XSAVE.
-    // TODO: b/270734340 implement
     fn get_xsave(&self) -> Result<Xsave> {
-        Err(Error::new(EOPNOTSUPP))
+        let mut empty_buffer = [0u8; 1];
+        let mut needed_buf_size: u32 = 0;
+
+        // Find out how much space is needed for XSAVEs.
+        let res = unsafe {
+            WHvGetVirtualProcessorXsaveState(
+                self.vm_partition.partition,
+                self.index,
+                empty_buffer.as_mut_ptr() as *mut _,
+                0,
+                &mut needed_buf_size,
+            )
+        };
+        if res != WHV_E_INSUFFICIENT_BUFFER.0 {
+            // This should always work, so if it doesn't, we'll return unsupported.
+            error!("failed to get size of vcpu xsave");
+            return Err(Error::new(EIO));
+        }
+
+        let mut xsave = Xsave::new(needed_buf_size as usize);
+        // SAFETY: xsave_data is valid for the duration of the FFI call, and we pass its length in
+        // bytes so writes are bounded within the buffer.
+        check_whpx!(unsafe {
+            WHvGetVirtualProcessorXsaveState(
+                self.vm_partition.partition,
+                self.index,
+                xsave.as_mut_ptr(),
+                xsave.len() as u32,
+                &mut needed_buf_size,
+            )
+        })?;
+        Ok(xsave)
     }
 
     /// Sets the VCPU XSAVE.
-    // TODO: b/270734340 implement
-    fn set_xsave(&self, _xsave: &Xsave) -> Result<()> {
-        Err(Error::new(EOPNOTSUPP))
+    fn set_xsave(&self, xsave: &Xsave) -> Result<()> {
+        // SAFETY: the xsave buffer is valid for the duration of the FFI call, and we pass its
+        // length in bytes so reads are bounded within the buffer.
+        check_whpx!(unsafe {
+            WHvSetVirtualProcessorXsaveState(
+                self.vm_partition.partition,
+                self.index,
+                xsave.as_ptr(),
+                xsave.len() as u32,
+            )
+        })
     }
 
-    /// Gets the VCPU EVENTS.
-    // TODO: b/270734340 implement
-    fn get_vcpu_events(&self) -> Result<VcpuEvents> {
-        Err(Error::new(EOPNOTSUPP))
+    fn get_interrupt_state(&self) -> Result<serde_json::Value> {
+        let mut whpx_interrupt_regs: WhpxInterruptRegs = Default::default();
+        let reg_names = WhpxInterruptRegs::get_register_names();
+        // SAFETY: we have enough space for all the registers & the memory lives for the duration
+        // of the FFI call.
+        check_whpx!(unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.vm_partition.partition,
+                self.index,
+                reg_names as *const WHV_REGISTER_NAME,
+                reg_names.len() as u32,
+                whpx_interrupt_regs.as_mut_ptr(),
+            )
+        })?;
+
+        serde_json::to_value(whpx_interrupt_regs.into_serializable()).map_err(|e| {
+            error!("failed to serialize interrupt state: {:?}", e);
+            Error::new(EIO)
+        })
     }
 
-    /// Sets the VCPU EVENTS.
-    // TODO: b/270734340 implement
-    fn set_vcpu_events(&self, _vcpu_events: &VcpuEvents) -> Result<()> {
-        Err(Error::new(EOPNOTSUPP))
+    fn set_interrupt_state(&self, data: serde_json::Value) -> Result<()> {
+        let whpx_interrupt_regs =
+            WhpxInterruptRegs::from_serializable(serde_json::from_value(data).map_err(|e| {
+                error!("failed to serialize interrupt state: {:?}", e);
+                Error::new(EIO)
+            })?);
+        let reg_names = WhpxInterruptRegs::get_register_names();
+        // SAFETY: we have enough space for all the registers & the memory lives for the duration
+        // of the FFI call.
+        check_whpx!(unsafe {
+            WHvSetVirtualProcessorRegisters(
+                self.vm_partition.partition,
+                self.index,
+                reg_names as *const WHV_REGISTER_NAME,
+                reg_names.len() as u32,
+                whpx_interrupt_regs.as_ptr(),
+            )
+        })
     }
 
     /// Gets the VCPU debug registers.
@@ -1590,5 +1658,22 @@ mod tests {
         assert_eq!(sregs.efer, EFER_SCE | EFER_LME | EFER_LMA);
         vcpu.get_msrs(&mut efer_reg).expect("failed to get msrs");
         assert_eq!(efer_reg[0].value, EFER_SCE | EFER_LME | EFER_LMA);
+    }
+
+    #[test]
+    fn get_and_set_xsave_smoke() {
+        if !Whpx::is_enabled() {
+            return;
+        }
+        let cpu_count = 1;
+        let mem =
+            GuestMemory::new(&[(GuestAddress(0), 0x1000)]).expect("failed to create guest memory");
+        let vm = new_vm(cpu_count, mem);
+        let vcpu = vm.create_vcpu(0).expect("failed to create vcpu");
+
+        // XSAVE is essentially opaque for our purposes. We just want to make sure our syscalls
+        // succeed.
+        let xsave = vcpu.get_xsave().unwrap();
+        vcpu.set_xsave(&xsave).unwrap();
     }
 }

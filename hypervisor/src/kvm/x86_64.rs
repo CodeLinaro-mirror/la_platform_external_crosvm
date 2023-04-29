@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::arch::x86_64::CpuidResult;
-use std::mem::size_of;
 
 use base::errno_result;
 use base::error;
@@ -23,6 +22,8 @@ use kvm_sys::*;
 use libc::E2BIG;
 use libc::EIO;
 use libc::ENXIO;
+use serde::Deserialize;
+use serde::Serialize;
 use vm_memory::GuestAddress;
 
 use super::Config;
@@ -53,13 +54,7 @@ use crate::Register;
 use crate::Regs;
 use crate::Segment;
 use crate::Sregs;
-use crate::VcpuEvents;
-use crate::VcpuExceptionState;
 use crate::VcpuExit;
-use crate::VcpuInterruptState;
-use crate::VcpuNmiState;
-use crate::VcpuSmiState;
-use crate::VcpuTripleFaultState;
 use crate::VcpuX86_64;
 use crate::VmCap;
 use crate::VmX86_64;
@@ -69,6 +64,54 @@ use crate::NUM_IOAPIC_PINS;
 
 type KvmCpuId = kvm::CpuId;
 const KVM_XSAVE_MAX_SIZE: i32 = 4096;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuEvents {
+    pub exception: VcpuExceptionState,
+    pub interrupt: VcpuInterruptState,
+    pub nmi: VcpuNmiState,
+    pub sipi_vector: Option<u32>,
+    pub smi: VcpuSmiState,
+    pub triple_fault: VcpuTripleFaultState,
+    pub exception_payload: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuExceptionState {
+    pub injected: bool,
+    pub nr: u8,
+    pub has_error_code: bool,
+    pub pending: Option<bool>,
+    pub error_code: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuInterruptState {
+    pub injected: bool,
+    pub nr: u8,
+    pub soft: bool,
+    pub shadow: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuNmiState {
+    pub injected: bool,
+    pub pending: Option<bool>,
+    pub masked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuSmiState {
+    pub smm: Option<bool>,
+    pub pending: bool,
+    pub smm_inside_nmi: bool,
+    pub latched_init: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpuTripleFaultState {
+    pub pending: Option<bool>,
+}
 
 pub fn get_cpuid_with_initial_capacity<T: AsRawDescriptor>(
     descriptor: &T,
@@ -495,7 +538,7 @@ impl VmX86_64 for KvmVm {
     /// See the documentation on the KVM_SET_TSS_ADDR ioctl.
     fn set_tss_addr(&self, addr: GuestAddress) -> Result<()> {
         // Safe because we know that our file is a VM fd and we verify the return result.
-        let ret = unsafe { ioctl_with_val(self, KVM_SET_TSS_ADDR(), addr.offset() as u64) };
+        let ret = unsafe { ioctl_with_val(self, KVM_SET_TSS_ADDR(), addr.offset()) };
         if ret == 0 {
             Ok(())
         } else {
@@ -508,8 +551,7 @@ impl VmX86_64 for KvmVm {
     /// See the documentation on the KVM_SET_IDENTITY_MAP_ADDR ioctl.
     fn set_identity_map_addr(&self, addr: GuestAddress) -> Result<()> {
         // Safe because we know that our file is a VM fd and we verify the return result.
-        let ret =
-            unsafe { ioctl_with_ref(self, KVM_SET_IDENTITY_MAP_ADDR(), &(addr.offset() as u64)) };
+        let ret = unsafe { ioctl_with_ref(self, KVM_SET_IDENTITY_MAP_ADDR(), &addr.offset()) };
         if ret == 0 {
             Ok(())
         } else {
@@ -694,18 +736,18 @@ impl VcpuX86_64 for KvmVcpu {
         if size < 0 {
             return errno_result();
         }
-        // Size / sizeof(u32) = len of vec.
-        let mut xsave: Vec<u32> = vec![0u32; size as usize / size_of::<u32>()];
+        let mut xsave = Xsave::new(size as usize);
         let ioctl_nr = if size > KVM_XSAVE_MAX_SIZE {
             KVM_GET_XSAVE2()
         } else {
             KVM_GET_XSAVE()
         };
+
         // Safe because we know that our file is a VCPU fd, we know the kernel will only write the
         // correct amount of memory to our pointer, and we verify the return result.
         let ret = unsafe { ioctl_with_mut_ptr(self, ioctl_nr, xsave.as_mut_ptr()) };
         if ret == 0 {
-            Ok(Xsave::from(xsave))
+            Ok(xsave)
         } else {
             errno_result()
         }
@@ -724,7 +766,7 @@ impl VcpuX86_64 for KvmVcpu {
         }
         // Ensure xsave is the same size as used in get_xsave.
         // Return err if sizes don't match => not the same extensions are enabled for CPU.
-        if xsave.0.len() != size as usize / size_of::<u32>() {
+        if xsave.len() != size as usize {
             return Err(Error::new(EIO));
         }
 
@@ -732,7 +774,7 @@ impl VcpuX86_64 for KvmVcpu {
         // correct amount of memory to our pointer, and we verify the return result.
         // Because of the len check above, and because the layout of `struct kvm_xsave` is
         // compatible with a slice of `u32`, we can pass the pointer to `xsave` directly.
-        let ret = unsafe { ioctl_with_ptr(self, KVM_SET_XSAVE(), xsave.0.as_ptr()) };
+        let ret = unsafe { ioctl_with_ptr(self, KVM_SET_XSAVE(), xsave.as_ptr()) };
         if ret == 0 {
             Ok(())
         } else {
@@ -740,18 +782,27 @@ impl VcpuX86_64 for KvmVcpu {
         }
     }
 
-    fn get_vcpu_events(&self) -> Result<VcpuEvents> {
+    fn get_interrupt_state(&self) -> Result<serde_json::Value> {
         let mut vcpu_evts: kvm_vcpu_events = Default::default();
         let ret = unsafe { ioctl_with_mut_ref(self, KVM_GET_VCPU_EVENTS(), &mut vcpu_evts) };
         if ret == 0 {
-            Ok(VcpuEvents::from(&vcpu_evts))
+            Ok(
+                serde_json::to_value(VcpuEvents::from(&vcpu_evts)).map_err(|e| {
+                    error!("failed to serialize vcpu_events: {:?}", e);
+                    Error::new(EIO)
+                })?,
+            )
         } else {
             errno_result()
         }
     }
 
-    fn set_vcpu_events(&self, vcpu_evts: &VcpuEvents) -> Result<()> {
-        let vcpu_events = kvm_vcpu_events::from(vcpu_evts);
+    fn set_interrupt_state(&self, data: serde_json::Value) -> Result<()> {
+        let vcpu_events =
+            kvm_vcpu_events::from(&serde_json::from_value::<VcpuEvents>(data).map_err(|e| {
+                error!("failed to deserialize vcpu_events: {:?}", e);
+                Error::new(EIO)
+            })?);
         let ret = unsafe { ioctl_with_ref(self, KVM_SET_VCPU_EVENTS(), &vcpu_events) };
         if ret == 0 {
             Ok(())
@@ -1104,7 +1155,7 @@ impl From<&kvm_ioapic_state__bindgen_ty_1> for IoapicRedirectionTableEntry {
         let mut entry = IoapicRedirectionTableEntry::default();
         // Safe because the 64-bit layout of the IoapicRedirectionTableEntry matches the kvm_sys
         // table entry layout
-        entry.set(0, 64, unsafe { item.bits as u64 });
+        entry.set(0, 64, unsafe { item.bits });
         entry
     }
 }
@@ -1545,12 +1596,6 @@ impl From<&Fpu> for kvm_fpu {
     }
 }
 
-impl Xsave {
-    fn from(r: Vec<u32>) -> Self {
-        Xsave(r)
-    }
-}
-
 impl From<&kvm_debugregs> for DebugRegs {
     fn from(r: &kvm_debugregs) -> Self {
         DebugRegs {
@@ -1589,7 +1634,7 @@ fn to_kvm_xcrs(r: &[Register]) -> kvm_xcrs {
         ..Default::default()
     };
     for (i, &xcr) in r.iter().enumerate() {
-        kvm.xcrs[i].xcr = xcr.id as u32;
+        kvm.xcrs[i].xcr = xcr.id;
         kvm.xcrs[i].value = xcr.value;
     }
     kvm
@@ -1599,7 +1644,7 @@ fn to_kvm_msrs(vec: &[Register]) -> Vec<kvm_msrs> {
     let vec: Vec<kvm_msr_entry> = vec
         .iter()
         .map(|e| kvm_msr_entry {
-            index: e.id as u32,
+            index: e.id,
             data: e.value,
             ..Default::default()
         })

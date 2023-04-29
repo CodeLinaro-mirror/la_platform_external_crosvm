@@ -31,9 +31,7 @@ mod serde_capset_mask {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
         let s = String::deserialize(deserializer)?;
-        let context_types: Vec<String> = s.split(':').map(|s| s.to_string()).collect();
-
-        Ok(rutabaga_gfx::calculate_capset_mask(context_types))
+        Ok(rutabaga_gfx::calculate_capset_mask(s.split(':')))
     }
 }
 
@@ -59,10 +57,6 @@ pub struct GpuParameters {
     pub renderer_use_surfaceless: bool,
     #[serde(rename = "vulkan")]
     pub use_vulkan: Option<bool>,
-    // It is possible that we compile with the gfxstream feature but don't use the gfxstream
-    // backend, in which case we want to ensure this option is not touched accidentally, so we make
-    // it an `Option` with default value `None`.
-    #[cfg(feature = "gfxstream")]
     pub wsi: Option<RutabagaWsi>,
     pub udmabuf: bool,
     pub cache_path: Option<String>,

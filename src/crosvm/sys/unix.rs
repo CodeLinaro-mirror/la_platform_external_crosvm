@@ -95,6 +95,8 @@ use devices::HotPlugBus;
 use devices::IommuDevType;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use devices::IrqChipAArch64 as IrqChipArch;
+#[cfg(target_arch = "riscv64")]
+use devices::IrqChipRiscv64 as IrqChipArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::IrqChipX86_64 as IrqChipArch;
 use devices::IrqEventIndex;
@@ -140,6 +142,8 @@ use hypervisor::geniezone::GeniezoneVm;
 use hypervisor::kvm::Kvm;
 use hypervisor::kvm::KvmVcpu;
 use hypervisor::kvm::KvmVm;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::CpuConfigRiscv64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::CpuConfigX86_64;
 use hypervisor::Hypervisor;
@@ -147,12 +151,16 @@ use hypervisor::HypervisorCap;
 use hypervisor::ProtectionType;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use hypervisor::VcpuAArch64 as VcpuArch;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::VcpuRiscv64 as VcpuArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VcpuX86_64 as VcpuArch;
 use hypervisor::Vm;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use hypervisor::VmAArch64 as VmArch;
 use hypervisor::VmCap;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::VmRiscv64 as VmArch;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64 as VmArch;
 use jail::*;
@@ -163,6 +171,8 @@ use resources::Alloc;
 #[cfg(feature = "direct")]
 use resources::Error as ResourceError;
 use resources::SystemAllocator;
+#[cfg(target_arch = "riscv64")]
+use riscv64::Riscv64 as Arch;
 use rutabaga_gfx::RutabagaGralloc;
 use serde::Serialize;
 use smallvec::SmallVec;
@@ -186,6 +196,7 @@ use crate::crosvm::config::FileBackedMappingParameters;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::crosvm::config::HostPcieRootPortParameters;
 use crate::crosvm::config::HypervisorKind;
+use crate::crosvm::config::IrqChipKind;
 use crate::crosvm::config::SharedDir;
 use crate::crosvm::config::SharedDirKind;
 #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
@@ -209,7 +220,6 @@ fn create_virtio_devices(
     resources: &mut SystemAllocator,
     #[cfg_attr(not(feature = "gpu"), allow(unused_variables))] vm_evt_wrtube: &SendTube,
     #[cfg(feature = "balloon")] balloon_device_tube: Option<Tube>,
-    #[cfg(feature = "balloon")] balloon_wss_device_tube: Option<Tube>,
     #[cfg(feature = "balloon")] balloon_inflate_tube: Option<Tube>,
     #[cfg(feature = "balloon")] init_balloon_size: u64,
     disk_device_tubes: &mut Vec<Tube>,
@@ -495,7 +505,6 @@ fn create_virtio_devices(
                 BalloonMode::Relaxed
             },
             balloon_device_tube,
-            balloon_wss_device_tube,
             balloon_inflate_tube,
             init_balloon_size,
             balloon_features,
@@ -618,6 +627,7 @@ fn create_virtio_devices(
             src,
             tag,
             kind,
+            ugid,
             uid_map,
             gid_map,
             fs_cfg,
@@ -630,6 +640,7 @@ fn create_virtio_devices(
                 create_fs_device(
                     cfg.protection_type,
                     &cfg.jail_config,
+                    *ugid,
                     uid_map,
                     gid_map,
                     src,
@@ -641,6 +652,7 @@ fn create_virtio_devices(
             SharedDirKind::P9 => create_9p_device(
                 cfg.protection_type,
                 &cfg.jail_config,
+                *ugid,
                 uid_map,
                 gid_map,
                 src,
@@ -679,7 +691,6 @@ fn create_devices(
     irq_control_tubes: &mut Vec<Tube>,
     control_tubes: &mut Vec<TaggedControlTube>,
     #[cfg(feature = "balloon")] balloon_device_tube: Option<Tube>,
-    #[cfg(feature = "balloon")] balloon_wss_device_tube: Option<Tube>,
     #[cfg(feature = "balloon")] init_balloon_size: u64,
     disk_device_tubes: &mut Vec<Tube>,
     pmem_device_tubes: &mut Vec<Tube>,
@@ -808,8 +819,6 @@ fn create_devices(
         vm_evt_wrtube,
         #[cfg(feature = "balloon")]
         balloon_device_tube,
-        #[cfg(feature = "balloon")]
-        balloon_wss_device_tube,
         #[cfg(feature = "balloon")]
         balloon_inflate_tube,
         #[cfg(feature = "balloon")]
@@ -1339,13 +1348,14 @@ fn run_gz(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> 
     let vm_clone = vm.try_clone().context("failed to clone vm")?;
 
     let ioapic_host_tube;
-    let mut irq_chip = if cfg.split_irqchip {
-        unimplemented!("Geniezone does not support split irqchip mode");
-    } else {
-        ioapic_host_tube = None;
-
-        GeniezoneKernelIrqChip::new(vm_clone, components.vcpu_count)
-            .context("failed to create IRQ chip")?
+    let mut irq_chip = match cfg.irq_chip.unwrap_or(IrqChipKind::Kernel) {
+        IrqChipKind::Split => bail!("Geniezone does not support split irqchip mode"),
+        IrqChipKind::Userspace => bail!("Geniezone does not support userspace irqchip mode"),
+        IrqChipKind::Kernel => {
+            ioapic_host_tube = None;
+            GeniezoneKernelIrqChip::new(vm_clone, components.vcpu_count)
+                .context("failed to create IRQ chip")?
+        }
     };
 
     run_vm::<GeniezoneVcpu, GeniezoneVm>(
@@ -1418,29 +1428,36 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
     }
 
     let ioapic_host_tube;
-    let mut irq_chip = if cfg.split_irqchip {
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        unimplemented!("KVM split irqchip mode only supported on x86 processors");
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            let (host_tube, ioapic_device_tube) = Tube::pair().context("failed to create tube")?;
-            ioapic_host_tube = Some(host_tube);
-            KvmIrqChip::Split(
-                KvmSplitIrqChip::new(
-                    vm_clone,
-                    components.vcpu_count,
-                    ioapic_device_tube,
-                    Some(120),
+    let mut irq_chip = match cfg.irq_chip.unwrap_or(IrqChipKind::Kernel) {
+        IrqChipKind::Userspace => {
+            bail!("KVM userspace irqchip mode not implemented");
+        }
+        IrqChipKind::Split => {
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            bail!("KVM split irqchip mode only supported on x86 processors");
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                let (host_tube, ioapic_device_tube) =
+                    Tube::pair().context("failed to create tube")?;
+                ioapic_host_tube = Some(host_tube);
+                KvmIrqChip::Split(
+                    KvmSplitIrqChip::new(
+                        vm_clone,
+                        components.vcpu_count,
+                        ioapic_device_tube,
+                        Some(120),
+                    )
+                    .context("failed to create IRQ chip")?,
                 )
-                .context("failed to create IRQ chip")?,
+            }
+        }
+        IrqChipKind::Kernel => {
+            ioapic_host_tube = None;
+            KvmIrqChip::Kernel(
+                KvmKernelIrqChip::new(vm_clone, components.vcpu_count)
+                    .context("failed to create IRQ chip")?,
             )
         }
-    } else {
-        ioapic_host_tube = None;
-        KvmIrqChip::Kernel(
-            KvmKernelIrqChip::new(vm_clone, components.vcpu_count)
-                .context("failed to create IRQ chip")?,
-        )
     };
 
     run_vm::<KvmVcpu, KvmVm>(
@@ -1640,16 +1657,6 @@ where
                 .context("failed to set timeout")?;
             (Some(host), Some(device))
         }
-    } else {
-        (None, None)
-    };
-
-    #[cfg(feature = "balloon")]
-    let (balloon_wss_host_tube, balloon_wss_device_tube) = if cfg.balloon_wss_reporting {
-        let (host, device) = Tube::pair().context("failed to create tube")?;
-        host.set_recv_timeout(Some(Duration::from_millis(100)))
-            .context("failed to set timeout")?;
-        (Some(host), Some(device))
     } else {
         (None, None)
     };
@@ -1855,8 +1862,6 @@ where
         #[cfg(feature = "balloon")]
         balloon_device_tube,
         #[cfg(feature = "balloon")]
-        balloon_wss_device_tube,
-        #[cfg(feature = "balloon")]
         init_balloon_size,
         &mut disk_device_tubes,
         &mut pmem_device_tubes,
@@ -2061,8 +2066,6 @@ where
         control_tubes,
         #[cfg(feature = "balloon")]
         balloon_host_tube,
-        #[cfg(feature = "balloon")]
-        balloon_wss_host_tube,
         &disk_host_tubes,
         #[cfg(feature = "gpu")]
         gpu_control_host_tube,
@@ -2507,7 +2510,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     irq_control_tubes: Vec<Tube>,
     mut control_tubes: Vec<TaggedControlTube>,
     #[cfg(feature = "balloon")] balloon_host_tube: Option<Tube>,
-    #[cfg(feature = "balloon")] balloon_wss_host_tube: Option<Tube>,
     disk_host_tubes: &[Tube],
     #[cfg(feature = "gpu")] gpu_control_tube: Tube,
     #[cfg(feature = "usb")] usb_control_tube: Tube,
@@ -2773,6 +2775,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         let cpu_config = None;
 
+        #[cfg(target_arch = "riscv64")]
+        let cpu_config = Some(CpuConfigRiscv64::new(vcpu_init.fdt_address));
+
         let handle = vcpu::run_vcpu(
             cpu_id,
             vcpu_ids[cpu_id],
@@ -2862,6 +2867,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             |msg, index| {
                 vcpu::kick_vcpu(&vcpu_handles.get(index), linux.irq_chip.as_irq_chip(), msg)
             },
+            &irq_handler_control,
             &device_ctrl_tube,
             linux.vcpu_count,
         )?;
@@ -2880,6 +2886,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(feature = "balloon")]
     let mut balloon_wss_id: u64 = 0;
     let mut registered_evt_tubes: HashMap<RegisteredEvent, HashSet<AddressedTube>> = HashMap::new();
+    let mut region_state = VmMemoryRegionState::new();
 
     'wait: loop {
         let events = {
@@ -3114,8 +3121,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 #[cfg(feature = "balloon")]
                                                 balloon_host_tube.as_ref(),
                                                 #[cfg(feature = "balloon")]
-                                                balloon_wss_host_tube.as_ref(),
-                                                #[cfg(feature = "balloon")]
                                                 &mut balloon_stats_id,
                                                 #[cfg(feature = "balloon")]
                                                 &mut balloon_wss_id,
@@ -3242,6 +3247,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                         } else {
                                             None
                                         },
+                                        &mut region_state,
                                     );
                                     if let Err(e) = tube.send(&response) {
                                         error!("failed to send VmMemoryControlResponse: {}", e);
@@ -3429,13 +3435,13 @@ fn irq_handler_thread(
             .context("failed to add descriptor to wait context")?;
     }
 
-    let events = irq_chip
+    let mut irq_event_tokens = irq_chip
         .irq_event_tokens()
         .context("failed get event tokens from irqchip")?;
 
-    for (index, _gsi, evt) in events {
+    for (index, _gsi, evt) in irq_event_tokens.iter() {
         wait_ctx
-            .add(&evt, IrqHandlerToken::IrqFd { index })
+            .add(evt, IrqHandlerToken::IrqFd { index: *index })
             .context("failed to add irq chip event tokens to wait context")?;
     }
 
@@ -3478,6 +3484,36 @@ fn irq_handler_thread(
                                         .context("failed to add new IRQ control Tube to wait context")?;
                                     }
                                     irq_control_tubes.append(&mut tubes);
+                                }
+                                IrqHandlerRequest::RefreshIrqEventTokens => {
+                                    for (_index, _gsi, evt) in irq_event_tokens.iter() {
+                                        wait_ctx.delete(evt).context(
+                                            "failed to remove irq chip event \
+                                                token from wait context",
+                                        )?;
+                                    }
+
+                                    irq_event_tokens = irq_chip
+                                        .irq_event_tokens()
+                                        .context("failed get event tokens from irqchip")?;
+                                    for (index, _gsi, evt) in irq_event_tokens.iter() {
+                                        wait_ctx
+                                            .add(evt, IrqHandlerToken::IrqFd { index: *index })
+                                            .context(
+                                                "failed to add irq chip event \
+                                                tokens to wait context",
+                                            )?;
+                                    }
+
+                                    if let Err(e) = handler_control
+                                        .send(&IrqHandlerResponse::IrqEventTokenRefreshComplete)
+                                    {
+                                        error!(
+                                            "failed to notify IRQ event token refresh \
+                                            was completed: {}",
+                                            e
+                                        );
+                                    }
                                 }
                                 IrqHandlerRequest::WakeAndNotifyIteration => {
                                     notify_control_on_iteration_end = true;

@@ -37,6 +37,7 @@ use vm_control::USB_CONTROL_MAX_PORTS;
 
 fn validate_socket_path(socket_path: *const c_char) -> Option<PathBuf> {
     if !socket_path.is_null() {
+        // SAFETY: just checked that `socket_path` is not null.
         let socket_path = unsafe { CStr::from_ptr(socket_path) };
         Some(PathBuf::from(socket_path.to_str().ok()?))
     } else {
@@ -47,11 +48,17 @@ fn validate_socket_path(socket_path: *const c_char) -> Option<PathBuf> {
 /// Stops the crosvm instance whose control socket is listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_stop_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_stop_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Exit, &socket_path).is_ok()
+            vms_request(&VmRequest::Exit, socket_path).is_ok()
         } else {
             false
         }
@@ -62,11 +69,17 @@ pub extern "C" fn crosvm_client_stop_vm(socket_path: *const c_char) -> bool {
 /// Suspends the crosvm instance whose control socket is listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_suspend_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_suspend_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Suspend, &socket_path).is_ok()
+            vms_request(&VmRequest::Suspend, socket_path).is_ok()
         } else {
             false
         }
@@ -77,11 +90,17 @@ pub extern "C" fn crosvm_client_suspend_vm(socket_path: *const c_char) -> bool {
 /// Resumes the crosvm instance whose control socket is listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_resume_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_resume_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Resume, &socket_path).is_ok()
+            vms_request(&VmRequest::Resume, socket_path).is_ok()
         } else {
             false
         }
@@ -92,11 +111,17 @@ pub extern "C" fn crosvm_client_resume_vm(socket_path: *const c_char) -> bool {
 /// Creates an RT vCPU for the crosvm instance whose control socket is listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_make_rt_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_make_rt_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::MakeRT, &socket_path).is_ok()
+            vms_request(&VmRequest::MakeRT, socket_path).is_ok()
         } else {
             false
         }
@@ -108,12 +133,21 @@ pub extern "C" fn crosvm_client_make_rt_vm(socket_path: *const c_char) -> bool {
 /// listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_balloon_vms(socket_path: *const c_char, num_bytes: u64) -> bool {
+pub unsafe extern "C" fn crosvm_client_balloon_vms(
+    socket_path: *const c_char,
+    num_bytes: u64,
+) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
             let command = BalloonControlCommand::Adjust { num_bytes };
-            vms_request(&VmRequest::BalloonCommand(command), &socket_path).is_ok()
+            vms_request(&VmRequest::BalloonCommand(command), socket_path).is_ok()
         } else {
             false
         }
@@ -124,11 +158,17 @@ pub extern "C" fn crosvm_client_balloon_vms(socket_path: *const c_char, num_byte
 /// Enable vmm swap for crosvm instance whose control socket is listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_swap_enable_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_swap_enable_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Swap(SwapCommand::Enable), &socket_path).is_ok()
+            vms_request(&VmRequest::Swap(SwapCommand::Enable), socket_path).is_ok()
         } else {
             false
         }
@@ -140,11 +180,17 @@ pub extern "C" fn crosvm_client_swap_enable_vm(socket_path: *const c_char) -> bo
 /// on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_swap_swapout_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_swap_swapout_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Swap(SwapCommand::SwapOut), &socket_path).is_ok()
+            vms_request(&VmRequest::Swap(SwapCommand::SwapOut), socket_path).is_ok()
         } else {
             false
         }
@@ -155,11 +201,17 @@ pub extern "C" fn crosvm_client_swap_swapout_vm(socket_path: *const c_char) -> b
 /// Disable vmm swap for crosvm instance whose control socket is listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_swap_disable_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_swap_disable_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Swap(SwapCommand::Disable), &socket_path).is_ok()
+            vms_request(&VmRequest::Swap(SwapCommand::Disable), socket_path).is_ok()
         } else {
             false
         }
@@ -206,20 +258,30 @@ pub extern "C" fn crosvm_client_max_usb_devices() -> usize {
 ///
 /// Use the value returned by [`crosvm_client_max_usb_devices()`] to determine the size of the input
 /// array to this function.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_usb_list(
+pub unsafe extern "C" fn crosvm_client_usb_list(
     socket_path: *const c_char,
     entries: *mut UsbDeviceEntry,
     entries_length: ssize_t,
 ) -> ssize_t {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
+            if entries.is_null() {
+                return -1;
+            }
             if let Ok(UsbControlResult::Devices(res)) = do_usb_list(&socket_path) {
                 let mut i = 0;
                 for entry in res.iter().filter(|x| x.valid()) {
                     if i >= entries_length {
                         break;
                     }
+                    // SAFETY: checked that `entries` is not null.
                     unsafe {
                         *entries.offset(i) = entry.into();
                         i += 1;
@@ -250,8 +312,14 @@ pub extern "C" fn crosvm_client_usb_list(
 /// * `out_port` - (optional) internal port will be written here if provided.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_usb_attach(
+pub unsafe extern "C" fn crosvm_client_usb_attach(
     socket_path: *const c_char,
     _bus: u8,
     _addr: u8,
@@ -265,9 +333,10 @@ pub extern "C" fn crosvm_client_usb_attach(
             if dev_path.is_null() {
                 return false;
             }
+            // SAFETY: just checked that `dev_path` is not null.
             let dev_path = Path::new(unsafe { CStr::from_ptr(dev_path) }.to_str().unwrap_or(""));
 
-            if let Ok(UsbControlResult::Ok { port }) = do_usb_attach(&socket_path, dev_path) {
+            if let Ok(UsbControlResult::Ok { port }) = do_usb_attach(socket_path, dev_path) {
                 if !out_port.is_null() {
                     unsafe { *out_port = port };
                 }
@@ -286,11 +355,17 @@ pub extern "C" fn crosvm_client_usb_attach(
 /// `port` determines device to be detached.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_usb_detach(socket_path: *const c_char, port: u8) -> bool {
+pub unsafe extern "C" fn crosvm_client_usb_detach(socket_path: *const c_char, port: u8) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            do_usb_detach(&socket_path, port).is_ok()
+            do_usb_detach(socket_path, port).is_ok()
         } else {
             false
         }
@@ -302,8 +377,14 @@ pub extern "C" fn crosvm_client_usb_detach(socket_path: *const c_char, port: u8)
 /// `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_modify_battery(
+pub unsafe extern "C" fn crosvm_client_modify_battery(
     socket_path: *const c_char,
     battery_type: *const c_char,
     property: *const c_char,
@@ -319,7 +400,7 @@ pub extern "C" fn crosvm_client_modify_battery(
             let target = unsafe { CStr::from_ptr(target) };
 
             do_modify_battery(
-                &socket_path,
+                socket_path,
                 battery_type.to_str().unwrap(),
                 property.to_str().unwrap(),
                 target.to_str().unwrap(),
@@ -335,8 +416,14 @@ pub extern "C" fn crosvm_client_modify_battery(
 /// Resizes the disk of the crosvm instance whose control socket is listening on `socket_path`.
 ///
 /// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_resize_disk(
+pub unsafe extern "C" fn crosvm_client_resize_disk(
     socket_path: *const c_char,
     disk_index: u64,
     new_size: u64,
@@ -348,7 +435,7 @@ pub extern "C" fn crosvm_client_resize_disk(
                     disk_index,
                     command: DiskControlCommand::Resize { new_size },
                 };
-                vms_request(&request, &socket_path).is_ok()
+                vms_request(&request, socket_path).is_ok()
             } else {
                 false
             }
@@ -407,8 +494,14 @@ impl From<&BalloonStats> for BalloonStatsFfi {
 /// # Note
 ///
 /// Entries in `BalloonStatsFfi` that are not available will be set to `-1`.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_balloon_stats(
+pub unsafe extern "C" fn crosvm_client_balloon_stats(
     socket_path: *const c_char,
     stats: *mut BalloonStatsFfi,
     actual: *mut u64,
@@ -419,15 +512,17 @@ pub extern "C" fn crosvm_client_balloon_stats(
             if let Ok(VmResponse::BalloonStats {
                 stats: ref balloon_stats,
                 balloon_actual,
-            }) = handle_request(request, &socket_path)
+            }) = handle_request(request, socket_path)
             {
                 if !stats.is_null() {
+                    // SAFETY: just checked that `stats` is not null.
                     unsafe {
                         *stats = balloon_stats.into();
                     }
                 }
 
                 if !actual.is_null() {
+                    // SAFETY: just checked that `actual` is not null.
                     unsafe {
                         *actual = balloon_actual;
                     }
@@ -496,23 +591,39 @@ impl BalloonWSSFfi {
 }
 
 /// Returns balloon working set size of the crosvm instance whose control socket is listening on socket_path.
+///
+/// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_balloon_wss(
+pub unsafe extern "C" fn crosvm_client_balloon_wss(
     socket_path: *const c_char,
     wss: *mut BalloonWSSFfi,
+    actual: *mut u64,
 ) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
             let request = &VmRequest::BalloonCommand(BalloonControlCommand::WorkingSetSize);
             if let Ok(VmResponse::BalloonWSS {
                 wss: ref balloon_wss,
-            }) = handle_request(request, &socket_path)
+                balloon_actual,
+            }) = handle_request(request, socket_path)
             {
                 if !wss.is_null() {
-                    // SAFETY: deref of raw pointer is safe because we check to
-                    // make sure the pointer is not null.
+                    // SAFETY: just checked that `wss` is not null.
                     unsafe {
                         *wss = balloon_wss.into();
+                    }
+                }
+
+                if !actual.is_null() {
+                    // SAFETY: just checked that `actual` is not null.
+                    unsafe {
+                        *actual = balloon_actual;
                     }
                 }
                 true
@@ -550,8 +661,16 @@ impl TryFrom<RegisteredEventFfi> for RegisteredEvent {
 }
 
 /// Registers the connected process as a listener for `event`.
+///
+/// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_register_events_listener(
+pub unsafe extern "C" fn crosvm_client_register_events_listener(
     socket_path: *const c_char,
     listening_socket_path: *const c_char,
     event: RegisteredEventFfi,
@@ -564,7 +683,7 @@ pub extern "C" fn crosvm_client_register_events_listener(
                         event,
                         socket_addr: listening_socket_path.to_str().unwrap().to_string(),
                     };
-                    vms_request(&request, &socket_path).is_ok()
+                    vms_request(&request, socket_path).is_ok()
                 } else {
                     false
                 }
@@ -579,8 +698,16 @@ pub extern "C" fn crosvm_client_register_events_listener(
 }
 
 /// Unegisters the connected process as a listener for `event`.
+///
+/// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_unregister_events_listener(
+pub unsafe extern "C" fn crosvm_client_unregister_events_listener(
     socket_path: *const c_char,
     listening_socket_path: *const c_char,
     event: RegisteredEventFfi,
@@ -593,7 +720,7 @@ pub extern "C" fn crosvm_client_unregister_events_listener(
                         event,
                         socket_addr: listening_socket_path.to_str().unwrap().to_string(),
                     };
-                    vms_request(&request, &socket_path).is_ok()
+                    vms_request(&request, socket_path).is_ok()
                 } else {
                     false
                 }
@@ -608,8 +735,16 @@ pub extern "C" fn crosvm_client_unregister_events_listener(
 }
 
 /// Unegisters the connected process as a listener for all events.
+///
+/// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[no_mangle]
-pub extern "C" fn crosvm_client_unregister_listener(
+pub unsafe extern "C" fn crosvm_client_unregister_listener(
     socket_path: *const c_char,
     listening_socket_path: *const c_char,
 ) -> bool {
@@ -619,7 +754,42 @@ pub extern "C" fn crosvm_client_unregister_listener(
                 let request = VmRequest::Unregister {
                     socket_addr: listening_socket_path.to_str().unwrap().to_string(),
                 };
-                vms_request(&request, &socket_path).is_ok()
+                vms_request(&request, socket_path).is_ok()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// Set Working Set Size config in guest.
+///
+/// The function returns true on success or false if an error occured.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
+#[no_mangle]
+pub unsafe extern "C" fn crosvm_client_balloon_wss_config(
+    socket_path: *const c_char,
+    config: *const [u64; 5],
+) -> bool {
+    catch_unwind(|| {
+        if let Some(socket_path) = validate_socket_path(socket_path) {
+            if !config.is_null() {
+                // SAFETY: just checked that `config` is not null.
+                unsafe {
+                    let request =
+                        VmRequest::BalloonCommand(BalloonControlCommand::WorkingSetSizeConfig {
+                            config: *config,
+                        });
+                    vms_request(&request, socket_path).is_ok()
+                }
             } else {
                 false
             }

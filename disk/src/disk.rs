@@ -141,8 +141,8 @@ pub trait DiskGetLen {
 impl DiskGetLen for File {
     fn get_len(&self) -> io::Result<u64> {
         let mut s = self;
-        let orig_seek = s.seek(SeekFrom::Current(0))?;
-        let end = s.seek(SeekFrom::End(0))? as u64;
+        let orig_seek = s.stream_position()?;
+        let end = s.seek(SeekFrom::End(0))?;
         s.seek(SeekFrom::Start(orig_seek))?;
         Ok(end)
     }
@@ -212,7 +212,7 @@ fn log_host_fs_type(file: &File) -> Result<()> {
 pub fn detect_image_type(file: &File) -> Result<ImageType> {
     let mut f = file;
     let disk_size = f.get_len().map_err(Error::SeekingFile)?;
-    let orig_seek = f.seek(SeekFrom::Current(0)).map_err(Error::SeekingFile)?;
+    let orig_seek = f.stream_position().map_err(Error::SeekingFile)?;
     f.seek(SeekFrom::Start(0)).map_err(Error::SeekingFile)?;
 
     info!("disk size {}, ", disk_size);
@@ -476,7 +476,7 @@ impl AsyncDisk for SingleFileDisk {
             let buf = vec![0u8; write_size];
             nwritten += self
                 .inner
-                .write_from_vec(Some(file_offset + nwritten as u64), buf)
+                .write_from_vec(Some(file_offset + nwritten), buf)
                 .await
                 .map(|(n, _)| n as u64)
                 .map_err(Error::WriteFromVec)?;
