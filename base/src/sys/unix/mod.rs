@@ -61,6 +61,7 @@ use std::os::unix::net::UnixDatagram;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::ptr;
 use std::time::Duration;
@@ -70,6 +71,7 @@ pub use capabilities::drop_capabilities;
 pub use descriptor::*;
 pub use event::EventExt;
 pub(crate) use event::PlatformEvent;
+pub use file::find_next_data;
 pub use file::FileDataIterator;
 pub use file_flags::*;
 pub use get_filesystem_type::*;
@@ -629,6 +631,25 @@ pub fn get_max_open_files() -> Result<u64> {
 pub fn number_of_logical_cores() -> Result<usize> {
     // Safe because we pass a flag for this call and the host supports this system call
     Ok(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) } as usize)
+}
+
+/// Moves the requested PID/TID to a particular cgroup
+///
+pub fn move_to_cgroup(cgroup_path: PathBuf, id_to_write: Pid, cgroup_file: &str) -> Result<()> {
+    use std::io::Write;
+
+    let gpu_cgroup_file = cgroup_path.join(cgroup_file);
+    let mut f = File::create(gpu_cgroup_file)?;
+    f.write_all(id_to_write.to_string().as_bytes())?;
+    Ok(())
+}
+
+pub fn move_task_to_cgroup(cgroup_path: PathBuf, thread_id: Pid) -> Result<()> {
+    move_to_cgroup(cgroup_path, thread_id, "tasks")
+}
+
+pub fn move_proc_to_cgroup(cgroup_path: PathBuf, process_id: Pid) -> Result<()> {
+    move_to_cgroup(cgroup_path, process_id, "cgroup.procs")
 }
 
 #[cfg(test)]

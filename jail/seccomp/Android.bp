@@ -34,7 +34,7 @@ python_binary_host {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "$(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/block.policy) $(location x86_64/vvu.policy) $(location x86_64/vhost_user.policy) < $(in) | $(location detect_duplication) > $(out)",
+    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/block.policy) $(location x86_64/vvu.policy) $(location x86_64/vhost_user.policy) $(location x86_64/vhost_vsock.policy) < $(in) | $(location detect_duplication) > $(out)",
     tools: [
         "detect_duplication",
     ],
@@ -46,12 +46,13 @@ genrule_defaults {
         "x86_64/block.policy",
         "x86_64/vvu.policy",
         "x86_64/vhost_user.policy",
+        "x86_64/vhost_vsock.policy",
     ],
 }
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_aarch64",
-    cmd: "$(location policy-inliner.sh) $(location aarch64/common_device.policy) $(location aarch64/gpu_common.policy) $(location aarch64/serial.policy) < $(in) | $(location detect_duplication) > $(out)",
+    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location aarch64/common_device.policy) $(location aarch64/gpu_common.policy) $(location aarch64/serial.policy) DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST < $(in) | $(location detect_duplication) > $(out)",
     tools: [
         "detect_duplication",
     ],

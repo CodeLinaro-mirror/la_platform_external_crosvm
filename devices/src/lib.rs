@@ -12,7 +12,7 @@ pub mod bat;
 mod bus;
 #[cfg(feature = "stats")]
 mod bus_stats;
-mod cmos;
+pub mod cmos;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod debugcon;
 #[cfg(feature = "direct")]
@@ -45,7 +45,7 @@ cfg_if::cfg_if! {
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
+use std::fs::File;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -57,8 +57,7 @@ use base::TubeError;
 use cros_async::AsyncTube;
 use cros_async::Executor;
 use vm_control::DeviceControlCommand;
-use vm_control::RestoreControlResult;
-use vm_control::SnapshotControlResult;
+use vm_control::VmResponse;
 use vm_memory::GuestMemory;
 
 pub use self::acpi::ACPIPMFixedEvent;
@@ -78,7 +77,6 @@ pub use self::bus::HostHotPlugKey;
 pub use self::bus::HotPlugBus;
 #[cfg(feature = "stats")]
 pub use self::bus_stats::BusStatistics;
-pub use self::cmos::Cmos;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use self::debugcon::Debugcon;
 #[cfg(feature = "direct")]
@@ -188,20 +186,15 @@ pub enum UnpinResponse {
     Failed,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum IommuDevType {
     #[serde(rename = "off")]
+    #[default]
     NoIommu,
     #[serde(rename = "viommu")]
     VirtioIommu,
     #[serde(rename = "coiommu")]
     CoIommu,
-}
-
-impl Default for IommuDevType {
-    fn default() -> Self {
-        IommuDevType::NoIommu
-    }
 }
 
 // Thread that handles commands sent to devices - such as snapshot, sleep, suspend
@@ -218,9 +211,9 @@ pub fn create_devices_worker_thread(
             let ex = Executor::new().expect("Failed to create an executor");
 
             let async_control = AsyncTube::new(&ex, device_ctrl_resp).unwrap();
-            match ex.run_until(ex.spawn_local(async move {
+            match ex.run_until(async move {
                 handle_command_tube(async_control, guest_memory, io_bus, mmio_bus).await
-            })) {
+            }) {
                 Ok(_) => {}
                 Err(e) => {
                     error!("Device control thread exited with error: {}", e);
@@ -348,34 +341,22 @@ async fn snapshot_handler(
     // TODO(b/268094487): If the snapshot fail, this leaves an incomplete memory snapshot at the
     // requested path.
 
-    let mut json_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut json_file =
+        File::create(path).with_context(|| format!("failed to open {}", path.display()))?;
 
     let mem_path = path.with_extension("mem");
-    let mut mem_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&mem_path)
+    let mut mem_file = File::create(&mem_path)
         .with_context(|| format!("failed to open {}", mem_path.display()))?;
 
-    {
-        let _sleep_guard = SleepGuard::new(buses)?;
+    snapshot_root.guest_memory_metadata = guest_memory
+        .snapshot(&mut mem_file)
+        .context("failed to snapshot memory")?;
 
-        snapshot_root.guest_memory_metadata = guest_memory
-            .snapshot(&mut mem_file)
-            .context("failed to snapshot memory")?;
-
-        for bus in buses {
-            snapshot_devices(bus, |id, snapshot| {
-                snapshot_root.devices.push([(id, snapshot)].into())
-            })
-            .context("failed to snapshot devices")?;
-        }
+    for bus in buses {
+        snapshot_devices(bus, |id, snapshot| {
+            snapshot_root.devices.push([(id, snapshot)].into())
+        })
+        .context("failed to snapshot devices")?;
     }
 
     serde_json::to_writer(&mut json_file, &snapshot_root)?;
@@ -388,18 +369,11 @@ async fn restore_handler(
     guest_memory: &GuestMemory,
     buses: &[&Bus],
 ) -> anyhow::Result<()> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
 
     let mem_path = path.with_extension("mem");
-    let mut mem_file = OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(&mem_path)
-        .with_context(|| format!("failed to open {}", mem_path.display()))?;
+    let mut mem_file =
+        File::open(&mem_path).with_context(|| format!("failed to open {}", mem_path.display()))?;
 
     let snapshot_root: SnapshotRoot = serde_json::from_reader(file)?;
 
@@ -434,26 +408,52 @@ async fn handle_command_tube(
     io_bus: Arc<Bus>,
     mmio_bus: Arc<Bus>,
 ) -> anyhow::Result<()> {
+    let buses = &[&*io_bus, &*mmio_bus];
+    let mut _sleep_guard = None;
     loop {
         match command_tube.next().await {
             Ok(command) => {
                 match command {
+                    DeviceControlCommand::SleepDevices => match SleepGuard::new(buses) {
+                        Ok(guard) => {
+                            _sleep_guard = Some(guard);
+                            command_tube
+                                .send(VmResponse::Ok)
+                                .await
+                                .context("failed to reply to sleep command")?;
+                        }
+                        Err(e) => {
+                            command_tube
+                                .send(VmResponse::ErrString(e.to_string()))
+                                .await
+                                .context("failed to send response.")?;
+                        }
+                    },
+                    DeviceControlCommand::WakeDevices => {
+                        _sleep_guard = None;
+                        command_tube
+                            .send(VmResponse::Ok)
+                            .await
+                            .context("failed to reply to wake devices request")?;
+                    }
                     DeviceControlCommand::SnapshotDevices {
                         snapshot_path: path,
                     } => {
-                        if let Err(e) =
-                            snapshot_handler(path.as_path(), &guest_memory, &[&*io_bus, &*mmio_bus])
-                                .await
+                        assert!(
+                            _sleep_guard.is_some(),
+                            "devices must be sleeping to snapshot"
+                        );
+                        if let Err(e) = snapshot_handler(path.as_path(), &guest_memory, buses).await
                         {
                             error!("failed to snapshot: {}", e);
                             command_tube
-                                .send(SnapshotControlResult::Failed(e.to_string()))
+                                .send(VmResponse::ErrString(e.to_string()))
                                 .await
                                 .context("Failed to send response")?;
                             continue;
                         }
                         command_tube
-                            .send(SnapshotControlResult::Ok)
+                            .send(VmResponse::Ok)
                             .await
                             .context("Failed to send response")?;
                     }
@@ -464,13 +464,13 @@ async fn handle_command_tube(
                         {
                             error!("failed to restore: {}", e);
                             command_tube
-                                .send(RestoreControlResult::Failed(e.to_string()))
+                                .send(VmResponse::ErrString(e.to_string()))
                                 .await
                                 .context("Failed to send response")?;
                             continue;
                         }
                         command_tube
-                            .send(RestoreControlResult::Ok)
+                            .send(VmResponse::Ok)
                             .await
                             .context("Failed to send response")?;
                     }

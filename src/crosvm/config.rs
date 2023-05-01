@@ -42,6 +42,7 @@ use devices::virtio::vhost::user::device::gpu::sys::windows::GpuBackendConfig;
 use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
 #[cfg(all(windows, feature = "audio"))]
 use devices::virtio::vhost::user::device::snd::sys::windows::SndSplitConfig;
+use devices::virtio::vsock::VsockConfig;
 use devices::virtio::NetParameters;
 #[cfg(feature = "audio")]
 use devices::Ac97Backend;
@@ -79,7 +80,6 @@ cfg_if::cfg_if! {
         use crate::crosvm::sys::GpuRenderServerParameters;
         use libc::{getegid, geteuid};
 
-        static KVM_PATH: &str = "/dev/kvm";
         static VHOST_NET_PATH: &str = "/dev/vhost-net";
     } else if #[cfg(windows)] {
         use base::{Event, Tube};
@@ -386,9 +386,10 @@ impl FromStr for TouchDeviceOption {
     }
 }
 
-#[derive(Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SharedDirKind {
     FS,
+    #[default]
     P9,
 }
 
@@ -402,12 +403,6 @@ impl FromStr for SharedDirKind {
             "9p" | "9P" | "p9" | "P9" => Ok(P9),
             _ => Err("invalid file system type"),
         }
-    }
-}
-
-impl Default for SharedDirKind {
-    fn default() -> SharedDirKind {
-        SharedDirKind::P9
     }
 }
 
@@ -1007,7 +1002,6 @@ pub struct Config {
     pub broker_shutdown_event: Option<Event>,
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
     pub bus_lock_ratelimit: u64,
-    pub cid: Option<u64>,
     #[cfg(unix)]
     pub coiommu_param: Option<devices::CoIommuParameters>,
     pub cpu_capacity: BTreeMap<usize, u32>, // CPU index -> capacity
@@ -1047,10 +1041,14 @@ pub struct Config {
     pub gdb: Option<u32>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_backend_config: Option<GpuBackendConfig>,
+    #[cfg(all(unix, feature = "gpu"))]
+    pub gpu_cgroup_path: Option<PathBuf>,
     #[cfg(feature = "gpu")]
     pub gpu_parameters: Option<GpuParameters>,
     #[cfg(all(unix, feature = "gpu"))]
     pub gpu_render_server_parameters: Option<GpuRenderServerParameters>,
+    #[cfg(all(unix, feature = "gpu"))]
+    pub gpu_server_cgroup_path: Option<PathBuf>,
     #[cfg(all(windows, feature = "gpu"))]
     pub gpu_vmm_config: Option<GpuVmmConfig>,
     pub host_cpu_topology: bool,
@@ -1067,8 +1065,6 @@ pub struct Config {
     pub jail_config: Option<JailConfig>,
     #[cfg(windows)]
     pub kernel_log_file: Option<String>,
-    #[cfg(unix)]
-    pub kvm_device_path: PathBuf,
     #[cfg(unix)]
     pub lock_guest_memory: bool,
     #[cfg(windows)]
@@ -1179,8 +1175,6 @@ pub struct Config {
     pub vhost_user_video_dec: Vec<VhostUserOption>,
     pub vhost_user_vsock: Vec<VhostUserOption>,
     pub vhost_user_wl: Option<VhostUserOption>,
-    #[cfg(unix)]
-    pub vhost_vsock_device: Option<PathBuf>,
     #[cfg(feature = "video-decoder")]
     pub video_dec: Vec<VideoDeviceConfig>,
     #[cfg(feature = "video-encoder")]
@@ -1195,6 +1189,7 @@ pub struct Config {
     pub virtio_snds: Vec<SndParameters>,
     pub virtio_switches: Vec<PathBuf>,
     pub virtio_trackpad: Vec<TouchDeviceOption>,
+    pub vsock: Option<VsockConfig>,
     #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     pub vtpm_proxy: bool,
     pub vvu_proxy: Vec<VvuOption>,
@@ -1225,7 +1220,6 @@ impl Default for Config {
             broker_shutdown_event: None,
             #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
             bus_lock_ratelimit: 0,
-            cid: None,
             #[cfg(unix)]
             coiommu_param: None,
             #[cfg(feature = "crash-report")]
@@ -1269,6 +1263,10 @@ impl Default for Config {
             gpu_parameters: None,
             #[cfg(all(unix, feature = "gpu"))]
             gpu_render_server_parameters: None,
+            #[cfg(all(unix, feature = "gpu"))]
+            gpu_cgroup_path: None,
+            #[cfg(all(unix, feature = "gpu"))]
+            gpu_server_cgroup_path: None,
             #[cfg(all(windows, feature = "gpu"))]
             gpu_vmm_config: None,
             host_cpu_topology: false,
@@ -1293,8 +1291,6 @@ impl Default for Config {
             },
             #[cfg(windows)]
             kernel_log_file: None,
-            #[cfg(unix)]
-            kvm_device_path: PathBuf::from(KVM_PATH),
             #[cfg(unix)]
             lock_guest_memory: false,
             #[cfg(windows)]
@@ -1398,8 +1394,7 @@ impl Default for Config {
             vhost_user_snd: Vec::new(),
             vhost_user_vsock: Vec::new(),
             vhost_user_wl: None,
-            #[cfg(unix)]
-            vhost_vsock_device: None,
+            vsock: None,
             #[cfg(feature = "video-decoder")]
             video_dec: Vec::new(),
             #[cfg(feature = "video-encoder")]
@@ -1576,6 +1571,13 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         return Err("'lock-guest-memory' and 'disable-sandbox' are mutually exclusive".to_string());
     }
 
+    // TODO(b/253386409): Vmm-swap only support sandboxed devices until vmm-swap use
+    // `devices::Suspendable` to suspend devices.
+    #[cfg(feature = "swap")]
+    if cfg.swap_dir.is_some() && cfg.jail_config.is_none() {
+        return Err("'swap' and 'disable-sandbox' are mutually exclusive".to_string());
+    }
+
     set_default_serial_parameters(
         &mut cfg.serial_parameters,
         !cfg.vhost_user_console.is_empty(),
@@ -1610,11 +1612,12 @@ fn validate_file_backed_mapping(mapping: &mut FileBackedMappingParameters) -> Re
 #[cfg(test)]
 #[allow(clippy::needless_update)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::Duration;
+
     use argh::FromArgs;
     use devices::PciClassCode;
     use devices::StubPciParameters;
-    #[cfg(unix)]
-    use std::time::Duration;
 
     use super::*;
 
@@ -2243,6 +2246,28 @@ mod tests {
         assert_eq!(shared_dir.fs_cfg.attr_timeout, Duration::from_secs(3600));
         assert_eq!(shared_dir.fs_cfg.entry_timeout, Duration::from_secs(3600));
         assert_eq!(shared_dir.fs_cfg.writeback, true);
+        assert_eq!(
+            shared_dir.fs_cfg.cache_policy,
+            passthrough::CachePolicy::Always
+        );
+        assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
+        assert_eq!(shared_dir.fs_cfg.use_dax, false);
+        assert_eq!(shared_dir.fs_cfg.posix_acl, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_shared_dir_oem() {
+        let shared_dir: SharedDir = "/:oem_etc:type=fs:cache=always:uidmap=0 299 1, 5000 600 50:gidmap=0 300 1, 5000 600 50:timeout=3600:rewrite-security-xattrs=true".parse().unwrap();
+        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
+        assert_eq!(shared_dir.tag, "oem_etc");
+        assert!(shared_dir.kind == SharedDirKind::FS);
+        assert_eq!(shared_dir.uid_map, "0 299 1, 5000 600 50");
+        assert_eq!(shared_dir.gid_map, "0 300 1, 5000 600 50");
+        assert_eq!(shared_dir.fs_cfg.ascii_casefold, false);
+        assert_eq!(shared_dir.fs_cfg.attr_timeout, Duration::from_secs(3600));
+        assert_eq!(shared_dir.fs_cfg.entry_timeout, Duration::from_secs(3600));
+        assert_eq!(shared_dir.fs_cfg.writeback, false);
         assert_eq!(
             shared_dir.fs_cfg.cache_policy,
             passthrough::CachePolicy::Always

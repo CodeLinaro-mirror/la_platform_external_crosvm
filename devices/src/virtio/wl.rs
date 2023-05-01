@@ -85,6 +85,7 @@ use base::SharedMemoryUnix;
 use base::Tube;
 use base::TubeError;
 use base::WaitContext;
+use base::WorkerThread;
 use data_model::*;
 #[cfg(feature = "minigbm")]
 use libc::EBADF;
@@ -101,11 +102,15 @@ use rutabaga_gfx::ImageAllocationInfo;
 #[cfg(feature = "minigbm")]
 use rutabaga_gfx::ImageMemoryRequirements;
 #[cfg(feature = "minigbm")]
+use rutabaga_gfx::RutabagaDescriptor;
+#[cfg(feature = "minigbm")]
 use rutabaga_gfx::RutabagaError;
 #[cfg(feature = "minigbm")]
 use rutabaga_gfx::RutabagaGralloc;
 #[cfg(feature = "minigbm")]
 use rutabaga_gfx::RutabagaGrallocFlags;
+#[cfg(feature = "minigbm")]
+use rutabaga_gfx::RutabagaIntoRawDescriptor;
 use thiserror::Error as ThisError;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
@@ -140,7 +145,6 @@ use crate::virtio::device_constants::wl::VIRTIO_WL_F_USE_SHMEM;
 use crate::virtio::virtio_device::Error as VirtioError;
 use crate::virtio::VirtioDeviceSaved;
 use crate::Suspendable;
-use base::WorkerThread;
 
 const VIRTWL_SEND_MAX_ALLOCS: usize = 28;
 const VIRTIO_WL_CMD_VFD_NEW: u32 = 256;
@@ -435,6 +439,13 @@ struct VmRequester {
     state: Rc<RefCell<VmRequesterState>>,
 }
 
+// The following are wrappers to avoid base dependencies in the rutabaga crate
+#[cfg(feature = "minigbm")]
+fn to_safe_descriptor(r: RutabagaDescriptor) -> SafeDescriptor {
+    // Safe because we own the SafeDescriptor at this point.
+    unsafe { SafeDescriptor::from_raw_descriptor(r.into_raw_descriptor()) }
+}
+
 impl VmRequester {
     fn new(
         mapper: Box<dyn SharedMemoryMapper>,
@@ -507,15 +518,15 @@ impl VmRequester {
             .map_err(WlError::GrallocError)?;
         drop(state);
 
+        let safe_descriptor = to_safe_descriptor(handle.os_handle);
         self.register_memory(
-            handle
-                .os_handle
+            safe_descriptor
                 .try_clone()
                 .context("failed to dup gfx handle")
                 .map_err(WlError::ShmemMapperError)?,
             reqs.size,
         )
-        .map(|info| (info, handle.os_handle, reqs))
+        .map(|info| (info, safe_descriptor, reqs))
     }
 
     fn register_shmem(&self, shm: &SharedMemory) -> WlResult<u64> {

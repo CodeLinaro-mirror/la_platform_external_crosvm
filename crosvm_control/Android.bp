@@ -25,6 +25,11 @@ rust_ffi_shared {
         "liblibc",
         "libvm_control",
     ],
+    // The build.rs file compiles the generated C header just as a test, which
+    // tricks cargo_embargo into thinking there is a library dependency that
+    // doesn't actually exist.
+    //
+    // static_libs: ["libcrosvm_control_test"],
 }
 
 rust_ffi_static {
@@ -42,4 +47,9 @@ rust_ffi_static {
         "liblibc",
         "libvm_control",
     ],
+    // The build.rs file compiles the generated C header just as a test, which
+    // tricks cargo_embargo into thinking there is a library dependency that
+    // doesn't actually exist.
+    //
+    // static_libs: ["libcrosvm_control_test"],
 }

@@ -37,7 +37,7 @@ rust_test {
         "libdata_model",
         "libfutures",
         "liblibc",
-        "libprotobuf", // Added manually
+        "libprotobuf_deprecated", // Added manually
         "libprotos", // Added manually
         "libserde",
         "libsync_rust",
@@ -75,7 +75,7 @@ rust_library {
         "libdata_model",
         "libfutures",
         "liblibc",
-        "libprotobuf", // Added manually
+        "libprotobuf_deprecated", // Added manually
         "libprotos", // Added manually
         "libserde",
         "libsync_rust",
@@ -89,5 +89,8 @@ rust_library {
         "libasync_trait",
         "libremain",
     ],
-    visibility: ["//packages/modules/Virtualization/virtualizationmanager"],
+    visibility: [
+        "//packages/modules/Virtualization/virtualizationmanager",
+        "//vendor:__subpackages__",
+    ],
 }

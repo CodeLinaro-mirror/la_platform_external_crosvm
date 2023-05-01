@@ -17,6 +17,7 @@ use libc::EBUSY;
 use libc::EINVAL;
 use libc::ENOENT;
 use libc::ENXIO;
+use libc::EOPNOTSUPP;
 use vm_memory::GuestAddress;
 use winapi::shared::winerror::E_UNEXPECTED;
 
@@ -35,9 +36,11 @@ use crate::Register;
 use crate::Regs;
 use crate::Sregs;
 use crate::Vcpu;
+use crate::VcpuEvents;
 use crate::VcpuExit;
 use crate::VcpuRunHandle;
 use crate::VcpuX86_64;
+use crate::Xsave;
 
 const WHPX_EXIT_DIRECTION_MMIO_READ: u8 = 0;
 const WHPX_EXIT_DIRECTION_MMIO_WRITE: u8 = 1;
@@ -1047,6 +1050,30 @@ impl VcpuX86_64 for WhpxVcpu {
         })
     }
 
+    /// Gets the VCPU XSAVE.
+    // TODO: b/270734340 implement
+    fn get_xsave(&self) -> Result<Xsave> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    /// Sets the VCPU XSAVE.
+    // TODO: b/270734340 implement
+    fn set_xsave(&self, _xsave: &Xsave) -> Result<()> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    /// Gets the VCPU EVENTS.
+    // TODO: b/270734340 implement
+    fn get_vcpu_events(&self) -> Result<VcpuEvents> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    /// Sets the VCPU EVENTS.
+    // TODO: b/270734340 implement
+    fn set_vcpu_events(&self, _vcpu_events: &VcpuEvents) -> Result<()> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
     /// Gets the VCPU debug registers.
     fn get_debugregs(&self) -> Result<DebugRegs> {
         let mut whpx_debugregs: WhpxDebugRegs = Default::default();
@@ -1155,6 +1182,11 @@ impl VcpuX86_64 for WhpxVcpu {
             msr.value = unsafe { buffer[i].Reg64 };
         }
         Ok(())
+    }
+
+    // TODO: b/270734340 implement
+    fn get_all_msrs(&self) -> Result<Vec<Register>> {
+        Err(Error::new(EOPNOTSUPP))
     }
 
     /// Sets the model-specific registers.

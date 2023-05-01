@@ -49,6 +49,7 @@ rust_binary {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "gunyah",
         "qcow",
         "usb",
     ],
@@ -171,6 +172,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "gunyah",
         "qcow",
         "usb",
     ],
@@ -293,6 +295,7 @@ rust_defaults {
         "//external/crosvm:__subpackages__",
         "//external/libchromeos-rs",
         "//packages/modules/Virtualization/authfs",
+        // For QCOM's crosvm fork.
         "//vendor:__subpackages__",
     ],
 }
@@ -305,6 +308,5 @@ rust_defaults {
     name: "crosvm_inner_defaults",
     defaults: ["crosvm_defaults"],
     defaults_visibility: ["//external/crosvm:__subpackages__"],
-    visibility: ["//external/crosvm:__subpackages__",
-                 "//vendor:__subpackages__",],
+    visibility: ["//external/crosvm:__subpackages__"],
 }

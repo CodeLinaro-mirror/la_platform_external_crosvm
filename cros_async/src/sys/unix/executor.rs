@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use std::future::Future;
+use std::pin::Pin;
 
-use async_task::Task;
 use base::debug;
 use base::warn;
 use base::AsRawDescriptors;
@@ -24,39 +24,21 @@ use super::URingExecutor;
 use super::UringSource;
 use crate::AsyncResult;
 use crate::IntoAsync;
-use crate::IoSourceExt;
+use crate::IoSource;
 
-pub(crate) fn async_uring_from<'a, F: IntoAsync + Send + 'a>(
+pub(crate) fn async_uring_from<'a, F: IntoAsync + 'a>(
     f: F,
     ex: &URingExecutor,
-) -> AsyncResult<Box<dyn IoSourceExt<F> + 'a + Send>> {
-    Ok(UringSource::new(f, ex).map(|u| Box::new(u) as Box<dyn IoSourceExt<F> + Send>)?)
+) -> AsyncResult<IoSource<F>> {
+    Ok(IoSource::Uring(UringSource::new(f, ex)?))
 }
 
-/// Creates a concrete `IoSourceExt` using the fd_executor.
-pub(crate) fn async_poll_from<'a, F: IntoAsync + Send + 'a>(
+/// Creates an `IoSource` using the fd_executor.
+pub(crate) fn async_poll_from<'a, F: IntoAsync + 'a>(
     f: F,
     ex: &FdExecutor,
-) -> AsyncResult<Box<dyn IoSourceExt<F> + Send + 'a>> {
-    Ok(PollSource::new(f, ex).map(|u| Box::new(u) as Box<dyn IoSourceExt<F> + Send>)?)
-}
-
-/// Same as [`async_uring_from`], but without the `Send` requirement and only usable on thread-local
-/// executors.
-pub(crate) fn async_uring_from_local<'a, F: IntoAsync + 'a>(
-    f: F,
-    ex: &URingExecutor,
-) -> AsyncResult<Box<dyn IoSourceExt<F> + 'a>> {
-    Ok(UringSource::new(f, ex).map(|u| Box::new(u) as Box<dyn IoSourceExt<F>>)?)
-}
-
-/// Same as [`async_poll_from`], but without the `Send` requirement and only usable on thread-local
-/// executors.
-pub(crate) fn async_poll_from_local<'a, F: IntoAsync + 'a>(
-    f: F,
-    ex: &FdExecutor,
-) -> AsyncResult<Box<dyn IoSourceExt<F> + 'a>> {
-    Ok(PollSource::new(f, ex).map(|u| Box::new(u) as Box<dyn IoSourceExt<F>>)?)
+) -> AsyncResult<IoSource<F>> {
+    Ok(IoSource::Epoll(PollSource::new(f, ex)?))
 }
 
 /// An executor for scheduling tasks that poll futures to completion.
@@ -83,11 +65,11 @@ pub(crate) fn async_poll_from_local<'a, F: IntoAsync + 'a>(
 /// use std::error::Error;
 /// use std::fs::{File, OpenOptions};
 ///
-/// use cros_async::{AsyncResult, Executor, IoSourceExt, complete3};
+/// use cros_async::{AsyncResult, Executor, IoSource, complete3};
 /// const CHUNK_SIZE: usize = 32;
 ///
 /// // Write all bytes from `data` to `f`.
-/// async fn write_file(f: &dyn IoSourceExt<File>, mut data: Vec<u8>) -> AsyncResult<()> {
+/// async fn write_file(f: &IoSource<File>, mut data: Vec<u8>) -> AsyncResult<()> {
 ///     while data.len() > 0 {
 ///         let (count, mut buf) = f.write_from_vec(None, data).await?;
 ///
@@ -99,8 +81,8 @@ pub(crate) fn async_poll_from_local<'a, F: IntoAsync + 'a>(
 ///
 /// // Transfer `len` bytes of data from `from` to `to`.
 /// async fn transfer_data(
-///     from: Box<dyn IoSourceExt<File>>,
-///     to: Box<dyn IoSourceExt<File>>,
+///     from: IoSource<File>,
+///     to: IoSource<File>,
 ///     len: usize,
 /// ) -> AsyncResult<usize> {
 ///     let mut rem = len;
@@ -115,7 +97,7 @@ pub(crate) fn async_poll_from_local<'a, F: IntoAsync + 'a>(
 ///         }
 ///
 ///         data.truncate(count);
-///         write_file(&*to, data).await?;
+///         write_file(&to, data).await?;
 ///
 ///         rem = rem.saturating_sub(count);
 ///     }
@@ -198,6 +180,31 @@ pub enum SetDefaultExecutorKindError {
     UringUnavailable(UringError),
 }
 
+pub enum TaskHandle<R> {
+    Uring(super::UringExecutorTaskHandle<R>),
+    Fd(super::FdExecutorTaskHandle<R>),
+}
+
+impl<R: Send + 'static> TaskHandle<R> {
+    pub fn detach(self) {
+        match self {
+            TaskHandle::Uring(x) => x.detach(),
+            TaskHandle::Fd(x) => x.detach(),
+        }
+    }
+}
+
+impl<R: 'static> Future for TaskHandle<R> {
+    type Output = R;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
+        match self.get_mut() {
+            TaskHandle::Uring(x) => Pin::new(x).poll(cx),
+            TaskHandle::Fd(x) => Pin::new(x).poll(cx),
+        }
+    }
+}
+
 impl Executor {
     /// Create a new `Executor`.
     pub fn new() -> AsyncResult<Self> {
@@ -240,36 +247,20 @@ impl Executor {
             ))
     }
 
-    /// Create a new `Box<dyn IoSourceExt<F>>` associated with `self`. Callers may then use the
-    /// returned `IoSourceExt` to directly start async operations without needing a separate
-    /// reference to the executor.
-    pub fn async_from<'a, F: IntoAsync + Send + 'a>(
-        &self,
-        f: F,
-    ) -> AsyncResult<Box<dyn IoSourceExt<F> + Send + 'a>> {
+    /// Create a new `IoSource<F>` associated with `self`. Callers may then use the returned
+    /// `IoSource` to directly start async operations without needing a separate reference to the
+    /// executor.
+    pub fn async_from<'a, F: IntoAsync + 'a>(&self, f: F) -> AsyncResult<IoSource<F>> {
         match self {
             Executor::Uring(ex) => async_uring_from(f, ex),
             Executor::Fd(ex) => async_poll_from(f, ex),
         }
     }
 
-    /// Same as [`Executor::async_from()`], but without the `Send` requirement and only usable on thread-local
-    /// executors.
-    pub fn async_from_local<'a, F: IntoAsync + 'a>(
-        &self,
-        f: F,
-    ) -> AsyncResult<Box<dyn IoSourceExt<F> + 'a>> {
-        match self {
-            Executor::Uring(ex) => async_uring_from_local(f, ex),
-            Executor::Fd(ex) => async_poll_from_local(f, ex),
-        }
-    }
-
     /// Spawn a new future for this executor to run to completion. Callers may use the returned
-    /// `Task` to await on the result of `f`. Dropping the returned `Task` will cancel `f`,
-    /// preventing it from being polled again. To drop a `Task` without canceling the future
-    /// associated with it use `Task::detach`. To cancel a task gracefully and wait until it is
-    /// fully destroyed, use `Task::cancel`.
+    /// `TaskHandle` to await on the result of `f`. Dropping the returned `TaskHandle` will cancel
+    /// `f`, preventing it from being polled again. To drop a `TaskHandle` without canceling the
+    /// future associated with it use `TaskHandle::detach`.
     ///
     /// # Examples
     ///
@@ -296,14 +287,14 @@ impl Executor {
     ///
     /// # example_spawn().unwrap();
     /// ```
-    pub fn spawn<F>(&self, f: F) -> Task<F::Output>
+    pub fn spawn<F>(&self, f: F) -> TaskHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
         match self {
-            Executor::Uring(ex) => ex.spawn(f),
-            Executor::Fd(ex) => ex.spawn(f),
+            Executor::Uring(ex) => TaskHandle::Uring(ex.spawn(f)),
+            Executor::Fd(ex) => TaskHandle::Fd(ex.spawn(f)),
         }
     }
 
@@ -313,7 +304,7 @@ impl Executor {
     ///
     /// # Panics
     ///
-    /// `Executor::run` and `Executor::run_util` will panic if they try to poll a future that was
+    /// `Executor::run` and `Executor::run_until` will panic if they try to poll a future that was
     /// added by calling `spawn_local` from a different thread.
     ///
     /// # Examples
@@ -334,27 +325,27 @@ impl Executor {
     ///
     /// # example_spawn_local().unwrap();
     /// ```
-    pub fn spawn_local<F>(&self, f: F) -> Task<F::Output>
+    pub fn spawn_local<F>(&self, f: F) -> TaskHandle<F::Output>
     where
         F: Future + 'static,
         F::Output: 'static,
     {
         match self {
-            Executor::Uring(ex) => ex.spawn_local(f),
-            Executor::Fd(ex) => ex.spawn_local(f),
+            Executor::Uring(ex) => TaskHandle::Uring(ex.spawn_local(f)),
+            Executor::Fd(ex) => TaskHandle::Fd(ex.spawn_local(f)),
         }
     }
 
     /// Run the provided closure on a dedicated thread where blocking is allowed.
     ///
-    /// Callers may `await` on the returned `Task` to wait for the result of `f`. Dropping or
-    /// canceling the returned `Task` may not cancel the operation if it was already started on a
+    /// Callers may `await` on the returned `TaskHandle` to wait for the result of `f`. Dropping
+    /// the returned `TaskHandle` may not cancel the operation if it was already started on a
     /// worker thread.
     ///
     /// # Panics
     ///
-    /// `await`ing the `Task` after the `Executor` is dropped will panic if the work was not already
-    /// completed.
+    /// `await`ing the `TaskHandle` after the `Executor` is dropped will panic if the work was not
+    /// already completed.
     ///
     /// # Examples
     ///
@@ -374,14 +365,14 @@ impl Executor {
     /// # let ex = Executor::new().unwrap();
     /// # ex.run_until(do_it(&ex)).unwrap();
     /// ```
-    pub fn spawn_blocking<F, R>(&self, f: F) -> Task<R>
+    pub fn spawn_blocking<F, R>(&self, f: F) -> TaskHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
         match self {
-            Executor::Uring(ex) => ex.spawn_blocking(f),
-            Executor::Fd(ex) => ex.spawn_blocking(f),
+            Executor::Uring(ex) => TaskHandle::Uring(ex.spawn_blocking(f)),
+            Executor::Fd(ex) => TaskHandle::Fd(ex.spawn_blocking(f)),
         }
     }
 

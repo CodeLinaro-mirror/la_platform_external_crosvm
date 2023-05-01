@@ -22,7 +22,6 @@ use base::EventToken;
 use base::RawDescriptor;
 use base::WaitContext;
 use base::WorkerThread;
-use data_model::DataInit;
 use data_model::Le16;
 use data_model::Le32;
 use linux_input_sys::virtio_input_event;
@@ -30,12 +29,15 @@ use linux_input_sys::InputEventDecoder;
 use remain::sorted;
 use thiserror::Error;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use self::constants::*;
 use self::event_source::EvdevEventSource;
 use self::event_source::EventSource;
 use self::event_source::SocketEventSource;
 use super::copy_config;
+use super::virtio_device::Error as VirtioError;
 use super::DescriptorChain;
 use super::DescriptorError;
 use super::DeviceType;
@@ -44,6 +46,7 @@ use super::Queue;
 use super::Reader;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
+use super::VirtioDeviceSaved;
 use super::Writer;
 use crate::Suspendable;
 
@@ -97,7 +100,7 @@ pub enum InputError {
 
 pub type Result<T> = std::result::Result<T, InputError>;
 
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_input_device_ids {
     bustype: Le16,
@@ -105,9 +108,6 @@ pub struct virtio_input_device_ids {
     product: Le16,
     version: Le16,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for virtio_input_device_ids {}
 
 impl virtio_input_device_ids {
     fn new(bustype: u16, product: u16, vendor: u16, version: u16) -> virtio_input_device_ids {
@@ -120,7 +120,7 @@ impl virtio_input_device_ids {
     }
 }
 
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_input_absinfo {
     min: Le32,
@@ -128,9 +128,6 @@ pub struct virtio_input_absinfo {
     fuzz: Le32,
     flat: Le32,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for virtio_input_absinfo {}
 
 impl virtio_input_absinfo {
     fn new(min: u32, max: u32, fuzz: u32, flat: u32) -> virtio_input_absinfo {
@@ -143,7 +140,7 @@ impl virtio_input_absinfo {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, AsBytes, FromBytes)]
 #[repr(C)]
 struct virtio_input_config {
     select: u8,
@@ -152,9 +149,6 @@ struct virtio_input_config {
     reserved: [u8; 5],
     payload: [u8; 128],
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for virtio_input_config {}
 
 impl virtio_input_config {
     fn new() -> virtio_input_config {
@@ -189,11 +183,11 @@ impl virtio_input_config {
     }
 
     fn set_absinfo(&mut self, absinfo: &virtio_input_absinfo) {
-        self.set_payload_slice(absinfo.as_slice());
+        self.set_payload_slice(absinfo.as_bytes());
     }
 
     fn set_device_ids(&mut self, device_ids: &virtio_input_device_ids) {
-        self.set_payload_slice(device_ids.as_slice());
+        self.set_payload_slice(device_ids.as_bytes());
     }
 }
 
@@ -335,14 +329,14 @@ impl VirtioInputConfig {
         copy_config(
             data,
             0,
-            self.build_config_memory().as_slice(),
+            self.build_config_memory().as_bytes(),
             offset as u64,
         );
     }
 
     fn write(&mut self, offset: usize, data: &[u8]) {
         let mut config = self.build_config_memory();
-        copy_config(config.as_mut_slice(), offset as u64, data, 0);
+        copy_config(config.as_bytes_mut(), offset as u64, data, 0);
         self.select = config.select;
         self.subsel = config.subsel;
     }
@@ -632,6 +626,20 @@ where
             return true;
         }
         false
+    }
+
+    fn stop(&mut self) -> std::result::Result<Option<VirtioDeviceSaved>, VirtioError> {
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let worker = worker_thread.stop();
+            self.source = Some(worker.event_source);
+            let queues = vec![
+                /* 0 */ worker.event_queue,
+                /* 1 */ worker.status_queue,
+            ];
+            Ok(Some(VirtioDeviceSaved { queues }))
+        } else {
+            Ok(None)
+        }
     }
 }
 

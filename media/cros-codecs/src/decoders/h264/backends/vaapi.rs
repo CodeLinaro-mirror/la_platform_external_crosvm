@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -39,9 +38,7 @@ use crate::decoders::Result as DecoderResult;
 use crate::decoders::StatelessBackendError;
 use crate::decoders::VideoDecoderBackend;
 use crate::utils::vaapi::DecodedHandle as VADecodedHandle;
-use crate::utils::vaapi::GenericBackendHandle;
 use crate::utils::vaapi::NegotiationStatus;
-use crate::utils::vaapi::PendingJob;
 use crate::utils::vaapi::StreamInfo;
 use crate::utils::vaapi::VaapiBackend;
 use crate::DecodedFormat;
@@ -646,38 +643,11 @@ impl StatelessDecoderBackend for Backend {
     fn submit_picture(
         &mut self,
         _: &PictureData,
-        block: bool,
+        block: BlockingMode,
     ) -> StatelessBackendResult<Self::Handle> {
         let current_picture = self.current_picture.take().unwrap();
-        let timestamp = current_picture.timestamp();
-        let surface_id = current_picture.surface().id();
-        let current_picture = current_picture.begin()?.render()?.end()?;
 
-        let metadata = self.backend.metadata_state.get_parsed()?;
-
-        let backend_handle = if block {
-            let current_picture = current_picture.sync()?;
-
-            Rc::new(RefCell::new(GenericBackendHandle::new_ready(
-                current_picture,
-                Rc::clone(&metadata.map_format),
-                metadata.display_resolution,
-            )))
-        } else {
-            let backend_handle =
-                Rc::new(RefCell::new(GenericBackendHandle::new_pending(surface_id)));
-
-            self.backend.pending_jobs.push_back(PendingJob {
-                va_picture: current_picture,
-                codec_picture: Rc::clone(&backend_handle),
-            });
-
-            backend_handle
-        };
-
-        self.backend
-            .build_va_decoded_handle(&backend_handle, timestamp)
-            .map_err(|e| StatelessBackendError::Other(anyhow!(e)))
+        self.backend.process_picture(current_picture, block)
     }
 
     fn new_picture(&mut self, _: &PictureData, timestamp: u64) -> StatelessBackendResult<()> {

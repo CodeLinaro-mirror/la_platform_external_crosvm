@@ -26,6 +26,7 @@ use data_model::vec_with_array_field;
 use libc::EINVAL;
 use libc::ENOENT;
 use libc::ENXIO;
+use libc::EOPNOTSUPP;
 use vm_memory::GuestAddress;
 
 use super::*;
@@ -44,9 +45,11 @@ use crate::Regs;
 use crate::Segment;
 use crate::Sregs;
 use crate::Vcpu;
+use crate::VcpuEvents;
 use crate::VcpuExit;
 use crate::VcpuRunHandle;
 use crate::VcpuX86_64;
+use crate::Xsave;
 
 // HAXM exit reasons
 // IO port request
@@ -231,18 +234,11 @@ impl Vcpu for HaxmVcpu {
                     operation: IoOperation::Read,
                 }) {
                     // Safe because we know this is an mmio read, so we need to put data into the
-                    // "value" field of the hax_fastmmio. The "value" field is a u64, so casting
-                    // as a &mut [u8] of len 8 is safe.
-                    // TODO(b/250085118): remove this clippy allow as it's allowing potentially
-                    // problematic behavior.
-                    #[allow(unaligned_references)]
-                    let buffer = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            &mut (*mmio).__bindgen_anon_1.value as *mut u64 as *mut u8,
-                            8,
-                        )
-                    };
-                    buffer[..size].copy_from_slice(&data[..size]);
+                    // "value" field of the hax_fastmmio.
+                    let data = u64::from_ne_bytes(data);
+                    unsafe {
+                        (*mmio).__bindgen_anon_1.value = data;
+                    }
                 }
                 Ok(())
             }
@@ -469,6 +465,22 @@ impl VcpuX86_64 for HaxmVcpu {
         Ok(())
     }
 
+    fn get_xsave(&self) -> Result<Xsave> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    fn set_xsave(&self, _xsave: &Xsave) -> Result<()> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    fn get_vcpu_events(&self) -> Result<VcpuEvents> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
+    fn set_vcpu_events(&self, _vcpu_events: &VcpuEvents) -> Result<()> {
+        Err(Error::new(EOPNOTSUPP))
+    }
+
     /// Gets the VCPU debug registers.
     fn get_debugregs(&self) -> Result<DebugRegs> {
         Ok(self.get_vcpu_state()?.get_debugregs())
@@ -524,6 +536,10 @@ impl VcpuX86_64 for HaxmVcpu {
         }
 
         Ok(())
+    }
+
+    fn get_all_msrs(&self) -> Result<Vec<Register>> {
+        Err(Error::new(EOPNOTSUPP))
     }
 
     /// Sets the model-specific registers.

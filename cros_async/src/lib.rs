@@ -50,12 +50,12 @@
 //! long as kernels < 5.4 are supported.
 //! The other method submits operations to io_uring and is signaled when they complete. This is more
 //! efficient, but only supported on kernel 5.4+.
-//! If `IoSourceExt::new` is used to interface with async IO, then the correct backend will be chosen
+//! If `IoSource::new` is used to interface with async IO, then the correct backend will be chosen
 //! automatically.
 //!
 //! # Examples
 //!
-//! See the docs for `IoSourceExt` if support for kernels <5.4 is required. Focus on `UringSource` if
+//! See the docs for `IoSource` if support for kernels <5.4 is required. Focus on `UringSource` if
 //! all systems have support for io_uring.
 
 mod async_types;
@@ -64,6 +64,7 @@ mod blocking;
 mod complete;
 mod event;
 mod io_ext;
+mod io_source;
 pub mod mem;
 mod queue;
 mod select;
@@ -71,10 +72,13 @@ pub mod sync;
 pub mod sys;
 pub use sys::Executor;
 pub use sys::ExecutorKind;
+pub use sys::TaskHandle;
 mod timer;
 mod waker;
 
 use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 
 pub use async_types::*;
 pub use base::Event;
@@ -88,14 +92,13 @@ pub use blocking::TimeoutAction;
 pub use event::EventAsync;
 #[cfg(windows)]
 pub use futures::executor::block_on;
-pub use io_ext::AllocateMode;
+use futures::stream::FuturesUnordered;
 pub use io_ext::AsyncWrapper;
 pub use io_ext::Error as AsyncError;
 pub use io_ext::IntoAsync;
-pub use io_ext::IoSourceExt;
-pub use io_ext::ReadAsync;
 pub use io_ext::Result as AsyncResult;
-pub use io_ext::WriteAsync;
+pub use io_source::AllocateMode;
+pub use io_source::IoSource;
 pub use mem::BackingMemory;
 pub use mem::MemRegion;
 pub use mem::VecIoWrapper;
@@ -131,6 +134,31 @@ pub enum Error {
     URingExecutor(sys::unix::uring_executor::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Heterogeneous collection of `async_task:Task` that are running in a "detached" state.
+///
+/// We keep them around to ensure they are dropped before the executor they are running on.
+pub(crate) struct DetachedTasks(FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>);
+
+impl DetachedTasks {
+    pub(crate) fn new() -> Self {
+        DetachedTasks(FuturesUnordered::new())
+    }
+
+    pub(crate) fn push<R: Send + 'static>(&self, task: async_task::Task<R>) {
+        // Convert to fallible, otherwise poll could panic if the `Runnable` is dropped early.
+        let task = task.fallible();
+        self.0.push(Box::pin(async {
+            let _ = task.await;
+        }));
+    }
+
+    /// Polls all the tasks, dropping any that complete.
+    pub(crate) fn poll(&mut self, cx: &mut std::task::Context) {
+        use futures::Stream;
+        while let Poll::Ready(Some(_)) = Pin::new(&mut self.0).poll_next(cx) {}
+    }
+}
 
 // Select helpers to run until any future completes.
 

@@ -7,6 +7,12 @@
 pub mod aarch64;
 pub mod caps;
 
+#[cfg(all(
+    unix,
+    any(target_arch = "arm", target_arch = "aarch64"),
+    feature = "gunyah"
+))]
+pub mod gunyah;
 #[cfg(all(windows, feature = "haxm"))]
 pub mod haxm;
 #[cfg(unix)]
@@ -15,6 +21,10 @@ pub mod kvm;
 pub mod whpx;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod x86_64;
+
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(all(unix, feature = "geniezone"))]
+pub mod geniezone;
 
 use std::os::raw::c_int;
 
@@ -385,7 +395,7 @@ pub enum IoEventAddress {
 }
 
 /// Used in `Vm::register_ioevent` to indicate a size and optionally value to match.
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Datamatch {
     AnyLength,
     U8(Option<u8>),

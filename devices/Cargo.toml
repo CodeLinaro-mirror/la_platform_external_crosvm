@@ -4,6 +4,14 @@ version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
+# The passthroughfs test must execute each test case in single thread, which requires a custom test
+# harness.
+[[test]]
+name = "passthroughfs"
+path = "tests/passthroughfs/main.rs"
+harness = false
+
+
 [features]
 arc_quota = ["dbus", "protobuf", "system_api"]
 audio = []
@@ -12,7 +20,9 @@ balloon = []
 chromeos = ["dbus", "protobuf", "system_api"]
 direct = []
 gpu = ["gpu_display"]
+gunyah = []
 libvda-stub = ["libvda/libvda-stub"]
+geniezone = []
 tpm = ["tpm2"]
 usb = []
 vaapi = ["libva", "cros-codecs/vaapi", "downcast-rs", "crc32fast"]
@@ -26,6 +36,7 @@ vtpm = ["system_api", "protobuf", "dbus"]
 gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
 slirp = ["net_util/slirp"]
 stats = []
+seccomp_trace = []
 whpx = []
 
 [dependencies]
@@ -35,6 +46,7 @@ acpi_tables = {path = "../acpi_tables" }
 anyhow = "*"
 async-trait = "0.1.36"
 audio_streams = "*"
+audio_util = { path = "../audio_util" }
 balloon_control = { path = "../common/balloon_control" }
 base = { path = "../base" }
 bit_field = { path = "../bit_field" }
@@ -78,7 +90,7 @@ system_api = { path = "../system_api", optional = true }
 thiserror = "1.0.20"
 tpm2 = { path = "../tpm2", optional = true }
 cros_tracing = { path = "../cros_tracing" }
-uuid = { version = "0.8.2", features = [ "serde" ] }
+uuid = { version = "1", features = [ "serde" ] }
 vhost = { path = "../vhost" }
 vmm_vhost = { path = "../third_party/vmm_vhost", features = ["vmm", "device", "vfio-device"] }
 virtio_sys = { path = "../virtio_sys" }
@@ -112,5 +124,6 @@ default-features = false
 
 [dev-dependencies]
 bytes = "1.1.0"
-tempfile = "3"
 crc32fast = "1"
+libtest-mimic = "0.6"
+tempfile = "3"

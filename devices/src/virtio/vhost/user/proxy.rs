@@ -38,6 +38,7 @@ use base::SafeDescriptor;
 use base::ScmSocket;
 use base::Tube;
 use base::WaitContext;
+use base::WorkerThread;
 use data_model::DataInit;
 use data_model::Le32;
 use hypervisor::Datamatch;
@@ -72,6 +73,8 @@ use vmm_vhost::Error as VhostError;
 use vmm_vhost::Protocol;
 use vmm_vhost::Result as VhostResult;
 use vmm_vhost::SlaveReqHelper;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::pci::PciBarConfiguration;
 use crate::pci::PciBarIndex;
@@ -97,7 +100,6 @@ use crate::virtio::VIRTIO_F_ACCESS_PLATFORM;
 use crate::virtio::VIRTIO_MSI_NO_VECTOR;
 use crate::PciAddress;
 use crate::Suspendable;
-use base::WorkerThread;
 
 // Note: There are two sets of queues that will be mentioned here. 1st set is
 // for this Virtio PCI device itself. 2nd set is the actual device backends
@@ -155,7 +157,7 @@ const SIBLING_ACTION_MESSAGE_TYPES: &[MasterReq] = &[
 pub type Result<T> = anyhow::Result<T>;
 
 // Device configuration as per section 5.7.4.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, AsBytes, FromBytes)]
 #[repr(C)]
 struct VirtioVhostUserConfig {
     status: Le32,
@@ -892,7 +894,7 @@ impl Worker {
         // Safe because we own the file.
         let evt = unsafe { Event::from_raw_descriptor(file.into_raw_descriptor()) };
 
-        self.send_memory_request(&VmMemoryRequest::IoEvent {
+        self.send_memory_request(&VmMemoryRequest::IoEventWithAlloc {
             evt: evt.try_clone().context("failed to dup event")?,
             allocation: self.io_pci_bar,
             offset: DOORBELL_OFFSET + DOORBELL_OFFSET_MULTIPLIER as u64 * index as u64,
@@ -1235,7 +1237,7 @@ impl Worker {
             .filter_map(|(idx, v)| v.call_evt.take().map(|e| (idx, e)))
             .collect();
         for (idx, evt) in vring_call_evts {
-            if let Err(e) = self.send_memory_request(&VmMemoryRequest::IoEvent {
+            if let Err(e) = self.send_memory_request(&VmMemoryRequest::IoEventWithAlloc {
                 evt,
                 allocation: self.io_pci_bar,
                 offset: DOORBELL_OFFSET + DOORBELL_OFFSET_MULTIPLIER as u64 * idx as u64,
@@ -1252,18 +1254,15 @@ impl Worker {
 
 // Doorbell capability of the proxy device.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, FromBytes, AsBytes)]
 pub struct VirtioPciDoorbellCap {
     cap: VirtioPciCap,
     doorbell_off_multiplier: Le32,
 }
-// It is safe to implement DataInit; `VirtioPciCap` implements DataInit and for
-// Le32 any value is valid.
-unsafe impl DataInit for VirtioPciDoorbellCap {}
 
 impl PciCapability for VirtioPciDoorbellCap {
     fn bytes(&self) -> &[u8] {
-        self.as_slice()
+        self.as_bytes()
     }
 
     // TODO: What should this be.
@@ -1314,7 +1313,7 @@ enum State {
         iommu: Arc<Mutex<IpcMemoryMapper>>,
     },
     /// The worker thread is running.
-    Running(WorkerThread<Result<()>>),
+    Running,
     /// Something wrong happened and the device is unusable.
     Invalid,
 }
@@ -1371,6 +1370,9 @@ pub struct VirtioVhostUser {
     // as well as the main device thread.
     state: Arc<Mutex<State>>,
 
+    // The worker thread for this proxy device, if it has been started.
+    worker_thread: Option<WorkerThread<Result<()>>>,
+
     iommu: Option<Arc<Mutex<IpcMemoryMapper>>>,
 }
 
@@ -1404,6 +1406,7 @@ impl VirtioVhostUser {
                 listener,
             })),
             pci_address,
+            worker_thread: None,
             iommu: None,
         })
     }
@@ -1491,6 +1494,11 @@ impl VirtioVhostUser {
     // Checks the device's state and starts a worker thread if it's ready.
     // The thread will process all messages to this device and send out messages in response.
     fn try_starting_worker(&mut self) {
+        // If a thread is already running, do nothing here.
+        if self.worker_thread.is_some() {
+            return;
+        }
+
         let mut state = self.state.lock();
 
         // Check the device state to decide whether start a new worker thread.
@@ -1499,7 +1507,7 @@ impl VirtioVhostUser {
         match *state {
             State::Activated { .. } => (),
             _ => {
-                // If the device is not ready or a thread is already running, do nothing here.
+                // If the device is not ready, do nothing here.
                 return;
             }
         };
@@ -1568,7 +1576,7 @@ impl VirtioVhostUser {
 
         // This thread will wait for the sibling to connect and the continuously parse messages from
         // the sibling as well as the device (over Virtio).
-        *state = State::Running(WorkerThread::start("v_vhost_user", move |kill_evt| {
+        self.worker_thread = Some(WorkerThread::start("v_vhost_user", move |kill_evt| {
             // Block until the connection with the sibling is established. We do this in a
             // thread to avoid blocking the main thread.
             let (socket, _) = listener
@@ -1666,6 +1674,7 @@ impl VirtioVhostUser {
                 }
             }
         }));
+        *state = State::Running;
     }
 }
 
@@ -1715,7 +1724,7 @@ impl VirtioDevice for VirtioVhostUser {
         copy_config(
             data,
             0, /* dst_offset */
-            self.config.as_slice(),
+            self.config.as_bytes(),
             offset,
         );
     }
@@ -1912,7 +1921,7 @@ impl VirtioDevice for VirtioVhostUser {
                     main_process_tube,
                 };
             }
-            State::Running(worker_thread) => {
+            State::Running => {
                 // TODO(b/216407443): The current implementation doesn't support the case where
                 // vvu-proxy is reset while running.
                 // So, the state is changed to `Invalid` in this case below.
@@ -1922,8 +1931,11 @@ impl VirtioDevice for VirtioVhostUser {
 
                 // Drop the lock, as the worker thread might change the state.
                 drop(state);
-                if let Err(e) = worker_thread.stop() {
-                    error!("failed to get back resources: {:?}", e);
+
+                if let Some(worker_thread) = self.worker_thread.take() {
+                    if let Err(e) = worker_thread.stop() {
+                        error!("failed to get back resources: {:?}", e);
+                    }
                 }
 
                 let mut state = self.state.lock();

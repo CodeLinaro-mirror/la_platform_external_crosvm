@@ -8,7 +8,6 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use base::AsRawDescriptor;
 
 use super::uring_executor::Error;
@@ -21,12 +20,9 @@ use crate::mem::VecIoWrapper;
 use crate::AllocateMode;
 use crate::AsyncError;
 use crate::AsyncResult;
-use crate::ReadAsync;
-use crate::WriteAsync;
 
 /// `UringSource` wraps FD backed IO sources for use with io_uring. It is a thin wrapper around
 /// registering an IO source with the uring that provides an `IoSource` implementation.
-/// Most useful functions are provided by 'IoSourceExt'.
 pub struct UringSource<F: AsRawDescriptor> {
     registered_source: RegisteredSource,
     source: F,
@@ -42,17 +38,9 @@ impl<F: AsRawDescriptor> UringSource<F> {
         })
     }
 
-    /// Consume `self` and return the object used to create it.
-    pub fn into_source(self) -> F {
-        self.source
-    }
-}
-
-#[async_trait(?Send)]
-impl<F: AsRawDescriptor> ReadAsync for UringSource<F> {
     /// Reads from the iosource at `file_offset` and fill the given `vec`.
-    async fn read_to_vec<'a>(
-        &'a self,
+    pub async fn read_to_vec(
+        &self,
         file_offset: Option<u64>,
         vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
@@ -76,14 +64,14 @@ impl<F: AsRawDescriptor> ReadAsync for UringSource<F> {
     }
 
     /// Wait for the FD of `self` to be readable.
-    async fn wait_readable(&self) -> AsyncResult<()> {
+    pub async fn wait_readable(&self) -> AsyncResult<()> {
         let op = self.registered_source.poll_fd_readable()?;
         op.await?;
         Ok(())
     }
 
     /// Reads a single u64 (e.g. from an eventfd).
-    async fn read_u64(&self) -> AsyncResult<u64> {
+    pub async fn read_u64(&self) -> AsyncResult<u64> {
         // This doesn't just forward to read_to_vec to avoid an unnecessary extra allocation from
         // async-trait.
         let buf = Arc::new(VecIoWrapper::from(0u64.to_ne_bytes().to_vec()));
@@ -114,11 +102,11 @@ impl<F: AsRawDescriptor> ReadAsync for UringSource<F> {
     }
 
     /// Reads to the given `mem` at the given offsets from the file starting at `file_offset`.
-    async fn read_to_mem<'a>(
-        &'a self,
+    pub async fn read_to_mem(
+        &self,
         file_offset: Option<u64>,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [MemRegion],
+        mem_offsets: &[MemRegion],
     ) -> AsyncResult<usize> {
         let op = self
             .registered_source
@@ -126,13 +114,10 @@ impl<F: AsRawDescriptor> ReadAsync for UringSource<F> {
         let len = op.await?;
         Ok(len as usize)
     }
-}
 
-#[async_trait(?Send)]
-impl<F: AsRawDescriptor> WriteAsync for UringSource<F> {
     /// Writes from the given `vec` to the file starting at `file_offset`.
-    async fn write_from_vec<'a>(
-        &'a self,
+    pub async fn write_from_vec(
+        &self,
         file_offset: Option<u64>,
         vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
@@ -156,11 +141,11 @@ impl<F: AsRawDescriptor> WriteAsync for UringSource<F> {
     }
 
     /// Writes from the given `mem` from the given offsets to the file starting at `file_offset`.
-    async fn write_from_mem<'a>(
-        &'a self,
+    pub async fn write_from_mem(
+        &self,
         file_offset: Option<u64>,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [MemRegion],
+        mem_offsets: &[MemRegion],
     ) -> AsyncResult<usize> {
         let op = self
             .registered_source
@@ -170,7 +155,12 @@ impl<F: AsRawDescriptor> WriteAsync for UringSource<F> {
     }
 
     /// See `fallocate(2)`. Note this op is synchronous when using the Polled backend.
-    async fn fallocate(&self, file_offset: u64, len: u64, mode: AllocateMode) -> AsyncResult<()> {
+    pub async fn fallocate(
+        &self,
+        file_offset: u64,
+        len: u64,
+        mode: AllocateMode,
+    ) -> AsyncResult<()> {
         let op = self
             .registered_source
             .start_fallocate(file_offset, len, mode.into())?;
@@ -179,31 +169,28 @@ impl<F: AsRawDescriptor> WriteAsync for UringSource<F> {
     }
 
     /// Sync all completed write operations to the backing storage.
-    async fn fsync(&self) -> AsyncResult<()> {
+    pub async fn fsync(&self) -> AsyncResult<()> {
         let op = self.registered_source.start_fsync()?;
         let _ = op.await?;
         Ok(())
     }
-}
 
-#[async_trait(?Send)]
-impl<F: AsRawDescriptor> crate::IoSourceExt<F> for UringSource<F> {
     /// Yields the underlying IO source.
-    fn into_source(self: Box<Self>) -> F {
+    pub fn into_source(self) -> F {
         self.source
     }
 
     /// Provides a mutable ref to the underlying IO source.
-    fn as_source(&self) -> &F {
+    pub fn as_source(&self) -> &F {
         &self.source
     }
 
     /// Provides a ref to the underlying IO source.
-    fn as_source_mut(&mut self) -> &mut F {
+    pub fn as_source_mut(&mut self) -> &mut F {
         &mut self.source
     }
 
-    async fn wait_for_handle(&self) -> AsyncResult<u64> {
+    pub async fn wait_for_handle(&self) -> AsyncResult<u64> {
         self.read_u64().await
     }
 }
@@ -222,80 +209,27 @@ impl<F: AsRawDescriptor> DerefMut for UringSource<F> {
     }
 }
 
+// NOTE: Prefer adding tests to io_source.rs if not backend specific.
 #[cfg(test)]
 mod tests {
     use std::fs::File;
     use std::fs::OpenOptions;
+    use std::future::Future;
     use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
 
+    use sync::Mutex;
     use tempfile::tempfile;
 
     use super::super::uring_executor::is_uring_stable;
     use super::super::UringSource;
     use super::*;
-    use crate::io_ext::ReadAsync;
-    use crate::io_ext::WriteAsync;
-
-    #[test]
-    fn read_to_mem() {
-        if !is_uring_stable() {
-            return;
-        }
-
-        use std::io::Write;
-
-        use tempfile::tempfile;
-
-        use crate::mem::VecIoWrapper;
-
-        let ex = URingExecutor::new().unwrap();
-        // Use guest memory as a test file, it implements AsRawDescriptor.
-        let mut source = tempfile().unwrap();
-        let data = vec![0x55; 8192];
-        source.write_all(&data).unwrap();
-
-        let io_obj = UringSource::new(source, &ex).unwrap();
-
-        // Start with memory filled with 0x44s.
-        let buf: Arc<VecIoWrapper> = Arc::new(VecIoWrapper::from(vec![0x44; 8192]));
-
-        let fut = io_obj.read_to_mem(
-            Some(0),
-            Arc::<VecIoWrapper>::clone(&buf),
-            &[MemRegion {
-                offset: 0,
-                len: 8192,
-            }],
-        );
-        assert_eq!(8192, ex.run_until(fut).unwrap().unwrap());
-        let vec: Vec<u8> = match Arc::try_unwrap(buf) {
-            Ok(v) => v.into(),
-            Err(_) => panic!("Too many vec refs"),
-        };
-        assert!(vec.iter().all(|&b| b == 0x55));
-    }
-
-    #[test]
-    fn readvec() {
-        if !is_uring_stable() {
-            return;
-        }
-
-        async fn go(ex: &URingExecutor) {
-            let f = File::open("/dev/zero").unwrap();
-            let source = UringSource::new(f, ex).unwrap();
-            let v = vec![0x55u8; 32];
-            let v_ptr = v.as_ptr();
-            let ret = source.read_to_vec(None, v).await.unwrap();
-            assert_eq!(ret.0, 32);
-            let ret_v = ret.1;
-            assert_eq!(v_ptr, ret_v.as_ptr());
-            assert!(ret_v.iter().all(|&b| b == 0));
-        }
-
-        let ex = URingExecutor::new().unwrap();
-        ex.run_until(go(&ex)).unwrap();
-    }
+    use crate::Executor;
+    use crate::ExecutorKind;
+    use crate::IoSource;
 
     #[test]
     fn readmulti() {
@@ -330,19 +264,6 @@ mod tests {
         let mut val = 0u64.to_ne_bytes();
         val.copy_from_slice(&u64_mem);
         u64::from_ne_bytes(val)
-    }
-
-    #[test]
-    fn u64_from_file() {
-        if !is_uring_stable() {
-            return;
-        }
-
-        let f = File::open("/dev/zero").unwrap();
-        let ex = URingExecutor::new().unwrap();
-        let source = UringSource::new(f, &ex).unwrap();
-
-        assert_eq!(0u64, ex.run_until(read_u64(&source)).unwrap());
     }
 
     #[test]
@@ -418,60 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn readmem() {
-        if !is_uring_stable() {
-            return;
-        }
-
-        async fn go(ex: &URingExecutor) {
-            let f = File::open("/dev/zero").unwrap();
-            let source = UringSource::new(f, ex).unwrap();
-            let v = vec![0x55u8; 64];
-            let vw = Arc::new(VecIoWrapper::from(v));
-            let ret = source
-                .read_to_mem(
-                    None,
-                    Arc::<VecIoWrapper>::clone(&vw),
-                    &[MemRegion { offset: 0, len: 32 }],
-                )
-                .await
-                .unwrap();
-            assert_eq!(32, ret);
-            let vec: Vec<u8> = match Arc::try_unwrap(vw) {
-                Ok(v) => v.into(),
-                Err(_) => panic!("Too many vec refs"),
-            };
-            assert!(vec.iter().take(32).all(|&b| b == 0));
-            assert!(vec.iter().skip(32).all(|&b| b == 0x55));
-
-            // test second half of memory too.
-            let v = vec![0x55u8; 64];
-            let vw = Arc::new(VecIoWrapper::from(v));
-            let ret = source
-                .read_to_mem(
-                    None,
-                    Arc::<VecIoWrapper>::clone(&vw),
-                    &[MemRegion {
-                        offset: 32,
-                        len: 32,
-                    }],
-                )
-                .await
-                .unwrap();
-            assert_eq!(32, ret);
-            let v: Vec<u8> = match Arc::try_unwrap(vw) {
-                Ok(v) => v.into(),
-                Err(_) => panic!("Too many vec refs"),
-            };
-            assert!(v.iter().take(32).all(|&b| b == 0x55));
-            assert!(v.iter().skip(32).all(|&b| b == 0));
-        }
-
-        let ex = URingExecutor::new().unwrap();
-        ex.run_until(go(&ex)).unwrap();
-    }
-
-    #[test]
     fn range_error() {
         if !is_uring_stable() {
             return;
@@ -516,7 +383,7 @@ mod tests {
                 .open(&file_path)
                 .unwrap();
             let source = UringSource::new(f, ex).unwrap();
-            if let Err(e) = source.fallocate(0, 4096, AllocateMode::Default).await {
+            if let Err(e) = source.fallocate(0, 4096, AllocateMode::Allocate).await {
                 match e {
                     crate::io_ext::Error::Uring(super::super::uring_executor::Error::Io(
                         io_err,
@@ -564,48 +431,6 @@ mod tests {
             let f = File::open("/dev/zero").unwrap();
             let source = UringSource::new(f, ex).unwrap();
             source.wait_readable().await.unwrap();
-        }
-
-        let ex = URingExecutor::new().unwrap();
-        ex.run_until(go(&ex)).unwrap();
-    }
-
-    #[test]
-    fn writemem() {
-        if !is_uring_stable() {
-            return;
-        }
-
-        async fn go(ex: &URingExecutor) {
-            let f = tempfile().unwrap();
-            let source = UringSource::new(f, ex).unwrap();
-            let v = vec![0x55u8; 64];
-            let vw = Arc::new(crate::mem::VecIoWrapper::from(v));
-            let ret = source
-                .write_from_mem(None, vw, &[MemRegion { offset: 0, len: 32 }])
-                .await
-                .unwrap();
-            assert_eq!(32, ret);
-        }
-
-        let ex = URingExecutor::new().unwrap();
-        ex.run_until(go(&ex)).unwrap();
-    }
-
-    #[test]
-    fn writevec() {
-        if !is_uring_stable() {
-            return;
-        }
-
-        async fn go(ex: &URingExecutor) {
-            let f = tempfile().unwrap();
-            let source = UringSource::new(f, ex).unwrap();
-            let v = vec![0x55u8; 32];
-            let v_ptr = v.as_ptr();
-            let (ret, ret_v) = source.write_from_vec(None, v).await.unwrap();
-            assert_eq!(32, ret);
-            assert_eq!(v_ptr, ret_v.as_ptr());
         }
 
         let ex = URingExecutor::new().unwrap();
@@ -674,5 +499,109 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    struct State {
+        should_quit: bool,
+        waker: Option<Waker>,
+    }
+
+    impl State {
+        fn wake(&mut self) {
+            self.should_quit = true;
+            let waker = self.waker.take();
+
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+
+    struct Quit {
+        state: Arc<Mutex<State>>,
+    }
+
+    impl Future for Quit {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+            let mut state = self.state.lock();
+            if state.should_quit {
+                return Poll::Ready(());
+            }
+
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn await_uring_from_poll() {
+        if !is_uring_stable() {
+            return;
+        }
+        // Start a uring operation and then await the result from an FdExecutor.
+        async fn go(source: IoSource<File>) {
+            let v = vec![0xa4u8; 16];
+            let (len, vec) = source.read_to_vec(None, v).await.unwrap();
+            assert_eq!(len, 16);
+            assert!(vec.iter().all(|&b| b == 0));
+        }
+
+        let state = Arc::new(Mutex::new(State {
+            should_quit: false,
+            waker: None,
+        }));
+
+        let uring_ex = Executor::with_executor_kind(ExecutorKind::Uring).unwrap();
+        let f = File::open("/dev/zero").unwrap();
+        let source = uring_ex.async_from(f).unwrap();
+
+        let quit = Quit {
+            state: state.clone(),
+        };
+        let handle = std::thread::spawn(move || uring_ex.run_until(quit));
+
+        let poll_ex = Executor::with_executor_kind(ExecutorKind::Fd).unwrap();
+        poll_ex.run_until(go(source)).unwrap();
+
+        state.lock().wake();
+        handle.join().unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn await_poll_from_uring() {
+        if !is_uring_stable() {
+            return;
+        }
+        // Start a poll operation and then await the result from a URingExecutor.
+        async fn go(source: IoSource<File>) {
+            let v = vec![0x2cu8; 16];
+            let (len, vec) = source.read_to_vec(None, v).await.unwrap();
+            assert_eq!(len, 16);
+            assert!(vec.iter().all(|&b| b == 0));
+        }
+
+        let state = Arc::new(Mutex::new(State {
+            should_quit: false,
+            waker: None,
+        }));
+
+        let poll_ex = Executor::with_executor_kind(ExecutorKind::Fd).unwrap();
+        let f = File::open("/dev/zero").unwrap();
+        let source = poll_ex.async_from(f).unwrap();
+
+        let quit = Quit {
+            state: state.clone(),
+        };
+        let handle = std::thread::spawn(move || poll_ex.run_until(quit));
+
+        let uring_ex = Executor::with_executor_kind(ExecutorKind::Uring).unwrap();
+        uring_ex.run_until(go(source)).unwrap();
+
+        state.lock().wake();
+        handle.join().unwrap().unwrap();
     }
 }
