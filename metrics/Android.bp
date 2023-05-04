@@ -17,6 +17,7 @@ genrule {
     out: [
         "event_details.rs",
         "generated.rs",
+        "mod.rs",
     ],
 }
 
@@ -36,7 +37,7 @@ rust_library {
         "libanyhow",
         "libbase_rust",
         "libcfg_if",
-        "libprotobuf_deprecated",
+        "libprotobuf",
         "libserde",
     ],
 }

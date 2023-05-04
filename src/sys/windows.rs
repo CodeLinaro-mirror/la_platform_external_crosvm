@@ -38,9 +38,13 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use arch::CpuConfigArch;
+use arch::IrqChipArch;
 use arch::LinuxArch;
 use arch::RunnableLinuxVm;
+use arch::VcpuArch;
 use arch::VirtioDeviceStub;
+use arch::VmArch;
 use arch::VmComponents;
 use arch::VmImage;
 use base::enable_high_res_timers;
@@ -105,10 +109,6 @@ use devices::BusDeviceObj;
 use devices::GvmIrqChip;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use devices::IrqChip;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use devices::IrqChipAArch64 as IrqChipArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use devices::IrqChipX86_64 as IrqChipArch;
 use devices::UserspaceIrqChip;
 use devices::VirtioPciDevice;
 #[cfg(feature = "whpx")]
@@ -141,24 +141,14 @@ use hypervisor::whpx::WhpxFeature;
 use hypervisor::whpx::WhpxVcpu;
 #[cfg(feature = "whpx")]
 use hypervisor::whpx::WhpxVm;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::CpuConfigX86_64;
 use hypervisor::Hypervisor;
 #[cfg(feature = "whpx")]
 use hypervisor::HypervisorCap;
 #[cfg(feature = "whpx")]
 use hypervisor::HypervisorX86_64;
 use hypervisor::ProtectionType;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VcpuAArch64 as VcpuArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VcpuX86_64 as VcpuArch;
 #[cfg(any(feature = "gvm", feature = "whpx"))]
 use hypervisor::Vm;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VmAArch64 as VmArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VmX86_64 as VmArch;
 use irq_wait::IrqWaitWorker;
 use jail::FakeMinijailStub as Minijail;
 #[cfg(not(feature = "crash-report"))]
@@ -184,6 +174,7 @@ use tube_transporter::TubeToken;
 use tube_transporter::TubeTransporterReader;
 use vm_control::BalloonControlCommand;
 use vm_control::DeviceControlCommand;
+use vm_control::IrqHandlerRequest;
 use vm_control::VmMemoryRegionState;
 use vm_control::VmMemoryRequest;
 use vm_control::VmRunMode;
@@ -936,14 +927,16 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let sys_allocator_mutex = Arc::new(Mutex::new(sys_allocator));
 
     let exit_evt = Event::new().exit_context(Exit::CreateEvent, "failed to create event")?;
+    let (irq_handler_control, irq_handler_control_for_worker) = Tube::pair().exit_context(
+        Exit::CreateTube,
+        "failed to create IRQ handler control Tube",
+    )?;
 
     // Create a separate thread to wait on IRQ events. This is a natural division
     // because IRQ interrupts have no dependencies on other events, and this lets
     // us avoid approaching the Windows WaitForMultipleObjects 64-object limit.
     let irq_join_handle = IrqWaitWorker::start(
-        exit_evt
-            .try_clone()
-            .exit_context(Exit::CloneEvent, "failed to clone event")?,
+        irq_handler_control_for_worker,
         guest_os
             .irq_chip
             .try_box_clone()
@@ -1141,6 +1134,12 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let mut res = Ok(exit_state);
     guest_os.irq_chip.kick_halted_vcpus();
     let _ = exit_evt.signal();
+
+    // Shut down the IRQ handler thread.
+    if let Err(e) = irq_handler_control.send(&IrqHandlerRequest::Exit) {
+        error!("failed to request exit from IRQ handler thread: {}", e);
+    }
+
     // Ensure any child threads have ended by sending the Exit vm event (possibly again) to ensure
     // their run loops are aborted.
     let _ = vm_evt_wrtube.send::<VmEventType>(&VmEventType::Exit);
@@ -1280,7 +1279,7 @@ fn create_whpx_vm(
     force_calibrated_tsc_leaf: bool,
     vm_evt_wrtube: SendTube,
 ) -> Result<WhpxVm> {
-    let cpu_config = CpuConfigX86_64::new(
+    let cpu_config = hypervisor::CpuConfigX86_64::new(
         force_calibrated_tsc_leaf,
         false, /* host_cpu_topology */
         false, /* enable_hwp */

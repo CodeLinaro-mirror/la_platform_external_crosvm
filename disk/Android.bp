@@ -37,7 +37,7 @@ rust_test {
         "libdata_model",
         "libfutures",
         "liblibc",
-        "libprotobuf_deprecated", // Added manually
+        "libprotobuf", // Added manually
         "libprotos", // Added manually
         "libserde",
         "libsync_rust",
@@ -75,7 +75,7 @@ rust_library {
         "libdata_model",
         "libfutures",
         "liblibc",
-        "libprotobuf_deprecated", // Added manually
+        "libprotobuf", // Added manually
         "libprotos", // Added manually
         "libserde",
         "libsync_rust",

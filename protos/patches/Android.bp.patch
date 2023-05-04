@@ -7,9 +7,9 @@ index eaf06cf1..32a8f81b 100644
      srcs: ["src/lib.rs"],
      edition: "2021",
 +    features: ["composite-disk"],
--    rustlibs: ["libprotobuf_deprecated"],
+-    rustlibs: ["libprotobuf"],
 +    rustlibs: [
 +        "libcdisk_spec_proto",
-+        "libprotobuf_deprecated",
++        "libprotobuf",
 +    ],
  }
