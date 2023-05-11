@@ -7,7 +7,6 @@
 mod async_utils;
 mod balloon;
 mod descriptor_utils;
-mod input;
 mod interrupt;
 mod iommu;
 mod p9;
@@ -28,6 +27,7 @@ pub mod console;
 pub mod fs;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod input;
 pub mod net;
 pub mod resource_bridge;
 #[cfg(feature = "audio")]
