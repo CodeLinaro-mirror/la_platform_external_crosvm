@@ -56,8 +56,10 @@ use hypervisor::CpuHybridType;
 use hypervisor::ProtectionType;
 use merge::vec::append;
 use resources::AddressRange;
+#[cfg(feature = "config-file")]
 use serde::de::Error as SerdeError;
 use serde::Deserialize;
+#[cfg(feature = "config-file")]
 use serde::Deserializer;
 use serde::Serialize;
 #[cfg(feature = "gpu")]
@@ -77,6 +79,7 @@ use crate::crosvm::config::parse_cpu_affinity;
 use crate::crosvm::config::parse_cpu_capacity;
 #[cfg(feature = "direct")]
 use crate::crosvm::config::parse_direct_io_options;
+use crate::crosvm::config::parse_dynamic_power_coefficient;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::crosvm::config::parse_memory_region;
 use crate::crosvm::config::parse_mmio_address_range;
@@ -1159,6 +1162,17 @@ pub struct RunCommand {
     /// dump generated device tree as a DTB file
     pub dump_device_tree_blob: Option<PathBuf>,
 
+    #[argh(
+        option,
+        arg_name = "CPU=DYN_PWR[,CPU=DYN_PWR[,...]]",
+        from_str_fn(parse_dynamic_power_coefficient)
+    )]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// pass power modeling param from to guest OS; scalar coefficient used in conjuction with
+    /// voltage and frequency for calculating power; in units of uW/MHz/^2
+    pub dynamic_power_coefficient: Option<BTreeMap<usize, u32>>,
+
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1662,12 +1676,6 @@ pub struct RunCommand {
     #[merge(strategy = append)]
     /// path to a disk image
     pub pmem_device: Vec<DiskOption>,
-
-    #[argh(switch)]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_option)]
-    /// grant this Guest VM certain privileges to manage Host resources, such as power management
-    pub privileged_vm: Option<bool>,
 
     #[cfg(feature = "process-invariants")]
     #[argh(option, arg_name = "PATH")]
@@ -2432,6 +2440,10 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.vcpu_affinity = cmd.cpu_affinity;
 
+        if let Some(dynamic_power_coefficient) = cmd.dynamic_power_coefficient {
+            cfg.dynamic_power_coefficient = dynamic_power_coefficient;
+        }
+
         if let Some(capacity) = cmd.cpu_capacity {
             cfg.cpu_capacity = capacity;
         }
@@ -3069,8 +3081,6 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.force_calibrated_tsc_leaf = cmd.force_calibrated_tsc_leaf.unwrap_or_default();
         }
 
-        cfg.privileged_vm = cmd.privileged_vm.unwrap_or_default();
-
         cfg.stub_pci_devices = cmd.stub_pci_device;
 
         cfg.vvu_proxy = cmd.vvu_proxy;
@@ -3118,9 +3128,11 @@ impl TryFrom<RunCommand> for super::config::Config {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "config-file")]
     use super::*;
 
     #[test]
+    #[cfg(feature = "config-file")]
     fn merge_runcommands() {
         let cmd2 = RunCommand {
             mem: Some(MemOptions { size: Some(4096) }),

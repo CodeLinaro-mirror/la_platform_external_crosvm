@@ -887,6 +887,35 @@ pub fn parse_cpu_capacity(s: &str) -> Result<BTreeMap<usize, u32>, String> {
     Ok(cpu_capacity)
 }
 
+pub fn parse_dynamic_power_coefficient(s: &str) -> Result<BTreeMap<usize, u32>, String> {
+    let mut dyn_power_coefficient: BTreeMap<usize, u32> = BTreeMap::default();
+    for cpu_pair in s.split(',') {
+        let assignment: Vec<&str> = cpu_pair.split('=').collect();
+        if assignment.len() != 2 {
+            return Err(invalid_value_err(
+                cpu_pair,
+                "invalid CPU dynamic power pair syntax",
+            ));
+        }
+        let cpu = assignment[0].parse().map_err(|_| {
+            invalid_value_err(assignment[0], "CPU index must be a non-negative integer")
+        })?;
+        let power_coefficient = assignment[1].parse().map_err(|_| {
+            invalid_value_err(
+                assignment[1],
+                "Power coefficient must be a non-negative integer",
+            )
+        })?;
+        if dyn_power_coefficient
+            .insert(cpu, power_coefficient)
+            .is_some()
+        {
+            return Err(invalid_value_err(cpu_pair, "CPU index must be unique"));
+        }
+    }
+    Ok(dyn_power_coefficient)
+}
+
 pub fn from_key_values<'a, T: Deserialize<'a>>(value: &'a str) -> Result<T, String> {
     serde_keyvalue::from_key_values(value).map_err(|e| e.to_string())
 }
@@ -1061,6 +1090,7 @@ pub struct Config {
     pub display_window_mouse: bool,
     pub dmi_path: Option<PathBuf>,
     pub dump_device_tree_blob: Option<PathBuf>,
+    pub dynamic_power_coefficient: BTreeMap<usize, u32>,
     pub enable_hwp: bool,
     pub enable_pnp_data: bool,
     pub executable_path: Option<Executable>,
@@ -1128,7 +1158,6 @@ pub struct Config {
     pub plugin_mounts: Vec<BindMount>,
     pub plugin_root: Option<PathBuf>,
     pub pmem_devices: Vec<DiskOption>,
-    pub privileged_vm: bool,
     #[cfg(feature = "process-invariants")]
     pub process_invariants_data_handle: Option<u64>,
     #[cfg(feature = "process-invariants")]
@@ -1269,6 +1298,7 @@ impl Default for Config {
             display_window_mouse: false,
             dmi_path: None,
             dump_device_tree_blob: None,
+            dynamic_power_coefficient: BTreeMap::new(),
             enable_hwp: false,
             enable_pnp_data: false,
             executable_path: None,
@@ -1344,7 +1374,6 @@ impl Default for Config {
             plugin_mounts: Vec::new(),
             plugin_root: None,
             pmem_devices: Vec::new(),
-            privileged_vm: false,
             #[cfg(feature = "process-invariants")]
             process_invariants_data_handle: None,
             #[cfg(feature = "process-invariants")]

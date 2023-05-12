@@ -184,9 +184,9 @@ use crate::crosvm::config::HypervisorKind;
 use crate::crosvm::config::IrqChipKind;
 use crate::crosvm::config::SharedDir;
 use crate::crosvm::config::SharedDirKind;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use crate::crosvm::gdb::gdb_thread;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use crate::crosvm::gdb::GdbStub;
 #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
 use crate::crosvm::ratelimit::Ratelimit;
@@ -1198,7 +1198,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .collect::<Result<Vec<SDT>>>()?,
         rt_cpus: cfg.rt_cpus.clone(),
         delay_rt: cfg.delay_rt,
-        #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+        #[cfg(feature = "gdb")]
         gdb: None,
         dmi_path: cfg.dmi_path.clone(),
         no_i8042: cfg.no_i8042,
@@ -1214,6 +1214,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         pcie_ecam: cfg.pcie_ecam,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         pci_low_start: cfg.pci_low_start,
+        dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
     })
 }
 
@@ -1608,7 +1609,7 @@ where
     let mut control_tubes = Vec::new();
     let mut irq_control_tubes = Vec::new();
 
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     if let Some(port) = cfg.gdb {
         // GDB needs a control socket to interrupt vcpus.
         let (gdb_host_tube, gdb_control_tube) = Tube::pair().context("failed to create tube")?;
@@ -1960,6 +1961,12 @@ where
     // KVM_CREATE_VCPU uses apic id for x86 and uses cpu id for others.
     let mut vcpu_ids = Vec::new();
 
+    let guest_suspended_cvar = if cfg.force_s2idle {
+        Some(Arc::new((Mutex::new(false), Condvar::new())))
+    } else {
+        None
+    };
+
     #[cfg_attr(not(feature = "direct"), allow(unused_mut))]
     let mut linux = Arch::build_vm::<V, Vcpu>(
         components,
@@ -1979,6 +1986,7 @@ where
         simple_jail(&cfg.jail_config, "block_device")?,
         #[cfg(feature = "swap")]
         swap_controller.as_ref(),
+        guest_suspended_cvar.clone(),
     )
     .context("the architecture failed to build the vm")?;
 
@@ -2067,6 +2075,7 @@ where
         #[cfg(feature = "swap")]
         swap_controller,
         reg_evt_rdtube,
+        guest_suspended_cvar,
     )
 }
 
@@ -2508,6 +2517,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] hp_thread: std::thread::JoinHandle<()>,
     #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
     reg_evt_rdtube: RecvTube,
+    guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
 ) -> Result<ExitState> {
     #[derive(EventToken)]
     enum Token {
@@ -2626,7 +2636,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         drop_capabilities().context("failed to drop process capabilities")?;
     }
 
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     // Create a channel for GDB thread.
     let (to_gdb_channel, from_vcpu_channel) = if linux.gdb.is_some() {
         let (s, r) = mpsc::channel();
@@ -2707,11 +2717,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(target_os = "android")]
     android::set_process_profiles(&cfg.task_profiles)?;
 
-    let guest_suspended_cvar = Arc::new((Mutex::new(false), Condvar::new()));
-
     #[allow(unused_mut)]
     let mut run_mode = VmRunMode::Running;
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     if to_gdb_channel.is_some() {
         // Wait until a GDB client attaches
         run_mode = VmRunMode::Breakpoint;
@@ -2785,11 +2793,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             linux.vm.check_capability(VmCap::PvClockSuspend),
             from_main_channel,
             use_hypervisor_signals,
-            #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+            #[cfg(feature = "gdb")]
             to_gdb_channel.clone(),
             cfg.per_vm_core_scheduling,
             cpu_config,
-            cfg.privileged_vm,
             match vcpu_cgroup_tasks_file {
                 None => None,
                 Some(ref f) => Some(
@@ -2799,7 +2806,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             },
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             cfg.userspace_msr.clone(),
-            guest_suspended_cvar.clone(),
             #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
             bus_lock_ratelimit_ctrl,
             run_mode,
@@ -2807,7 +2813,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         vcpu_handles.push((handle, to_vcpu_channel));
     }
 
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     // Spawn GDB thread.
     if let Some((gdb_port_num, gdb_control_tube)) = linux.gdb.take() {
         let to_vcpu_channels = vcpu_handles
@@ -3158,7 +3164,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                         .name("s2idle_wait".to_owned())
                                                         .spawn(move || {
                                                             trigger_vm_suspend_and_wait_for_entry(
-                                                                guest_suspended_cvar,
+                                                                guest_suspended_cvar.unwrap(),
                                                                 &send_tube,
                                                                 delayed_response,
                                                                 suspend_evt,

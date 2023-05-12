@@ -10,7 +10,7 @@
 //! The wire message format is a little-endian C-struct of fixed size, along with a file descriptor
 //! if the request type expects one.
 
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub mod gdb;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -89,6 +89,7 @@ use rutabaga_gfx::RutabagaMappedRegion;
 use rutabaga_gfx::VulkanInfo;
 use serde::Deserialize;
 use serde::Serialize;
+use swap::SwapStatus;
 use sync::Mutex;
 #[cfg(unix)]
 pub use sys::FsMappingRequest;
@@ -106,11 +107,11 @@ use crate::display::MouseMode;
 use crate::display::WindowEvent;
 use crate::display::WindowMode;
 use crate::display::WindowVisibility;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebug;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebugStatus;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebugStatusMessage;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuControlCommand;
@@ -120,7 +121,7 @@ use crate::gpu::GpuControlResult;
 /// Control the state of a particular VM CPU.
 #[derive(Clone, Debug)]
 pub enum VcpuControl {
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     Debug(VcpuDebug),
     RunState(VmRunMode),
     MakeRT,
@@ -1178,15 +1179,6 @@ pub enum SwapCommand {
     SwapOut,
     Disable,
     Status,
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "swap")] {
-        use swap::Status as SwapStatus;
-    } else {
-        #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum SwapStatus {}
-    }
 }
 
 ///

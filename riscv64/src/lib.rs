@@ -29,6 +29,10 @@ use devices::PciAddress;
 use devices::PciConfigMmio;
 use devices::PciDevice;
 use devices::PciRootCommand;
+#[cfg(feature = "gdb")]
+use gdbstub::arch::Arch;
+#[cfg(feature = "gdb")]
+use gdbstub_arch::riscv::Riscv64 as GdbArch;
 use hypervisor::CoreRegister;
 use hypervisor::CpuConfigRiscv64;
 use hypervisor::Hypervisor;
@@ -47,10 +51,14 @@ use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
+#[cfg(unix)]
+use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
 use vm_control::BatteryType;
 use vm_memory::GuestAddress;
+#[cfg(feature = "gdb")]
+use vm_memory::GuestMemory;
 use vm_memory::MemoryRegionOptions;
 
 mod fdt;
@@ -180,6 +188,7 @@ impl arch::LinuxArch for Riscv64 {
         _dump_device_tree_blob: Option<PathBuf>,
         _debugcon_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(unix)] _guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmRiscv64,
@@ -394,6 +403,8 @@ impl arch::LinuxArch for Riscv64 {
             delay_rt: components.delay_rt,
             suspend_evt,
             bat_control: None,
+            #[cfg(feature = "gdb")]
+            gdb: components.gdb,
             pm: None,
             devices_thread: None,
             vm_request_tube: None,
@@ -434,6 +445,57 @@ impl arch::LinuxArch for Riscv64 {
     ) -> std::result::Result<PciAddress, Self::Error> {
         // hotplug function isn't verified on Riscv64, so set it unsupported here.
         Err(Error::Unsupported)
+    }
+}
+
+#[cfg(feature = "gdb")]
+impl<T: VcpuRiscv64> arch::GdbOps<T> for Riscv64 {
+    type Error = Error;
+
+    fn read_memory(
+        _vcpu: &T,
+        _guest_mem: &GuestMemory,
+        _vaddr: GuestAddress,
+        _len: usize,
+    ) -> Result<Vec<u8>> {
+        unimplemented!();
+    }
+
+    fn write_memory(
+        _vcpu: &T,
+        _guest_mem: &GuestMemory,
+        _vaddr: GuestAddress,
+        _buf: &[u8],
+    ) -> Result<()> {
+        unimplemented!();
+    }
+
+    fn read_registers(_vcpu: &T) -> Result<<GdbArch as Arch>::Registers> {
+        unimplemented!();
+    }
+
+    fn write_registers(_vcpu: &T, _regs: &<GdbArch as Arch>::Registers) -> Result<()> {
+        unimplemented!();
+    }
+
+    fn read_register(_vcpu: &T, _reg_id: <GdbArch as Arch>::RegId) -> Result<Vec<u8>> {
+        unimplemented!();
+    }
+
+    fn write_register(_vcpu: &T, _reg_id: <GdbArch as Arch>::RegId, _data: &[u8]) -> Result<()> {
+        unimplemented!();
+    }
+
+    fn enable_singlestep(_vcpu: &T) -> Result<()> {
+        unimplemented!();
+    }
+
+    fn get_max_hw_breakpoints(_vcpu: &T) -> Result<usize> {
+        unimplemented!();
+    }
+
+    fn set_hw_breakpoints(_vcpu: &T, _breakpoints: &[GuestAddress]) -> Result<()> {
+        unimplemented!();
     }
 }
 

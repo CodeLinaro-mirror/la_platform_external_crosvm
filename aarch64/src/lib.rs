@@ -35,9 +35,9 @@ use devices::PciConfigMmio;
 use devices::PciDevice;
 use devices::PciRootCommand;
 use devices::Serial;
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use gdbstub::arch::Arch;
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use gdbstub_arch::aarch64::AArch64 as GdbArch;
 use hypervisor::CpuConfigAArch64;
 use hypervisor::DeviceKind;
@@ -59,12 +59,14 @@ use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
+#[cfg(unix)]
+use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
 use vm_control::BatControl;
 use vm_control::BatteryType;
 use vm_memory::GuestAddress;
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
 use vm_memory::MemoryRegionOptions;
@@ -379,6 +381,7 @@ impl arch::LinuxArch for AArch64 {
         dump_device_tree_blob: Option<PathBuf>,
         _debugcon_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(unix)] _guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmAArch64,
@@ -699,6 +702,7 @@ impl arch::LinuxArch for AArch64 {
             vmwdt_cfg,
             dump_device_tree_blob,
             &|writer, phandles| vm.create_fdt(writer, phandles),
+            components.dynamic_power_coefficient,
         )
         .map_err(Error::CreateFdt)?;
 
@@ -725,7 +729,7 @@ impl arch::LinuxArch for AArch64 {
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
             bat_control,
-            #[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+            #[cfg(feature = "gdb")]
             gdb: components.gdb,
             pm: None,
             resume_notify_devices: Vec::new(),
@@ -767,7 +771,7 @@ impl arch::LinuxArch for AArch64 {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+#[cfg(feature = "gdb")]
 impl<T: VcpuAArch64> arch::GdbOps<T> for AArch64 {
     type Error = Error;
 

@@ -694,6 +694,7 @@ dependencies = [
  "cbindgen",
  "cc",
  "libc",
+ "swap",
  "tempfile",
  "vm_control",
 ]
@@ -2046,6 +2047,8 @@ dependencies = [
  "cros_fdt",
  "data_model 0.1.1-alpha.1",
  "devices",
+ "gdbstub",
+ "gdbstub_arch",
  "hypervisor",
  "kernel_cmdline",
  "kvm",
@@ -2247,6 +2250,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base",
+ "cfg-if",
  "cros_tracing",
  "data_model 0.1.1-alpha.1",
  "jail",

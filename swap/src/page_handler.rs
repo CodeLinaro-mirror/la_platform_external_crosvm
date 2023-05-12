@@ -39,6 +39,7 @@ use crate::userfaultfd::Error as UffdError;
 use crate::userfaultfd::Userfaultfd;
 use crate::worker::Channel;
 use crate::worker::Task;
+use crate::SwapMetrics;
 
 pub(crate) const MLOCK_BUDGET: usize = 16 * 1024 * 1024; // = 16MB
 const PREFETCH_THRESHOLD: usize = 4 * 1024 * 1024; // = 4MB
@@ -598,7 +599,7 @@ impl<'a> PageHandler<'a> {
     }
 
     /// Returns count of pages copied from vmm-swap file to the guest memory.
-    pub fn compute_copied_from_file_pages(&self) -> usize {
+    fn compute_copied_from_file_pages(&self) -> usize {
         self.ctx
             .lock()
             .regions
@@ -608,7 +609,7 @@ impl<'a> PageHandler<'a> {
     }
 
     /// Returns count of pages copied from staging memory to the guest memory.
-    pub fn compute_copied_from_staging_pages(&self) -> usize {
+    fn compute_copied_from_staging_pages(&self) -> usize {
         self.ctx
             .lock()
             .regions
@@ -618,12 +619,12 @@ impl<'a> PageHandler<'a> {
     }
 
     /// Returns count of pages initialized with zero.
-    pub fn compute_zeroed_pages(&self) -> usize {
+    fn compute_zeroed_pages(&self) -> usize {
         self.ctx.lock().regions.iter().map(|r| r.zeroed_pages).sum()
     }
 
     /// Returns count of pages which were already initialized on page faults.
-    pub fn compute_redundant_pages(&self) -> usize {
+    fn compute_redundant_pages(&self) -> usize {
         self.ctx
             .lock()
             .regions
@@ -633,7 +634,7 @@ impl<'a> PageHandler<'a> {
     }
 
     /// Returns count of pages present in the staging memory.
-    pub fn compute_staging_pages(&self) -> usize {
+    fn compute_staging_pages(&self) -> usize {
         self.ctx
             .lock()
             .regions
@@ -643,13 +644,26 @@ impl<'a> PageHandler<'a> {
     }
 
     /// Returns count of pages present in the swap files.
-    pub fn compute_swap_pages(&self) -> usize {
+    fn compute_swap_pages(&self) -> usize {
         self.ctx
             .lock()
             .regions
             .iter()
             .map(|r| r.file.present_pages())
             .sum()
+    }
+
+    /// Generates [SwapMetrics].
+    pub fn compute_metrics(&self) -> SwapMetrics {
+        SwapMetrics {
+            resident_pages: self.compute_resident_pages() as u64,
+            copied_from_file_pages: self.compute_copied_from_file_pages() as u64,
+            copied_from_staging_pages: self.compute_copied_from_staging_pages() as u64,
+            zeroed_pages: self.compute_zeroed_pages() as u64,
+            redundant_pages: self.compute_redundant_pages() as u64,
+            staging_pages: self.compute_staging_pages() as u64,
+            swap_pages: self.compute_swap_pages() as u64,
+        }
     }
 }
 

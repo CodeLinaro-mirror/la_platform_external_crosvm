@@ -128,6 +128,7 @@ fn create_cpu_nodes(
     num_cpus: u32,
     cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
+    dynamic_power_coefficient: BTreeMap<usize, u32>,
 ) -> Result<()> {
     let cpus_node = fdt.begin_node("cpus")?;
     fdt.property_u32("#address-cells", 0x1)?;
@@ -144,6 +145,9 @@ fn create_cpu_nodes(
         fdt.property_u32("reg", cpu_id)?;
         fdt.property_u32("phandle", PHANDLE_CPU0 + cpu_id)?;
 
+        if let Some(pwr_coefficient) = dynamic_power_coefficient.get(&(cpu_id as usize)) {
+            fdt.property_u32("dynamic-power-coefficient", *pwr_coefficient)?;
+        }
         if let Some(capacity) = cpu_capacity.get(&(cpu_id as usize)) {
             fdt.property_u32("capacity-dmips-mhz", *capacity)?;
         }
@@ -331,6 +335,15 @@ fn create_config_node(fdt: &mut FdtWriter, (addr, size): (GuestAddress, usize)) 
     fdt.property_u32("kernel-address", addr)?;
     fdt.property_u32("kernel-size", size)?;
     fdt.end_node(config_node)?;
+
+    Ok(())
+}
+
+fn create_kvm_cpufreq_node(fdt: &mut FdtWriter) -> Result<()> {
+    let vcf_node = fdt.begin_node("cpufreq")?;
+
+    fdt.property_string("compatible", "virtual,kvm-cpufreq")?;
+    fdt.end_node(vcf_node)?;
 
     Ok(())
 }
@@ -573,6 +586,7 @@ pub fn create_fdt(
     vmwdt_cfg: VmWdtConfig,
     dump_device_tree_blob: Option<PathBuf>,
     vm_generator: &impl Fn(&mut FdtWriter, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
+    dynamic_power_coefficient: BTreeMap<usize, u32>,
 ) -> Result<()> {
     let mut fdt = FdtWriter::new(&[]);
     let mut phandles = BTreeMap::new();
@@ -598,7 +612,13 @@ pub fn create_fdt(
         }
         None => None,
     };
-    create_cpu_nodes(&mut fdt, num_cpus, cpu_clusters, cpu_capacity)?;
+    create_cpu_nodes(
+        &mut fdt,
+        num_cpus,
+        cpu_clusters,
+        cpu_capacity,
+        dynamic_power_coefficient,
+    )?;
     create_gic_node(&mut fdt, is_gicv3, num_cpus as u64)?;
     create_timer_node(&mut fdt, num_cpus)?;
     if use_pmu {
@@ -612,6 +632,7 @@ pub fn create_fdt(
         create_battery_node(&mut fdt, bat_mmio_base, bat_irq)?;
     }
     create_vmwdt_node(&mut fdt, vmwdt_cfg)?;
+    create_kvm_cpufreq_node(&mut fdt)?;
     vm_generator(&mut fdt, &phandles)?;
     // End giant node
     fdt.end_node(root_node)?;
