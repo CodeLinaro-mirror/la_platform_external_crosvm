@@ -27,6 +27,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "geniezone",
         "gunyah",
         "usb",
     ],
@@ -124,6 +125,7 @@ rust_test {
     features: [
         "audio",
         "balloon",
+        "geniezone",
         "gunyah",
         "usb",
     ],
@@ -217,6 +219,7 @@ rust_library {
     features: [
         "audio",
         "balloon",
+        "geniezone",
         "gunyah",
         "usb",
     ],
