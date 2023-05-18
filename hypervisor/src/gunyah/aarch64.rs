@@ -9,7 +9,6 @@ use libc::ENOENT;
 use libc::ENOTSUP;
 use vm_memory::GuestAddress;
 use vm_memory::MemoryRegionInformation;
-use vm_memory::MemoryRegionOptions;
 use vm_memory::MemoryRegionPurpose;
 
 use base::error;
@@ -35,7 +34,6 @@ fn fdt_create_shm_device(
     fdt: &mut FdtWriter,
     index: u32,
     guest_addr: GuestAddress,
-    options: MemoryRegionOptions,
 ) -> cros_fdt::Result<()> {
     let shm_name = format!("shm-{:x}", index);
     let shm_node = fdt.begin_node(&shm_name)?;
@@ -168,7 +166,7 @@ impl VmAArch64 for GunyahVm {
                 };
 
                 if create_shm_node {
-                    fdt_create_shm_device(fdt, index.try_into().unwrap(), guest_addr, options)?;
+                    fdt_create_shm_device(fdt, index.try_into().unwrap(), guest_addr)?;
                 }
 
                 Ok(())

@@ -24,7 +24,7 @@ memoffset = "0.6"
 rand = "0.8"
 remain = "*"
 resources = { path = "../resources" }
-swap = { path = "../swap", optional = true }
+swap = { path = "../swap" }
 sync = { path = "../common/sync" }
 base = { path = "../base" }
 thiserror = "*"

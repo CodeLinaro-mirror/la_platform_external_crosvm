@@ -106,6 +106,7 @@ exclude = [
     "tools/audio_streams_conformance_test",
     "tools/examples/baremetal",
     "tube_transporter",
+    "perfetto",
     "win_audio",
     "win_util",
 ]
@@ -430,7 +431,7 @@ serde_json = "*"
 serde_keyvalue = { path = "serde_keyvalue", features = ["argh_derive"] }
 smallvec = "1.6.1"
 static_assertions = "1.1"
-swap = { path = "swap", default-features = false, optional = true }
+swap = { path = "swap" }
 sync = { path = "common/sync" }
 tempfile = "3"
 thiserror = { version = "1.0.20" }

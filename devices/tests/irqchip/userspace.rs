@@ -4,7 +4,6 @@
 
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 
-use std::os::raw::c_int;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -52,7 +51,6 @@ use hypervisor::Sregs;
 use hypervisor::TriggerMode;
 use hypervisor::Vcpu;
 use hypervisor::VcpuExit;
-use hypervisor::VcpuRunHandle;
 use hypervisor::VcpuX86_64;
 use hypervisor::Xsave;
 use resources::AddressRange;
@@ -664,20 +662,17 @@ impl Vcpu for FakeVcpu {
         self
     }
 
-    fn take_run_handle(&self, _signal_num: Option<c_int>) -> Result<VcpuRunHandle> {
+    fn run(&mut self) -> Result<VcpuExit> {
         unimplemented!()
     }
-    fn run(&mut self, _run_handle: &VcpuRunHandle) -> Result<VcpuExit> {
-        unimplemented!()
-    }
+
     fn set_immediate_exit(&self, _exit: bool) {}
-    fn set_local_immediate_exit(_exit: bool) {}
-    fn set_local_immediate_exit_fn(&self) -> extern "C" fn() {
-        extern "C" fn f() {
-            FakeVcpu::set_local_immediate_exit(true);
-        }
-        f
+
+    #[cfg(unix)]
+    fn signal_handle(&self) -> hypervisor::VcpuSignalHandle {
+        unimplemented!()
     }
+
     fn handle_mmio(&self, _handle_fn: &mut dyn FnMut(IoParams) -> Option<[u8; 8]>) -> Result<()> {
         unimplemented!()
     }
@@ -694,9 +689,6 @@ impl Vcpu for FakeVcpu {
         unimplemented!()
     }
     fn pvclock_ctrl(&self) -> Result<()> {
-        unimplemented!()
-    }
-    fn set_signal_mask(&self, _signals: &[c_int]) -> Result<()> {
         unimplemented!()
     }
     unsafe fn enable_raw_capability(&self, _cap: u32, _args: &[u64; 4]) -> Result<()> {
