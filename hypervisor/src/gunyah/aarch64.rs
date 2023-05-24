@@ -41,9 +41,6 @@ fn fdt_create_shm_device(
     let shm_node = fdt.begin_node(&shm_name)?;
     fdt.property_string("vdevice-type", "shm")?;
     fdt.property_null("peer-default")?;
-    if options.purpose == MemoryRegionPurpose::StaticSwiotlbRegion {
-        fdt.property_string("push-compatible", "restricted-dma-pool")?;
-    }
     fdt.property_u64("dma_base", 0)?;
     let mem_node = fdt.begin_node("memory")?;
     fdt.property_u32("label", index)?;
