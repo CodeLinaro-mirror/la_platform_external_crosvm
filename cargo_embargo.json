@@ -6,8 +6,9 @@
     "balloon",
     "config-file",
     // TODO: The "protos" crate has been modified such that it doesn't work with cargo. If we fix that,
-    // we can remove a some patch files and enable "composite-disk" here.
+    // we can remove a some patch files and enable "composite-disk" and "registered_events" here.
     // "composite-disk",
+    // "registered_events",
     "gdb",
     "geniezone",
     "gunyah",

@@ -30,7 +30,7 @@ use base::pagesize;
 use cros_async::ExecutorKind;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
-use devices::virtio::block::block::DiskOption;
+use devices::virtio::block::DiskOption;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 use devices::virtio::device_constants::video::VideoDeviceConfig;
 #[cfg(feature = "gpu")]
@@ -1088,7 +1088,6 @@ pub struct Config {
     pub disks: Vec<DiskOption>,
     pub display_window_keyboard: bool,
     pub display_window_mouse: bool,
-    pub dmi_path: Option<PathBuf>,
     pub dump_device_tree_blob: Option<PathBuf>,
     pub dynamic_power_coefficient: BTreeMap<usize, u32>,
     pub enable_hwp: bool,
@@ -1297,7 +1296,6 @@ impl Default for Config {
             disable_virtio_intx: false,
             display_window_keyboard: false,
             display_window_mouse: false,
-            dmi_path: None,
             dump_device_tree_blob: None,
             dynamic_power_coefficient: BTreeMap::new(),
             enable_hwp: false,
@@ -1530,8 +1528,8 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         }
     }
     if cfg.virt_cpufreq {
-        if !cfg.host_cpu_topology || (cfg.vcpu_affinity.is_none() && cfg.cpu_capacity.is_empty()) {
-            return Err("`virt-cpufreq` requires 'host-cpu-topology' enable or \
+        if !cfg.host_cpu_topology && (cfg.vcpu_affinity.is_none() || cfg.cpu_capacity.is_empty()) {
+            return Err("`virt-cpufreq` requires 'host-cpu-topology' enabled or \
                        have vcpu_affinity and cpu_capacity configured"
                 .to_string());
         }

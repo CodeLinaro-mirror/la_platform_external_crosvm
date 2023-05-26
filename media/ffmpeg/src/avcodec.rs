@@ -218,6 +218,12 @@ impl EncoderContextBuilder {
     }
 }
 
+impl Default for AvCodecIterator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Lightweight abstraction over libavcodec's `av_codec_iterate` function that can be used to
 /// enumerate all the supported codecs.
 pub struct AvCodecIterator(*mut libc::c_void);
@@ -578,6 +584,7 @@ pub trait AvBufferSource: Send {
         self.as_ptr() as *mut u8
     }
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
 }
 
 /// Wrapper around `AVBuffer` and `AVBufferRef`.
@@ -1016,6 +1023,10 @@ mod tests {
 
             fn len(&self) -> usize {
                 0
+            }
+
+            fn is_empty(&self) -> bool {
+                true
             }
         }
 

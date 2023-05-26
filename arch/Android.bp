@@ -90,6 +90,7 @@ rust_library {
         "libpower_monitor",
         "libresources",
         "libserde",
+        "libserde_json",
         "libserde_keyvalue",
         "libswap",
         "libsync_rust",

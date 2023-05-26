@@ -16,7 +16,7 @@ use anyhow::Context;
 use base::warn;
 use base::Event;
 use base::Timer;
-use cros_async::sync::Mutex as AsyncMutex;
+use cros_async::sync::RwLock as AsyncRwLock;
 use cros_async::AsyncTube;
 use cros_async::EventAsync;
 use cros_async::Executor;
@@ -41,17 +41,20 @@ use crate::virtio::block::DiskState;
 use crate::virtio::copy_config;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
 use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
+use crate::virtio::vhost::user::device::handler::Error as DeviceError;
 use crate::virtio::vhost::user::device::handler::VhostBackendReqConnection;
 use crate::virtio::vhost::user::device::handler::VhostBackendReqConnectionState;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
 use crate::virtio::vhost::user::device::handler::VhostUserPlatformOps;
+use crate::virtio::vhost::user::device::handler::WorkerState;
 use crate::virtio::vhost::user::device::VhostUserDevice;
+use crate::virtio::Queue;
 
 const NUM_QUEUES: u16 = 16;
 
 struct BlockBackend {
     ex: Executor,
-    disk_state: Rc<AsyncMutex<DiskState>>,
+    disk_state: Rc<AsyncRwLock<DiskState>>,
     disk_size: Arc<AtomicU64>,
     block_size: u32,
     seg_max: u32,
@@ -61,7 +64,7 @@ struct BlockBackend {
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
     backend_req_conn: Arc<Mutex<VhostBackendReqConnectionState>>,
-    workers: [Option<AbortHandle>; NUM_QUEUES as usize],
+    workers: [Option<WorkerState<Rc<RefCell<Queue>>, ()>>; NUM_QUEUES as usize],
 }
 
 impl VhostUserDevice for BlockAsync {
@@ -83,7 +86,7 @@ impl VhostUserDevice for BlockAsync {
         };
         let async_image = disk_image.to_async_disk(ex)?;
 
-        let disk_state = Rc::new(AsyncMutex::new(DiskState::new(
+        let disk_state = Rc::new(AsyncRwLock::new(DiskState::new(
             async_image,
             Arc::clone(&self.disk_size),
             self.read_only,
@@ -213,9 +216,9 @@ impl VhostUserBackend for BlockBackend {
         doorbell: Doorbell,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
-        if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
+        if self.workers[idx].is_some() {
             warn!("Starting new queue handler without stopping old handler");
-            handle.abort();
+            self.stop_queue(idx)?;
         }
 
         let kick_evt = EventAsync::new(kick_evt, &self.ex)
@@ -225,28 +228,43 @@ impl VhostUserBackend for BlockBackend {
         let disk_state = Rc::clone(&self.disk_state);
         let timer = Rc::clone(&self.flush_timer);
         let timer_armed = Rc::clone(&self.flush_timer_armed);
-        self.ex
-            .spawn_local(Abortable::new(
-                handle_queue(
-                    mem,
-                    disk_state,
-                    Rc::new(RefCell::new(queue)),
-                    kick_evt,
-                    doorbell,
-                    timer,
-                    timer_armed,
-                ),
-                registration,
-            ))
-            .detach();
+        let queue = Rc::new(RefCell::new(queue));
+        let queue_task = self.ex.spawn_local(Abortable::new(
+            handle_queue(
+                mem,
+                disk_state,
+                queue.clone(),
+                kick_evt,
+                doorbell,
+                timer,
+                timer_armed,
+            ),
+            registration,
+        ));
 
-        self.workers[idx] = Some(handle);
+        self.workers[idx] = Some(WorkerState {
+            abort_handle: handle,
+            queue_task,
+            queue,
+        });
         Ok(())
     }
 
-    fn stop_queue(&mut self, idx: usize) {
-        if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
-            handle.abort();
+    fn stop_queue(&mut self, idx: usize) -> anyhow::Result<virtio::Queue> {
+        if let Some(worker) = self.workers.get_mut(idx).and_then(Option::take) {
+            worker.abort_handle.abort();
+
+            // Wait for queue_task to be aborted.
+            let _ = self.ex.run_until(async { worker.queue_task.await });
+
+            let queue = match Rc::try_unwrap(worker.queue) {
+                Ok(queue_cell) => queue_cell.into_inner(),
+                Err(_) => panic!("failed to recover queue from worker"),
+            };
+
+            Ok(queue)
+        } else {
+            Err(anyhow::Error::new(DeviceError::WorkerNotFound))
         }
     }
 

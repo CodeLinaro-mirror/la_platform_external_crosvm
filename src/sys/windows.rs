@@ -85,7 +85,7 @@ use devices::tsc::get_tsc_sync_mitigations;
 use devices::tsc::standard_deviation;
 use devices::tsc::TscSyncMitigations;
 use devices::virtio;
-use devices::virtio::block::block::DiskOption;
+use devices::virtio::block::DiskOption;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::common_backend::VirtioSnd;
 #[cfg(feature = "audio")]
@@ -439,6 +439,7 @@ fn create_balloon_device(
             BalloonMode::Relaxed
         },
         balloon_features,
+        #[cfg(feature = "registered_events")]
         None,
     )
     .exit_context(Exit::BalloonDeviceNew, "failed to create balloon")?;
@@ -1002,14 +1003,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     let anti_tamper_main_thread_tube = spawn_anti_tamper_thread(&wait_ctx);
 
-    #[cfg(feature = "sandbox")]
-    if sandbox::is_sandbox_target() {
-        sandbox::TargetServices::get()
-            .exit_context(Exit::SandboxError, "failed to create sandbox")?
-            .expect("Could not create sandbox!")
-            .lower_token();
-    }
-
     let ime_thread = run_ime_thread(product_args, &exit_evt)?;
 
     let original_terminal_mode = stdin().set_raw_mode().ok();
@@ -1480,7 +1473,6 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .collect::<Result<Vec<SDT>>>()?,
         rt_cpus: cfg.rt_cpus.clone(),
         delay_rt: cfg.delay_rt,
-        dmi_path: cfg.dmi_path.clone(),
         no_i8042: cfg.no_i8042,
         no_rtc: cfg.no_rtc,
         host_cpu_topology: cfg.host_cpu_topology,
@@ -1995,6 +1987,35 @@ where
     } else {
         None
     };
+
+    // Lower the token, locking the main process down to a stricter security policy.
+    //
+    // WARNING:
+    //
+    // Windows system calls can behave in unusual ways if they happen concurrently to the token
+    // lowering. For example, access denied can happen if Tube pairs are created in another thread
+    // (b/281108137), and lower_token happens right before the client pipe is connected. Tubes are
+    // not privileged resources, but can be broken due to the token changing unexpectedly.
+    //
+    // We explicitly lower the token here and *then* call run_control to make it clear that any
+    // resources that require a privileged token should be created on the main thread & passed into
+    // run_control, to follow the correct order:
+    // - Privileged resources are created.
+    // - Token is lowered.
+    // - Threads are spawned & may create more non-privileged resources (without fear of the token
+    //   changing at an undefined time).
+    //
+    // Recommendation: If you find your code doesnt work in run_control because of the sandbox, you
+    // should split any resource creation to before this token lowering & pass the resources into
+    // run_control. Don't move the token lowering somewhere else without considering multi-threaded
+    // effects.
+    #[cfg(feature = "sandbox")]
+    if sandbox::is_sandbox_target() {
+        sandbox::TargetServices::get()
+            .exit_code_from_err("failed to create sandbox")?
+            .expect("Could not create sandbox!")
+            .lower_token();
+    }
 
     run_control(
         windows,

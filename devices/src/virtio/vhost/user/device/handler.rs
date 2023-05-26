@@ -67,7 +67,11 @@ use base::IntoRawDescriptor;
 use base::Protection;
 use base::SafeDescriptor;
 use base::SharedMemory;
+use cros_async::TaskHandle;
+use futures::future::AbortHandle;
+use futures::future::Aborted;
 use sys::Doorbell;
+use thiserror::Error as ThisError;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -201,7 +205,8 @@ pub trait VhostUserBackend {
     ) -> anyhow::Result<()>;
 
     /// Indicates that the backend should stop processing requests for virtio queue number `idx`.
-    fn stop_queue(&mut self, idx: usize);
+    /// This method should return the queue passed to `start_queue` for the corresponding `idx`.
+    fn stop_queue(&mut self, idx: usize) -> anyhow::Result<Queue>;
 
     /// Resets the vhost-user backend.
     fn reset(&mut self);
@@ -369,6 +374,8 @@ pub struct DeviceRequestHandler {
     mem: Option<GuestMemory>,
     backend: Box<dyn VhostUserBackend>,
     ops: Box<dyn VhostUserPlatformOps>,
+    // Active queues that are sleeping.
+    paused_queues: Vec<Option<Queue>>,
 }
 
 impl DeviceRequestHandler {
@@ -383,6 +390,8 @@ impl DeviceRequestHandler {
             vrings.push(Vring::new(MAX_VRING_LEN));
         }
 
+        let mut paused_queues = Vec::new();
+        paused_queues.resize_with(backend.max_queue_num(), Default::default);
         DeviceRequestHandler {
             vrings,
             owned: false,
@@ -390,6 +399,7 @@ impl DeviceRequestHandler {
             mem: None,
             backend,
             ops,
+            paused_queues,
         }
     }
 }
@@ -532,7 +542,9 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
         // that file descriptor is readable) on the descriptor specified by
         // VHOST_USER_SET_VRING_KICK, and stop ring upon receiving
         // VHOST_USER_GET_VRING_BASE.
-        self.backend.stop_queue(index as usize);
+        if let Err(e) = self.backend.stop_queue(index as usize) {
+            error!("Failed to stop queue in get_vring_base: {}", e);
+        }
 
         let vring = &mut self.vrings[index as usize];
         vring.reset();
@@ -687,6 +699,19 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
             Vec::new()
         })
     }
+
+    fn sleep(&mut self) -> VhostResult<()> {
+        for (idx, _) in self.vrings.iter().enumerate() {
+            match self.backend.stop_queue(idx) {
+                Ok(queue) => self.paused_queues[idx] = Some(queue),
+                Err(e) => {
+                    error!("Failed to stop queue: {}", e);
+                    self.paused_queues[idx] = None;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Indicates the state of backend request connection
@@ -823,6 +848,19 @@ impl SharedMemoryMapper for VhostShmemMapper {
     }
 }
 
+pub(crate) struct WorkerState<T, U> {
+    pub(crate) abort_handle: AbortHandle,
+    pub(crate) queue_task: TaskHandle<std::result::Result<U, Aborted>>,
+    pub(crate) queue: T,
+}
+
+/// Errors for device operations
+#[derive(Debug, ThisError)]
+pub enum Error {
+    #[error("worker not found when stopping queue")]
+    WorkerNotFound,
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -932,7 +970,10 @@ mod tests {
             Ok(())
         }
 
-        fn stop_queue(&mut self, _idx: usize) {}
+        fn stop_queue(&mut self, _idx: usize) -> anyhow::Result<Queue> {
+            // TODO(280607609): Return a `Queue`.
+            Err(anyhow!("Missing queue"))
+        }
     }
 
     #[cfg(unix)]

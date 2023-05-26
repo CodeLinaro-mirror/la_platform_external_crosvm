@@ -43,7 +43,6 @@ members = [
     "broker_ipc",
     "common/audio_streams",
     "common/balloon_control",
-    "common/cros-fuzz",
     "common/data_model",
     "common/p9",
     "common/sync",
@@ -54,11 +53,11 @@ members = [
     "crosvm_cli",
     "crosvm_control",
     "crosvm_plugin",
-    "crosvm-fuzz",
     "devices",
     "disk",
     "e2e_tests",
     "fuse",
+    "fuzz",
     "gpu_display",
     "hypervisor",
     "io_uring",
@@ -68,9 +67,7 @@ members = [
     "kvm",
     "libcras_stub",
     "linux_input_sys",
-    "media/cros-codecs",
     "media/ffmpeg",
-    "media/libva",
     "media/libvda",
     "metrics",
     "net_sys",
@@ -155,6 +152,9 @@ panic-memfd = []
 
 ## Enables the use of the qcow format for block devices.
 qcow = ["disk/qcow"]
+
+## Enables the registered_events mechanisms.
+registered_events = ["protos/registered_events", "protobuf", "base/proto_tube", "vm_control/registered_events", "devices/registered_events"]
 
 ## Enables vmm-swap of guest memory. This is only available on Linux.
 swap = ["aarch64/swap", "arch/swap", "devices/swap", "vm_control/swap", "x86_64/swap", "swap/enable"]
@@ -379,7 +379,7 @@ all-mingw64 = [
 all-msvc64 = [ "all-mingw64" ]
 
 ## All features that are enabled in ChromeOS builds.
-all-chromeos = ["base/chromeos", "audio_cras", "devices/chromeos", "panic-memfd", "arc_quota", "vtpm"]
+all-chromeos = ["base/chromeos", "audio_cras", "devices/chromeos", "panic-memfd", "arc_quota", "vtpm", "registered_events"]
 
 # Deprecated feature flag. Remove after ChromeOS-side is updated.
 chromeos = ["all-chromeos"]
@@ -476,7 +476,6 @@ rand = "0.8"
 audio_streams = { path = "common/audio_streams" }
 base = { path = "base" }
 cros_async =  { path = "cros_async" }
-cros_fuzz = { path = "common/cros-fuzz" } # ignored by ebuild
 data_model = { path = "common/data_model" }
 libcras = { path = "libcras_stub" } # ignored by ebuild
 p9 = { path = "common/p9" } # ignored by ebuild

@@ -77,6 +77,8 @@ use libc::EIO;
 use libc::ENODEV;
 use libc::ENOTSUP;
 use libc::ERANGE;
+#[cfg(feature = "registered_events")]
+use protos::registered_events;
 use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
@@ -559,6 +561,12 @@ impl VmMemoryRegionState {
             slot_map: HashMap::new(),
             mapped_regions: BTreeMap::new(),
         }
+    }
+}
+
+impl Default for VmMemoryRegionState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1232,26 +1240,94 @@ pub enum VmRequest {
     /// Command to Restore devices
     Restore(RestoreCommand),
     /// Register for event notification
+    #[cfg(feature = "registered_events")]
     RegisterListener {
         socket_addr: String,
         event: RegisteredEvent,
     },
     /// Unregister for notifications for event
+    #[cfg(feature = "registered_events")]
     UnregisterListener {
         socket_addr: String,
         event: RegisteredEvent,
     },
     /// Unregister for all event notification
+    #[cfg(feature = "registered_events")]
     Unregister { socket_addr: String },
 }
 
 /// NOTE: when making any changes to this enum please also update
 /// RegisteredEventFfi in crosvm_control/src/lib.rs
+#[cfg(feature = "registered_events")]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum RegisteredEvent {
     VirtioBalloonWssReport,
     VirtioBalloonResize,
     VirtioBalloonOOMDeflation,
+}
+
+#[cfg(feature = "registered_events")]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RegisteredEventWithData {
+    VirtioBalloonWssReport {
+        wss_buckets: [WSSBucket; 4],
+        balloon_actual: u64,
+    },
+    VirtioBalloonResize,
+    VirtioBalloonOOMDeflation,
+}
+
+#[cfg(feature = "registered_events")]
+impl RegisteredEventWithData {
+    pub fn into_event(&self) -> RegisteredEvent {
+        match self {
+            Self::VirtioBalloonWssReport { .. } => RegisteredEvent::VirtioBalloonWssReport,
+            Self::VirtioBalloonResize => RegisteredEvent::VirtioBalloonResize,
+            Self::VirtioBalloonOOMDeflation => RegisteredEvent::VirtioBalloonOOMDeflation,
+        }
+    }
+
+    pub fn into_proto(&self) -> registered_events::RegisteredEvent {
+        match self {
+            Self::VirtioBalloonWssReport {
+                wss_buckets,
+                balloon_actual,
+            } => {
+                let mut report = registered_events::VirtioBalloonWssReport {
+                    balloon_actual: *balloon_actual,
+                    ..registered_events::VirtioBalloonWssReport::new()
+                };
+                for wss in wss_buckets {
+                    report.wss_buckets.push(registered_events::VirtioWssBucket {
+                        age: wss.age,
+                        file_bytes: wss.bytes[0],
+                        anon_bytes: wss.bytes[1],
+                        ..registered_events::VirtioWssBucket::new()
+                    });
+                }
+                let mut event = registered_events::RegisteredEvent::new();
+                event.set_wss_report(report);
+                event
+            }
+            Self::VirtioBalloonResize => {
+                let mut event = registered_events::RegisteredEvent::new();
+                event.set_resize(registered_events::VirtioBalloonResize::new());
+                event
+            }
+            Self::VirtioBalloonOOMDeflation => {
+                let mut event = registered_events::RegisteredEvent::new();
+                event.set_oom_deflation(registered_events::VirtioBalloonOOMDeflation::new());
+                event
+            }
+        }
+    }
+
+    pub fn from_wss(wss: &BalloonWSS, balloon_actual: u64) -> Self {
+        RegisteredEventWithData::VirtioBalloonWssReport {
+            wss_buckets: wss.wss,
+            balloon_actual,
+        }
+    }
 }
 
 pub fn handle_disk_command(command: &DiskControlCommand, disk_host_tube: &Tube) -> VmResponse {
@@ -1440,6 +1516,8 @@ impl VmRequest {
         device_control_tube: &Tube,
         vcpu_size: usize,
         irq_handler_control: &Tube,
+        snapshot_irqchip: impl Fn() -> anyhow::Result<serde_json::Value>,
+        restore_irqchip: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1855,6 +1933,8 @@ impl VmRequest {
                         }
                     }
                     info!("flushed IRQs in {} iterations", flush_attempts);
+
+                    // Snapshot Vcpus
                     let vcpu_path = snapshot_path.with_extension("vcpu");
                     let cpu_file = File::create(&vcpu_path)
                         .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
@@ -1874,6 +1954,17 @@ impl VmRequest {
                         }
                     }
                     serde_json::to_writer(cpu_file, &cpu_vec).expect("Failed to write Vcpu state");
+
+                    // Snapshot irqchip
+                    let irqchip_path = snapshot_path.with_extension("irqchip");
+                    let irqchip_file = File::create(&irqchip_path).with_context(|| {
+                        format!("failed to open path {}", irqchip_path.display())
+                    })?;
+                    let irqchip_snap = snapshot_irqchip()?;
+                    serde_json::to_writer(irqchip_file, &irqchip_snap)
+                        .expect("Failed to write irqchip state");
+
+                    // Snapshot devices
                     device_control_tube
                         .send(&DeviceControlCommand::SnapshotDevices {
                             snapshot_path: snapshot_path.clone(),
@@ -1899,6 +1990,7 @@ impl VmRequest {
                     irq_handler_control,
                     device_control_tube,
                     vcpu_size,
+                    restore_irqchip,
                 ) {
                     Ok(()) => VmResponse::Ok,
                     Err(e) => {
@@ -1907,14 +1999,17 @@ impl VmRequest {
                     }
                 }
             }
+            #[cfg(feature = "registered_events")]
             VmRequest::RegisterListener {
                 socket_addr: _,
                 event: _,
             } => VmResponse::Ok,
+            #[cfg(feature = "registered_events")]
             VmRequest::UnregisterListener {
                 socket_addr: _,
                 event: _,
             } => VmResponse::Ok,
+            #[cfg(feature = "registered_events")]
             VmRequest::Unregister { socket_addr: _ } => VmResponse::Ok,
         }
     }
@@ -1931,9 +2026,19 @@ pub fn do_restore(
     irq_handler_control: &Tube,
     device_control_tube: &Tube,
     vcpu_size: usize,
+    mut restore_irqchip: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
     let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
+
+    // Restore IrqChip
+    let irq_path = restore_path.with_extension("irqchip");
+    let irq_file = File::open(&irq_path)
+        .with_context(|| format!("failed to open path {}", irq_path.display()))?;
+    let irq_snapshot: serde_json::Value = serde_json::from_reader(irq_file)?;
+    restore_irqchip(irq_snapshot)?;
+
+    // Restore Vcpu(s)
     let vcpu_path = restore_path.with_extension("vcpu");
     let cpu_file = File::open(&vcpu_path)
         .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
@@ -1958,6 +2063,8 @@ pub fn do_restore(
             bail!("Failed to restore vcpu: {}", e);
         }
     }
+
+    // Restore devices
     device_control_tube
         .send(&DeviceControlCommand::RestoreDevices { restore_path })
         .context("send command to devices control socket")?;
