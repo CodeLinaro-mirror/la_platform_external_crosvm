@@ -14,7 +14,6 @@ use libc::EINVAL;
 use libc::EIO;
 use libc::ENOENT;
 use libc::ENXIO;
-use libc::EOPNOTSUPP;
 use vm_memory::GuestAddress;
 use winapi::shared::winerror::E_UNEXPECTED;
 use windows::Win32::Foundation::WHV_E_INSUFFICIENT_BUFFER;
@@ -1157,9 +1156,64 @@ impl VcpuX86_64 for WhpxVcpu {
         Ok(())
     }
 
-    // TODO: b/270734340 implement
     fn get_all_msrs(&self) -> Result<Vec<Register>> {
-        Err(Error::new(EOPNOTSUPP))
+        // Note that some members of VALID_MSRS cannot be fetched from WHPX with
+        // WHvGetVirtualProcessorRegisters per the HTLFS, so we enumerate all of
+        // permitted MSRs here.
+        //
+        // We intentionally exclude WHvRegisterPendingInterruption and
+        // WHvRegisterInterruptState because they are included in
+        // get_interrupt_state.
+        //
+        // We also exclude MSR_TSC, because on WHPX, we will use virtio-pvclock
+        // to restore the guest clocks. Note that this will be *guest aware*
+        // snapshotting. We may in the future add guest unaware snapshotting
+        // for Windows, in which case we will want to save/restore TSC such that
+        // the guest does not observe any change.
+        let mut registers = vec![
+            Register {
+                id: MSR_EFER,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_KERNEL_GS_BASE,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_APIC_BASE,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_SYSENTER_CS,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_SYSENTER_EIP,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_SYSENTER_ESP,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_STAR,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_LSTAR,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_CSTAR,
+                ..Default::default()
+            },
+            Register {
+                id: MSR_SFMASK,
+                ..Default::default()
+            },
+        ];
+        self.get_msrs(&mut registers)?;
+        Ok(registers)
     }
 
     /// Sets the model-specific registers.
@@ -1580,5 +1634,22 @@ mod tests {
         // succeed.
         let xsave = vcpu.get_xsave().unwrap();
         vcpu.set_xsave(&xsave).unwrap();
+    }
+
+    #[test]
+    fn get_and_set_interrupt_state_smoke() {
+        if !Whpx::is_enabled() {
+            return;
+        }
+        let cpu_count = 1;
+        let mem =
+            GuestMemory::new(&[(GuestAddress(0), 0x1000)]).expect("failed to create guest memory");
+        let vm = new_vm(cpu_count, mem);
+        let vcpu = vm.create_vcpu(0).expect("failed to create vcpu");
+
+        // For the sake of snapshotting, interrupt state is essentially opaque. We just want to make
+        // sure our syscalls succeed.
+        let interrupt_state = vcpu.get_interrupt_state().unwrap();
+        vcpu.set_interrupt_state(interrupt_state).unwrap();
     }
 }

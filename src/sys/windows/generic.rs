@@ -75,6 +75,7 @@ impl TaggedControlTube {
 pub(super) enum Token {
     VmEvent,
     BrokerShutdown,
+    VmControlServer,
     VmControl { index: usize },
 }
 
@@ -103,7 +104,7 @@ pub(super) fn handle_pvclock_request(tube: &Option<Tube>, command: PvClockComman
 
 // Run ime thread.
 pub(super) fn run_ime_thread(
-    product_args: RunControlArgs,
+    product_args: &mut RunControlArgs,
     exit_evt: &Event,
 ) -> Result<Option<JoinHandle<Result<()>>>> {
     Ok(None)
@@ -200,10 +201,8 @@ pub(super) fn create_gpu(
         gpu_parameters,
         None,
         event_devices,
-        /* external_blob= */ false,
-        /* system_blob= */ false,
         features,
-        BTreeMap::new(),
+        &BTreeMap::new(),
         wndproc_thread,
     ))
 }

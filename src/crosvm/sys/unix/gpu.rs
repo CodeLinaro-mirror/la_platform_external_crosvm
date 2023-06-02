@@ -4,13 +4,12 @@
 
 //! GPU related things
 //! depends on "gpu" feature
+static_assertions::assert_cfg!(feature = "gpu");
 
-#[cfg(feature = "gpu")]
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
-#[cfg(feature = "gpu")]
 use base::platform::move_proc_to_cgroup;
 use jail::*;
 use serde::Deserialize;
@@ -88,17 +87,21 @@ pub fn create_gpu_device(
     exit_evt_wrtube: &SendTube,
     gpu_control_tube: Tube,
     resource_bridges: Vec<Tube>,
-    wayland_socket_path: Option<&PathBuf>,
-    x_display: Option<String>,
     render_server_fd: Option<SafeDescriptor>,
     event_devices: Vec<EventDevice>,
 ) -> DeviceResult {
+    let is_sandboxed = cfg.jail_config.is_some();
+    let mut gpu_params = cfg.gpu_parameters.clone().unwrap();
+    gpu_params.external_blob = is_sandboxed;
+    gpu_params.allow_implicit_render_server_exec = !is_sandboxed;
+
     let mut display_backends = vec![
-        virtio::DisplayBackend::X(x_display),
+        virtio::DisplayBackend::X(cfg.x_display.clone()),
         virtio::DisplayBackend::Stub,
     ];
 
-    if let Some(socket_path) = wayland_socket_path {
+    // Use the unnamed socket for GPU display screens.
+    if let Some(socket_path) = cfg.wayland_socket_paths.get("") {
         display_backends.insert(
             0,
             virtio::DisplayBackend::Wayland(Some(socket_path.to_owned())),
@@ -112,13 +115,11 @@ pub fn create_gpu_device(
         gpu_control_tube,
         resource_bridges,
         display_backends,
-        cfg.gpu_parameters.as_ref().unwrap(),
+        &gpu_params,
         render_server_fd,
         event_devices,
-        /*external_blob=*/ cfg.jail_config.is_some(),
-        /*system_blob=*/ false,
         virtio::base_features(cfg.protection_type),
-        cfg.wayland_socket_paths.clone(),
+        &cfg.wayland_socket_paths,
         cfg.gpu_cgroup_path.as_ref(),
     );
 
@@ -131,12 +132,12 @@ pub fn create_gpu_device(
         let mut jail = create_gpu_minijail(&jail_config.pivot_root, &config)?;
 
         // Prepare GPU shader disk cache directory.
-        let (cache_dir, cache_size) = cfg
-            .gpu_parameters
-            .as_ref()
-            .map(|params| (params.cache_path.as_ref(), params.cache_size.as_ref()))
-            .unwrap();
-        let cache_info = get_gpu_cache_info(cache_dir, cache_size, None, cfg.jail_config.is_some());
+        let cache_info = get_gpu_cache_info(
+            gpu_params.cache_path.as_ref(),
+            gpu_params.cache_size.as_ref(),
+            None,
+            cfg.jail_config.is_some(),
+        );
 
         if let Some(dir) = cache_info.directory {
             // Manually bind mount recursively to allow DLC shader caches
@@ -182,7 +183,6 @@ pub struct GpuRenderServerParameters {
     pub precompiled_cache_path: Option<String>,
 }
 
-#[cfg(feature = "gpu")]
 fn get_gpu_render_server_environment(cache_info: Option<&GpuCacheInfo>) -> Result<Vec<String>> {
     let mut env = HashMap::<String, String>::new();
     let os_env_len = env::vars_os().count();
@@ -212,7 +212,6 @@ fn get_gpu_render_server_environment(cache_info: Option<&GpuCacheInfo>) -> Resul
     Ok(env.iter().map(|(k, v)| format!("{}={}", k, v)).collect())
 }
 
-#[cfg(feature = "gpu")]
 pub fn start_gpu_render_server(
     cfg: &Config,
     render_server_parameters: &GpuRenderServerParameters,

@@ -78,7 +78,7 @@ pub trait IrqChipX86_64: IrqChip {
             lapics.push(self.get_lapic_state(i)?);
             mp_states.push(self.get_mp_state(i)?);
         }
-        serde_json::to_value(&IrqChipSnapshot {
+        serde_json::to_value(IrqChipSnapshot {
             ioapic_state: self.get_ioapic_state()?,
             lapic_state: lapics,
             pic_state_1: self.get_pic_state(PicSelect::Primary)?,
@@ -184,6 +184,20 @@ impl Routes {
             routes.push(IrqRoute::ioapic_irq_route(i));
         }
 
+        routes
+    }
+
+    /// Gets the routes as a flat Vec of `IrqRoute`s.
+    pub fn get_routes(&self) -> Vec<IrqRoute> {
+        let mut routes = Vec::with_capacity(self.routes.len());
+        for (gsi, sources) in self.routes.iter().enumerate() {
+            for source in sources.iter() {
+                routes.push(IrqRoute {
+                    gsi: gsi.try_into().expect("GSIs must be < u32::MAX"),
+                    source: *source,
+                });
+            }
+        }
         routes
     }
 

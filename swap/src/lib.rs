@@ -17,11 +17,14 @@ cfg_if::cfg_if! {
         pub mod page_handler;
         mod processes;
         mod staging;
+        mod uffd_list;
         // this is public only for integration tests.
         pub mod userfaultfd;
         // this is public only for integration tests.
         pub mod worker;
 
+        pub use crate::controller::SwapDeviceHelper;
+        pub use crate::controller::PrepareFork;
         pub use crate::controller::SwapController;
         pub use crate::controller::SwapDeviceUffdSender;
     }

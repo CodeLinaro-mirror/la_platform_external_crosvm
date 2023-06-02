@@ -9,7 +9,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use base::error;
@@ -202,7 +201,7 @@ macro_rules! trace_event {
 macro_rules! trace_event_begin {
     ($category:ident) => {
         $crate::CATEGORY_COUNTER[$crate::TracedCategories::$category as usize]
-            .fetch_add(1, Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     };
 }
 
@@ -219,21 +218,22 @@ macro_rules! trace_event_end {
             .load(std::sync::atomic::Ordering::Relaxed))
         {
             $crate::CATEGORY_COUNTER[$crate::TracedCategories::$category as usize]
-                .fetch_sub(1, Ordering::SeqCst);
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
     };
     ($category_id:expr) => {
         if ($crate::ENABLED_CATEGORIES[$category_id as usize]
             .load(std::sync::atomic::Ordering::Relaxed))
         {
-            $crate::CATEGORY_COUNTER[$category_id as usize].fetch_sub(1, Ordering::SeqCst);
+            $crate::CATEGORY_COUNTER[$category_id as usize]
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
     };
 }
 
 // List of categories that can be enabled.
 // If a category is marked as disabled here, no events will be processed for it.
-setup_trace_marker!((VirtioFs, true));
+setup_trace_marker!((VirtioFs, true), (VirtioNet, true));
 
 /// Platform-specific implementation of the `trace_simple_print!` macro. If tracing
 /// is enabled on the system, it writes the given message to the `trace_marker` file.
