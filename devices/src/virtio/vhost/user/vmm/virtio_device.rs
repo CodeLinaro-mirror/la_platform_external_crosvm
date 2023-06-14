@@ -11,6 +11,7 @@ use base::error;
 use base::Event;
 use base::RawDescriptor;
 use base::WorkerThread;
+use serde_json::Value;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
@@ -19,14 +20,12 @@ use crate::virtio::copy_config;
 use crate::virtio::vhost::user::vmm::Connection;
 use crate::virtio::vhost::user::vmm::Result;
 use crate::virtio::vhost::user::vmm::VhostUserHandler;
-use crate::virtio::virtio_device::Error;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
 use crate::virtio::VirtioDevice;
-use crate::virtio::VirtioDeviceSaved;
 use crate::Suspendable;
 
 pub struct VhostUserVirtioDevice {
@@ -200,17 +199,25 @@ impl VirtioDevice for VhostUserVirtioDevice {
     fn expose_shmem_descriptors_with_viommu(&self) -> bool {
         self.expose_shmem_descriptors_with_viommu
     }
-
-    // The queue states are saved in the device process.
-    fn stop(&mut self) -> anyhow::Result<Option<VirtioDeviceSaved>, Error> {
-        if let Err(e) = self.handler.borrow_mut().sleep() {
-            error!("Failed to sleep vhost user device {}", e);
-        }
-        if let Some(worker_thread) = self.worker_thread.take() {
-            worker_thread.stop();
-        }
-        Ok(None)
-    }
 }
 
-impl Suspendable for VhostUserVirtioDevice {}
+impl Suspendable for VhostUserVirtioDevice {
+    fn sleep(&mut self) -> anyhow::Result<()> {
+        self.handler
+            .borrow_mut()
+            .sleep()
+            .context("Failed to sleep device.")
+    }
+
+    fn wake(&mut self) -> anyhow::Result<()> {
+        self.handler
+            .borrow_mut()
+            .wake()
+            .context("Failed to wake device.")
+    }
+
+    fn snapshot(&self) -> anyhow::Result<Value> {
+        // TODO(b/280608177): Snapshot devices
+        serde_json::to_value("").context("failed to serialize")
+    }
+}

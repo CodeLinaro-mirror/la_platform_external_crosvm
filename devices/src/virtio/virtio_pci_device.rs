@@ -8,7 +8,6 @@ use std::sync::Arc;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use base::error;
 use base::trace;
@@ -34,11 +33,9 @@ use virtio_sys::virtio_config::VIRTIO_CONFIG_S_DRIVER_OK;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FAILED;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_FEATURES_OK;
 use virtio_sys::virtio_config::VIRTIO_CONFIG_S_NEEDS_RESET;
-use vm_control::IoEventUpdateRequest;
+use vm_control::api::VmMemoryClient;
 use vm_control::VmMemoryDestination;
 use vm_control::VmMemoryRegionId;
-use vm_control::VmMemoryRequest;
-use vm_control::VmMemoryResponse;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -290,71 +287,22 @@ pub struct VirtioPciDevice {
     queues: Vec<Queue>,
     queue_evts: Vec<QueueEvent>,
     mem: GuestMemory,
-    settings_bar: u8,
+    settings_bar: PciBarIndex,
     msix_config: Arc<Mutex<MsixConfig>>,
     msix_cap_reg_idx: Option<usize>,
     common_config: VirtioPciCommonConfig,
 
+    // True if the device is asleep (aka suspended).
+    is_asleep: bool,
+
     iommu: Option<Arc<Mutex<IpcMemoryMapper>>>,
 
-    // A tube that is present if the device has shared memory regions, and
+    // API client that is present if the device has shared memory regions, and
     // is used to map/unmap files into the shared memory region.
-    shared_memory_tube: Option<Tube>,
+    shared_memory_vm_memory_client: Option<VmMemoryClient>,
 
-    // Tube for request registeration of ioevents when PCI BAR reprogramming is detected.
-    ioevent_tube: Tube,
-}
-
-fn ioevent_request(ioevent_tube: &Tube, request: IoEventUpdateRequest) -> anyhow::Result<()> {
-    ioevent_tube
-        .send(&VmMemoryRequest::IoEventRaw(request))
-        .context("ioevent_tube.send()")?;
-    match ioevent_tube
-        .recv::<VmMemoryResponse>()
-        .context("ioevent_tube.recv()")?
-    {
-        VmMemoryResponse::Ok => Ok(()),
-        VmMemoryResponse::Err(e) => Err(e).context("VmMemoryRequest::IoEventRaw"),
-        other => Err(anyhow!("unexpected VmMemoryResponse {:?}", other)),
-    }
-}
-
-fn register_ioevent(
-    ioevent_tube: &Tube,
-    event: &Event,
-    addr: u64,
-    datamatch: Datamatch,
-) -> anyhow::Result<()> {
-    ioevent_request(
-        ioevent_tube,
-        IoEventUpdateRequest {
-            event: event
-                .try_clone()
-                .context("failed to clone event for ioevent_request")?,
-            addr,
-            datamatch,
-            register: true,
-        },
-    )
-}
-
-fn unregister_ioevent(
-    ioevent_tube: &Tube,
-    event: &Event,
-    addr: u64,
-    datamatch: Datamatch,
-) -> anyhow::Result<()> {
-    ioevent_request(
-        ioevent_tube,
-        IoEventUpdateRequest {
-            event: event
-                .try_clone()
-                .context("failed to clone event for ioevent_request")?,
-            addr,
-            datamatch,
-            register: false,
-        },
-    )
+    // API client for registration of ioevents when PCI BAR reprogramming is detected.
+    ioevent_vm_memory_client: VmMemoryClient,
 }
 
 impl VirtioPciDevice {
@@ -364,13 +312,13 @@ impl VirtioPciDevice {
         device: Box<dyn VirtioDevice>,
         msi_device_tube: Tube,
         disable_intx: bool,
-        shared_memory_tube: Option<Tube>,
-        ioevent_tube: Tube,
+        shared_memory_vm_memory_client: Option<VmMemoryClient>,
+        ioevent_vm_memory_client: VmMemoryClient,
     ) -> Result<Self> {
-        // shared_memory_tube is required if there are shared memory regions.
+        // shared_memory_vm_memory_client is required if there are shared memory regions.
         assert_eq!(
             device.get_shared_memory_region().is_none(),
-            shared_memory_tube.is_none()
+            shared_memory_vm_memory_client.is_none()
         );
 
         let mut queue_evts = Vec::new();
@@ -445,9 +393,10 @@ impl VirtioPciDevice {
                 queue_select: 0,
                 msix_config: VIRTIO_MSI_NO_VECTOR,
             },
+            is_asleep: false,
             iommu: None,
-            shared_memory_tube,
-            ioevent_tube,
+            shared_memory_vm_memory_client,
+            ioevent_vm_memory_client,
         })
     }
 
@@ -531,7 +480,7 @@ impl VirtioPciDevice {
             .map_err(PciDeviceError::CapabilitiesSetup)?;
         self.msix_cap_reg_idx = Some(msix_offset / 4);
 
-        self.settings_bar = settings_bar;
+        self.settings_bar = settings_bar as PciBarIndex;
         Ok(())
     }
 
@@ -553,7 +502,7 @@ impl VirtioPciDevice {
         );
         self.interrupt = Some(interrupt.clone());
 
-        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize);
+        let bar0 = self.config_regs.get_bar_addr(self.settings_bar);
         let notify_base = bar0 + NOTIFICATION_BAR_OFFSET;
 
         // Use ready queues and their events.
@@ -565,13 +514,13 @@ impl VirtioPciDevice {
             .filter(|((_, q), _)| q.ready())
             .map(|((queue_index, queue), evt)| {
                 if !evt.ioevent_registered {
-                    register_ioevent(
-                        &self.ioevent_tube,
-                        &evt.event,
-                        notify_base + queue_index as u64 * u64::from(NOTIFY_OFF_MULTIPLIER),
-                        Datamatch::AnyLength,
-                    )
-                    .context("failed to register ioevent")?;
+                    self.ioevent_vm_memory_client
+                        .register_io_event(
+                            evt.event.try_clone().context("failed to clone Event")?,
+                            notify_base + queue_index as u64 * u64::from(NOTIFY_OFF_MULTIPLIER),
+                            Datamatch::AnyLength,
+                        )
+                        .context("failed to register ioevent")?;
                     evt.ioevent_registered = true;
                 }
                 Ok((
@@ -596,18 +545,18 @@ impl VirtioPciDevice {
     }
 
     fn unregister_ioevents(&mut self) -> anyhow::Result<()> {
-        let bar0 = self.config_regs.get_bar_addr(self.settings_bar as usize);
+        let bar0 = self.config_regs.get_bar_addr(self.settings_bar);
         let notify_base = bar0 + NOTIFICATION_BAR_OFFSET;
 
         for (queue_index, evt) in self.queue_evts.iter_mut().enumerate() {
             if evt.ioevent_registered {
-                unregister_ioevent(
-                    &self.ioevent_tube,
-                    &evt.event,
-                    notify_base + queue_index as u64 * u64::from(NOTIFY_OFF_MULTIPLIER),
-                    Datamatch::AnyLength,
-                )
-                .context("failed to unregister ioevent")?;
+                self.ioevent_vm_memory_client
+                    .unregister_io_event(
+                        evt.event.try_clone().context("failed to clone Event")?,
+                        notify_base + queue_index as u64 * u64::from(NOTIFY_OFF_MULTIPLIER),
+                        Datamatch::AnyLength,
+                    )
+                    .context("failed to unregister ioevent")?;
                 evt.ioevent_registered = false;
             }
         }
@@ -676,7 +625,7 @@ impl PciDevice for VirtioPciDevice {
         if let Some(iommu) = &self.iommu {
             rds.append(&mut iommu.lock().as_raw_descriptors());
         }
-        rds.push(self.ioevent_tube.as_raw_descriptor());
+        rds.push(self.ioevent_vm_memory_client.as_raw_descriptor());
         rds
     }
 
@@ -771,7 +720,7 @@ impl PciDevice for VirtioPciDevice {
 
             self.device
                 .set_shared_memory_mapper(Box::new(VmRequester::new(
-                    self.shared_memory_tube
+                    self.shared_memory_vm_memory_client
                         .take()
                         .expect("missing shared_memory_tube"),
                     alloc,
@@ -865,18 +814,8 @@ impl PciDevice for VirtioPciDevice {
         self.config_regs.write_reg(reg_idx, offset, data)
     }
 
-    fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
-        let bar = match self
-            .config_regs
-            .get_bars()
-            .find(|bar| bar.address_range().contains(&addr))
-        {
-            Some(bar) => bar,
-            None => return,
-        };
-
-        if bar.bar_index() == self.settings_bar as PciBarIndex {
-            let offset = addr - bar.address();
+    fn read_bar(&mut self, bar_index: usize, offset: u64, data: &mut [u8]) {
+        if bar_index == self.settings_bar {
             match offset {
                 COMMON_CONFIG_BAR_OFFSET..=COMMON_CONFIG_LAST => self.common_config.read(
                     offset - COMMON_CONFIG_BAR_OFFSET,
@@ -914,23 +853,12 @@ impl PciDevice for VirtioPciDevice {
                 _ => (),
             }
         } else {
-            self.device
-                .read_bar(bar.bar_index(), addr - bar.address(), data);
+            self.device.read_bar(bar_index, offset, data);
         }
     }
 
-    fn write_bar(&mut self, addr: u64, data: &[u8]) {
-        let bar = match self
-            .config_regs
-            .get_bars()
-            .find(|bar| bar.address_range().contains(&addr))
-        {
-            Some(bar) => bar,
-            None => return,
-        };
-
-        if bar.bar_index() == self.settings_bar as PciBarIndex {
-            let offset = addr - bar.address();
+    fn write_bar(&mut self, bar_index: usize, offset: u64, data: &[u8]) {
+        if bar_index == self.settings_bar {
             match offset {
                 COMMON_CONFIG_BAR_OFFSET..=COMMON_CONFIG_LAST => self.common_config.write(
                     offset - COMMON_CONFIG_BAR_OFFSET,
@@ -978,8 +906,7 @@ impl PciDevice for VirtioPciDevice {
                 _ => (),
             }
         } else {
-            self.device
-                .write_bar(bar.bar_index(), addr - bar.address(), data);
+            self.device.write_bar(bar_index, offset, data);
         }
 
         if !self.device_activated && self.is_driver_ready() {
@@ -1025,29 +952,63 @@ impl PciDevice for VirtioPciDevice {
 
 #[derive(Serialize, Deserialize)]
 struct VirtioPciDeviceSnapshot {
+    config_regs: serde_json::Value,
     inner_device: serde_json::Value,
+    device_activated: bool,
+    interrupt: Option<serde_json::Value>,
+    queues: Vec<serde_json::Value>,
     msix_config: serde_json::Value,
+    common_config: VirtioPciCommonConfig,
 }
 
 impl Suspendable for VirtioPciDevice {
     fn sleep(&mut self) -> anyhow::Result<()> {
-        if let Some(state) = self.device.stop()? {
-            self.queues = state.queues;
+        // If the device is already asleep, there is no need to send a request to stop workers
+        // since they should already be stopped.
+        if self.is_asleep {
+            return Ok(());
         }
+        self.device.sleep()?;
+        self.is_asleep = true;
         Ok(())
     }
 
     fn wake(&mut self) -> anyhow::Result<()> {
-        if self.device_activated {
-            self.activate()?;
+        // If the device is awake, workers will be running so no need to send a request to start
+        // them up.
+        if !self.is_asleep {
+            return Ok(());
         }
+        if self.device_activated {
+            self.device.wake()?;
+        }
+        self.is_asleep = false;
         Ok(())
     }
 
     fn snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        if self.iommu.is_some() {
+            return Err(anyhow!("Cannot snapshot if iommu is present."));
+        }
+        let interrupt = match &self.interrupt {
+            Some(interrupt) => Some(interrupt.snapshot()?),
+            None => None,
+        };
+        let queues: Vec<serde_json::Value> = self
+            .queues
+            .iter()
+            .map(|queue| queue.snapshot())
+            .collect::<anyhow::Result<Vec<serde_json::Value>>>()?;
+
         serde_json::to_value(VirtioPciDeviceSnapshot {
+            config_regs: serde_json::to_value(&self.config_regs)
+                .context("failed to serialize config_regs")?,
             inner_device: self.device.snapshot()?,
+            device_activated: self.device_activated,
+            interrupt,
+            queues,
             msix_config: self.msix_config.lock().snapshot()?,
+            common_config: self.common_config,
         })
         .context("failed to serialize VirtioPciDeviceSnapshot")
     }
@@ -1060,16 +1021,16 @@ impl Suspendable for VirtioPciDevice {
 }
 
 struct VmRequester {
-    tube: Tube,
+    vm_memory_client: VmMemoryClient,
     alloc: Alloc,
     mappings: BTreeMap<u64, VmMemoryRegionId>,
     needs_prepare: bool,
 }
 
 impl VmRequester {
-    fn new(tube: Tube, alloc: Alloc, do_prepare: bool) -> Self {
+    fn new(vm_memory_client: VmMemoryClient, alloc: Alloc, do_prepare: bool) -> Self {
         Self {
-            tube,
+            vm_memory_client,
             alloc,
             mappings: BTreeMap::new(),
             needs_prepare: do_prepare,
@@ -1085,57 +1046,36 @@ impl SharedMemoryMapper for VmRequester {
         prot: Protection,
     ) -> anyhow::Result<()> {
         if self.needs_prepare {
-            self.tube
-                .send(&VmMemoryRequest::PrepareSharedMemoryRegion { alloc: self.alloc })
-                .context("failed to send request")?;
-            match self
-                .tube
-                .recv()
-                .context("failed to recieve request response")?
-            {
-                VmMemoryResponse::Ok => (),
-                e => bail!("unexpected response {:?}", e),
-            };
+            self.vm_memory_client
+                .prepare_shared_memory_region(self.alloc)
+                .context("prepare_shared_memory_region failed")?;
             self.needs_prepare = false;
         }
-        let request = VmMemoryRequest::RegisterMemory {
-            source,
-            dest: VmMemoryDestination::ExistingAllocation {
-                allocation: self.alloc,
-                offset,
-            },
-            prot,
-        };
-        self.tube.send(&request).context("failed to send request")?;
-        match self
-            .tube
-            .recv()
-            .context("failed to recieve request response")?
-        {
-            VmMemoryResponse::RegisterMemory(id) => {
-                self.mappings.insert(offset, id);
-                Ok(())
-            }
-            e => Err(anyhow!("unexpected response {:?}", e)),
-        }
+
+        let id = self
+            .vm_memory_client
+            .register_memory(
+                source,
+                VmMemoryDestination::ExistingAllocation {
+                    allocation: self.alloc,
+                    offset,
+                },
+                prot,
+            )
+            .context("register_memory failed")?;
+
+        self.mappings.insert(offset, id);
+        Ok(())
     }
 
     fn remove_mapping(&mut self, offset: u64) -> anyhow::Result<()> {
         let id = self.mappings.remove(&offset).context("invalid offset")?;
-        self.tube
-            .send(&VmMemoryRequest::UnregisterMemory(id))
-            .context("failed to send request")?;
-        match self
-            .tube
-            .recv()
-            .context("failed to recieve request response")?
-        {
-            VmMemoryResponse::Ok => Ok(()),
-            e => Err(anyhow!(format!("unexpected response {:?}", e))),
-        }
+        self.vm_memory_client
+            .unregister_memory(id)
+            .context("unregister_memory failed")
     }
 
     fn as_raw_descriptor(&self) -> Option<RawDescriptor> {
-        Some(self.tube.as_raw_descriptor())
+        Some(self.vm_memory_client.as_raw_descriptor())
     }
 }

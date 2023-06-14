@@ -30,7 +30,7 @@ fi
 #
 # TODO: Consider using android's prebuilt rust binaries. Currently doesn't work
 # because they try to incorrectly use system clang and llvm.
-RUST_TOOLCHAIN="1.65.0"
+RUST_TOOLCHAIN="1.68.2"
 rustup which --toolchain $RUST_TOOLCHAIN cargo || \
   rustup toolchain install $RUST_TOOLCHAIN
 CARGO_BIN="$(dirname $(rustup which --toolchain $RUST_TOOLCHAIN cargo))"

@@ -130,6 +130,9 @@ pub enum Error {
     /// Failure from the slave side.
     #[error("slave internal error")]
     SlaveInternalError,
+    /// Failure to run device specific sleep.
+    #[error("Failed to run device specific sleep: {0}")]
+    SleepError(anyhow::Error),
     /// The socket is broken or has been closed.
     #[error("socket is broken: {0}")]
     SocketBroken(std::io::Error),
@@ -142,6 +145,9 @@ pub enum Error {
     /// Should retry the socket operation again.
     #[error("temporary socket error: {0}")]
     SocketRetry(std::io::Error),
+    /// Failure to stop a queue.
+    #[error("failed to stop queue")]
+    StopQueueError(anyhow::Error),
     /// Error from tx/rx on a Tube.
     #[error("failed to read/write on Tube: {0}")]
     TubeError(base::TubeError),

@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::ensure;
 use anyhow::Context;
@@ -58,10 +57,8 @@ use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
 use sync::Mutex;
 use thiserror::Error as ThisError;
-use vm_control::IoEventUpdateRequest;
+use vm_control::api::VmMemoryClient;
 use vm_control::VmMemoryDestination;
-use vm_control::VmMemoryRequest;
-use vm_control::VmMemoryResponse;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -81,6 +78,7 @@ use crate::pci::pci_device::BarRange;
 use crate::pci::pci_device::PciDevice;
 use crate::pci::pci_device::Result as PciResult;
 use crate::pci::PciAddress;
+use crate::pci::PciBarIndex;
 use crate::pci::PciDeviceError;
 use crate::vfio::VfioContainer;
 use crate::Suspendable;
@@ -94,9 +92,9 @@ const COIOMMU_CMD_ACTIVATE: u64 = 1;
 const COIOMMU_CMD_PARK_UNPIN: u64 = 2;
 const COIOMMU_CMD_UNPARK_UNPIN: u64 = 3;
 const COIOMMU_REVISION_ID: u8 = 0x10;
-const COIOMMU_MMIO_BAR: u8 = 0;
+const COIOMMU_MMIO_BAR: PciBarIndex = 0;
 const COIOMMU_MMIO_BAR_SIZE: u64 = 0x2000;
-const COIOMMU_NOTIFYMAP_BAR: u8 = 2;
+const COIOMMU_NOTIFYMAP_BAR: PciBarIndex = 2;
 const COIOMMU_NOTIFYMAP_SIZE: usize = 0x2000;
 const COIOMMU_TOPOLOGYMAP_BAR: u8 = 4;
 const COIOMMU_TOPOLOGYMAP_SIZE: usize = 0x2000;
@@ -115,8 +113,6 @@ enum Error {
     CreateSharedMemory,
     #[error("Failed to get DTT entry")]
     GetDTTEntry,
-    #[error("Tube error")]
-    TubeError,
 }
 
 //default interval is 60s
@@ -1018,7 +1014,7 @@ pub struct CoIommuDev {
     topologymap_mem: SafeDescriptor,
     topologymap_addr: Option<u64>,
     mmapped: bool,
-    device_tube: Tube,
+    vm_memory_client: VmMemoryClient,
     pin_thread: Option<WorkerThread<PinWorker>>,
     unpin_thread: Option<WorkerThread<UnpinWorker>>,
     unpin_tube: Option<Tube>,
@@ -1032,7 +1028,7 @@ impl CoIommuDev {
     pub fn new(
         mem: GuestMemory,
         vfio_container: Arc<Mutex<VfioContainer>>,
-        device_tube: Tube,
+        vm_memory_client: VmMemoryClient,
         unpin_tube: Option<Tube>,
         endpoints: Vec<u16>,
         vcpu_count: u64,
@@ -1097,7 +1093,7 @@ impl CoIommuDev {
             topologymap_mem: topologymap_mem.into(),
             topologymap_addr: None,
             mmapped: false,
-            device_tube,
+            vm_memory_client,
             pin_thread: None,
             unpin_thread: None,
             unpin_tube,
@@ -1113,25 +1109,6 @@ impl CoIommuDev {
         })
     }
 
-    fn send_msg(&self, msg: &VmMemoryRequest) -> Result<()> {
-        self.device_tube.send(msg).context(Error::TubeError)?;
-        let res = self.device_tube.recv().context(Error::TubeError)?;
-        match res {
-            VmMemoryResponse::RegisterMemory { .. } | VmMemoryResponse::Ok => Ok(()),
-            VmMemoryResponse::Err(e) => Err(anyhow!("Receive msg err {}", e)),
-        }
-    }
-
-    fn register_ioevent(&self, event: &Event, addr: u64, datamatch: Datamatch) -> Result<()> {
-        let request = VmMemoryRequest::IoEventRaw(IoEventUpdateRequest {
-            event: event.try_clone().unwrap(),
-            addr,
-            datamatch,
-            register: true,
-        });
-        self.send_msg(&request)
-    }
-
     fn register_mmap(
         &self,
         descriptor: SafeDescriptor,
@@ -1140,16 +1117,19 @@ impl CoIommuDev {
         gpa: u64,
         prot: Protection,
     ) -> Result<()> {
-        let request = VmMemoryRequest::RegisterMemory {
-            source: VmMemorySource::Descriptor {
-                descriptor,
-                offset,
-                size: size as u64,
-            },
-            dest: VmMemoryDestination::GuestPhysicalAddress(gpa),
-            prot,
-        };
-        self.send_msg(&request)
+        let _region = self
+            .vm_memory_client
+            .register_memory(
+                VmMemorySource::Descriptor {
+                    descriptor,
+                    offset,
+                    size: size as u64,
+                },
+                VmMemoryDestination::GuestPhysicalAddress(gpa),
+                prot,
+            )
+            .context("register_mmap register_memory failed")?;
+        Ok(())
     }
 
     fn mmap(&mut self) {
@@ -1212,10 +1192,15 @@ impl CoIommuDev {
             .map(|e| e.try_clone().unwrap())
             .collect();
 
-        let bar0 = self.config_regs.get_bar_addr(COIOMMU_MMIO_BAR as usize);
+        let bar0 = self.config_regs.get_bar_addr(COIOMMU_MMIO_BAR);
         let notify_base = bar0 + mem::size_of::<CoIommuReg>() as u64;
         for (i, evt) in self.ioevents.iter().enumerate() {
-            self.register_ioevent(evt, notify_base + i as u64, Datamatch::AnyLength)
+            self.vm_memory_client
+                .register_io_event(
+                    evt.try_clone().expect("failed to clone event"),
+                    notify_base + i as u64,
+                    Datamatch::AnyLength,
+                )
                 .expect("failed to register ioevent");
         }
 
@@ -1301,15 +1286,11 @@ impl CoIommuDev {
         Ok(addr)
     }
 
-    fn read_mmio(&mut self, addr: u64, data: &mut [u8]) {
-        let bar = self.config_regs.get_bar_addr(COIOMMU_MMIO_BAR as usize);
-        let offset = addr - bar;
+    fn read_mmio(&mut self, offset: u64, data: &mut [u8]) {
         if offset >= mem::size_of::<CoIommuReg>() as u64 {
             error!(
-                "{}: read_mmio: invalid addr 0x{:x} bar 0x{:x} offset 0x{:x}",
+                "{}: read_mmio: invalid offset 0x{:x}",
                 self.debug_label(),
-                addr,
-                bar,
                 offset
             );
             return;
@@ -1336,10 +1317,8 @@ impl CoIommuDev {
         data.copy_from_slice(&v.to_ne_bytes());
     }
 
-    fn write_mmio(&mut self, addr: u64, data: &[u8]) {
-        let bar = self.config_regs.get_bar_addr(COIOMMU_MMIO_BAR as usize);
+    fn write_mmio(&mut self, offset: u64, data: &[u8]) {
         let mmio_len = mem::size_of::<CoIommuReg>() as u64;
-        let offset = addr - bar;
         if offset >= mmio_len {
             if data.len() != 1 {
                 error!(
@@ -1476,7 +1455,7 @@ impl PciDevice for CoIommuDev {
             resources,
             address,
             COIOMMU_MMIO_BAR_SIZE,
-            COIOMMU_MMIO_BAR,
+            COIOMMU_MMIO_BAR as u8,
             "coiommu-mmiobar",
         )?;
 
@@ -1517,7 +1496,7 @@ impl PciDevice for CoIommuDev {
             resources,
             address,
             COIOMMU_NOTIFYMAP_SIZE as u64,
-            COIOMMU_NOTIFYMAP_BAR,
+            COIOMMU_NOTIFYMAP_BAR as u8,
             "coiommu-notifymap",
         )?;
         self.notifymap_addr = Some(notifymap_addr);
@@ -1549,7 +1528,7 @@ impl PciDevice for CoIommuDev {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
         let mut rds = vec![
             self.vfio_container.lock().as_raw_descriptor(),
-            self.device_tube.as_raw_descriptor(),
+            self.vm_memory_client.as_raw_descriptor(),
             self.notifymap_mem.as_raw_descriptor(),
             self.topologymap_mem.as_raw_descriptor(),
         ];
@@ -1560,16 +1539,10 @@ impl PciDevice for CoIommuDev {
         rds
     }
 
-    fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
-        let mmio_bar = self.config_regs.get_bar_addr(COIOMMU_MMIO_BAR as usize);
-        let notifymap = self
-            .config_regs
-            .get_bar_addr(COIOMMU_NOTIFYMAP_BAR as usize);
-        match addr {
-            o if mmio_bar <= o && o < mmio_bar + COIOMMU_MMIO_BAR_SIZE => {
-                self.read_mmio(addr, data);
-            }
-            o if notifymap <= o && o < notifymap + COIOMMU_NOTIFYMAP_SIZE as u64 => {
+    fn read_bar(&mut self, bar_index: PciBarIndex, offset: u64, data: &mut [u8]) {
+        match bar_index {
+            COIOMMU_MMIO_BAR => self.read_mmio(offset, data),
+            COIOMMU_NOTIFYMAP_BAR => {
                 // With coiommu device activated, the accessing the notifymap bar
                 // won't cause vmexit. If goes here, means the coiommu device is
                 // deactivated, and will not do the pin/unpin work. Thus no need
@@ -1579,16 +1552,10 @@ impl PciDevice for CoIommuDev {
         }
     }
 
-    fn write_bar(&mut self, addr: u64, data: &[u8]) {
-        let mmio_bar = self.config_regs.get_bar_addr(COIOMMU_MMIO_BAR as usize);
-        let notifymap = self
-            .config_regs
-            .get_bar_addr(COIOMMU_NOTIFYMAP_BAR as usize);
-        match addr {
-            o if mmio_bar <= o && o < mmio_bar + COIOMMU_MMIO_BAR_SIZE => {
-                self.write_mmio(addr, data);
-            }
-            o if notifymap <= o && o < notifymap + COIOMMU_NOTIFYMAP_SIZE as u64 => {
+    fn write_bar(&mut self, bar_index: PciBarIndex, offset: u64, data: &[u8]) {
+        match bar_index {
+            COIOMMU_MMIO_BAR => self.write_mmio(offset, data),
+            COIOMMU_NOTIFYMAP_BAR => {
                 // With coiommu device activated, the accessing the notifymap bar
                 // won't cause vmexit. If goes here, means the coiommu device is
                 // deactivated, and will not do the pin/unpin work. Thus no need

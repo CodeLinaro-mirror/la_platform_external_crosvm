@@ -58,6 +58,7 @@ use arch::VirtioDeviceStub;
 use arch::VmArch;
 use arch::VmComponents;
 use arch::VmImage;
+use argh::FromArgs;
 use base::ReadNotifier;
 #[cfg(feature = "balloon")]
 use base::UnixSeqpacket;
@@ -168,6 +169,7 @@ use smallvec::SmallVec;
 use swap::SwapController;
 use sync::Condvar;
 use sync::Mutex;
+use vm_control::api::VmMemoryClient;
 use vm_control::*;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -508,34 +510,12 @@ fn create_virtio_devices(
                     .try_clone()
                     .context("failed to clone registered_evt_q tube")?,
             ),
+            cfg.balloon_wss_num_bins,
         )?);
     }
 
     for opt in &cfg.net {
-        let vq_pairs = opt.vq_pairs.unwrap_or(1);
-        let vcpu_count = cfg.vcpu_count.unwrap_or(1);
-        let multi_vq = vq_pairs > 1 && !opt.vhost_net;
-        let (tap, mac) = create_tap_for_net_device(&opt.mode, multi_vq)?;
-        let dev = if opt.vhost_net {
-            create_virtio_vhost_net_device_from_tap(
-                cfg.protection_type,
-                &cfg.jail_config,
-                vq_pairs,
-                vcpu_count,
-                cfg.vhost_net_device_path.clone(),
-                tap,
-                mac,
-            )
-        } else {
-            create_virtio_net_device_from_tap(
-                cfg.protection_type,
-                &cfg.jail_config,
-                vq_pairs,
-                vcpu_count,
-                tap,
-                mac,
-            )
-        }?;
+        let dev = opt.create_virtio_device_and_jail(cfg.protection_type, &cfg.jail_config)?;
         devs.push(dev);
     }
 
@@ -792,7 +772,7 @@ fn create_devices(
             let dev = CoIommuDev::new(
                 vm.get_memory().clone(),
                 vfio_container,
-                coiommu_device_tube,
+                VmMemoryClient::new(coiommu_device_tube),
                 coiommu_tube,
                 coiommu_attached_endpoints,
                 vcpu_count,
@@ -862,8 +842,8 @@ fn create_devices(
                     stub.dev,
                     msi_device_tube,
                     cfg.disable_virtio_intx,
-                    shared_memory_tube,
-                    ioevent_device_tube,
+                    shared_memory_tube.map(VmMemoryClient::new),
+                    VmMemoryClient::new(ioevent_device_tube),
                 )
                 .context("failed to create virtio pci dev")?;
 
@@ -1974,7 +1954,7 @@ where
             msi_device_tube,
             cfg.disable_virtio_intx,
             None,
-            ioevent_device_tube,
+            VmMemoryClient::new(ioevent_device_tube),
         )
         .context("failed to create virtio pci dev")?;
         // early reservation for viommu.
@@ -3050,7 +3030,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     // here since they are used by the vmm-swap feature.
                     let mut do_exit = false;
                     while let Some(siginfo) =
-                        sigchld_fd.read().context("failed to create signalfd")?
+                        sigchld_fd.read().context("failed to read signalfd")?
                     {
                         let pid = siginfo.ssi_pid;
                         let pid_label = match linux.pid_debug_label_map.get(&pid) {
@@ -4014,6 +3994,22 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
     // Create vsock devices.
     for (i, params) in opts.vsock.iter().enumerate() {
         add_device(i, &params.device, &params.vhost, &jail, &mut devices_jails)?;
+    }
+
+    // Create network devices.
+    for (i, params) in opts.net.iter().enumerate() {
+        add_device(i, &params.device, &params.vhost, &jail, &mut devices_jails)?;
+    }
+
+    // No device created, that's probably not intended - print the help in that case.
+    if devices_jails.is_empty() {
+        let err = DevicesCommand::from_args(
+            &[&std::env::args().next().unwrap_or(String::from("crosvm"))],
+            &["--help"],
+        )
+        .unwrap_err();
+        println!("{}", err.output);
+        return Ok(());
     }
 
     let ex = Executor::new()?;

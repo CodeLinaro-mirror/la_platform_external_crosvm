@@ -53,6 +53,50 @@ rust_test {
     ],
 }
 
+rust_test {
+    name: "cros_async_test_tests_executor",
+    defaults: ["crosvm_inner_defaults"],
+    host_supported: true,
+    crate_name: "executor",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.1",
+    srcs: ["tests/executor.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: false,
+    },
+    edition: "2021",
+    rustlibs: [
+        "libanyhow",
+        "libasync_task",
+        "libaudio_streams",
+        "libbase_rust",
+        "libcfg_if",
+        "libcros_async",
+        "libdata_model",
+        "libfutures",
+        "libfutures_executor",
+        "libfutures_util",
+        "libintrusive_collections",
+        "libio_uring",
+        "liblibc",
+        "libonce_cell",
+        "libpin_utils",
+        "libserde",
+        "libserde_keyvalue",
+        "libslab",
+        "libsync_rust",
+        "libtempfile",
+        "libthiserror",
+    ],
+    proc_macros: [
+        "libasync_trait",
+        "libpaste",
+        "libremain",
+    ],
+}
+
 rust_library {
     name: "libcros_async",
     defaults: ["crosvm_inner_defaults"],
