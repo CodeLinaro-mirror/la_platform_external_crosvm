@@ -34,13 +34,10 @@ use zerocopy::FromBytes;
 use super::async_utils;
 use super::copy_config;
 use super::DescriptorChain;
-use super::DescriptorError;
 use super::DeviceType;
 use super::Interrupt;
 use super::Queue;
-use super::Reader;
 use super::VirtioDevice;
-use super::Writer;
 use crate::Suspendable;
 
 const QUEUE_SIZE: u16 = 256;
@@ -72,9 +69,6 @@ struct virtio_pmem_req {
 #[sorted]
 #[derive(Error, Debug)]
 enum Error {
-    /// Invalid virtio descriptor chain.
-    #[error("virtio descriptor error: {0}")]
-    Descriptor(DescriptorError),
     /// Failed to read from virtqueue.
     #[error("failed to read from virtqueue: {0}")]
     ReadQueue(io::Error),
@@ -126,16 +120,13 @@ fn execute_request(
 }
 
 fn handle_request(
-    mem: &GuestMemory,
-    avail_desc: DescriptorChain,
+    avail_desc: &mut DescriptorChain,
     pmem_device_tube: &Tube,
     mapping_arena_slot: u32,
     mapping_size: usize,
 ) -> Result<usize> {
-    let mut reader = Reader::new(mem.clone(), avail_desc.clone()).map_err(Error::Descriptor)?;
-    let mut writer = Writer::new(mem.clone(), avail_desc).map_err(Error::Descriptor)?;
-
-    let status_code = reader
+    let status_code = avail_desc
+        .reader
         .read_obj()
         .map(|request| execute_request(request, pmem_device_tube, mapping_arena_slot, mapping_size))
         .map_err(Error::ReadQueue)?;
@@ -144,9 +135,12 @@ fn handle_request(
         status_code: status_code.into(),
     };
 
-    writer.write_obj(response).map_err(Error::WriteQueue)?;
+    avail_desc
+        .writer
+        .write_obj(response)
+        .map_err(Error::WriteQueue)?;
 
-    Ok(writer.bytes_written())
+    Ok(avail_desc.writer.bytes_written())
 }
 
 async fn handle_queue(
@@ -159,17 +153,16 @@ async fn handle_queue(
     mapping_size: usize,
 ) {
     loop {
-        let avail_desc = match queue.next_async(mem, &mut queue_event).await {
+        let mut avail_desc = match queue.next_async(mem, &mut queue_event).await {
             Err(e) => {
                 error!("Failed to read descriptor {}", e);
                 return;
             }
             Ok(d) => d,
         };
-        let index = avail_desc.index;
+
         let written = match handle_request(
-            mem,
-            avail_desc,
+            &mut avail_desc,
             &pmem_device_tube,
             mapping_arena_slot,
             mapping_size,
@@ -180,7 +173,7 @@ async fn handle_queue(
                 0
             }
         };
-        queue.add_used(mem, index, written as u32);
+        queue.add_used(mem, avail_desc, written as u32);
         queue.trigger_interrupt(mem, &interrupt);
     }
 }
@@ -287,7 +280,7 @@ impl VirtioDevice for Pmem {
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let config = virtio_pmem_config {
             start_address: Le64::from(self.mapping_address.offset()),
-            size: Le64::from(self.mapping_size as u64),
+            size: Le64::from(self.mapping_size),
         };
         copy_config(data, 0, config.as_bytes(), offset);
     }

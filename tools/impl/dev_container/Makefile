@@ -21,28 +21,18 @@ TAG_BASE=gcr.io/crosvm-infra
 VERSION=$(shell cat version)
 BUILD_CONTEXT=$(shell realpath ../../../)
 
-DOCKER ?= docker
+DOCKER ?= podman
 
-all: crosvm_dev crosvm_dev_user
+all: crosvm_dev
 
 upload: all
 	$(DOCKER) push $(TAG_BASE)/crosvm_dev:$(VERSION)
 	$(DOCKER) push $(TAG_BASE)/crosvm_dev:latest
-	$(DOCKER) push $(TAG_BASE)/crosvm_dev_user:$(VERSION)
-	$(DOCKER) push $(TAG_BASE)/crosvm_dev_user:latest
 
 crosvm_dev:
 	$(DOCKER) build \
 		-t $(TAG_BASE)/$@:$(VERSION) \
 		-f Dockerfile \
-		$(BUILD_CONTEXT)
-	$(DOCKER) tag $(TAG_BASE)/$@:$(VERSION) $(TAG_BASE)/$@:latest
-
-crosvm_dev_user:
-	$(DOCKER) build \
-		-t $(TAG_BASE)/$@:$(VERSION) \
-		-f Dockerfile.user \
-		--build-arg=VERSION=$(VERSION) \
 		$(BUILD_CONTEXT)
 	$(DOCKER) tag $(TAG_BASE)/$@:$(VERSION) $(TAG_BASE)/$@:latest
 

@@ -22,7 +22,7 @@ use base::RawDescriptor;
 use base::WorkerThread;
 use cros_async::block_on;
 use cros_async::sync::Condvar;
-use cros_async::sync::Mutex as AsyncMutex;
+use cros_async::sync::RwLock as AsyncRwLock;
 use cros_async::AsyncError;
 use cros_async::EventAsync;
 use cros_async::Executor;
@@ -57,12 +57,11 @@ use crate::virtio::snd::sys::set_audio_thread_priority;
 use crate::virtio::snd::sys::SysAsyncStreamObjects;
 use crate::virtio::snd::sys::SysAudioStreamSourceGenerator;
 use crate::virtio::snd::sys::SysBufferWriter;
-use crate::virtio::DescriptorError;
+use crate::virtio::DescriptorChain;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::VirtioDevice;
-use crate::virtio::Writer;
 use crate::Suspendable;
 
 pub mod async_funcs;
@@ -94,9 +93,6 @@ pub enum Error {
     /// Cloning kill event failed.
     #[error("Failed to clone kill event: {0}")]
     CloneKillEvent(SysError),
-    /// Descriptor chain was invalid.
-    #[error("Failed to valildate descriptor chain: {0}")]
-    DescriptorChain(DescriptorError),
     // Future error.
     #[error("Unexpected error. Done was not triggered before dropped: {0}")]
     DoneNotTriggered(Canceled),
@@ -194,9 +190,8 @@ const SUPPORTED_FRAME_RATES: u64 = 1 << VIRTIO_SND_PCM_RATE_8000
 
 // Response from pcm_worker to pcm_queue
 pub struct PcmResponse {
-    pub(crate) desc_index: u16,
+    pub(crate) desc_chain: DescriptorChain,
     pub(crate) status: virtio_snd_pcm_status, // response to the pcm message
-    pub(crate) writer: Writer,
     pub(crate) done: Option<oneshot::Sender<()>>, // when pcm response is written to the queue
 }
 
@@ -448,7 +443,10 @@ impl VirtioDevice for VirtioSnd {
         let stream_info_builders = self.stream_info_builders.to_vec();
 
         self.worker_thread = Some(WorkerThread::start("v_snd_common", move |kill_evt| {
-            set_audio_thread_priority();
+            let _thread_priority_handle = set_audio_thread_priority();
+            if let Err(e) = _thread_priority_handle {
+                warn!("Failed to set audio thread to real time: {}", e);
+            };
             if let Err(err_string) = run_worker(
                 interrupt,
                 queues,
@@ -501,9 +499,9 @@ fn run_worker(
     let streams = stream_info_builders
         .into_iter()
         .map(StreamInfoBuilder::build)
-        .map(AsyncMutex::new)
+        .map(AsyncRwLock::new)
         .collect();
-    let streams = Rc::new(AsyncMutex::new(streams));
+    let streams = Rc::new(AsyncRwLock::new(streams));
 
     let mut queues: Vec<(Queue, EventAsync)> = queues
         .into_iter()
@@ -515,13 +513,14 @@ fn run_worker(
         })
         .collect();
 
-    let (mut ctrl_queue, mut ctrl_queue_evt) = queues.remove(0);
+    let (ctrl_queue, mut ctrl_queue_evt) = queues.remove(0);
+    let ctrl_queue = Rc::new(AsyncRwLock::new(ctrl_queue));
     let (_event_queue, _event_queue_evt) = queues.remove(0);
     let (tx_queue, tx_queue_evt) = queues.remove(0);
     let (rx_queue, rx_queue_evt) = queues.remove(0);
 
-    let tx_queue = Rc::new(AsyncMutex::new(tx_queue));
-    let rx_queue = Rc::new(AsyncMutex::new(rx_queue));
+    let tx_queue = Rc::new(AsyncRwLock::new(tx_queue));
+    let rx_queue = Rc::new(AsyncRwLock::new(rx_queue));
 
     let (tx_send, mut tx_recv) = mpsc::unbounded();
     let (rx_send, mut rx_recv) = mpsc::unbounded();
@@ -542,13 +541,13 @@ fn run_worker(
             &snd_data,
             &mut f_kill,
             &mut f_resample,
-            &mut ctrl_queue,
+            ctrl_queue.clone(),
             &mut ctrl_queue_evt,
-            &tx_queue,
+            tx_queue.clone(),
             &tx_queue_evt,
             tx_send.clone(),
             &mut tx_recv,
-            &rx_queue,
+            rx_queue.clone(),
             &rx_queue_evt,
             rx_send.clone(),
             &mut rx_recv,
@@ -575,7 +574,7 @@ fn run_worker(
     Ok(())
 }
 
-async fn notify_reset_signal(reset_signal: &(AsyncMutex<bool>, Condvar)) {
+async fn notify_reset_signal(reset_signal: &(AsyncRwLock<bool>, Condvar)) {
     let (lock, cvar) = reset_signal;
     *lock.lock().await = true;
     cvar.notify_all();
@@ -590,19 +589,19 @@ async fn notify_reset_signal(reset_signal: &(AsyncMutex<bool>, Condvar)) {
 /// the streams and run the worker again.
 fn run_worker_once(
     ex: &Executor,
-    streams: &Rc<AsyncMutex<Vec<AsyncMutex<StreamInfo>>>>,
+    streams: &Rc<AsyncRwLock<Vec<AsyncRwLock<StreamInfo>>>>,
     mem: &GuestMemory,
     interrupt: Interrupt,
     snd_data: &SndData,
     mut f_kill: &mut (impl Future<Output = anyhow::Result<()>> + FusedFuture + Unpin),
     mut f_resample: &mut (impl Future<Output = anyhow::Result<()>> + FusedFuture + Unpin),
-    ctrl_queue: &mut Queue,
+    ctrl_queue: Rc<AsyncRwLock<Queue>>,
     ctrl_queue_evt: &mut EventAsync,
-    tx_queue: &Rc<AsyncMutex<Queue>>,
+    tx_queue: Rc<AsyncRwLock<Queue>>,
     tx_queue_evt: &EventAsync,
     tx_send: mpsc::UnboundedSender<PcmResponse>,
     tx_recv: &mut mpsc::UnboundedReceiver<PcmResponse>,
-    rx_queue: &Rc<AsyncMutex<Queue>>,
+    rx_queue: Rc<AsyncRwLock<Queue>>,
     rx_queue_evt: &EventAsync,
     rx_send: mpsc::UnboundedSender<PcmResponse>,
     rx_recv: &mut mpsc::UnboundedReceiver<PcmResponse>,
@@ -610,7 +609,7 @@ fn run_worker_once(
     let tx_send2 = tx_send.clone();
     let rx_send2 = rx_send.clone();
 
-    let reset_signal = (AsyncMutex::new(false), Condvar::new());
+    let reset_signal = (AsyncRwLock::new(false), Condvar::new());
 
     let f_ctrl = handle_ctrl_queue(
         ex,
@@ -638,7 +637,7 @@ fn run_worker_once(
         mem,
         streams,
         tx_send2,
-        tx_queue,
+        tx_queue.clone(),
         tx_queue_evt,
         Some(&reset_signal),
     )
@@ -655,7 +654,7 @@ fn run_worker_once(
         mem,
         streams,
         rx_send2,
-        rx_queue,
+        rx_queue.clone(),
         rx_queue_evt,
         Some(&reset_signal),
     )
@@ -723,15 +722,15 @@ fn run_worker_once(
 
 fn reset_streams(
     ex: &Executor,
-    streams: &Rc<AsyncMutex<Vec<AsyncMutex<StreamInfo>>>>,
+    streams: &Rc<AsyncRwLock<Vec<AsyncRwLock<StreamInfo>>>>,
     mem: &GuestMemory,
     interrupt: Interrupt,
-    tx_queue: &Rc<AsyncMutex<Queue>>,
+    tx_queue: &Rc<AsyncRwLock<Queue>>,
     tx_recv: &mut mpsc::UnboundedReceiver<PcmResponse>,
-    rx_queue: &Rc<AsyncMutex<Queue>>,
+    rx_queue: &Rc<AsyncRwLock<Queue>>,
     rx_recv: &mut mpsc::UnboundedReceiver<PcmResponse>,
 ) -> Result<(), AsyncError> {
-    let reset_signal = (AsyncMutex::new(false), Condvar::new());
+    let reset_signal = (AsyncRwLock::new(false), Condvar::new());
 
     let do_reset = async {
         let streams = streams.read_lock().await;
@@ -759,7 +758,7 @@ fn reset_streams(
     let f_tx_response = async {
         while send_pcm_response_worker(
             mem,
-            tx_queue,
+            tx_queue.clone(),
             interrupt.clone(),
             tx_recv,
             Some(&reset_signal),
@@ -772,7 +771,7 @@ fn reset_streams(
     let f_rx_response = async {
         while send_pcm_response_worker(
             mem,
-            rx_queue,
+            rx_queue.clone(),
             interrupt.clone(),
             rx_recv,
             Some(&reset_signal),

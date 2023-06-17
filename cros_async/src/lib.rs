@@ -13,10 +13,6 @@
 //!
 //! Use helper functions based the desired behavior of your application.
 //!
-//! ## Running one future.
-//!
-//! If there is only one top-level future to run, use the [`run_one`](fn.run_one.html) function.
-//!
 //! ## Completing one of several futures.
 //!
 //! If there are several top level tasks that should run until any one completes, use the "select"
@@ -73,6 +69,7 @@ pub mod sys;
 pub use sys::Executor;
 pub use sys::ExecutorKind;
 pub use sys::TaskHandle;
+mod common_executor;
 mod timer;
 mod waker;
 
@@ -104,7 +101,6 @@ pub use mem::MemRegion;
 pub use mem::VecIoWrapper;
 use remain::sorted;
 pub use select::SelectResult;
-pub use sys::run_one;
 use thiserror::Error as ThisError;
 pub use timer::TimerAsync;
 
@@ -118,6 +114,8 @@ pub enum Error {
     #[cfg(windows)]
     #[error("Failure in the handle executor: {0}")]
     HandleExecutor(sys::windows::handle_executor::Error),
+    #[error("IO error: {0}")]
+    Io(std::io::Error),
     /// Error from the polled(FD) source, which includes error from the FD executor.
     #[cfg(unix)]
     #[error("An error with a poll source: {0}")]
@@ -168,7 +166,7 @@ impl DetachedTasks {
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{SelectResult, select2, run_one};
+///    use cros_async::{SelectResult, select2, block_on};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -176,8 +174,8 @@ impl DetachedTasks {
 ///    let second = async {let () = pending().await;};
 ///    pin_mut!(first);
 ///    pin_mut!(second);
-///    match run_one(select2(first, second)) {
-///        Ok((SelectResult::Finished(5), SelectResult::Pending(_second))) => (),
+///    match block_on(select2(first, second)) {
+///        (SelectResult::Finished(5), SelectResult::Pending(_second)) => (),
 ///        _ => panic!("Select didn't return the first future"),
 ///    };
 ///    ```
@@ -194,7 +192,7 @@ pub async fn select2<F1: Future + Unpin, F2: Future + Unpin>(
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{SelectResult, select3, run_one};
+///    use cros_async::{SelectResult, select3, block_on};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -204,10 +202,10 @@ pub async fn select2<F1: Future + Unpin, F2: Future + Unpin>(
 ///    pin_mut!(first);
 ///    pin_mut!(second);
 ///    pin_mut!(third);
-///    match run_one(select3(first, second, third)) {
-///        Ok((SelectResult::Finished(4),
-///            SelectResult::Pending(_second),
-///            SelectResult::Finished(5))) => (),
+///    match block_on(select3(first, second, third)) {
+///        (SelectResult::Finished(4),
+///         SelectResult::Pending(_second),
+///         SelectResult::Finished(5)) => (),
 ///        _ => panic!("Select didn't return the futures"),
 ///    };
 ///    ```
@@ -225,7 +223,7 @@ pub async fn select3<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin>
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{SelectResult, select4, run_one};
+///    use cros_async::{SelectResult, select4, block_on};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -237,9 +235,9 @@ pub async fn select3<F1: Future + Unpin, F2: Future + Unpin, F3: Future + Unpin>
 ///    pin_mut!(second);
 ///    pin_mut!(third);
 ///    pin_mut!(fourth);
-///    match run_one(select4(first, second, third, fourth)) {
-///        Ok((SelectResult::Finished(4), SelectResult::Pending(_second),
-///            SelectResult::Finished(5), SelectResult::Pending(_fourth))) => (),
+///    match block_on(select4(first, second, third, fourth)) {
+///        (SelectResult::Finished(4), SelectResult::Pending(_second),
+///         SelectResult::Finished(5), SelectResult::Pending(_fourth)) => (),
 ///        _ => panic!("Select didn't return the futures"),
 ///    };
 ///    ```
@@ -268,7 +266,7 @@ pub async fn select4<
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{SelectResult, select5, run_one};
+///    use cros_async::{SelectResult, select5, block_on};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -282,10 +280,10 @@ pub async fn select4<
 ///    pin_mut!(third);
 ///    pin_mut!(fourth);
 ///    pin_mut!(fifth);
-///    match run_one(select5(first, second, third, fourth, fifth)) {
-///        Ok((SelectResult::Finished(4), SelectResult::Pending(_second),
-///            SelectResult::Finished(5), SelectResult::Pending(_fourth),
-///            SelectResult::Finished(6))) => (),
+///    match block_on(select5(first, second, third, fourth, fifth)) {
+///        (SelectResult::Finished(4), SelectResult::Pending(_second),
+///         SelectResult::Finished(5), SelectResult::Pending(_fourth),
+///         SelectResult::Finished(6)) => (),
 ///        _ => panic!("Select didn't return the futures"),
 ///    };
 ///    ```
@@ -317,7 +315,7 @@ pub async fn select5<
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{SelectResult, select6, run_one};
+///    use cros_async::{SelectResult, select6, block_on};
 ///    use futures::future::pending;
 ///    use futures::pin_mut;
 ///
@@ -333,10 +331,10 @@ pub async fn select5<
 ///    pin_mut!(fourth);
 ///    pin_mut!(fifth);
 ///    pin_mut!(sixth);
-///    match run_one(select6(first, second, third, fourth, fifth, sixth)) {
-///        Ok((SelectResult::Finished(1), SelectResult::Pending(_second),
-///            SelectResult::Finished(3), SelectResult::Pending(_fourth),
-///            SelectResult::Finished(5), SelectResult::Finished(6))) => (),
+///    match block_on(select6(first, second, third, fourth, fifth, sixth)) {
+///        (SelectResult::Finished(1), SelectResult::Pending(_second),
+///         SelectResult::Finished(3), SelectResult::Pending(_fourth),
+///         SelectResult::Finished(5), SelectResult::Finished(6)) => (),
 ///        _ => panic!("Select didn't return the futures"),
 ///    };
 ///    ```
@@ -586,11 +584,11 @@ pub async fn select12<
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{complete2, run_one};
+///    use cros_async::{complete2, block_on};
 ///
 ///    let first = async {5};
 ///    let second = async {6};
-///    assert_eq!(run_one(complete2(first, second)).unwrap_or((0,0)), (5,6));
+///    assert_eq!(block_on(complete2(first, second)), (5,6));
 ///    ```
 pub async fn complete2<F1, F2>(f1: F1, f2: F2) -> (F1::Output, F2::Output)
 where
@@ -606,12 +604,12 @@ where
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{complete3, run_one};
+///    use cros_async::{complete3, block_on};
 ///
 ///    let first = async {5};
 ///    let second = async {6};
 ///    let third = async {7};
-///    assert_eq!(run_one(complete3(first, second, third)).unwrap_or((0,0,0)), (5,6,7));
+///    assert_eq!(block_on(complete3(first, second, third)), (5,6,7));
 ///    ```
 pub async fn complete3<F1, F2, F3>(f1: F1, f2: F2, f3: F3) -> (F1::Output, F2::Output, F3::Output)
 where
@@ -628,13 +626,13 @@ where
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{complete4, run_one};
+///    use cros_async::{complete4, block_on};
 ///
 ///    let first = async {5};
 ///    let second = async {6};
 ///    let third = async {7};
 ///    let fourth = async {8};
-///    assert_eq!(run_one(complete4(first, second, third, fourth)).unwrap_or((0,0,0,0)), (5,6,7,8));
+///    assert_eq!(block_on(complete4(first, second, third, fourth)), (5,6,7,8));
 ///    ```
 pub async fn complete4<F1, F2, F3, F4>(
     f1: F1,
@@ -657,14 +655,14 @@ where
 ///  # Example
 ///
 ///    ```
-///    use cros_async::{complete5, run_one};
+///    use cros_async::{complete5, block_on};
 ///
 ///    let first = async {5};
 ///    let second = async {6};
 ///    let third = async {7};
 ///    let fourth = async {8};
 ///    let fifth = async {9};
-///    assert_eq!(run_one(complete5(first, second, third, fourth, fifth)).unwrap_or((0,0,0,0,0)),
+///    assert_eq!(block_on(complete5(first, second, third, fourth, fifth)),
 ///               (5,6,7,8,9));
 ///    ```
 pub async fn complete5<F1, F2, F3, F4, F5>(

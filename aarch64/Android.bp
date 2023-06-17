@@ -41,6 +41,7 @@ rust_library {
         "libminijail_rust",
         "librand",
         "libresources",
+        "libswap",
         "libsync_rust",
         "libthiserror",
         "libvm_control",

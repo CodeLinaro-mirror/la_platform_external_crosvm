@@ -25,21 +25,24 @@
 #   ./tools/dev_container --cros
 
 import argparse
-from argh import arg  # type: ignore
-from impl.common import (
-    chdir,
-    cmd,
+from pathlib import Path
+import shutil
+from impl.util import (
+    add_common_args,
+    confirm,
     cros_repo_root,
     CROSVM_ROOT,
     is_cros_repo,
     is_kiwi_repo,
     kiwi_repo_root,
-    quoted,
-    run_main,
 )
-from typing import Optional, Tuple, List
+from impl.command import (
+    chdir,
+    cmd,
+    quoted,
+)
+from typing import Optional, List
 import getpass
-import shutil
 import sys
 import unittest
 import os
@@ -52,53 +55,34 @@ CROS_CONTAINER_NAME = (
     f"crosvm_cros_{getpass.getuser()}_{zlib.crc32(os.path.realpath(__file__).encode('utf-8')):x}"
 )
 
-DEV_IMAGE_NAME = "gcr.io/crosvm-infra/crosvm_dev_user"
+DEV_IMAGE_NAME = "gcr.io/crosvm-infra/crosvm_dev"
 CROS_IMAGE_NAME = "gcr.io/crosvm-infra/crosvm_cros_cloudbuild"
 DEV_IMAGE_VERSION = (CROSVM_ROOT / "tools/impl/dev_container/version").read_text().strip()
 
 CACHE_DIR = os.environ.get("CROSVM_CONTAINER_CACHE", None)
 
-DOCKER_ARGS = [
+COMMON_ARGS = [
     # Share cache dir
     f"--volume {CACHE_DIR}:/cache:rw" if CACHE_DIR else None,
     # Use tmpfs in the container for faster performance.
     "--mount type=tmpfs,destination=/tmp",
     # KVM is required to run a VM for testing.
     "--device /dev/kvm",
+    # Enable terminal colors
+    f"--env TERM={os.environ.get('TERM', 'xterm-256color')}",
 ]
 
-if sys.platform == "linux":
-    DOCKER_ARGS.extend(
-        [
-            f"--env OUTSIDE_UID={os.getuid()}",
-            f"--env OUTSIDE_GID={os.getgid()}",
-            f"--env TERM={os.environ.get('TERM', 'xterm-256color')}",
-        ]
-    )
+DOCKER_ARGS = [
+    *COMMON_ARGS,
+]
 
 PODMAN_ARGS = [
-    # Share cache dir
-    f"--volume {CACHE_DIR}:/cache:rw" if CACHE_DIR else None,
-    # Use tmpfs in the container for faster performance.
-    "--mount type=tmpfs,destination=/tmp",
-    # KVM is required to run a VM for testing.
-    "--device /dev/kvm",
+    *COMMON_ARGS,
     # Allow access to group permissions of the user (e.g. for kvm access).
     "--group-add keep-groups",
+    # Increase number of PIDs the container can spawn (we run a lot of test processes in parallel)
+    "--pids-limit=4096",
 ]
-
-PRIVILEGED_ARGS = [
-    # Share devices and syslog
-    "--volume /dev/log:/dev/log",
-    "--device /dev/net/tun",
-    "--device /dev/vhost-net",
-    "--device /dev/vhost-vsock",
-    # For plugin process jail
-    "--mount type=tmpfs,destination=/var/empty",
-]
-
-
-PODMAN_IS_DEFAULT = shutil.which("docker") == None
 
 
 def container_name(cros: bool):
@@ -171,90 +155,129 @@ def ensure_container_is_alive(docker: cmd, docker_args: List[Optional[str]], cro
 
     if not container_is_running(docker, cros):
         # Run neverending sleep to keep container alive while we 'docker exec' commands.
+        print(f"Starting container...")
         docker(
             f"run --detach --name {container_name(cros)}",
             *docker_args,
             "sleep infinity",
-        ).fg(quiet=True)
+        ).fg(quiet=False)
         cid = container_id(docker, cros)
-        print(f"Started container ({cid}).")
     else:
         cid = container_id(docker, cros)
         print(f"Using existing container ({cid}).")
     return cid
 
 
-@arg("command", nargs=argparse.REMAINDER)
-def main(
-    command: Tuple[str, ...],
-    stop: bool = False,
-    clean: bool = False,
-    hermetic: bool = False,
-    interactive: bool = False,
-    podman: bool = PODMAN_IS_DEFAULT,
-    self_test: bool = False,
-    pull: bool = False,
-    unprivileged: bool = False,
-    cros: bool = False,
-):
+def validate_podman(podman: cmd):
+    graph_driver_name = podman("info --format={{.Store.GraphDriverName}}").stdout()
+    config_file_name = podman("info --format={{.Store.ConfigFile}}").stdout()
+    if graph_driver_name == "vfs":
+        print("You are using vfs as a storage driver. This will be extremely slow.")
+        print("Using the overlay driver is strongly recommended.")
+        print("Note: This will delete all existing podman images and containers.")
+        if confirm(f"Do you want me to update your config in {config_file_name}?"):
+            podman("system reset -f").fg()
+            with open(config_file_name, "a") as config_file:
+                print("[storage]", file=config_file)
+                print('driver = "overlay"', file=config_file)
+
+    username = os.environ["USER"]
+    subuids = Path("/etc/subuid").read_text()
+    if not username in subuids:
+        print("Rootless podman requires subuid's to be set up for your user.")
+        usermod = cmd(
+            "sudo usermod --add-subuids 900000-965535 --add-subgids 900000-965535", username
+        )
+        print("I can fix that by running:", usermod)
+        if confirm("Ok?"):
+            usermod.fg()
+            podman("system migrate").fg()
+
+
+def main(argv: List[str]):
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--clean", action="store_true")
+    parser.add_argument("--hermetic", action="store_true")
+    parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--use-docker", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--pull", action="store_true")
+    parser.add_argument("--cros", action="store_true")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+
+    args = parser.parse_args(argv)
+
     chdir(CROSVM_ROOT)
 
-    if cros and unprivileged:
-        print("ERROR: crOS container must be run in privileged mode")
-        sys.exit(1)
+    if CACHE_DIR:
+        Path(CACHE_DIR).mkdir(exist_ok=True)
 
-    if unprivileged:
-        print("WARNING: Running dev_container with --unprivileged is a work in progress.")
-        print("Not all tests are expected to pass.")
-        print()
+    has_docker = shutil.which("docker") != None
+    has_podman = shutil.which("podman") != None
+    if not has_podman and not has_docker:
+        raise Exception("Please install podman (or docker) to use the dev container.")
 
-    docker_args = [
-        *workspace_mount_args(cros),
-        *(PRIVILEGED_ARGS if not unprivileged else []),
-    ]
-    if podman:
-        print("WARNING: Running dev_container with podman is experimental.")
-        print("It is strongly recommended to use docker.")
+    use_docker = args.use_docker
+    if has_docker and not has_podman:
+        use_docker = True
+
+    # cros container only works in docker
+    if args.cros:
+        use_docker = True
+
+    if use_docker:
+        print(
+            "WARNING: Running dev_container with docker may cause root-owned files to be created."
+        )
+        print("Use podman to prevent this.")
         print()
-        docker = cmd("podman")
-        docker_args += [*PODMAN_ARGS]
-    else:
         docker = cmd("docker")
-        docker_args += [
-            "--privileged" if not unprivileged else None,
+        docker_args = [
             *DOCKER_ARGS,
+            *workspace_mount_args(args.cros),
         ]
+    else:
+        docker = cmd("podman")
+        docker_args = [
+            *PODMAN_ARGS,
+            *workspace_mount_args(args.cros),
+        ]
+        validate_podman(docker)
 
-    if cros:
+    if args.cros:
+        docker_args.append("--privileged")  # cros container requires privileged container
         docker_args.append(CROS_IMAGE_NAME)
     else:
         docker_args.append(DEV_IMAGE_NAME + ":" + DEV_IMAGE_VERSION)
 
-    if self_test:
+    if args.self_test:
         TestDevContainer.docker = docker
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestDevContainer)
         unittest.TextTestRunner().run(suite)
         return
 
-    if stop:
-        if not delete_container(docker, cros):
+    if args.stop:
+        if not delete_container(docker, args.cros):
             print(f"container is not running.")
         return
 
-    if clean:
-        delete_container(docker, cros)
+    if args.clean:
+        delete_container(docker, args.cros)
 
-    if pull:
-        if cros:
+    if args.pull:
+        if args.cros:
             docker("pull", CROS_IMAGE_NAME).fg()
         else:
             docker("pull", f"gcr.io/crosvm-infra/crosvm_dev:{DEV_IMAGE_VERSION}").fg()
-            docker("pull", f"gcr.io/crosvm-infra/crosvm_dev_user:{DEV_IMAGE_VERSION}").fg()
         return
+
+    command = args.command
 
     # If a command is provided run non-interactive unless explicitly asked for.
     tty_args = []
-    if not command or interactive:
+    if not command or args.interactive:
         if not sys.stdin.isatty():
             raise Exception("Trying to run an interactive session in a non-interactive terminal.")
         tty_args = ["--interactive", "--tty"]
@@ -263,21 +286,15 @@ def main(
         tty_args = ["--tty"]
 
     # Start an interactive shell by default
-    if hermetic:
+    if args.hermetic:
         # cmd is passed to entrypoint
         quoted_cmd = list(map(quoted, command))
         docker(f"run --rm", *tty_args, *docker_args, *quoted_cmd).fg()
     else:
         # cmd is executed directly
-        cid = ensure_container_is_alive(docker, docker_args, cros)
-        if podman:
-            if not command:
-                command = ("/bin/bash",)
-        else:
-            if not command:
-                command = ("/tools/entrypoint.sh",)
-            else:
-                command = ("/tools/entrypoint.sh",) + tuple(command)
+        cid = ensure_container_is_alive(docker, docker_args, args.cros)
+        if not command:
+            command = ("/bin/bash",)
         quoted_cmd = list(map(quoted, command))
         docker("exec", *tty_args, cid, *quoted_cmd).fg()
 
@@ -320,8 +337,8 @@ class TestDevContainer(unittest.TestCase):
         # Make sure we can get back into a good state and execute commands.
         ensure_container_is_alive(self.docker, self.docker_args, cros=False)
         self.assertTrue(container_is_running(self.docker, cros=False))
-        main(("true",))
+        main(["true"])
 
 
 if __name__ == "__main__":
-    run_main(main)
+    main(sys.argv[1:])

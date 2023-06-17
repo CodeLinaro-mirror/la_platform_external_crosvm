@@ -81,7 +81,6 @@ use libc::SIGCHLD;
 use libc::SOCK_SEQPACKET;
 use net_util::sys::unix::Tap;
 use net_util::TapTCommon;
-use protobuf::ProtobufError;
 use remain::sorted;
 use thiserror::Error;
 use vm_memory::GuestMemory;
@@ -102,9 +101,9 @@ const MAX_OPEN_FILES: u64 = 32768;
 #[derive(Error, Debug)]
 pub enum CommError {
     #[error("failed to decode plugin request: {0}")]
-    DecodeRequest(ProtobufError),
+    DecodeRequest(protobuf::Error),
     #[error("failed to encode plugin response: {0}")]
-    EncodeResponse(ProtobufError),
+    EncodeResponse(protobuf::Error),
     #[error("plugin request socket has been hung up")]
     PluginSocketHup,
     #[error("failed to recv from plugin request socket: {0}")]
@@ -178,11 +177,8 @@ fn new_pipe_pair() -> SysResult<VcpuPipe> {
     })
 }
 
-fn proto_to_sys_err(e: ProtobufError) -> SysError {
-    match e {
-        ProtobufError::IoError(e) => SysError::new(e.raw_os_error().unwrap_or(EINVAL)),
-        _ => SysError::new(EINVAL),
-    }
+fn proto_to_sys_err(e: protobuf::Error) -> SysError {
+    io_to_sys_err(io::Error::from(e))
 }
 
 fn io_to_sys_err(e: io::Error) -> SysError {
@@ -244,7 +240,7 @@ impl PluginObject {
                 1 => vm.unregister_ioevent(&evt, addr, Datamatch::U8(Some(datamatch as u8))),
                 2 => vm.unregister_ioevent(&evt, addr, Datamatch::U16(Some(datamatch as u16))),
                 4 => vm.unregister_ioevent(&evt, addr, Datamatch::U32(Some(datamatch as u32))),
-                8 => vm.unregister_ioevent(&evt, addr, Datamatch::U64(Some(datamatch as u64))),
+                8 => vm.unregister_ioevent(&evt, addr, Datamatch::U64(Some(datamatch))),
                 _ => Err(SysError::new(EINVAL)),
             },
             PluginObject::Memory { slot, .. } => vm.remove_memory_region(slot).and(Ok(())),
@@ -376,7 +372,7 @@ pub fn run_vcpus(
                                     VcpuExit::MmioRead { address, size } => {
                                         let mut data = [0; 8];
                                         vcpu_plugin.mmio_read(
-                                            address as u64,
+                                            address,
                                             &mut data[..size],
                                             &vcpu,
                                         );
@@ -389,7 +385,7 @@ pub fn run_vcpus(
                                         data,
                                     } => {
                                         vcpu_plugin.mmio_write(
-                                            address as u64,
+                                            address,
                                             &data[..size],
                                             &vcpu,
                                         );
@@ -498,7 +494,7 @@ pub fn run_config(cfg: Config) -> Result<()> {
         config.bind_mounts = true;
         let uid_map = format!("0 {} 1", geteuid());
         let gid_map = format!("0 {} 1", getegid());
-        let gid_map = if cfg.plugin_gid_maps.len() > 0 {
+        let gid_map = if !cfg.plugin_gid_maps.is_empty() {
             gid_map
                 + &cfg
                     .plugin_gid_maps

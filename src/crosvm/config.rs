@@ -15,11 +15,13 @@ use arch::set_default_serial_parameters;
 use arch::CpuSet;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrAction;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrConfig;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrFilter;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrRWType;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrValueFrom;
 use arch::Pstore;
 use arch::VcpuAffinity;
@@ -28,7 +30,7 @@ use base::pagesize;
 use cros_async::ExecutorKind;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
-use devices::virtio::block::block::DiskOption;
+use devices::virtio::block::DiskOption;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 use devices::virtio::device_constants::video::VideoDeviceConfig;
 #[cfg(feature = "gpu")]
@@ -81,8 +83,6 @@ cfg_if::cfg_if! {
         static VHOST_NET_PATH: &str = "/dev/vhost-net";
     } else if #[cfg(windows)] {
         use base::{Event, Tube};
-
-        use crate::crosvm::sys::windows::config::IrqChipKind;
     }
 }
 
@@ -106,9 +106,20 @@ pub enum Executable {
     Plugin(PathBuf),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub enum IrqChipKind {
+    /// All interrupt controllers are emulated in the kernel.
+    Kernel,
+    /// APIC is emulated in the kernel.  All other interrupt controllers are in userspace.
+    Split,
+    /// All interrupt controllers are emulated in userspace.
+    Userspace,
+}
+
 /// The core types in hybrid architecture.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CpuCoreType {
     /// Intel Atom.
@@ -117,7 +128,7 @@ pub struct CpuCoreType {
     pub core: CpuSet,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Deserialize, FromKeyValues)]
+#[derive(Debug, Default, PartialEq, Eq, Deserialize, Serialize, FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CpuOptions {
     /// Number of CPU cores.
@@ -131,7 +142,7 @@ pub struct CpuOptions {
     pub core_types: Option<CpuCoreType>,
 }
 
-#[derive(Debug, Default, Deserialize, FromKeyValues)]
+#[derive(Debug, Default, Deserialize, Serialize, FromKeyValues, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct MemOptions {
     /// Amount of guest memory in MiB.
@@ -409,6 +420,7 @@ pub struct SharedDir {
     pub src: PathBuf,
     pub tag: String,
     pub kind: SharedDirKind,
+    pub ugid: (Option<u32>, Option<u32>),
     pub uid_map: String,
     pub gid_map: String,
     pub fs_cfg: passthrough::Config,
@@ -422,6 +434,7 @@ impl Default for SharedDir {
             src: Default::default(),
             tag: Default::default(),
             kind: Default::default(),
+            ugid: (None, None),
             uid_map: format!("0 {} 1", unsafe { geteuid() }),
             gid_map: format!("0 {} 1", unsafe { getegid() }),
             fs_cfg: Default::default(),
@@ -450,6 +463,20 @@ impl FromStr for SharedDir {
         //   and directory contents should be considered valid (default: 5)
         // * cache=CACHE - one of "never", "always", or "auto" (default: auto)
         // * writeback=BOOL - indicates whether writeback caching should be enabled (default: false)
+        // * uid=UID - uid of the device process in the user namespace created by minijail.
+        //   (default: 0)
+        // * gid=GID - gid of the device process in the user namespace created by minijail.
+        //   (default: 0)
+        // These two options (uid/gid) are useful when the crosvm process has no
+        // CAP_SETGID/CAP_SETUID but an identity mapping of the current user/group
+        // between the VM and the host is required.
+        // Say the current user and the crosvm process has uid 5000, a user can use
+        // "uid=5000" and "uidmap=5000 5000 1" such that files owned by user 5000
+        // still appear to be owned by user 5000 in the VM. These 2 options are
+        // useful only when there is 1 user in the VM accessing shared files.
+        // If multiple users want to access the shared file, gid/uid options are
+        // useless. It'd be better to create a new user namespace and give
+        // CAP_SETUID/CAP_SETGID to the crosvm.
         let mut components = param.split(':');
         let src = PathBuf::from(
             components
@@ -486,6 +513,12 @@ impl FromStr for SharedDir {
                 }
                 "uidmap" => shared_dir.uid_map = value.into(),
                 "gidmap" => shared_dir.gid_map = value.into(),
+                "uid" => {
+                    shared_dir.ugid.0 = Some(value.parse().map_err(|_| "`uid` must be an integer")?)
+                }
+                "gid" => {
+                    shared_dir.ugid.1 = Some(value.parse().map_err(|_| "`gid` must be an integer")?)
+                }
                 _ => type_opts.push(opt),
             }
         }
@@ -854,6 +887,35 @@ pub fn parse_cpu_capacity(s: &str) -> Result<BTreeMap<usize, u32>, String> {
     Ok(cpu_capacity)
 }
 
+pub fn parse_dynamic_power_coefficient(s: &str) -> Result<BTreeMap<usize, u32>, String> {
+    let mut dyn_power_coefficient: BTreeMap<usize, u32> = BTreeMap::default();
+    for cpu_pair in s.split(',') {
+        let assignment: Vec<&str> = cpu_pair.split('=').collect();
+        if assignment.len() != 2 {
+            return Err(invalid_value_err(
+                cpu_pair,
+                "invalid CPU dynamic power pair syntax",
+            ));
+        }
+        let cpu = assignment[0].parse().map_err(|_| {
+            invalid_value_err(assignment[0], "CPU index must be a non-negative integer")
+        })?;
+        let power_coefficient = assignment[1].parse().map_err(|_| {
+            invalid_value_err(
+                assignment[1],
+                "Power coefficient must be a non-negative integer",
+            )
+        })?;
+        if dyn_power_coefficient
+            .insert(cpu, power_coefficient)
+            .is_some()
+        {
+            return Err(invalid_value_err(cpu_pair, "CPU index must be unique"));
+        }
+    }
+    Ok(dyn_power_coefficient)
+}
+
 pub fn from_key_values<'a, T: Deserialize<'a>>(value: &'a str) -> Result<T, String> {
     serde_keyvalue::from_key_values(value).map_err(|e| e.to_string())
 }
@@ -1026,8 +1088,8 @@ pub struct Config {
     pub disks: Vec<DiskOption>,
     pub display_window_keyboard: bool,
     pub display_window_mouse: bool,
-    pub dmi_path: Option<PathBuf>,
     pub dump_device_tree_blob: Option<PathBuf>,
+    pub dynamic_power_coefficient: BTreeMap<usize, u32>,
     pub enable_hwp: bool,
     pub enable_pnp_data: bool,
     pub executable_path: Option<Executable>,
@@ -1057,7 +1119,6 @@ pub struct Config {
     pub hypervisor: Option<HypervisorKind>,
     pub init_memory: Option<u64>,
     pub initrd_path: Option<PathBuf>,
-    #[cfg(windows)]
     pub irq_chip: Option<IrqChipKind>,
     pub itmt: bool,
     pub jail_config: Option<JailConfig>,
@@ -1096,7 +1157,6 @@ pub struct Config {
     pub plugin_mounts: Vec<BindMount>,
     pub plugin_root: Option<PathBuf>,
     pub pmem_devices: Vec<DiskOption>,
-    pub privileged_vm: bool,
     #[cfg(feature = "process-invariants")]
     pub process_invariants_data_handle: Option<u64>,
     #[cfg(feature = "process-invariants")]
@@ -1132,18 +1192,16 @@ pub struct Config {
     pub software_tpm: bool,
     #[cfg(feature = "audio")]
     pub sound: Option<PathBuf>,
-    pub split_irqchip: bool,
     pub strict_balloon: bool,
     pub stub_pci_devices: Vec<StubPciParameters>,
     pub swap_dir: Option<PathBuf>,
     pub swiotlb: Option<u64>,
-    #[cfg(windows)]
-    pub syslog_tag: Option<String>,
     #[cfg(target_os = "android")]
     pub task_profiles: Vec<String>,
     #[cfg(unix)]
     pub unmap_guest_memory_on_fork: bool,
     pub usb: bool,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub userspace_msr: BTreeMap<u32, MsrConfig>,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_cgroup_path: Option<PathBuf>,
@@ -1170,6 +1228,7 @@ pub struct Config {
     pub video_dec: Vec<VideoDeviceConfig>,
     #[cfg(feature = "video-encoder")]
     pub video_enc: Vec<VideoDeviceConfig>,
+    pub virt_cpufreq: bool,
     pub virtio_input_evdevs: Vec<PathBuf>,
     pub virtio_keyboard: Vec<PathBuf>,
     pub virtio_mice: Vec<PathBuf>,
@@ -1237,8 +1296,8 @@ impl Default for Config {
             disable_virtio_intx: false,
             display_window_keyboard: false,
             display_window_mouse: false,
-            dmi_path: None,
             dump_device_tree_blob: None,
+            dynamic_power_coefficient: BTreeMap::new(),
             enable_hwp: false,
             enable_pnp_data: false,
             executable_path: None,
@@ -1272,7 +1331,6 @@ impl Default for Config {
             hypervisor: None,
             init_memory: None,
             initrd_path: None,
-            #[cfg(windows)]
             irq_chip: None,
             itmt: false,
             jail_config: if !cfg!(feature = "default-no-sandbox") {
@@ -1315,7 +1373,6 @@ impl Default for Config {
             plugin_mounts: Vec::new(),
             plugin_root: None,
             pmem_devices: Vec::new(),
-            privileged_vm: false,
             #[cfg(feature = "process-invariants")]
             process_invariants_data_handle: None,
             #[cfg(feature = "process-invariants")]
@@ -1345,17 +1402,15 @@ impl Default for Config {
             software_tpm: false,
             #[cfg(feature = "audio")]
             sound: None,
-            split_irqchip: false,
             strict_balloon: false,
             stub_pci_devices: Vec::new(),
             swiotlb: None,
-            #[cfg(windows)]
-            syslog_tag: None,
             #[cfg(target_os = "android")]
             task_profiles: Vec::new(),
             #[cfg(unix)]
             unmap_guest_memory_on_fork: false,
             usb: true,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             userspace_msr: BTreeMap::new(),
             vcpu_affinity: None,
             vcpu_cgroup_path: None,
@@ -1383,6 +1438,7 @@ impl Default for Config {
             video_dec: Vec::new(),
             #[cfg(feature = "video-encoder")]
             video_enc: Vec::new(),
+            virt_cpufreq: false,
             virtio_input_evdevs: Vec::new(),
             virtio_keyboard: Vec::new(),
             virtio_mice: Vec::new(),
@@ -1459,6 +1515,7 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         }
     } else {
         // TODO(b/215297064): Support generic cpuaffinity if there's a need.
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         if !cfg.userspace_msr.is_empty() {
             for (_, msr_config) in cfg.userspace_msr.iter() {
                 if msr_config.from == MsrValueFrom::RWFromRunningCPU {
@@ -1468,6 +1525,13 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
                     );
                 }
             }
+        }
+    }
+    if cfg.virt_cpufreq {
+        if !cfg.host_cpu_topology && (cfg.vcpu_affinity.is_none() || cfg.cpu_capacity.is_empty()) {
+            return Err("`virt-cpufreq` requires 'host-cpu-topology' enabled or \
+                       have vcpu_affinity and cpu_capacity configured"
+                .to_string());
         }
     }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -1999,6 +2063,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_irqchip_kernel() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--irqchip", "kernel", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.irq_chip, Some(IrqChipKind::Kernel));
+    }
+
+    #[test]
+    fn parse_irqchip_split() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--irqchip", "split", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.irq_chip, Some(IrqChipKind::Split));
+    }
+
+    #[test]
+    fn parse_irqchip_userspace() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--irqchip", "userspace", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.irq_chip, Some(IrqChipKind::Userspace));
+    }
+
+    #[test]
     fn parse_stub_pci() {
         let params = from_key_values::<StubPciParameters>("0000:01:02.3,vendor=0xfffe,device=0xfffd,class=0xffc1c2,subsystem_vendor=0xfffc,subsystem_device=0xfffb,revision=0xa").unwrap();
         assert_eq!(params.address.bus, 1);
@@ -2237,6 +2343,7 @@ mod tests {
         assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
         assert_eq!(shared_dir.fs_cfg.use_dax, false);
         assert_eq!(shared_dir.fs_cfg.posix_acl, true);
+        assert_eq!(shared_dir.ugid, (None, None));
     }
 
     #[cfg(unix)]
@@ -2259,5 +2366,21 @@ mod tests {
         assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
         assert_eq!(shared_dir.fs_cfg.use_dax, false);
         assert_eq!(shared_dir.fs_cfg.posix_acl, true);
+        assert_eq!(shared_dir.ugid, (None, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_shared_dir_ugid_set() {
+        let shared_dir: SharedDir =
+            "/:hostRoot:type=fs:uidmap=40417 40417 1:gidmap=5000 5000 1:uid=40417:gid=5000"
+                .parse()
+                .unwrap();
+        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
+        assert_eq!(shared_dir.tag, "hostRoot");
+        assert!(shared_dir.kind == SharedDirKind::FS);
+        assert_eq!(shared_dir.uid_map, "40417 40417 1");
+        assert_eq!(shared_dir.gid_map, "5000 5000 1");
+        assert_eq!(shared_dir.ugid, (Some(40417), Some(5000)));
     }
 }

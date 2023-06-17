@@ -98,7 +98,7 @@ where
     vcpu.set_sregs(&vcpu_sregs).expect("set sregs failed");
 
     let vcpu_regs = Regs {
-        rip: load_addr.offset() as u64,
+        rip: load_addr.offset(),
         rflags: 2,
         rax: 0x33,
         rbx: 0x3000,
@@ -110,9 +110,8 @@ where
     // Ensure we get exactly 2 exits for the mmio and the pio.
     let exits = AtomicU16::new(0);
 
-    let run_handle = vcpu.take_run_handle(None).unwrap();
     loop {
-        match vcpu.run(&run_handle).expect("run failed") {
+        match vcpu.run().expect("run failed") {
             VcpuExit::Mmio => {
                 vcpu.handle_mmio(&mut |IoParams {
                                            address,

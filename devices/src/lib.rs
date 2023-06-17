@@ -25,12 +25,14 @@ pub mod irqchip;
 mod pci;
 mod pflash;
 pub mod pl030;
+pub mod pmc_virt;
 mod serial;
 pub mod serial_device;
 #[cfg(feature = "tpm")]
 mod software_tpm;
 mod suspendable;
 mod sys;
+mod virtcpufreq;
 pub mod virtio;
 #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
 mod vtpm_proxy;
@@ -127,6 +129,7 @@ pub use self::serial_device::SerialType;
 pub use self::software_tpm::SoftwareTpm;
 pub use self::suspendable::DeviceState;
 pub use self::suspendable::Suspendable;
+pub use self::virtcpufreq::VirtCpufreq;
 pub use self::virtio::VirtioMmioDevice;
 pub use self::virtio::VirtioPciDevice;
 #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
@@ -153,6 +156,7 @@ cfg_if::cfg_if! {
         };
         pub use self::platform::VfioPlatformDevice;
         pub use self::ac_adapter::AcAdapter;
+        pub use self::pmc_virt::VirtualPmc;
         pub use self::proxy::Error as ProxyError;
         pub use self::proxy::ProxyDevice;
         #[cfg(feature = "usb")]

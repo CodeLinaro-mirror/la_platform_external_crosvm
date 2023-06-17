@@ -4,20 +4,14 @@ version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 default-run = "crosvm"
-# b:223855233
-resolver = "1"
 
 [[bin]]
 name = "crosvm"
 path = "src/main.rs"
 
-[[bin]]
-name = "crosvm-direct"
-path = "src/main.rs"
-required-features = [ "direct" ]
-
 [profile.release]
 panic = 'abort'
+opt-level = 3
 overflow-checks = true
 
 [profile.release-test]
@@ -27,7 +21,6 @@ panic = 'unwind'
 # Reproduces the options used when building crosvm for ChromeOS.
 [profile.chromeos]
 inherits = "release"
-opt-level = "s"
 strip = "symbols"
 
 # Enables LTO to further reduce the size of the binary.
@@ -50,7 +43,6 @@ members = [
     "broker_ipc",
     "common/audio_streams",
     "common/balloon_control",
-    "common/cros-fuzz",
     "common/data_model",
     "common/p9",
     "common/sync",
@@ -61,11 +53,11 @@ members = [
     "crosvm_cli",
     "crosvm_control",
     "crosvm_plugin",
-    "crosvm-fuzz",
     "devices",
     "disk",
     "e2e_tests",
     "fuse",
+    "fuzz",
     "gpu_display",
     "hypervisor",
     "io_uring",
@@ -75,9 +67,7 @@ members = [
     "kvm",
     "libcras_stub",
     "linux_input_sys",
-    "media/cros-codecs",
     "media/ffmpeg",
-    "media/libva",
     "media/libvda",
     "metrics",
     "net_sys",
@@ -113,6 +103,7 @@ exclude = [
     "tools/audio_streams_conformance_test",
     "tools/examples/baremetal",
     "tube_transporter",
+    "perfetto",
     "win_audio",
     "win_util",
 ]
@@ -151,6 +142,7 @@ gdb = [
     "arch/gdb",
     "gdbstub",
     "gdbstub_arch",
+    "riscv64/gdb",
     "vm_control/gdb",
     "x86_64/gdb",
 ]
@@ -161,8 +153,11 @@ panic-memfd = []
 ## Enables the use of the qcow format for block devices.
 qcow = ["disk/qcow"]
 
+## Enables the registered_events mechanisms.
+registered_events = ["protos/registered_events", "protobuf", "base/proto_tube", "vm_control/registered_events", "devices/registered_events"]
+
 ## Enables vmm-swap of guest memory. This is only available on Linux.
-swap = ["aarch64/swap", "arch/swap", "devices/swap", "vm_control/swap", "x86_64/swap", "dep:swap"]
+swap = ["aarch64/swap", "arch/swap", "devices/swap", "vm_control/swap", "x86_64/swap", "swap/enable"]
 
 ## Enables collection of VM statistics.
 stats = ["devices/stats"]
@@ -349,6 +344,11 @@ all-aarch64 = [
     "gunyah",
 ]
 
+## All features that are compiled and tested for riscv64
+all-riscv64 = [
+    "gdb",
+]
+
 ## All features that are compiled and tested for x86_64
 all-x86_64 = ["all-default", "plugin", "scudo"]
 
@@ -358,7 +358,7 @@ all-armhf = [
     "android-sparse",
     "composite-disk",
     "default",
-    "gdb", # no effect because gdb is not supported for armhf
+    "gdb",
     "libvda-stub",
     "tpm",
 ]
@@ -379,7 +379,7 @@ all-mingw64 = [
 all-msvc64 = [ "all-mingw64" ]
 
 ## All features that are enabled in ChromeOS builds.
-all-chromeos = ["base/chromeos", "audio_cras", "devices/chromeos", "panic-memfd", "arc_quota", "vtpm"]
+all-chromeos = ["base/chromeos", "audio_cras", "devices/chromeos", "panic-memfd", "arc_quota", "vtpm", "registered_events"]
 
 # Deprecated feature flag. Remove after ChromeOS-side is updated.
 chromeos = ["all-chromeos"]
@@ -387,7 +387,7 @@ chromeos = ["all-chromeos"]
 [dependencies]
 anyhow = "1.0.32"
 arch = { path = "arch" }
-argh = "0.1"
+argh = "0.1.10"
 argh_helpers = { path = "argh_helpers" }
 audio_streams = "*"
 base = "*"
@@ -421,7 +421,7 @@ merge = "0.1.0"
 metrics = { path = "metrics" }
 net_util = { path = "net_util" }
 once_cell = "1.7"
-protobuf = { version = "2.3", optional = true }
+protobuf = { version = "3.2", optional = true }
 protos = { path = "protos", optional = true }
 remain = "*"
 resources = { path = "resources" }
@@ -431,14 +431,17 @@ serde_json = "*"
 serde_keyvalue = { path = "serde_keyvalue", features = ["argh_derive"] }
 smallvec = "1.6.1"
 static_assertions = "1.1"
+swap = { path = "swap" }
 sync = { path = "common/sync" }
 tempfile = "3"
 thiserror = { version = "1.0.20" }
 uuid = { version = "1", features = [ "serde" ] }
-vhost = { path = "vhost" }
 vm_control = { path = "vm_control" }
 acpi_tables = { path = "acpi_tables" }
 vm_memory = { path = "vm_memory" }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv64 = { path = "riscv64" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { path = "x86_64" }
@@ -449,9 +452,7 @@ aarch64 = { path = "aarch64" }
 [target.'cfg(unix)'.dependencies]
 minijail = "*" # provided by ebuild
 p9 = "*"
-
-[target.'cfg(target_os="linux")'.dependencies]
-swap = { path = "swap", optional = true }
+vhost = { path = "vhost" }
 
 [target.'cfg(windows)'.dependencies]
 anti_tamper = { path = "anti_tamper" }
@@ -475,7 +476,6 @@ rand = "0.8"
 audio_streams = { path = "common/audio_streams" }
 base = { path = "base" }
 cros_async =  { path = "cros_async" }
-cros_fuzz = { path = "common/cros-fuzz" } # ignored by ebuild
 data_model = { path = "common/data_model" }
 libcras = { path = "libcras_stub" } # ignored by ebuild
 p9 = { path = "common/p9" } # ignored by ebuild

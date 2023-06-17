@@ -2,34 +2,55 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// For the moment, the only platform specific code is related to tests.
-#![cfg(test)]
-
-use base::Timer;
-
-use super::FdExecutor;
-use super::URingExecutor;
-use crate::sys::unix::executor;
+use crate::AsyncError;
 use crate::AsyncResult;
 use crate::TimerAsync;
 
 impl TimerAsync {
-    pub(crate) fn new_poll(timer: Timer, ex: &FdExecutor) -> AsyncResult<TimerAsync> {
-        executor::async_poll_from(timer, ex).map(|io_source| TimerAsync { io_source })
-    }
-
-    pub(crate) fn new_uring(timer: Timer, ex: &URingExecutor) -> AsyncResult<TimerAsync> {
-        executor::async_uring_from(timer, ex).map(|io_source| TimerAsync { io_source })
+    pub async fn wait_sys(&self) -> AsyncResult<()> {
+        let (n, _) = self
+            .io_source
+            .read_to_vec(None, 0u64.to_ne_bytes().to_vec())
+            .await?;
+        if n != 8 {
+            return Err(AsyncError::EventAsync(base::Error::new(libc::ENODATA)));
+        }
+        Ok(())
     }
 }
 
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
+    use base::Timer;
+
+    use super::super::fd_executor::EpollReactor;
+    use super::super::uring_executor::UringReactor;
     use super::*;
+    use crate::common_executor::RawExecutor;
     use crate::sys::unix::uring_executor::is_uring_stable;
     use crate::Executor;
+    use std::sync::Arc;
+
+    impl TimerAsync {
+        pub(crate) fn new_poll(
+            timer: Timer,
+            ex: &Arc<RawExecutor<EpollReactor>>,
+        ) -> AsyncResult<TimerAsync> {
+            ex.new_source(timer)
+                .map(|io_source| TimerAsync { io_source })
+        }
+
+        pub(crate) fn new_uring(
+            timer: Timer,
+            ex: &Arc<RawExecutor<UringReactor>>,
+        ) -> AsyncResult<TimerAsync> {
+            ex.new_source(timer)
+                .map(|io_source| TimerAsync { io_source })
+        }
+    }
 
     #[test]
     fn timer() {
@@ -50,7 +71,7 @@ mod tests {
             return;
         }
 
-        async fn this_test(ex: &URingExecutor) {
+        async fn this_test(ex: &Arc<RawExecutor<UringReactor>>) {
             let mut tfd = Timer::new().expect("failed to create timerfd");
 
             let dur = Duration::from_millis(200);
@@ -58,19 +79,18 @@ mod tests {
             tfd.reset(dur, None).expect("failed to arm timer");
 
             let t = TimerAsync::new_uring(tfd, ex).unwrap();
-            let count = t.next_val().await.expect("unable to wait for timer");
+            t.wait().await.expect("unable to wait for timer");
 
-            assert_eq!(count, 1);
             assert!(now.elapsed() >= dur);
         }
 
-        let ex = URingExecutor::new().unwrap();
+        let ex = RawExecutor::<UringReactor>::new().unwrap();
         ex.run_until(this_test(&ex)).unwrap();
     }
 
     #[test]
     fn one_shot_fd() {
-        async fn this_test(ex: &FdExecutor) {
+        async fn this_test(ex: &Arc<RawExecutor<EpollReactor>>) {
             let mut tfd = Timer::new().expect("failed to create timerfd");
 
             let dur = Duration::from_millis(200);
@@ -78,13 +98,12 @@ mod tests {
             tfd.reset(dur, None).expect("failed to arm timer");
 
             let t = TimerAsync::new_poll(tfd, ex).unwrap();
-            let count = t.next_val().await.expect("unable to wait for timer");
+            t.wait().await.expect("unable to wait for timer");
 
-            assert_eq!(count, 1);
             assert!(now.elapsed() >= dur);
         }
 
-        let ex = FdExecutor::new().unwrap();
+        let ex = RawExecutor::<EpollReactor>::new().unwrap();
         ex.run_until(this_test(&ex)).unwrap();
     }
 }

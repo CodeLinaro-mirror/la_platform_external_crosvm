@@ -148,8 +148,10 @@ pub enum MasterReq {
     GET_STATUS = 40,
     /// Get a list of the device's shared memory regions.
     GET_SHARED_MEMORY_REGIONS = 41,
+    /// Stop all queue handlers and save each queue state.
+    SLEEP = 42,
     /// Upper bound of valid commands.
-    MAX_CMD = 42,
+    MAX_CMD = 43,
 }
 
 impl From<MasterReq> for u32 {
@@ -223,6 +225,8 @@ pub trait VhostUserMsgValidator {
 // Bit mask for common message flags.
 bitflags! {
     /// Common message flags for vhost-user requests and replies.
+    #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[repr(transparent)]
     pub struct VhostUserHeaderFlag: u32 {
         /// Bits[0..2] is message version number.
         const VERSION = 0x3;
@@ -395,6 +399,8 @@ impl<T: Req> VhostUserMsgValidator for VhostUserMsgHeader<T> {
 // Bit mask for transport specific flags in VirtIO feature set defined by vhost-user.
 bitflags! {
     /// Transport specific flags in VirtIO feature set defined by vhost-user.
+    #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[repr(transparent)]
     pub struct VhostUserVirtioFeatures: u64 {
         /// Feature flag for the protocol feature.
         const PROTOCOL_FEATURES = 0x4000_0000;
@@ -404,6 +410,8 @@ bitflags! {
 // Bit mask for vhost-user protocol feature flags.
 bitflags! {
     /// Vhost-user protocol feature flags.
+    #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[repr(transparent)]
     pub struct VhostUserProtocolFeatures: u64 {
         /// Support multiple queues.
         const MQ = 0x0000_0001;
@@ -620,6 +628,8 @@ impl VhostUserMsgValidator for VhostUserVringState {}
 // Bit mask for vring address flags.
 bitflags! {
     /// Flags for vring address.
+    #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[repr(transparent)]
     pub struct VhostUserVringAddrFlags: u32 {
         /// Support log of vring operations.
         /// Modifications to "used" vring should be logged.
@@ -701,6 +711,8 @@ impl VhostUserMsgValidator for VhostUserVringAddr {
 // Bit mask for the vhost-user device configuration message.
 bitflags! {
     /// Flags for the device configuration message.
+    #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[repr(transparent)]
     pub struct VhostUserConfigFlags: u32 {
         /// Vhost master messages used for writeable fields.
         const WRITABLE = 0x1;
@@ -820,8 +832,9 @@ pub struct VhostUserIotlb {
 
 // Bit mask for flags in virtio-fs slave messages
 bitflags! {
-    #[derive(Default)]
     /// Flags for virtio-fs slave messages.
+    #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[repr(transparent)]
     pub struct VhostUserFSSlaveMsgFlags: u64 {
         /// Empty permission.
         const EMPTY = 0x0;
@@ -866,8 +879,9 @@ impl VhostUserMsgValidator for VhostUserFSSlaveMsg {
 }
 
 bitflags! {
-    #[derive(Default)]
     /// Flags for SHMEM_MAP messages.
+    #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[repr(transparent)]
     pub struct VhostUserShmemMapMsgFlags: u8 {
         /// Empty permission.
         const EMPTY = 0x0;
@@ -1395,7 +1409,7 @@ mod tests {
         let config = VringConfigData {
             queue_max_size: 256,
             queue_size: 128,
-            flags: VhostUserVringAddrFlags::VHOST_VRING_F_LOG.bits,
+            flags: VhostUserVringAddrFlags::VHOST_VRING_F_LOG.bits(),
             desc_table_addr: 0x1000,
             used_ring_addr: 0x2000,
             avail_ring_addr: 0x3000,

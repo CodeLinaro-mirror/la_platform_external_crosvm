@@ -38,9 +38,13 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use arch::CpuConfigArch;
+use arch::IrqChipArch;
 use arch::LinuxArch;
 use arch::RunnableLinuxVm;
+use arch::VcpuArch;
 use arch::VirtioDeviceStub;
+use arch::VmArch;
 use arch::VmComponents;
 use arch::VmImage;
 use base::enable_high_res_timers;
@@ -73,6 +77,7 @@ use broker_ipc::CommonChildStartupArgs;
 use crosvm_cli::sys::windows::exit::Exit;
 use crosvm_cli::sys::windows::exit::ExitContext;
 use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
+use crosvm_cli::sys::windows::exit::ExitContextOption;
 use devices::create_devices_worker_thread;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
@@ -80,7 +85,7 @@ use devices::tsc::get_tsc_sync_mitigations;
 use devices::tsc::standard_deviation;
 use devices::tsc::TscSyncMitigations;
 use devices::virtio;
-use devices::virtio::block::block::DiskOption;
+use devices::virtio::block::DiskOption;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::common_backend::VirtioSnd;
 #[cfg(feature = "audio")]
@@ -104,10 +109,6 @@ use devices::BusDeviceObj;
 use devices::GvmIrqChip;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use devices::IrqChip;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use devices::IrqChipAArch64 as IrqChipArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use devices::IrqChipX86_64 as IrqChipArch;
 use devices::UserspaceIrqChip;
 use devices::VirtioPciDevice;
 #[cfg(feature = "whpx")]
@@ -140,24 +141,14 @@ use hypervisor::whpx::WhpxFeature;
 use hypervisor::whpx::WhpxVcpu;
 #[cfg(feature = "whpx")]
 use hypervisor::whpx::WhpxVm;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::CpuConfigX86_64;
 use hypervisor::Hypervisor;
 #[cfg(feature = "whpx")]
 use hypervisor::HypervisorCap;
 #[cfg(feature = "whpx")]
 use hypervisor::HypervisorX86_64;
 use hypervisor::ProtectionType;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VcpuAArch64 as VcpuArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VcpuX86_64 as VcpuArch;
 #[cfg(any(feature = "gvm", feature = "whpx"))]
 use hypervisor::Vm;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VmAArch64 as VmArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VmX86_64 as VmArch;
 use irq_wait::IrqWaitWorker;
 use jail::FakeMinijailStub as Minijail;
 #[cfg(not(feature = "crash-report"))]
@@ -183,6 +174,8 @@ use tube_transporter::TubeToken;
 use tube_transporter::TubeTransporterReader;
 use vm_control::BalloonControlCommand;
 use vm_control::DeviceControlCommand;
+use vm_control::IrqHandlerRequest;
+use vm_control::VmMemoryRegionState;
 use vm_control::VmMemoryRequest;
 use vm_control::VmRunMode;
 use vm_memory::GuestAddress;
@@ -201,11 +194,11 @@ use x86_64::X8664arch as Arch;
 
 use crate::crosvm::config::Config;
 use crate::crosvm::config::Executable;
+#[cfg(any(feature = "gvm", feature = "whpx"))]
+use crate::crosvm::config::IrqChipKind;
 #[cfg(feature = "gpu")]
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::sys::config::HypervisorKind;
-#[cfg(any(feature = "gvm", feature = "whpx"))]
-use crate::crosvm::sys::config::IrqChipKind;
 use crate::crosvm::sys::windows::broker::BrokerTubes;
 #[cfg(feature = "stats")]
 use crate::crosvm::sys::windows::stats::StatisticsCollector;
@@ -437,7 +430,6 @@ fn create_balloon_device(
     let dev = virtio::Balloon::new(
         virtio::base_features(cfg.protection_type),
         balloon_device_tube,
-        None,
         dynamic_mapping_device_tube,
         inflate_tube,
         init_balloon_size,
@@ -447,6 +439,7 @@ fn create_balloon_device(
             BalloonMode::Relaxed
         },
         balloon_features,
+        #[cfg(feature = "registered_events")]
         None,
     )
     .exit_context(Exit::BalloonDeviceNew, "failed to create balloon")?;
@@ -780,6 +773,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
     pvclock_host_tube: &Option<Tube>,
     run_mode_arc: &VcpuRunMode,
+    region_state: &mut VmMemoryRegionState,
 ) -> Result<(bool, Option<ExitState>)> {
     match event.token {
         Token::VmEvent => match vm_evt_rdtube.recv::<VmEventType>() {
@@ -828,6 +822,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 &mut sys_allocator_mutex.lock(),
                                 gralloc,
                                 None,
+                                region_state,
                             );
                             if let Err(e) = tube.send(&response) {
                                 error!("failed to send VmMemoryControlResponse: {}", e);
@@ -933,14 +928,16 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let sys_allocator_mutex = Arc::new(Mutex::new(sys_allocator));
 
     let exit_evt = Event::new().exit_context(Exit::CreateEvent, "failed to create event")?;
+    let (irq_handler_control, irq_handler_control_for_worker) = Tube::pair().exit_context(
+        Exit::CreateTube,
+        "failed to create IRQ handler control Tube",
+    )?;
 
     // Create a separate thread to wait on IRQ events. This is a natural division
     // because IRQ interrupts have no dependencies on other events, and this lets
     // us avoid approaching the Windows WaitForMultipleObjects 64-object limit.
     let irq_join_handle = IrqWaitWorker::start(
-        exit_evt
-            .try_clone()
-            .exit_context(Exit::CloneEvent, "failed to clone event")?,
+        irq_handler_control_for_worker,
         guest_os
             .irq_chip
             .try_box_clone()
@@ -1006,14 +1003,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     let anti_tamper_main_thread_tube = spawn_anti_tamper_thread(&wait_ctx);
 
-    #[cfg(feature = "sandbox")]
-    if sandbox::is_sandbox_target() {
-        sandbox::TargetServices::get()
-            .exit_context(Exit::SandboxError, "failed to create sandbox")?
-            .expect("Could not create sandbox!")
-            .lower_token();
-    }
-
     let ime_thread = run_ime_thread(product_args, &exit_evt)?;
 
     let original_terminal_mode = stdin().set_raw_mode().ok();
@@ -1042,6 +1031,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     }
 
     let mut exit_state = ExitState::Stop;
+    let mut region_state = VmMemoryRegionState::new();
 
     'poll: loop {
         let events = {
@@ -1075,6 +1065,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 vcpu_boxes.as_ref(),
                 &pvclock_host_tube,
                 run_mode_arc.as_ref(),
+                &mut region_state,
             )?;
             if let Some(state) = state {
                 exit_state = state;
@@ -1136,6 +1127,12 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let mut res = Ok(exit_state);
     guest_os.irq_chip.kick_halted_vcpus();
     let _ = exit_evt.signal();
+
+    // Shut down the IRQ handler thread.
+    if let Err(e) = irq_handler_control.send(&IrqHandlerRequest::Exit) {
+        error!("failed to request exit from IRQ handler thread: {}", e);
+    }
+
     // Ensure any child threads have ended by sending the Exit vm event (possibly again) to ensure
     // their run loops are aborted.
     let _ = vm_evt_wrtube.send::<VmEventType>(&VmEventType::Exit);
@@ -1275,7 +1272,7 @@ fn create_whpx_vm(
     force_calibrated_tsc_leaf: bool,
     vm_evt_wrtube: SendTube,
 ) -> Result<WhpxVm> {
-    let cpu_config = CpuConfigX86_64::new(
+    let cpu_config = hypervisor::CpuConfigX86_64::new(
         force_calibrated_tsc_leaf,
         false, /* host_cpu_topology */
         false, /* enable_hwp */
@@ -1352,28 +1349,31 @@ where
     Ok(irq_chip)
 }
 
-pub fn get_default_hypervisor() -> Result<HypervisorKind> {
+pub fn get_default_hypervisor() -> Option<HypervisorKind> {
     // The ordering here matters from most preferable to the least.
     #[cfg(feature = "whpx")]
     match hypervisor::whpx::Whpx::is_enabled() {
-        true => return Ok(HypervisorKind::Whpx),
+        true => return Some(HypervisorKind::Whpx),
         false => warn!("Whpx not enabled."),
     };
+
     #[cfg(feature = "haxm")]
     if get_cpu_manufacturer() == CpuManufacturer::Intel {
         // Make sure Haxm device can be opened before selecting it.
         match Haxm::new() {
-            Ok(_) => return Ok(HypervisorKind::Ghaxm),
+            Ok(_) => return Some(HypervisorKind::Ghaxm),
             Err(e) => warn!("Cannot initialize HAXM: {}", e),
         };
     }
+
     #[cfg(feature = "gvm")]
     // Make sure Gvm device can be opened before selecting it.
     match Gvm::new() {
-        Ok(_) => return Ok(HypervisorKind::Gvm),
+        Ok(_) => return Some(HypervisorKind::Gvm),
         Err(e) => warn!("Cannot initialize GVM: {}", e),
     };
-    bail!("no hypervisor enabled!");
+
+    None
 }
 
 fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
@@ -1441,6 +1441,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         vcpu_affinity: cfg.vcpu_affinity.clone(),
         cpu_clusters: cfg.cpu_clusters.clone(),
         cpu_capacity: cfg.cpu_capacity.clone(),
+        cpu_frequencies: BTreeMap::new(),
         no_smt: cfg.no_smt,
         hugepages: cfg.hugepages,
         hv_cfg: hypervisor::Config {
@@ -1472,7 +1473,6 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .collect::<Result<Vec<SDT>>>()?,
         rt_cpus: cfg.rt_cpus.clone(),
         delay_rt: cfg.delay_rt,
-        dmi_path: cfg.dmi_path.clone(),
         no_i8042: cfg.no_i8042,
         no_rtc: cfg.no_rtc,
         host_cpu_topology: cfg.host_cpu_topology,
@@ -1486,6 +1486,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         pcie_ecam: cfg.pcie_ecam,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         oem_strings: cfg.oem_strings.clone(),
+        dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
     })
 }
 
@@ -1678,10 +1679,11 @@ fn run_config_inner(
 
     let components: VmComponents = setup_vm_components(&cfg)?;
 
-    let default_hypervisor = get_default_hypervisor()
-        .exit_context(Exit::NoDefaultHypervisor, "no enabled hypervisor")?;
     #[allow(unused_mut)]
-    let mut hypervisor = cfg.hypervisor.unwrap_or(default_hypervisor);
+    let mut hypervisor = cfg
+        .hypervisor
+        .or_else(get_default_hypervisor)
+        .exit_context(Exit::NoDefaultHypervisor, "no enabled hypervisor")?;
 
     #[cfg(feature = "whpx")]
     if hypervisor::whpx::Whpx::is_enabled() {
@@ -1985,6 +1987,35 @@ where
     } else {
         None
     };
+
+    // Lower the token, locking the main process down to a stricter security policy.
+    //
+    // WARNING:
+    //
+    // Windows system calls can behave in unusual ways if they happen concurrently to the token
+    // lowering. For example, access denied can happen if Tube pairs are created in another thread
+    // (b/281108137), and lower_token happens right before the client pipe is connected. Tubes are
+    // not privileged resources, but can be broken due to the token changing unexpectedly.
+    //
+    // We explicitly lower the token here and *then* call run_control to make it clear that any
+    // resources that require a privileged token should be created on the main thread & passed into
+    // run_control, to follow the correct order:
+    // - Privileged resources are created.
+    // - Token is lowered.
+    // - Threads are spawned & may create more non-privileged resources (without fear of the token
+    //   changing at an undefined time).
+    //
+    // Recommendation: If you find your code doesnt work in run_control because of the sandbox, you
+    // should split any resource creation to before this token lowering & pass the resources into
+    // run_control. Don't move the token lowering somewhere else without considering multi-threaded
+    // effects.
+    #[cfg(feature = "sandbox")]
+    if sandbox::is_sandbox_target() {
+        sandbox::TargetServices::get()
+            .exit_code_from_err("failed to create sandbox")?
+            .expect("Could not create sandbox!")
+            .lower_token();
+    }
 
     run_control(
         windows,

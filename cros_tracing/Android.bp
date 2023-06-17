@@ -23,5 +23,6 @@ rust_library {
         "libanyhow",
         "libbase_rust",
         "libcfg_if",
+        "libcros_tracing_types",
     ],
 }

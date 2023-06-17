@@ -14,6 +14,8 @@ use hypervisor::MPState;
 use hypervisor::Vm;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use hypervisor::VmAArch64;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::VmRiscv64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64;
 use vm_memory::GuestMemory;
@@ -48,9 +50,17 @@ fn mp_state() {
     let state = chip.get_mp_state(0).expect("failed to get mp state");
     assert_eq!(state, MPState::Runnable);
 
-    chip.set_mp_state(0, &MPState::Stopped)
+    let new_mpstate = if cfg!(any(target_arch = "arm", target_arch = "aarch64")) {
+        MPState::Stopped
+    } else if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+        MPState::Halted
+    } else {
+        unimplemented!();
+    };
+
+    chip.set_mp_state(0, &new_mpstate)
         .expect("failed to set mp state");
 
     let state = chip.get_mp_state(0).expect("failed to get mp state");
-    assert_eq!(state, MPState::Stopped);
+    assert_eq!(state, new_mpstate);
 }

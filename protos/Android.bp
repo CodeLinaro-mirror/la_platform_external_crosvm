@@ -19,10 +19,14 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
-    features: ["composite-disk"],
+    features: [
+        "composite-disk",
+        "registered_events",
+    ],
     rustlibs: [
         "libcdisk_spec_proto",
-        "libprotobuf_deprecated",
+        "libprotobuf",
+        "libregistered_events_proto",
     ],
 }
 
@@ -32,6 +36,20 @@ rust_protobuf {
     protos: ["src/cdisk_spec.proto"],
     source_stem: "cdisk_spec",
     host_supported: true,
+    use_protobuf3: true,
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.virt",
+    ],
+}
+
+rust_protobuf {
+    name: "libregistered_events_proto",
+    crate_name: "registered_events_proto",
+    protos: ["src/registered_events.proto"],
+    source_stem: "registered_events",
+    host_supported: true,
+    use_protobuf3: true,
     apex_available: [
         "//apex_available:platform",
         "com.android.virt",
@@ -44,4 +62,5 @@ rust_protobuf {
     protos: ["src/plugin.proto"],
     source_stem: "plugin",
     host_supported: true,
+    use_protobuf3: true,
 }

@@ -222,6 +222,7 @@ where
         None,
         #[cfg(unix)]
         false,
+        Default::default(),
     )
     .unwrap();
 
@@ -238,7 +239,7 @@ where
 
     // Note that this puts the mptable at 0x9FC00 in guest physical memory.
     mptable::setup_mptable(&guest_mem, 1, &pci_irqs).expect("failed to setup mptable");
-    smbios::setup_smbios(&guest_mem, None, &Vec::new()).expect("failed to setup smbios");
+    smbios::setup_smbios(&guest_mem, &Vec::new()).expect("failed to setup smbios");
 
     let mut apic_ids = Vec::new();
     acpi::create_acpi_tables(
@@ -292,7 +293,7 @@ where
             // mov [eax],ebx
             // so we're writing 0x12 (the contents of ebx) to the address
             // in eax (write_addr).
-            vcpu_regs.rax = write_addr.offset() as u64;
+            vcpu_regs.rax = write_addr.offset();
             vcpu_regs.rbx = 0x12;
             // ecx will contain 0, but after the second instruction it will
             // also contain 0x12
@@ -309,9 +310,8 @@ where
 
             set_lint(0, &mut irq_chip).unwrap();
 
-            let run_handle = vcpu.take_run_handle(None).unwrap();
             loop {
-                match vcpu.run(&run_handle).expect("run failed") {
+                match vcpu.run().expect("run failed") {
                     VcpuExit::Io => {
                         vcpu.handle_io(&mut |IoParams {
                                                  address,

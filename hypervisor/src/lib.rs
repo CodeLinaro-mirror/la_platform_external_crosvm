@@ -17,6 +17,8 @@ pub mod gunyah;
 pub mod haxm;
 #[cfg(unix)]
 pub mod kvm;
+#[cfg(target_arch = "riscv64")]
+pub mod riscv64;
 #[cfg(all(windows, feature = "whpx"))]
 pub mod whpx;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -25,8 +27,6 @@ pub mod x86_64;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 #[cfg(all(unix, feature = "geniezone"))]
 pub mod geniezone;
-
-use std::os::raw::c_int;
 
 use base::AsRawDescriptor;
 use base::Event;
@@ -42,6 +42,8 @@ use vm_memory::GuestMemory;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub use crate::aarch64::*;
 pub use crate::caps::*;
+#[cfg(target_arch = "riscv64")]
+pub use crate::riscv64::*;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use crate::x86_64::*;
 
@@ -207,57 +209,6 @@ pub trait Vm: Send {
     fn handle_deflate(&mut self, guest_address: GuestAddress, size: u64) -> Result<()>;
 }
 
-/// A unique fingerprint for a particular `VcpuRunHandle`, used in `Vcpu` impls to ensure the
-/// `VcpuRunHandle ` they receive is the same one that was returned from `take_run_handle`.
-#[derive(Clone, PartialEq, Eq)]
-pub struct VcpuRunHandleFingerprint(u64);
-
-impl VcpuRunHandleFingerprint {
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-}
-
-/// A handle returned by a `Vcpu` to be used with `Vcpu::run` to execute a virtual machine's VCPU.
-///
-/// This is used to ensure that the caller has bound the `Vcpu` to a thread with
-/// `Vcpu::take_run_handle` and to execute hypervisor specific cleanup routines when dropped.
-pub struct VcpuRunHandle {
-    drop_fn: fn(),
-    fingerprint: VcpuRunHandleFingerprint,
-    // Prevents Send+Sync for this type.
-    phantom: std::marker::PhantomData<*mut ()>,
-}
-
-impl VcpuRunHandle {
-    /// Used by `Vcpu` impls to create a unique run handle, that when dropped, will call the given
-    /// `drop_fn`.
-    pub fn new(drop_fn: fn()) -> Self {
-        // Creates a probably unique number with a hash of the current thread id and epoch time.
-        use std::hash::Hash;
-        use std::hash::Hasher;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::time::Instant::now().hash(&mut hasher);
-        std::thread::current().id().hash(&mut hasher);
-        Self {
-            drop_fn,
-            fingerprint: VcpuRunHandleFingerprint(hasher.finish()),
-            phantom: std::marker::PhantomData,
-        }
-    }
-
-    /// Gets the unique fingerprint which may be copied and compared freely.
-    pub fn fingerprint(&self) -> &VcpuRunHandleFingerprint {
-        &self.fingerprint
-    }
-}
-
-impl Drop for VcpuRunHandle {
-    fn drop(&mut self) {
-        (self.drop_fn)();
-    }
-}
-
 /// Operation for Io and Mmio
 #[derive(Copy, Clone, Debug)]
 pub enum IoOperation {
@@ -278,11 +229,45 @@ pub struct IoParams {
     pub operation: IoOperation,
 }
 
+/// Handle to a virtual CPU that may be used to request a VM exit from within a signal handler.
+#[cfg(unix)]
+pub struct VcpuSignalHandle {
+    inner: std::sync::Weak<dyn VcpuSignalHandleInner>,
+}
+
+#[cfg(unix)]
+impl VcpuSignalHandle {
+    /// Request an immediate exit for this VCPU.
+    ///
+    /// This function is safe to call from a signal handler.
+    pub fn signal_immediate_exit(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            // SAFETY: The `Vcpu` owns the strong reference to this `Arc`, so it must still exist.
+            unsafe {
+                inner.signal_immediate_exit();
+            }
+        }
+    }
+}
+
+/// Signal-safe mechanism for requesting an immediate VCPU exit.
+///
+/// Each hypervisor backend must implement this for its VCPU type.
+#[cfg(unix)]
+pub(crate) trait VcpuSignalHandleInner {
+    /// Signal the associated VCPU to exit if it is currently running.
+    ///
+    /// # Safety
+    ///
+    /// The implementation of this function must be async signal safe.
+    /// <https://man7.org/linux/man-pages/man7/signal-safety.7.html>
+    ///
+    /// The caller must ensure the VCPU referenced by `self` still exists.
+    unsafe fn signal_immediate_exit(&self);
+}
+
 /// A virtual CPU holding a virtualized hardware thread's state, such as registers and interrupt
 /// state, which may be used to execute virtual machines.
-///
-/// To run, `take_run_handle` must be called to lock the vcpu to a thread. Then the returned
-/// `VcpuRunHandle` can be used for running.
 pub trait Vcpu: downcast_rs::DowncastSync {
     /// Makes a shallow clone of this `Vcpu`.
     fn try_clone(&self) -> Result<Self>
@@ -292,21 +277,8 @@ pub trait Vcpu: downcast_rs::DowncastSync {
     /// Casts this architecture specific trait object to the base trait object `Vcpu`.
     fn as_vcpu(&self) -> &dyn Vcpu;
 
-    /// Returns a unique `VcpuRunHandle`. A `VcpuRunHandle` is required to run the guest.
-    ///
-    /// Assigns a vcpu to the current thread so that signal handlers can call
-    /// set_local_immediate_exit().  An optional signal number will be temporarily blocked while
-    /// assigning the vcpu to the thread and later blocked when `VcpuRunHandle` is destroyed.
-    ///
-    /// Returns an error, `EBUSY`, if the current thread already contains a Vcpu.
-    fn take_run_handle(&self, signal_num: Option<c_int>) -> Result<VcpuRunHandle>;
-
     /// Runs the VCPU until it exits, returning the reason for the exit.
-    ///
-    /// Note that the state of the VCPU and associated VM must be setup first for this to do
-    /// anything useful. The given `run_handle` must be the same as the one returned by
-    /// `take_run_handle` for this `Vcpu`.
-    fn run(&mut self, run_handle: &VcpuRunHandle) -> Result<VcpuExit>;
+    fn run(&mut self) -> Result<VcpuExit>;
 
     /// Returns the vcpu id.
     fn id(&self) -> usize;
@@ -314,14 +286,10 @@ pub trait Vcpu: downcast_rs::DowncastSync {
     /// Sets the bit that requests an immediate exit.
     fn set_immediate_exit(&self, exit: bool);
 
-    /// Sets/clears the bit for immediate exit for the vcpu on the current thread.
-    fn set_local_immediate_exit(exit: bool)
-    where
-        Self: Sized;
-
-    /// Returns a function pointer that invokes `set_local_immediate_exit` in a
-    /// signal-safe way when called.
-    fn set_local_immediate_exit_fn(&self) -> extern "C" fn();
+    /// Returns a handle that can be used to cause this VCPU to exit from `run()` from a signal
+    /// handler.
+    #[cfg(unix)]
+    fn signal_handle(&self) -> VcpuSignalHandle;
 
     /// Handles an incoming MMIO request from the guest.
     ///
@@ -369,11 +337,6 @@ pub trait Vcpu: downcast_rs::DowncastSync {
     /// Signals to the hypervisor that this guest is being paused by userspace.  Only works on Vms
     /// that support `VmCap::PvClockSuspend`.
     fn pvclock_ctrl(&self) -> Result<()>;
-
-    /// Specifies set of signals that are blocked during execution of `RunnableVcpu::run`.  Signals
-    /// that are not blocked will cause run to return with `VcpuExit::Intr`.  Only works on Vms that
-    /// support `VmCap::SignalMask`.
-    fn set_signal_mask(&self, signals: &[c_int]) -> Result<()>;
 
     /// Enables a hypervisor-specific extension on this Vcpu.  `cap` is a constant defined by the
     /// hypervisor API (e.g., kvm.h).  `args` are the arguments for enabling the feature, if any.
@@ -444,7 +407,6 @@ pub enum VcpuExit {
     SystemEventShutdown,
     SystemEventReset,
     SystemEventCrash,
-    SystemEventS2Idle,
     RdMsr {
         index: u32,
     },
@@ -475,6 +437,19 @@ pub enum VcpuExit {
     ApicInitSipiTrap,
     /// vcpu stoppted due to bus lock
     BusLock,
+    /// Riscv supervisor call.
+    Sbi {
+        extension_id: u64,
+        function_id: u64,
+        args: [u64; 6],
+    },
+    /// Emulate CSR access from guest.
+    RiscvCsr {
+        csr_num: u64,
+        new_value: u64,
+        write_mask: u64,
+        ret_value: u64,
+    },
 }
 
 /// A hypercall with parameters being made from the guest.
@@ -503,21 +478,25 @@ pub enum DeviceKind {
     /// ARM virtual general interrupt controller v3
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     ArmVgicV3,
+    /// RiscV AIA in-kernel emulation
+    #[cfg(any(target_arch = "riscv64"))]
+    RiscvAia,
 }
 
 /// The source chip of an `IrqSource`
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrqSourceChip {
     PicPrimary,
     PicSecondary,
     Ioapic,
     Gic,
+    Aia,
 }
 
 /// A source of IRQs in an `IrqRoute`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrqSource {
     Irqchip { chip: IrqSourceChip, pin: u32 },
     Msi { address: u64, data: u32 },
@@ -525,7 +504,7 @@ pub enum IrqSource {
 
 /// A single route for an IRQ.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrqRoute {
     pub gsi: u32,
     pub source: IrqSource,
@@ -542,7 +521,7 @@ pub struct ClockState {
 
 /// The MPState represents the state of a processor.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MPState {
     /// the vcpu is currently running (x86/x86_64,arm/arm64)
     Runnable,

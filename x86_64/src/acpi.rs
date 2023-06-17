@@ -242,9 +242,9 @@ fn create_facp_table(sci_irq: u16, force_s2idle: bool) -> SDT {
     facp.write(FADT_FIELD_MINOR_REVISION, FADT_MINOR_REVISION); // FADT minor version
     facp.write(FADT_FIELD_HYPERVISOR_ID, *b"CROSVM"); // Hypervisor Vendor Identity
 
-    facp.write(FADT_FIELD_RTC_CENTURY, devices::cmos::RTC_REG_CENTURY);
-    facp.write(FADT_FIELD_RTC_DAY_ALARM, devices::cmos::RTC_REG_ALARM_DAY);
-    facp.write(
+    facp.write::<u8>(FADT_FIELD_RTC_CENTURY, devices::cmos::RTC_REG_CENTURY);
+    facp.write::<u8>(FADT_FIELD_RTC_DAY_ALARM, devices::cmos::RTC_REG_ALARM_DAY);
+    facp.write::<u8>(
         FADT_FIELD_RTC_MONTH_ALARM,
         devices::cmos::RTC_REG_ALARM_MONTH,
     );
@@ -268,8 +268,8 @@ fn write_facp_overrides(
     facp.write(FADT_FIELD_SMI_COMMAND, 0u32);
     facp.write(FADT_FIELD_FACS_ADDR32, 0u32);
     facp.write(FADT_FIELD_DSDT_ADDR32, 0u32);
-    facp.write(FADT_FIELD_FACS_ADDR, facs_offset.0 as u64);
-    facp.write(FADT_FIELD_DSDT_ADDR, dsdt_offset.0 as u64);
+    facp.write(FADT_FIELD_FACS_ADDR, facs_offset.0);
+    facp.write(FADT_FIELD_DSDT_ADDR, dsdt_offset.0);
 
     // PM1A Event Block Address
     facp.write(FADT_FIELD_PM1A_EVENT_BLK_ADDR, pm_iobase);
@@ -626,7 +626,7 @@ pub fn create_acpi_tables(
     );
     madt.write(
         MADT_FIELD_LAPIC_ADDR,
-        super::mptable::APIC_DEFAULT_PHYS_BASE as u32,
+        super::mptable::APIC_DEFAULT_PHYS_BASE,
     );
     // Our IrqChip implementations (the KVM in-kernel irqchip and the split irqchip) expose a pair
     // of PC-compatible 8259 PICs.
@@ -732,4 +732,36 @@ pub fn create_acpi_tables(
     guest_mem.write_at_addr(rsdp.as_bytes(), rsdp_offset).ok()?;
 
     Some(rsdp_offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::acpi::*;
+
+    #[test]
+    fn facp_table_creation() {
+        let sci_irq = 5;
+        let force_s2idle = true;
+        let facp = create_facp_table(sci_irq as u16, force_s2idle);
+
+        assert_eq!(facp.read::<u32>(FADT_FIELD_FLAGS), FADT_LOW_POWER_S2IDLE);
+        assert_eq!(facp.read::<u16>(FADT_FIELD_SCI_INTERRUPT), sci_irq);
+        assert_eq!(
+            facp.read::<u8>(FADT_FIELD_MINOR_REVISION),
+            FADT_MINOR_REVISION
+        );
+        assert_eq!(facp.read::<[u8; 6]>(FADT_FIELD_HYPERVISOR_ID), *b"CROSVM");
+        assert_eq!(
+            facp.read::<u8>(FADT_FIELD_RTC_CENTURY),
+            devices::cmos::RTC_REG_CENTURY
+        );
+        assert_eq!(
+            facp.read::<u8>(FADT_FIELD_RTC_DAY_ALARM),
+            devices::cmos::RTC_REG_ALARM_DAY
+        );
+        assert_eq!(
+            facp.read::<u8>(FADT_FIELD_RTC_MONTH_ALARM),
+            devices::cmos::RTC_REG_ALARM_MONTH
+        );
+    }
 }

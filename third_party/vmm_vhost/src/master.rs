@@ -347,6 +347,12 @@ impl<E: Endpoint<MasterReq>> VhostBackend for Master<E> {
         )?;
         node.wait_for_ack(&hdr)
     }
+
+    fn sleep(&self) -> Result<()> {
+        let mut node = self.node();
+        let hdr = node.send_request_header(MasterReq::SLEEP, None)?;
+        node.wait_for_ack(&hdr)
+    }
 }
 
 impl<E: Endpoint<MasterReq>> VhostUserMaster for Master<E> {
@@ -931,7 +937,7 @@ mod tests {
         master
             .set_config(
                 0x100,
-                unsafe { VhostUserConfigFlags::from_bits_unchecked(0xffff_ffff) },
+                VhostUserConfigFlags::from_bits_retain(0xffff_ffff),
                 &buf[0..4],
             )
             .unwrap_err();

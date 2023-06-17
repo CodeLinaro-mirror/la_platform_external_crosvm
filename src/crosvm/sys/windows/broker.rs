@@ -139,6 +139,18 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Time to wait for the metrics process to flush and upload all logs.
 const METRICS_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// DLLs that are known to interfere with graphics.
+#[cfg(feature = "sandbox")]
+const BLOCKLIST_GRAPHICS_DLLS: &[&str] = &[
+    "action_x64.dll",
+    "AudioDevProps2.dll",
+    "GridWndHook.dll",
+    "Nahimic2OSD.dll",
+    "NahimicOSD.dll",
+    "TwitchNativeOverlay64.dll",
+    "XSplitGameSource64.dll",
+];
+
 /// Maps a process type to its sandbox policy configuration.
 #[cfg(feature = "sandbox")]
 fn process_policy(process_type: ProcessType, cfg: &Config) -> sandbox::policy::Policy {
@@ -149,7 +161,7 @@ fn process_policy(process_type: ProcessType, cfg: &Config) -> sandbox::policy::P
         ProcessType::Metrics => sandbox::policy::METRICS,
         ProcessType::Net => sandbox::policy::NET,
         ProcessType::Slirp => sandbox::policy::SLIRP,
-        ProcessType::Gpu => sandbox::policy::GPU,
+        ProcessType::Gpu => gpu_process_policy(),
         ProcessType::Snd => sandbox::policy::SND,
         ProcessType::Broker => unimplemented!("No broker policy"),
         ProcessType::Spu => unimplemented!("No SPU policy"),
@@ -173,13 +185,17 @@ fn main_process_policy(cfg: &Config) -> sandbox::policy::Policy {
         };
         policy.exceptions.push(rule);
     }
-    let blocked_dlls = vec![
-        "NahimicOSD.dll",
-        "XSplitGameSource64.dll",
-        "TwitchNativeOverlay64.dll",
-        "GridWndHook.dll",
-    ];
-    for dll in blocked_dlls.iter() {
+    for dll in BLOCKLIST_GRAPHICS_DLLS.iter() {
+        policy.dll_blocklist.push(dll.to_string());
+    }
+    policy
+}
+
+/// Dynamically appends rules to the gpu process's policy.
+#[cfg(feature = "sandbox")]
+fn gpu_process_policy() -> sandbox::policy::Policy {
+    let mut policy = sandbox::policy::GPU;
+    for dll in BLOCKLIST_GRAPHICS_DLLS.iter() {
         policy.dll_blocklist.push(dll.to_string());
     }
     policy
@@ -353,7 +369,7 @@ impl Drop for ChildCleanup {
                     let mut exit_details = EmulatorChildProcessExitDetails::new();
                     exit_details.set_exit_code(exit_code as u32);
                     exit_details.set_process_type(self.process_type.into());
-                    details.set_emulator_child_process_exit_details(exit_details);
+                    details.emulator_child_process_exit_details = Some(exit_details).into();
                     metrics::log_event_with_details(MetricEventType::ChildProcessExit, &details);
                 } else {
                     error!(
@@ -867,7 +883,7 @@ impl Supervisor {
     }
 
     fn all_non_metrics_processes_exited(&self) -> bool {
-        self.children.len() == 0 || self.is_only_metrics_process_running()
+        self.children.is_empty() || self.is_only_metrics_process_running()
     }
 
     fn start_exit_timer(&mut self, timeout_token: Token) -> Result<()> {
@@ -1017,7 +1033,7 @@ impl Supervisor {
                             );
                         }
                         ensure_exit_code!(
-                            self.children.len() == 0,
+                            self.children.is_empty(),
                             Exit::BrokerMetricsExitedTimeout,
                             "metrics exited, but other broker children did not exit within the \
                             timeout",

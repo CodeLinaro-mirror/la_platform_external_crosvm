@@ -31,7 +31,7 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libbase_rust",
-        "libprotobuf_deprecated",
+        "libprotobuf",
         "libthiserror",
     ],
     proc_macros: ["libremain"],

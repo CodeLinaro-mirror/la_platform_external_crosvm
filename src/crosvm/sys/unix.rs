@@ -15,12 +15,15 @@ use std::cmp::max;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+#[cfg(feature = "registered_events")]
 use std::collections::HashMap;
+#[cfg(feature = "registered_events")]
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::ffi::CString;
 use std::fs::File;
 use std::fs::OpenOptions;
+#[cfg(feature = "registered_events")]
 use std::hash::Hash;
 use std::io::prelude::*;
 use std::io::stdin;
@@ -31,6 +34,7 @@ use std::os::unix::prelude::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process;
+#[cfg(feature = "registered_events")]
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -45,10 +49,13 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use arch::IrqChipArch;
 use arch::LinuxArch;
 use arch::RunnableLinuxVm;
 use arch::VcpuAffinity;
+use arch::VcpuArch;
 use arch::VirtioDeviceStub;
+use arch::VmArch;
 use arch::VmComponents;
 use arch::VmImage;
 use base::ReadNotifier;
@@ -93,10 +100,6 @@ use devices::HostHotPlugKey;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::HotPlugBus;
 use devices::IommuDevType;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use devices::IrqChipAArch64 as IrqChipArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use devices::IrqChipX86_64 as IrqChipArch;
 use devices::IrqEventIndex;
 use devices::IrqEventSource;
 use devices::KvmKernelIrqChip;
@@ -140,21 +143,15 @@ use hypervisor::geniezone::GeniezoneVm;
 use hypervisor::kvm::Kvm;
 use hypervisor::kvm::KvmVcpu;
 use hypervisor::kvm::KvmVm;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::CpuConfigRiscv64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::CpuConfigX86_64;
 use hypervisor::Hypervisor;
 use hypervisor::HypervisorCap;
 use hypervisor::ProtectionType;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VcpuAArch64 as VcpuArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VcpuX86_64 as VcpuArch;
 use hypervisor::Vm;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VmAArch64 as VmArch;
 use hypervisor::VmCap;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VmX86_64 as VmArch;
 use jail::*;
 use libc;
 use minijail::Minijail;
@@ -163,8 +160,9 @@ use resources::Alloc;
 #[cfg(feature = "direct")]
 use resources::Error as ResourceError;
 use resources::SystemAllocator;
+#[cfg(target_arch = "riscv64")]
+use riscv64::Riscv64 as Arch;
 use rutabaga_gfx::RutabagaGralloc;
-use serde::Serialize;
 use smallvec::SmallVec;
 #[cfg(feature = "swap")]
 use swap::SwapController;
@@ -186,11 +184,12 @@ use crate::crosvm::config::FileBackedMappingParameters;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::crosvm::config::HostPcieRootPortParameters;
 use crate::crosvm::config::HypervisorKind;
+use crate::crosvm::config::IrqChipKind;
 use crate::crosvm::config::SharedDir;
 use crate::crosvm::config::SharedDirKind;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use crate::crosvm::gdb::gdb_thread;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use crate::crosvm::gdb::GdbStub;
 #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
 use crate::crosvm::ratelimit::Ratelimit;
@@ -209,7 +208,6 @@ fn create_virtio_devices(
     resources: &mut SystemAllocator,
     #[cfg_attr(not(feature = "gpu"), allow(unused_variables))] vm_evt_wrtube: &SendTube,
     #[cfg(feature = "balloon")] balloon_device_tube: Option<Tube>,
-    #[cfg(feature = "balloon")] balloon_wss_device_tube: Option<Tube>,
     #[cfg(feature = "balloon")] balloon_inflate_tube: Option<Tube>,
     #[cfg(feature = "balloon")] init_balloon_size: u64,
     disk_device_tubes: &mut Vec<Tube>,
@@ -219,7 +217,7 @@ fn create_virtio_devices(
     #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
     vvu_proxy_device_tubes: &mut Vec<Tube>,
     vvu_proxy_max_sibling_mem_size: u64,
-    #[cfg_attr(not(feature = "balloon"), allow(unused_variables))] registered_evt_q: &SendTube,
+    #[cfg(feature = "registered_events")] registered_evt_q: &SendTube,
 ) -> DeviceResult<Vec<VirtioDeviceStub>> {
     let mut devs = Vec::new();
 
@@ -495,10 +493,10 @@ fn create_virtio_devices(
                 BalloonMode::Relaxed
             },
             balloon_device_tube,
-            balloon_wss_device_tube,
             balloon_inflate_tube,
             init_balloon_size,
             balloon_features,
+            #[cfg(feature = "registered_events")]
             Some(
                 registered_evt_q
                     .try_clone()
@@ -618,6 +616,7 @@ fn create_virtio_devices(
             src,
             tag,
             kind,
+            ugid,
             uid_map,
             gid_map,
             fs_cfg,
@@ -630,6 +629,7 @@ fn create_virtio_devices(
                 create_fs_device(
                     cfg.protection_type,
                     &cfg.jail_config,
+                    *ugid,
                     uid_map,
                     gid_map,
                     src,
@@ -641,6 +641,7 @@ fn create_virtio_devices(
             SharedDirKind::P9 => create_9p_device(
                 cfg.protection_type,
                 &cfg.jail_config,
+                *ugid,
                 uid_map,
                 gid_map,
                 src,
@@ -679,7 +680,6 @@ fn create_devices(
     irq_control_tubes: &mut Vec<Tube>,
     control_tubes: &mut Vec<TaggedControlTube>,
     #[cfg(feature = "balloon")] balloon_device_tube: Option<Tube>,
-    #[cfg(feature = "balloon")] balloon_wss_device_tube: Option<Tube>,
     #[cfg(feature = "balloon")] init_balloon_size: u64,
     disk_device_tubes: &mut Vec<Tube>,
     pmem_device_tubes: &mut Vec<Tube>,
@@ -690,7 +690,7 @@ fn create_devices(
     vvu_proxy_device_tubes: &mut Vec<Tube>,
     vvu_proxy_max_sibling_mem_size: u64,
     iova_max_addr: &mut Option<u64>,
-    registered_evt_q: &SendTube,
+    #[cfg(feature = "registered_events")] registered_evt_q: &SendTube,
 ) -> DeviceResult<Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>> {
     let mut devices: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)> = Vec::new();
     #[cfg(feature = "balloon")]
@@ -809,8 +809,6 @@ fn create_devices(
         #[cfg(feature = "balloon")]
         balloon_device_tube,
         #[cfg(feature = "balloon")]
-        balloon_wss_device_tube,
-        #[cfg(feature = "balloon")]
         balloon_inflate_tube,
         #[cfg(feature = "balloon")]
         init_balloon_size,
@@ -823,6 +821,7 @@ fn create_devices(
         render_server_fd,
         vvu_proxy_device_tubes,
         vvu_proxy_max_sibling_mem_size,
+        #[cfg(feature = "registered_events")]
         registered_evt_q,
     )?;
 
@@ -1156,6 +1155,37 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         (None, 0)
     };
 
+    let mut cpu_frequencies = BTreeMap::new();
+
+    if cfg.virt_cpufreq {
+        let host_cpu_frequencies = Arch::get_host_cpu_frequencies_khz()?;
+
+        for cpu_id in 0..cfg.vcpu_count.unwrap_or(1) {
+            let vcpu_affinity = match cfg.vcpu_affinity.clone() {
+                Some(VcpuAffinity::Global(v)) => v,
+                Some(VcpuAffinity::PerVcpu(mut m)) => m.remove(&cpu_id).unwrap_or_default(),
+                None => {
+                    panic!("There must be some vcpu_affinity setting with VirtCpufreq enabled!")
+                }
+            };
+
+            // Check that the physical CPUs that the vCPU is affined to all share the same
+            // frequency domain.
+            if let Some(freq_domain) = host_cpu_frequencies.get(&(vcpu_affinity[0] as usize)) {
+                for cpu in vcpu_affinity.iter() {
+                    if let Some(frequencies) = host_cpu_frequencies.get(cpu) {
+                        if frequencies != freq_domain {
+                            panic!("Affined CPUs do not share a frequency domain!");
+                        }
+                    }
+                }
+                cpu_frequencies.insert(cpu_id as usize, freq_domain.clone());
+            } else {
+                panic!("No frequency domain for cpu:{}", cpu_id);
+            }
+        }
+    }
+
     Ok(VmComponents {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         ac_adapter: cfg.ac_adapter,
@@ -1169,6 +1199,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         vcpu_affinity: cfg.vcpu_affinity.clone(),
         cpu_clusters: cfg.cpu_clusters.clone(),
         cpu_capacity: cfg.cpu_capacity.clone(),
+        cpu_frequencies,
         #[cfg(feature = "direct")]
         direct_gpe: cfg.direct_gpe.clone(),
         #[cfg(feature = "direct")]
@@ -1204,9 +1235,8 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .collect::<Result<Vec<SDT>>>()?,
         rt_cpus: cfg.rt_cpus.clone(),
         delay_rt: cfg.delay_rt,
-        #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+        #[cfg(feature = "gdb")]
         gdb: None,
-        dmi_path: cfg.dmi_path.clone(),
         no_i8042: cfg.no_i8042,
         no_rtc: cfg.no_rtc,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -1220,6 +1250,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         pcie_ecam: cfg.pcie_ecam,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         pci_low_start: cfg.pci_low_start,
+        dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
     })
 }
 
@@ -1339,13 +1370,14 @@ fn run_gz(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> 
     let vm_clone = vm.try_clone().context("failed to clone vm")?;
 
     let ioapic_host_tube;
-    let mut irq_chip = if cfg.split_irqchip {
-        unimplemented!("Geniezone does not support split irqchip mode");
-    } else {
-        ioapic_host_tube = None;
-
-        GeniezoneKernelIrqChip::new(vm_clone, components.vcpu_count)
-            .context("failed to create IRQ chip")?
+    let mut irq_chip = match cfg.irq_chip.unwrap_or(IrqChipKind::Kernel) {
+        IrqChipKind::Split => bail!("Geniezone does not support split irqchip mode"),
+        IrqChipKind::Userspace => bail!("Geniezone does not support userspace irqchip mode"),
+        IrqChipKind::Kernel => {
+            ioapic_host_tube = None;
+            GeniezoneKernelIrqChip::new(vm_clone, components.vcpu_count)
+                .context("failed to create IRQ chip")?
+        }
     };
 
     run_vm::<GeniezoneVcpu, GeniezoneVm>(
@@ -1384,15 +1416,13 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
             .context("failed to disable MSR_PLATFORM_INFO read access")?;
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     if !cfg.userspace_msr.is_empty() {
         vm.enable_userspace_msr()
             .context("failed to enable userspace MSR handling, do you have kernel 5.10 or later")?;
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            let msr_list = get_override_msr_list(&cfg.userspace_msr);
-            vm.set_msr_filter(msr_list)
-                .context("failed to set msr filter")?;
-        }
+        let msr_list = get_override_msr_list(&cfg.userspace_msr);
+        vm.set_msr_filter(msr_list)
+            .context("failed to set msr filter")?;
     }
 
     // Check that the VM was actually created in protected mode as expected.
@@ -1418,29 +1448,36 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
     }
 
     let ioapic_host_tube;
-    let mut irq_chip = if cfg.split_irqchip {
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        unimplemented!("KVM split irqchip mode only supported on x86 processors");
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            let (host_tube, ioapic_device_tube) = Tube::pair().context("failed to create tube")?;
-            ioapic_host_tube = Some(host_tube);
-            KvmIrqChip::Split(
-                KvmSplitIrqChip::new(
-                    vm_clone,
-                    components.vcpu_count,
-                    ioapic_device_tube,
-                    Some(120),
+    let mut irq_chip = match cfg.irq_chip.unwrap_or(IrqChipKind::Kernel) {
+        IrqChipKind::Userspace => {
+            bail!("KVM userspace irqchip mode not implemented");
+        }
+        IrqChipKind::Split => {
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            bail!("KVM split irqchip mode only supported on x86 processors");
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                let (host_tube, ioapic_device_tube) =
+                    Tube::pair().context("failed to create tube")?;
+                ioapic_host_tube = Some(host_tube);
+                KvmIrqChip::Split(
+                    KvmSplitIrqChip::new(
+                        vm_clone,
+                        components.vcpu_count,
+                        ioapic_device_tube,
+                        Some(120),
+                    )
+                    .context("failed to create IRQ chip")?,
                 )
-                .context("failed to create IRQ chip")?,
+            }
+        }
+        IrqChipKind::Kernel => {
+            ioapic_host_tube = None;
+            KvmIrqChip::Kernel(
+                KvmKernelIrqChip::new(vm_clone, components.vcpu_count)
+                    .context("failed to create IRQ chip")?,
             )
         }
-    } else {
-        ioapic_host_tube = None;
-        KvmIrqChip::Kernel(
-            KvmKernelIrqChip::new(vm_clone, components.vcpu_count)
-                .context("failed to create IRQ chip")?,
-        )
     };
 
     run_vm::<KvmVcpu, KvmVm>(
@@ -1608,7 +1645,7 @@ where
     let mut control_tubes = Vec::new();
     let mut irq_control_tubes = Vec::new();
 
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     if let Some(port) = cfg.gdb {
         // GDB needs a control socket to interrupt vcpus.
         let (gdb_host_tube, gdb_control_tube) = Tube::pair().context("failed to create tube")?;
@@ -1640,16 +1677,6 @@ where
                 .context("failed to set timeout")?;
             (Some(host), Some(device))
         }
-    } else {
-        (None, None)
-    };
-
-    #[cfg(feature = "balloon")]
-    let (balloon_wss_host_tube, balloon_wss_device_tube) = if cfg.balloon_wss_reporting {
-        let (host, device) = Tube::pair().context("failed to create tube")?;
-        host.set_recv_timeout(Some(Duration::from_millis(100)))
-            .context("failed to set timeout")?;
-        (Some(host), Some(device))
     } else {
         (None, None)
     };
@@ -1841,6 +1868,7 @@ where
         BTreeMap::new();
     let mut iova_max_addr: Option<u64> = None;
 
+    #[cfg(feature = "registered_events")]
     let (reg_evt_wrtube, reg_evt_rdtube) =
         Tube::directional_pair().context("failed to create registered event tube")?;
 
@@ -1855,8 +1883,6 @@ where
         #[cfg(feature = "balloon")]
         balloon_device_tube,
         #[cfg(feature = "balloon")]
-        balloon_wss_device_tube,
-        #[cfg(feature = "balloon")]
         init_balloon_size,
         &mut disk_device_tubes,
         &mut pmem_device_tubes,
@@ -1870,6 +1896,7 @@ where
         &mut vvu_proxy_device_tubes,
         components.memory_size,
         &mut iova_max_addr,
+        #[cfg(feature = "registered_events")]
         &reg_evt_wrtube,
     )?;
 
@@ -1972,6 +1999,12 @@ where
     // KVM_CREATE_VCPU uses apic id for x86 and uses cpu id for others.
     let mut vcpu_ids = Vec::new();
 
+    let guest_suspended_cvar = if cfg.force_s2idle {
+        Some(Arc::new((Mutex::new(false), Condvar::new())))
+    } else {
+        None
+    };
+
     #[cfg_attr(not(feature = "direct"), allow(unused_mut))]
     let mut linux = Arch::build_vm::<V, Vcpu>(
         components,
@@ -1991,6 +2024,7 @@ where
         simple_jail(&cfg.jail_config, "block_device")?,
         #[cfg(feature = "swap")]
         swap_controller.as_ref(),
+        guest_suspended_cvar.clone(),
     )
     .context("the architecture failed to build the vm")?;
 
@@ -2061,8 +2095,6 @@ where
         control_tubes,
         #[cfg(feature = "balloon")]
         balloon_host_tube,
-        #[cfg(feature = "balloon")]
-        balloon_wss_host_tube,
         &disk_host_tubes,
         #[cfg(feature = "gpu")]
         gpu_control_host_tube,
@@ -2080,7 +2112,9 @@ where
         hp_thread,
         #[cfg(feature = "swap")]
         swap_controller,
+        #[cfg(feature = "registered_events")]
         reg_evt_rdtube,
+        guest_suspended_cvar,
     )
 }
 
@@ -2507,7 +2541,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     irq_control_tubes: Vec<Tube>,
     mut control_tubes: Vec<TaggedControlTube>,
     #[cfg(feature = "balloon")] balloon_host_tube: Option<Tube>,
-    #[cfg(feature = "balloon")] balloon_wss_host_tube: Option<Tube>,
     disk_host_tubes: &[Tube],
     #[cfg(feature = "gpu")] gpu_control_tube: Tube,
     #[cfg(feature = "usb")] usb_control_tube: Tube,
@@ -2522,7 +2555,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     >,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] hp_thread: std::thread::JoinHandle<()>,
     #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
-    reg_evt_rdtube: RecvTube,
+    #[cfg(feature = "registered_events")] reg_evt_rdtube: RecvTube,
+    guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
 ) -> Result<ExitState> {
     #[derive(EventToken)]
     enum Token {
@@ -2530,42 +2564,50 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         Suspend,
         ChildSignal,
         VmControlServer,
-        VmControl { index: usize },
+        VmControl {
+            index: usize,
+        },
+        #[cfg(feature = "registered_events")]
         RegisteredEvent,
     }
 
-    // Tube keyed on the socket path used to create it.
-    struct AddressedTube {
-        tube: Rc<Tube>,
+    #[cfg(feature = "registered_events")]
+    struct AddressedProtoTube {
+        tube: Rc<ProtoTube>,
         socket_addr: String,
     }
 
-    impl PartialEq for AddressedTube {
+    #[cfg(feature = "registered_events")]
+    impl PartialEq for AddressedProtoTube {
         fn eq(&self, other: &Self) -> bool {
             self.socket_addr == other.socket_addr
         }
     }
 
-    impl Eq for AddressedTube {}
+    #[cfg(feature = "registered_events")]
+    impl Eq for AddressedProtoTube {}
 
-    impl Hash for AddressedTube {
+    #[cfg(feature = "registered_events")]
+    impl Hash for AddressedProtoTube {
         fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
             self.socket_addr.hash(state);
         }
     }
 
-    impl AddressedTube {
-        pub fn send<T: Serialize>(&self, msg: &T) -> Result<(), base::TubeError> {
-            self.tube.send(msg)
+    #[cfg(feature = "registered_events")]
+    impl AddressedProtoTube {
+        pub fn send<M: protobuf::Message>(&self, msg: &M) -> Result<(), base::TubeError> {
+            self.tube.send_proto(msg)
         }
     }
 
+    #[cfg(feature = "registered_events")]
     fn find_registered_tube<'a>(
-        registered_tubes: &'a HashMap<RegisteredEvent, HashSet<AddressedTube>>,
+        registered_tubes: &'a HashMap<RegisteredEvent, HashSet<AddressedProtoTube>>,
         socket_addr: &str,
         event: RegisteredEvent,
-    ) -> (Option<&'a Rc<Tube>>, bool) {
-        let mut registered_tube: Option<&Rc<Tube>> = None;
+    ) -> (Option<&'a Rc<ProtoTube>>, bool) {
+        let mut registered_tube: Option<&Rc<ProtoTube>> = None;
         let mut already_registered = false;
         'outer: for (evt, addr_tubes) in registered_tubes {
             for addr_tube in addr_tubes {
@@ -2586,12 +2628,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         (registered_tube, already_registered)
     }
 
+    #[cfg(feature = "registered_events")]
     fn make_addr_tube_from_maybe_existing(
-        tube: Option<&Rc<Tube>>,
+        tube: Option<&Rc<ProtoTube>>,
         addr: String,
-    ) -> Result<AddressedTube> {
+    ) -> Result<AddressedProtoTube> {
         if let Some(registered_tube) = tube {
-            Ok(AddressedTube {
+            Ok(AddressedProtoTube {
                 tube: registered_tube.clone(),
                 socket_addr: addr,
             })
@@ -2599,8 +2642,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             let sock = UnixSeqpacket::connect(addr.clone()).with_context(|| {
                 format!("failed to connect to registered listening socket {}", addr)
             })?;
-            let tube = Tube::new_from_unix_seqpacket(sock);
-            Ok(AddressedTube {
+            let tube = ProtoTube::new_from_unix_seqpacket(sock);
+            Ok(AddressedProtoTube {
                 tube: Rc::new(tube),
                 socket_addr: addr,
             })
@@ -2621,6 +2664,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         (&linux.suspend_evt, Token::Suspend),
         (&sigchld_fd, Token::ChildSignal),
         (&vm_evt_rdtube, Token::VmEvent),
+        #[cfg(feature = "registered_events")]
         (&reg_evt_rdtube, Token::RegisteredEvent),
     ])
     .context("failed to build wait context")?;
@@ -2641,7 +2685,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         drop_capabilities().context("failed to drop process capabilities")?;
     }
 
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     // Create a channel for GDB thread.
     let (to_gdb_channel, from_vcpu_channel) = if linux.gdb.is_some() {
         let (s, r) = mpsc::channel();
@@ -2666,11 +2710,18 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     let mut vcpu_handles = Vec::with_capacity(linux.vcpu_count);
     let vcpu_thread_barrier = Arc::new(Barrier::new(linux.vcpu_count + 1));
-    let use_hypervisor_signals = !linux
+
+    if !linux
         .vm
         .get_hypervisor()
-        .check_capability(HypervisorCap::ImmediateExit);
-    vcpu::setup_vcpu_signal_handler::<Vcpu>(use_hypervisor_signals)?;
+        .check_capability(HypervisorCap::ImmediateExit)
+    {
+        return Err(anyhow!(
+            "missing required hypervisor capability ImmediateExit"
+        ));
+    }
+
+    vcpu::setup_vcpu_signal_handler()?;
 
     let vcpus: Vec<Option<_>> = match linux.vcpus.take() {
         Some(vec) => vec.into_iter().map(Some).collect(),
@@ -2722,11 +2773,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(target_os = "android")]
     android::set_process_profiles(&cfg.task_profiles)?;
 
-    let guest_suspended_cvar = Arc::new((Mutex::new(false), Condvar::new()));
-
     #[allow(unused_mut)]
     let mut run_mode = VmRunMode::Running;
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     if to_gdb_channel.is_some() {
         // Wait until a GDB client attaches
         run_mode = VmRunMode::Breakpoint;
@@ -2773,6 +2822,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         let cpu_config = None;
 
+        #[cfg(target_arch = "riscv64")]
+        let cpu_config = Some(CpuConfigRiscv64::new(vcpu_init.fdt_address));
+
         let handle = vcpu::run_vcpu(
             cpu_id,
             vcpu_ids[cpu_id],
@@ -2796,12 +2848,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 .context("failed to clone vm event tube")?,
             linux.vm.check_capability(VmCap::PvClockSuspend),
             from_main_channel,
-            use_hypervisor_signals,
-            #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+            #[cfg(feature = "gdb")]
             to_gdb_channel.clone(),
             cfg.per_vm_core_scheduling,
             cpu_config,
-            cfg.privileged_vm,
             match vcpu_cgroup_tasks_file {
                 None => None,
                 Some(ref f) => Some(
@@ -2809,8 +2859,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                         .context("failed to clone vcpu cgroup tasks file")?,
                 ),
             },
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             cfg.userspace_msr.clone(),
-            guest_suspended_cvar.clone(),
             #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
             bus_lock_ratelimit_ctrl,
             run_mode,
@@ -2818,7 +2868,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         vcpu_handles.push((handle, to_vcpu_channel));
     }
 
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     // Spawn GDB thread.
     if let Some((gdb_port_num, gdb_control_tube)) = linux.gdb.take() {
         let to_vcpu_channels = vcpu_handles
@@ -2862,8 +2912,15 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             |msg, index| {
                 vcpu::kick_vcpu(&vcpu_handles.get(index), linux.irq_chip.as_irq_chip(), msg)
             },
+            &irq_handler_control,
             &device_ctrl_tube,
             linux.vcpu_count,
+            |image| {
+                linux
+                    .irq_chip
+                    .try_box_clone()?
+                    .restore(image, linux.vcpu_count)
+            },
         )?;
         // Allow the vCPUs to start for real.
         vcpu::kick_all_vcpus(
@@ -2879,7 +2936,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let mut balloon_stats_id: u64 = 0;
     #[cfg(feature = "balloon")]
     let mut balloon_wss_id: u64 = 0;
-    let mut registered_evt_tubes: HashMap<RegisteredEvent, HashSet<AddressedTube>> = HashMap::new();
+    #[cfg(feature = "registered_events")]
+    let mut registered_evt_tubes: HashMap<RegisteredEvent, HashSet<AddressedProtoTube>> =
+        HashMap::new();
+    let mut region_state = VmMemoryRegionState::new();
 
     'wait: loop {
         let events = {
@@ -2895,12 +2955,14 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         let mut vm_control_indices_to_remove = Vec::new();
         for event in events.iter().filter(|e| e.is_readable) {
             match event.token {
-                Token::RegisteredEvent => match reg_evt_rdtube.recv::<RegisteredEvent>() {
+                #[cfg(feature = "registered_events")]
+                Token::RegisteredEvent => match reg_evt_rdtube.recv::<RegisteredEventWithData>() {
                     Ok(reg_evt) => {
+                        let evt = reg_evt.into_event();
                         let mut tubes_to_remove: Vec<String> = Vec::new();
-                        if let Some(tubes) = registered_evt_tubes.get_mut(&reg_evt) {
+                        if let Some(tubes) = registered_evt_tubes.get_mut(&evt) {
                             for tube in tubes.iter() {
-                                if let Err(e) = tube.send(&reg_evt) {
+                                if let Err(e) = tube.send(&reg_evt.into_proto()) {
                                     warn!(
                                         "failed to send registered event {:?} to {}, removing from \
                                          registrations: {}",
@@ -3063,6 +3125,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 VmResponse::Ok
                                             }
                                         }
+                                        #[cfg(feature = "registered_events")]
                                         VmRequest::RegisterListener { socket_addr, event } => {
                                             let (registered_tube, already_registered) =
                                                 find_registered_tube(
@@ -3090,6 +3153,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                             }
                                             VmResponse::Ok
                                         }
+                                        #[cfg(feature = "registered_events")]
                                         VmRequest::UnregisterListener { socket_addr, event } => {
                                             if let Some(tubes) =
                                                 registered_evt_tubes.get_mut(&event)
@@ -3100,6 +3164,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 .retain(|_, tubes| !tubes.is_empty());
                                             VmResponse::Ok
                                         }
+                                        #[cfg(feature = "registered_events")]
                                         VmRequest::Unregister { socket_addr } => {
                                             for (_, tubes) in registered_evt_tubes.iter_mut() {
                                                 tubes.retain(|t| t.socket_addr != socket_addr);
@@ -3113,8 +3178,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 &mut run_mode_opt,
                                                 #[cfg(feature = "balloon")]
                                                 balloon_host_tube.as_ref(),
-                                                #[cfg(feature = "balloon")]
-                                                balloon_wss_host_tube.as_ref(),
                                                 #[cfg(feature = "balloon")]
                                                 &mut balloon_stats_id,
                                                 #[cfg(feature = "balloon")]
@@ -3148,6 +3211,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 &device_ctrl_tube,
                                                 vcpu_handles.len(),
                                                 &irq_handler_control,
+                                                || linux.irq_chip.snapshot(linux.vcpu_count),
+                                                |image| {
+                                                    linux
+                                                        .irq_chip
+                                                        .try_box_clone()?
+                                                        .restore(image, linux.vcpu_count)
+                                                },
                                             );
 
                                             // For non s2idle guest suspension we are done
@@ -3169,7 +3239,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                         .name("s2idle_wait".to_owned())
                                                         .spawn(move || {
                                                             trigger_vm_suspend_and_wait_for_entry(
-                                                                guest_suspended_cvar,
+                                                                guest_suspended_cvar.unwrap(),
                                                                 &send_tube,
                                                                 delayed_response,
                                                                 suspend_evt,
@@ -3242,6 +3312,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                         } else {
                                             None
                                         },
+                                        &mut region_state,
                                     );
                                     if let Err(e) = tube.send(&response) {
                                         error!("failed to send VmMemoryControlResponse: {}", e);
@@ -3429,13 +3500,13 @@ fn irq_handler_thread(
             .context("failed to add descriptor to wait context")?;
     }
 
-    let events = irq_chip
+    let mut irq_event_tokens = irq_chip
         .irq_event_tokens()
         .context("failed get event tokens from irqchip")?;
 
-    for (index, _gsi, evt) in events {
+    for (index, _gsi, evt) in irq_event_tokens.iter() {
         wait_ctx
-            .add(&evt, IrqHandlerToken::IrqFd { index })
+            .add(evt, IrqHandlerToken::IrqFd { index: *index })
             .context("failed to add irq chip event tokens to wait context")?;
     }
 
@@ -3478,6 +3549,36 @@ fn irq_handler_thread(
                                         .context("failed to add new IRQ control Tube to wait context")?;
                                     }
                                     irq_control_tubes.append(&mut tubes);
+                                }
+                                IrqHandlerRequest::RefreshIrqEventTokens => {
+                                    for (_index, _gsi, evt) in irq_event_tokens.iter() {
+                                        wait_ctx.delete(evt).context(
+                                            "failed to remove irq chip event \
+                                                token from wait context",
+                                        )?;
+                                    }
+
+                                    irq_event_tokens = irq_chip
+                                        .irq_event_tokens()
+                                        .context("failed get event tokens from irqchip")?;
+                                    for (index, _gsi, evt) in irq_event_tokens.iter() {
+                                        wait_ctx
+                                            .add(evt, IrqHandlerToken::IrqFd { index: *index })
+                                            .context(
+                                                "failed to add irq chip event \
+                                                tokens to wait context",
+                                            )?;
+                                    }
+
+                                    if let Err(e) = handler_control
+                                        .send(&IrqHandlerResponse::IrqEventTokenRefreshComplete)
+                                    {
+                                        error!(
+                                            "failed to notify IRQ event token refresh \
+                                            was completed: {}",
+                                            e
+                                        );
+                                    }
                                 }
                                 IrqHandlerRequest::WakeAndNotifyIteration => {
                                     notify_control_on_iteration_end = true;

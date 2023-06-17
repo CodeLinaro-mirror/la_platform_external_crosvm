@@ -10,11 +10,12 @@
 //! The wire message format is a little-endian C-struct of fixed size, along with a file descriptor
 //! if the request type expects one.
 
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub mod gdb;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
+use balloon_control::VIRTIO_BALLOON_WSS_CONFIG_SIZE;
 #[cfg(unix)]
 use base::MemoryMappingBuilderUnix;
 #[cfg(windows)]
@@ -24,7 +25,9 @@ pub mod client;
 pub mod display;
 pub mod sys;
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Display;
@@ -49,6 +52,7 @@ use base::info;
 use base::warn;
 use base::with_as_descriptor;
 use base::AsRawDescriptor;
+use base::Descriptor;
 use base::Error as SysError;
 use base::Event;
 use base::ExternalMapping;
@@ -73,6 +77,8 @@ use libc::EIO;
 use libc::ENODEV;
 use libc::ENOTSUP;
 use libc::ERANGE;
+#[cfg(feature = "registered_events")]
+use protos::registered_events;
 use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
@@ -85,6 +91,7 @@ use rutabaga_gfx::RutabagaMappedRegion;
 use rutabaga_gfx::VulkanInfo;
 use serde::Deserialize;
 use serde::Serialize;
+use swap::SwapStatus;
 use sync::Mutex;
 #[cfg(unix)]
 pub use sys::FsMappingRequest;
@@ -102,11 +109,11 @@ use crate::display::MouseMode;
 use crate::display::WindowEvent;
 use crate::display::WindowMode;
 use crate::display::WindowVisibility;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebug;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebugStatus;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebugStatusMessage;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuControlCommand;
@@ -116,7 +123,7 @@ use crate::gpu::GpuControlResult;
 /// Control the state of a particular VM CPU.
 #[derive(Clone, Debug)]
 pub enum VcpuControl {
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     Debug(VcpuDebug),
     RunState(VmRunMode),
     MakeRT,
@@ -189,6 +196,9 @@ pub enum BalloonControlCommand {
     },
     Stats,
     WorkingSetSize,
+    WorkingSetSizeConfig {
+        config: [u64; VIRTIO_BALLOON_WSS_CONFIG_SIZE],
+    },
 }
 
 // BalloonControlResult holds results for BalloonControlCommand defined above.
@@ -312,6 +322,14 @@ pub enum DeviceControlCommand {
 pub enum IrqHandlerRequest {
     /// No response is sent for this command.
     AddIrqControlTubes(Vec<Tube>),
+    /// Refreshes the set of event tokens (Events) from the Irqchip that the IRQ
+    /// handler waits on to forward IRQs to their final destination (e.g. via
+    /// Irqchip::service_irq_event).
+    ///
+    /// If the set of tokens exposed by the Irqchip changes while the VM is
+    /// running (such as for snapshot restore), this command must be sent
+    /// otherwise the VM will not receive IRQs as expected.
+    RefreshIrqEventTokens,
     WakeAndNotifyIteration,
     /// No response is sent for this command.
     Exit,
@@ -322,6 +340,8 @@ const EXPECTED_MAX_IRQ_FLUSH_ITERATIONS: usize = 100;
 /// Response for [IrqHandlerRequest].
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IrqHandlerResponse {
+    /// Sent when the IRQ event tokens have been refreshed.
+    IrqEventTokenRefreshComplete,
     /// Specifies the number of tokens serviced in the requested iteration
     /// (less the token for the `WakeAndNotifyIteration` request).
     HandlerIterationComplete(usize),
@@ -477,6 +497,9 @@ pub struct IoEventUpdateRequest {
 
 #[derive(Serialize, Deserialize)]
 pub enum VmMemoryRequest {
+    /// Prepare a shared memory region to make later operations more efficient. This
+    /// may be a no-op depending on underlying platform support.
+    PrepareSharedMemoryRegion { alloc: Alloc },
     RegisterMemory {
         /// Source of the memory to register (mapped file descriptor, shared memory region, etc.)
         source: VmMemorySource,
@@ -496,7 +519,7 @@ pub enum VmMemoryRequest {
         size: u64,
     },
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
-    UnregisterMemory(MemSlot),
+    UnregisterMemory(VmMemoryRegionId),
     /// Register an ioeventfd by looking up using Alloc info.
     IoEventWithAlloc {
         evt: Event,
@@ -525,6 +548,75 @@ impl<'a> VmMemoryRequestIommuClient<'a> {
     }
 }
 
+pub struct VmMemoryRegionState {
+    // alloc -> (pfn, slot)
+    slot_map: HashMap<Alloc, (u64, MemSlot)>,
+    // id -> (slot, Option<offset, size>)
+    mapped_regions: BTreeMap<VmMemoryRegionId, (MemSlot, Option<(usize, usize)>)>,
+}
+
+impl VmMemoryRegionState {
+    pub fn new() -> VmMemoryRegionState {
+        Self {
+            slot_map: HashMap::new(),
+            mapped_regions: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for VmMemoryRegionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn handle_prepared_region(
+    vm: &mut impl Vm,
+    region_state: &mut VmMemoryRegionState,
+    source: &VmMemorySource,
+    dest: &VmMemoryDestination,
+    prot: &Protection,
+) -> Option<VmMemoryResponse> {
+    let VmMemoryDestination::ExistingAllocation { allocation, offset } = dest else {
+        return None;
+    };
+
+    let (pfn, slot) = region_state.slot_map.get(allocation)?;
+
+    let (descriptor, file_offset, size) = match source {
+        VmMemorySource::Descriptor {
+            descriptor,
+            offset,
+            size,
+        } => (
+            Descriptor(descriptor.as_raw_descriptor()),
+            *offset,
+            *size as usize,
+        ),
+        VmMemorySource::SharedMemory(shm) => {
+            let size = shm.size() as usize;
+            (Descriptor(shm.as_raw_descriptor()), 0, size)
+        }
+        _ => return Some(VmMemoryResponse::Err(SysError::new(EINVAL))),
+    };
+    if let Err(err) = vm.add_fd_mapping(
+        *slot,
+        *offset as usize,
+        size,
+        &descriptor,
+        file_offset,
+        *prot,
+    ) {
+        return Some(VmMemoryResponse::Err(err));
+    }
+    let pfn = pfn + (offset >> 12);
+    region_state.mapped_regions.insert(
+        VmMemoryRegionId(pfn),
+        (*slot, Some((*offset as usize, size))),
+    );
+    Some(VmMemoryResponse::RegisterMemory(VmMemoryRegionId(pfn)))
+}
+
 impl VmMemoryRequest {
     /// Executes this request on the given Vm.
     ///
@@ -541,10 +633,34 @@ impl VmMemoryRequest {
         sys_allocator: &mut SystemAllocator,
         gralloc: &mut RutabagaGralloc,
         iommu_client: Option<&mut VmMemoryRequestIommuClient>,
+        region_state: &mut VmMemoryRegionState,
     ) -> VmMemoryResponse {
         use self::VmMemoryRequest::*;
         match self {
+            PrepareSharedMemoryRegion { alloc } => {
+                // Currently the iommu_client is only used by virtio-gpu, and virtio-gpu
+                // is incompatible with PrepareSharedMemoryRegion because we can't use
+                // add_fd_mapping with VmMemorySource::Vulkan.
+                assert!(iommu_client.is_none());
+
+                if !sys::should_prepare_memory_region() {
+                    return VmMemoryResponse::Ok;
+                }
+
+                match sys::prepare_shared_memory_region(vm, sys_allocator, alloc) {
+                    Ok(info) => {
+                        region_state.slot_map.insert(alloc, info);
+                        VmMemoryResponse::Ok
+                    }
+                    Err(e) => VmMemoryResponse::Err(e),
+                }
+            }
             RegisterMemory { source, dest, prot } => {
+                if let Some(resp) = handle_prepared_region(vm, region_state, &source, &dest, &prot)
+                {
+                    return resp;
+                }
+
                 // Correct on Windows because callers of this IPC guarantee descriptor is a mapping
                 // handle.
                 let (mapped_region, size, descriptor) = match source.map(gralloc, prot) {
@@ -590,33 +706,43 @@ impl VmMemoryRequest {
                 }
 
                 let pfn = guest_addr.0 >> 12;
-                VmMemoryResponse::RegisterMemory { pfn, slot }
+                region_state
+                    .mapped_regions
+                    .insert(VmMemoryRegionId(pfn), (slot, None));
+                VmMemoryResponse::RegisterMemory(VmMemoryRegionId(pfn))
             }
-            UnregisterMemory(slot) => match vm.remove_memory_region(slot) {
-                Ok(_) => {
-                    if let Some(iommu_client) = iommu_client {
-                        if iommu_client.gpu_memory.remove(&slot) {
-                            let request = VirtioIOMMURequest::VfioCommand(
-                                VirtioIOMMUVfioCommand::VfioDmabufUnmap(slot),
-                            );
+            UnregisterMemory(id) => match region_state.mapped_regions.remove(&id) {
+                Some((slot, None)) => match vm.remove_memory_region(slot) {
+                    Ok(_) => {
+                        if let Some(iommu_client) = iommu_client {
+                            if iommu_client.gpu_memory.remove(&slot) {
+                                let request = VirtioIOMMURequest::VfioCommand(
+                                    VirtioIOMMUVfioCommand::VfioDmabufUnmap(slot),
+                                );
 
-                            match virtio_iommu_request(iommu_client.tube, &request) {
-                                Ok(VirtioIOMMUResponse::VfioResponse(
-                                    VirtioIOMMUVfioResult::Ok,
-                                )) => VmMemoryResponse::Ok,
-                                resp => {
-                                    error!("Unexpected message response: {:?}", resp);
-                                    VmMemoryResponse::Err(SysError::new(EINVAL))
+                                match virtio_iommu_request(iommu_client.tube, &request) {
+                                    Ok(VirtioIOMMUResponse::VfioResponse(
+                                        VirtioIOMMUVfioResult::Ok,
+                                    )) => VmMemoryResponse::Ok,
+                                    resp => {
+                                        error!("Unexpected message response: {:?}", resp);
+                                        VmMemoryResponse::Err(SysError::new(EINVAL))
+                                    }
                                 }
+                            } else {
+                                VmMemoryResponse::Ok
                             }
                         } else {
                             VmMemoryResponse::Ok
                         }
-                    } else {
-                        VmMemoryResponse::Ok
                     }
-                }
-                Err(e) => VmMemoryResponse::Err(e),
+                    Err(e) => VmMemoryResponse::Err(e),
+                },
+                Some((slot, Some((offset, size)))) => match vm.remove_mapping(slot, offset, size) {
+                    Ok(()) => VmMemoryResponse::Ok,
+                    Err(e) => VmMemoryResponse::Err(e),
+                },
+                None => VmMemoryResponse::Err(SysError::new(EINVAL)),
             },
             DynamicallyFreeMemoryRange {
                 guest_address,
@@ -689,14 +815,15 @@ impl VmMemoryRequest {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
+/// Identifer for registered memory regions. Globally unique.
+// The current implementation uses pfn as the unique identifier.
+pub struct VmMemoryRegionId(u64);
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum VmMemoryResponse {
-    /// The request to register memory into guest address space was successfully done at page frame
-    /// number `pfn` and memory slot number `slot`.
-    RegisterMemory {
-        pfn: u64,
-        slot: MemSlot,
-    },
+    /// The request to register memory into guest address space was successful.
+    RegisterMemory(VmMemoryRegionId),
     Ok,
     Err(SysError),
 }
@@ -1062,15 +1189,6 @@ pub enum SwapCommand {
     Status,
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "swap")] {
-        use swap::Status as SwapStatus;
-    } else {
-        #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum SwapStatus {}
-    }
-}
-
 ///
 /// A request to the main process to perform some operation on the VM.
 ///
@@ -1122,26 +1240,94 @@ pub enum VmRequest {
     /// Command to Restore devices
     Restore(RestoreCommand),
     /// Register for event notification
+    #[cfg(feature = "registered_events")]
     RegisterListener {
         socket_addr: String,
         event: RegisteredEvent,
     },
     /// Unregister for notifications for event
+    #[cfg(feature = "registered_events")]
     UnregisterListener {
         socket_addr: String,
         event: RegisteredEvent,
     },
     /// Unregister for all event notification
+    #[cfg(feature = "registered_events")]
     Unregister { socket_addr: String },
 }
 
 /// NOTE: when making any changes to this enum please also update
 /// RegisteredEventFfi in crosvm_control/src/lib.rs
+#[cfg(feature = "registered_events")]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum RegisteredEvent {
     VirtioBalloonWssReport,
     VirtioBalloonResize,
     VirtioBalloonOOMDeflation,
+}
+
+#[cfg(feature = "registered_events")]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RegisteredEventWithData {
+    VirtioBalloonWssReport {
+        wss_buckets: [WSSBucket; 4],
+        balloon_actual: u64,
+    },
+    VirtioBalloonResize,
+    VirtioBalloonOOMDeflation,
+}
+
+#[cfg(feature = "registered_events")]
+impl RegisteredEventWithData {
+    pub fn into_event(&self) -> RegisteredEvent {
+        match self {
+            Self::VirtioBalloonWssReport { .. } => RegisteredEvent::VirtioBalloonWssReport,
+            Self::VirtioBalloonResize => RegisteredEvent::VirtioBalloonResize,
+            Self::VirtioBalloonOOMDeflation => RegisteredEvent::VirtioBalloonOOMDeflation,
+        }
+    }
+
+    pub fn into_proto(&self) -> registered_events::RegisteredEvent {
+        match self {
+            Self::VirtioBalloonWssReport {
+                wss_buckets,
+                balloon_actual,
+            } => {
+                let mut report = registered_events::VirtioBalloonWssReport {
+                    balloon_actual: *balloon_actual,
+                    ..registered_events::VirtioBalloonWssReport::new()
+                };
+                for wss in wss_buckets {
+                    report.wss_buckets.push(registered_events::VirtioWssBucket {
+                        age: wss.age,
+                        file_bytes: wss.bytes[0],
+                        anon_bytes: wss.bytes[1],
+                        ..registered_events::VirtioWssBucket::new()
+                    });
+                }
+                let mut event = registered_events::RegisteredEvent::new();
+                event.set_wss_report(report);
+                event
+            }
+            Self::VirtioBalloonResize => {
+                let mut event = registered_events::RegisteredEvent::new();
+                event.set_resize(registered_events::VirtioBalloonResize::new());
+                event
+            }
+            Self::VirtioBalloonOOMDeflation => {
+                let mut event = registered_events::RegisteredEvent::new();
+                event.set_oom_deflation(registered_events::VirtioBalloonOOMDeflation::new());
+                event
+            }
+        }
+    }
+
+    pub fn from_wss(wss: &BalloonWSS, balloon_actual: u64) -> Self {
+        RegisteredEventWithData::VirtioBalloonWssReport {
+            wss_buckets: wss.wss,
+            balloon_actual,
+        }
+    }
 }
 
 pub fn handle_disk_command(command: &DiskControlCommand, disk_host_tube: &Tube) -> VmResponse {
@@ -1316,7 +1502,6 @@ impl VmRequest {
         &self,
         run_mode: &mut Option<VmRunMode>,
         #[cfg(feature = "balloon")] balloon_host_tube: Option<&Tube>,
-        #[cfg(feature = "balloon")] balloon_wss_host_tube: Option<&Tube>,
         #[cfg(feature = "balloon")] balloon_stats_id: &mut u64,
         #[cfg(feature = "balloon")] balloon_wss_id: &mut u64,
         disk_host_tubes: &[Tube],
@@ -1331,6 +1516,8 @@ impl VmRequest {
         device_control_tube: &Tube,
         vcpu_size: usize,
         irq_handler_control: &Tube,
+        snapshot_irqchip: impl Fn() -> anyhow::Result<serde_json::Value>,
+        restore_irqchip: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1506,6 +1693,19 @@ impl VmRequest {
                 }
             }
             #[cfg(feature = "balloon")]
+            VmRequest::BalloonCommand(BalloonControlCommand::WorkingSetSizeConfig { config }) => {
+                if let Some(balloon_host_tube) = balloon_host_tube {
+                    match balloon_host_tube
+                        .send(&BalloonTubeCommand::WorkingSetSizeConfig { config })
+                    {
+                        Ok(_) => VmResponse::Ok,
+                        Err(_) => VmResponse::Err(SysError::last()),
+                    }
+                } else {
+                    VmResponse::Err(SysError::new(ENOTSUP))
+                }
+            }
+            #[cfg(feature = "balloon")]
             VmRequest::BalloonCommand(BalloonControlCommand::Stats) => {
                 if let Some(balloon_host_tube) = balloon_host_tube {
                     // NB: There are a few reasons stale balloon stats could be left
@@ -1547,7 +1747,8 @@ impl VmRequest {
                                         unreachable!("unexpected adjusted response")
                                     }
                                     Ok(BalloonTubeResult::WorkingSetSize { .. }) => {
-                                        unreachable!("unexpected wss response")
+                                        // stale WSS message, can discard
+                                        continue;
                                     }
                                 }
                             }
@@ -1560,7 +1761,7 @@ impl VmRequest {
             }
             #[cfg(feature = "balloon")]
             VmRequest::BalloonCommand(BalloonControlCommand::WorkingSetSize) => {
-                if let Some(balloon_wss_host_tube) = balloon_wss_host_tube {
+                if let Some(balloon_host_tube) = balloon_host_tube {
                     // NB: There are a few reasons stale balloon wss could be left
                     // in balloon_wss_host_tube:
                     //  - the send succeeds, but the recv fails because the device
@@ -1574,18 +1775,25 @@ impl VmRequest {
                     // until it does.
                     *balloon_wss_id = (*balloon_wss_id).wrapping_add(1);
                     let sent_id = *balloon_wss_id;
-                    match balloon_wss_host_tube
+                    match balloon_host_tube
                         .send(&BalloonTubeCommand::WorkingSetSize { id: sent_id })
                     {
                         Ok(_) => {
                             loop {
-                                match balloon_wss_host_tube.recv() {
-                                    Ok(BalloonTubeResult::WorkingSetSize { wss, id }) => {
+                                match balloon_host_tube.recv() {
+                                    Ok(BalloonTubeResult::WorkingSetSize {
+                                        wss,
+                                        balloon_actual,
+                                        id,
+                                    }) => {
                                         if sent_id != id {
                                             // Keep trying to get fresh stats.
                                             continue;
                                         }
-                                        break VmResponse::BalloonWSS { wss };
+                                        break VmResponse::BalloonWSS {
+                                            wss,
+                                            balloon_actual,
+                                        };
                                     }
                                     Err(e) => {
                                         error!("balloon socket recv for wss failed: {}", e);
@@ -1595,7 +1803,8 @@ impl VmRequest {
                                         unreachable!("unexpected adjusted response")
                                     }
                                     Ok(BalloonTubeResult::Stats { .. }) => {
-                                        unreachable!("unexpected stats response")
+                                        // stale stats message, can discard
+                                        continue;
                                     }
                                 }
                             }
@@ -1716,6 +1925,7 @@ impl VmRequest {
                                     break;
                                 }
                             }
+                            _ => bail!("received unexpected reply from IRQ handler: {:?}", resp),
                         }
                         flush_attempts += 1;
                         if flush_attempts > EXPECTED_MAX_IRQ_FLUSH_ITERATIONS {
@@ -1723,6 +1933,8 @@ impl VmRequest {
                         }
                     }
                     info!("flushed IRQs in {} iterations", flush_attempts);
+
+                    // Snapshot Vcpus
                     let vcpu_path = snapshot_path.with_extension("vcpu");
                     let cpu_file = File::create(&vcpu_path)
                         .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
@@ -1742,6 +1954,17 @@ impl VmRequest {
                         }
                     }
                     serde_json::to_writer(cpu_file, &cpu_vec).expect("Failed to write Vcpu state");
+
+                    // Snapshot irqchip
+                    let irqchip_path = snapshot_path.with_extension("irqchip");
+                    let irqchip_file = File::create(&irqchip_path).with_context(|| {
+                        format!("failed to open path {}", irqchip_path.display())
+                    })?;
+                    let irqchip_snap = snapshot_irqchip()?;
+                    serde_json::to_writer(irqchip_file, &irqchip_snap)
+                        .expect("Failed to write irqchip state");
+
+                    // Snapshot devices
                     device_control_tube
                         .send(&DeviceControlCommand::SnapshotDevices {
                             snapshot_path: snapshot_path.clone(),
@@ -1764,8 +1987,10 @@ impl VmRequest {
                     restore_path.clone(),
                     kick_vcpus,
                     kick_vcpu,
+                    irq_handler_control,
                     device_control_tube,
                     vcpu_size,
+                    restore_irqchip,
                 ) {
                     Ok(()) => VmResponse::Ok,
                     Err(e) => {
@@ -1774,14 +1999,17 @@ impl VmRequest {
                     }
                 }
             }
+            #[cfg(feature = "registered_events")]
             VmRequest::RegisterListener {
                 socket_addr: _,
                 event: _,
             } => VmResponse::Ok,
+            #[cfg(feature = "registered_events")]
             VmRequest::UnregisterListener {
                 socket_addr: _,
                 event: _,
             } => VmResponse::Ok,
+            #[cfg(feature = "registered_events")]
             VmRequest::Unregister { socket_addr: _ } => VmResponse::Ok,
         }
     }
@@ -1795,11 +2023,22 @@ pub fn do_restore(
     restore_path: PathBuf,
     kick_vcpus: impl Fn(VcpuControl),
     kick_vcpu: impl Fn(VcpuControl, usize),
+    irq_handler_control: &Tube,
     device_control_tube: &Tube,
     vcpu_size: usize,
+    mut restore_irqchip: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
     let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
+
+    // Restore IrqChip
+    let irq_path = restore_path.with_extension("irqchip");
+    let irq_file = File::open(&irq_path)
+        .with_context(|| format!("failed to open path {}", irq_path.display()))?;
+    let irq_snapshot: serde_json::Value = serde_json::from_reader(irq_file)?;
+    restore_irqchip(irq_snapshot)?;
+
+    // Restore Vcpu(s)
     let vcpu_path = restore_path.with_extension("vcpu");
     let cpu_file = File::open(&vcpu_path)
         .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
@@ -1824,16 +2063,31 @@ pub fn do_restore(
             bail!("Failed to restore vcpu: {}", e);
         }
     }
+
+    // Restore devices
     device_control_tube
         .send(&DeviceControlCommand::RestoreDevices { restore_path })
         .context("send command to devices control socket")?;
-    let resp = device_control_tube
+    let resp: VmResponse = device_control_tube
         .recv()
         .context("receive from devices control socket")?;
-    match resp {
-        VmResponse::Ok => Ok(()),
-        _ => bail!("unexpected RestoreDevices response: {resp}"),
+    if !matches!(resp, VmResponse::Ok) {
+        bail!("unexpected RestoreDevices response: {resp}");
     }
+
+    irq_handler_control
+        .send(&IrqHandlerRequest::RefreshIrqEventTokens)
+        .context("failed to send refresh irq event token command to IRQ handler thread")?;
+    let resp: IrqHandlerResponse = irq_handler_control
+        .recv()
+        .context("failed to recv refresh response from IRQ handler thread")?;
+    if !matches!(resp, IrqHandlerResponse::IrqEventTokenRefreshComplete) {
+        bail!(
+            "received unexpected reply from IRQ handler thread: {:?}",
+            resp
+        );
+    }
+    Ok(())
 }
 
 /// Indication of success or failure of a `VmRequest`.
@@ -1857,7 +2111,10 @@ pub enum VmResponse {
         balloon_actual: u64,
     },
     /// Results of balloon WSS-R command
-    BalloonWSS { wss: BalloonWSS },
+    BalloonWSS {
+        wss: BalloonWSS,
+        balloon_actual: u64,
+    },
     /// Results of usb control commands.
     UsbResponse(UsbControlResult),
     #[cfg(feature = "gpu")]
@@ -1894,12 +2151,16 @@ impl Display for VmResponse {
                     balloon_actual
                 )
             }
-            VmResponse::BalloonWSS { wss } => {
+            VmResponse::BalloonWSS {
+                wss,
+                balloon_actual,
+            } => {
                 write!(
                     f,
-                    "wss: {}",
+                    "wss: {}, balloon_actual: {}",
                     serde_json::to_string_pretty(&wss)
-                        .unwrap_or_else(|_| "invalid_response".to_string())
+                        .unwrap_or_else(|_| "invalid_response".to_string()),
+                    balloon_actual,
                 )
             }
             UsbResponse(result) => write!(f, "usb control request get result {:?}", result),

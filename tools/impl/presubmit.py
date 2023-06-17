@@ -4,28 +4,28 @@
 # found in the LICENSE file.
 
 import os
-import re
 import subprocess
+import sys
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from fnmatch import fnmatch
 from pathlib import Path
-import sys
 from time import sleep
-from typing import Callable, List, NamedTuple, Optional, Set, Union
-from datetime import datetime, timedelta
+from typing import Callable, List, NamedTuple, Optional, Union
 
-from impl.common import Command, all_tracked_files, cmd, console, verbose
-
-import rich
-import rich.console
-import rich.live
-import rich.spinner
-import rich.text
+from impl.common import (
+    Command,
+    all_tracked_files,
+    cmd,
+    console,
+    rich,
+    strip_ansi_escape_sequences,
+    verbose,
+)
 
 git = cmd("git")
-
-ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 @dataclass
@@ -204,7 +204,7 @@ class Task(object):
             *(
                 # Print last log lines without it's original colors
                 rich.text.Text(
-                    "│ " + ansi_escape.sub("", log_line),
+                    "│ " + strip_ansi_escape_sequences(log_line),
                     style="light_slate_grey",
                     overflow="ellipsis",
                     no_wrap=True,
@@ -218,20 +218,25 @@ class Task(object):
 
     def execute(self):
         "Execute the task while updating the status variables."
-        self.start_time = datetime.now()
-        success = True
-        for command in self.commands:
-            if verbose():
-                self.log_lines.append(f"$ {command}")
-            process = command.popen(stderr=subprocess.STDOUT)
-            assert process.stdout
-            for line in iter(process.stdout.readline, ""):
-                self.log_lines.append(line.strip())
-            if process.wait() != 0:
-                success = False
-        self.duration = datetime.now() - self.start_time
-        self.success = success
-        self.done = True
+        try:
+            self.start_time = datetime.now()
+            success = True
+            for command in self.commands:
+                if verbose():
+                    self.log_lines.append(f"$ {command}")
+                process = command.popen(
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, errors="replace"
+                )
+                assert process.stdout
+                for line in iter(process.stdout.readline, ""):
+                    self.log_lines.append(line.strip())
+                if process.wait() != 0:
+                    success = False
+            self.duration = datetime.now() - self.start_time
+            self.success = success
+            self.done = True
+        except Exception:
+            self.log_lines.append(traceback.format_exc())
 
 
 def print_logs(tasks: List[Task]):
@@ -357,6 +362,9 @@ def generate_plan(
             f"  [blue] $ tools/dev_container tools/presubmit {' '.join(sys.argv[1:])}[/blue]"
         )
         console.print()
+
+    if not os.access("/dev/kvm", os.W_OK):
+        console.print("[yellow]Warning:[/yellow] Cannot access KVM. Integration tests are not run.")
 
     # Sort so that priority tasks are launched (and rendered) first
     tasks.sort(key=lambda t: (t.priority, t.title), reverse=True)

@@ -379,6 +379,13 @@ impl<F: AsRawDescriptor> HandleSource<F> {
             .map_err(AsyncError::HandleSource)
     }
 
+    /// Sync all data of completed write operations to the backing storage. Currently, the
+    /// implementation is equivalent to fsync.
+    pub async fn fdatasync(&self) -> AsyncResult<()> {
+        // TODO(b/282003931): Fall back to regular fsync.
+        self.fsync().await
+    }
+
     /// Note that on Windows w/ multiple sources these functions do not make sense.
     /// TODO(nkgold): decide on what these should mean.
 
@@ -409,12 +416,9 @@ impl<F: AsRawDescriptor> HandleSource<F> {
 
     /// In the multi-source case, the 0th source is waited on. If sources are not interchangeable,
     /// behavior is undefined.
-    pub async fn wait_for_handle(&self) -> AsyncResult<u64> {
+    pub async fn wait_for_handle(&self) -> AsyncResult<()> {
         let waiter = super::WaitForHandle::new(&self.sources[0]);
-        match waiter.await {
-            Err(e) => Err(AsyncError::HandleSource(e)),
-            Ok(()) => Ok(0),
-        }
+        waiter.await.map_err(AsyncError::HandleSource)
     }
 }
 
@@ -425,8 +429,9 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
-    use super::super::HandleExecutor;
+    use super::super::HandleReactor;
     use super::*;
+    use crate::common_executor::RawExecutor;
 
     #[cfg_attr(all(target_os = "windows", target_env = "gnu"), ignore)]
     #[test]
@@ -445,7 +450,7 @@ mod tests {
                 .unwrap();
         }
 
-        let ex = HandleExecutor::new().unwrap();
+        let ex = RawExecutor::<HandleReactor>::new().unwrap();
         let f = fs::OpenOptions::new()
             .write(true)
             .open(temp_file.path())
@@ -479,7 +484,7 @@ mod tests {
                 .unwrap();
         }
 
-        let ex = HandleExecutor::new().unwrap();
+        let ex = RawExecutor::<HandleReactor>::new().unwrap();
         let f = fs::OpenOptions::new()
             .write(true)
             .open(temp_file.path())
@@ -509,7 +514,7 @@ mod tests {
     //             .unwrap();
     //     }
 
-    //     let ex = HandleExecutor::new();
+    //     let ex = RawExecutor::<HandleReactor>::new();
     //     let f = fs::OpenOptions::new()
     //         .write(true)
     //         .open(temp_file.path())

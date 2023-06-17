@@ -31,6 +31,10 @@ pub enum BalloonTubeCommand {
     WorkingSetSize {
         id: u64,
     },
+    // Send balloon wss config to guest.
+    WorkingSetSizeConfig {
+        config: [u64; VIRTIO_BALLOON_WSS_CONFIG_SIZE],
+    },
 }
 
 // BalloonStats holds stats returned from the stats_queue.
@@ -64,6 +68,7 @@ pub struct WSSBucket {
 // BalloonWSS holds WSS returned from the wss_queue.
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 pub struct BalloonWSS {
+    /// working set size, separated per histogram bucket.
     pub wss: [WSSBucket; VIRTIO_BALLOON_WSS_NUM_BINS],
 }
 
@@ -90,6 +95,8 @@ pub enum BalloonTubeResult {
     },
     WorkingSetSize {
         wss: BalloonWSS,
+        /// size of the balloon in bytes.
+        balloon_actual: u64,
         id: u64,
     },
 }

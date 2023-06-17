@@ -13,8 +13,9 @@ use remain::sorted;
 use thiserror::Error as ThisError;
 
 use super::fd_executor;
-use super::fd_executor::FdExecutor;
+use super::fd_executor::EpollReactor;
 use super::fd_executor::RegisteredSource;
+use crate::common_executor::RawExecutor;
 use crate::mem::BackingMemory;
 use crate::mem::MemRegion;
 use crate::AllocateMode;
@@ -33,6 +34,9 @@ pub enum Error {
     /// An error occurred when executing fallocate synchronously.
     #[error("An error occurred when executing fallocate synchronously: {0}")]
     Fallocate(base::Error),
+    /// An error occurred when executing fdatasync synchronously.
+    #[error("An error occurred when executing fdatasync synchronously: {0}")]
+    Fdatasync(base::Error),
     /// An error occurred when executing fsync synchronously.
     #[error("An error occurred when executing fsync synchronously: {0}")]
     Fsync(base::Error),
@@ -55,6 +59,7 @@ impl From<Error> for io::Error {
             AddingWaker(e) => e.into(),
             Executor(e) => e.into(),
             Fallocate(e) => e.into(),
+            Fdatasync(e) => e.into(),
             Fsync(e) => e.into(),
             Read(e) => e.into(),
             Seeking(e) => e.into(),
@@ -68,8 +73,8 @@ pub struct PollSource<F>(RegisteredSource<F>);
 
 impl<F: AsRawDescriptor> PollSource<F> {
     /// Create a new `PollSource` from the given IO source.
-    pub fn new(f: F, ex: &FdExecutor) -> Result<Self> {
-        ex.register_source(f)
+    pub fn new(f: F, ex: &Arc<RawExecutor<EpollReactor>>) -> Result<Self> {
+        RegisteredSource::new(ex, f)
             .map(PollSource)
             .map_err(Error::Executor)
     }
@@ -184,32 +189,6 @@ impl<F: AsRawDescriptor> PollSource<F> {
         let op = self.0.wait_readable().map_err(Error::AddingWaker)?;
         op.await.map_err(Error::Executor)?;
         Ok(())
-    }
-
-    pub async fn read_u64(&self) -> AsyncResult<u64> {
-        let mut buf = 0u64.to_ne_bytes();
-        loop {
-            // Safe because this will only modify `buf` and we check the return value.
-            let res = unsafe {
-                libc::read(
-                    self.as_raw_descriptor(),
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                )
-            };
-
-            if res >= 0 {
-                return Ok(u64::from_ne_bytes(buf));
-            }
-
-            match base::Error::last() {
-                e if e.errno() == libc::EWOULDBLOCK => {
-                    let op = self.0.wait_readable().map_err(Error::AddingWaker)?;
-                    op.await.map_err(Error::Executor)?;
-                }
-                e => return Err(Error::Read(e).into()),
-            }
-        }
     }
 
     /// Writes from the given `vec` to the file starting at `file_offset`.
@@ -335,6 +314,17 @@ impl<F: AsRawDescriptor> PollSource<F> {
         }
     }
 
+    /// Sync all data of completed write operations to the backing storage, avoiding updating extra
+    /// metadata.
+    pub async fn fdatasync(&self) -> AsyncResult<()> {
+        let ret = unsafe { libc::fdatasync(self.as_raw_descriptor()) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(AsyncError::Poll(Error::Fdatasync(base::Error::last())))
+        }
+    }
+
     /// Yields the underlying IO source.
     pub fn into_source(self) -> F {
         self.0.into_source()
@@ -349,10 +339,6 @@ impl<F: AsRawDescriptor> PollSource<F> {
     pub fn as_source(&self) -> &F {
         self
     }
-
-    pub async fn wait_for_handle(&self) -> AsyncResult<u64> {
-        self.read_u64().await
-    }
 }
 
 // NOTE: Prefer adding tests to io_source.rs if not backend specific.
@@ -366,7 +352,7 @@ mod tests {
 
     #[test]
     fn fallocate() {
-        async fn go(ex: &FdExecutor) {
+        async fn go(ex: &Arc<RawExecutor<EpollReactor>>) {
             let dir = tempfile::TempDir::new().unwrap();
             let mut file_path = PathBuf::from(dir.path());
             file_path.push("test");
@@ -386,7 +372,7 @@ mod tests {
             assert_eq!(meta_data.len(), 4096);
         }
 
-        let ex = FdExecutor::new().unwrap();
+        let ex = RawExecutor::<EpollReactor>::new().unwrap();
         ex.run_until(go(&ex)).unwrap();
     }
 
@@ -399,7 +385,7 @@ mod tests {
         }
 
         let (rx, _tx) = base::pipe(true).unwrap();
-        let ex = FdExecutor::new().unwrap();
+        let ex = RawExecutor::<EpollReactor>::new().unwrap();
         let source = PollSource::new(rx, &ex).unwrap();
         ex.spawn_local(owns_poll_source(source)).detach();
 

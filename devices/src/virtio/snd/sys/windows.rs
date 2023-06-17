@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use audio_streams::AsyncPlaybackBuffer;
 use audio_streams::AsyncPlaybackBufferStream;
 use base::error;
-use base::set_audio_thread_priorities;
 use base::warn;
 use cros_async::Executor;
 use data_model::Le32;
@@ -28,7 +27,6 @@ use win_audio::AudioSharedFormat;
 use win_audio::WinAudioServer;
 use win_audio::WinStreamSourceGenerator;
 
-use crate::virtio::snd::common_backend::async_funcs::get_index_with_reader_and_writer;
 use crate::virtio::snd::common_backend::async_funcs::PlaybackBufferWriter;
 use crate::virtio::snd::common_backend::stream_info::StreamInfo;
 use crate::virtio::snd::common_backend::DirectionalStream;
@@ -41,6 +39,8 @@ use crate::virtio::snd::parameters::Error as ParametersError;
 use crate::virtio::snd::parameters::Parameters;
 use crate::virtio::DescriptorChain;
 use crate::virtio::Reader;
+
+pub(crate) use base::set_audio_thread_priority;
 
 pub(crate) type SysAudioStreamSourceGenerator = Box<dyn WinStreamSourceGenerator>;
 pub(crate) type SysAudioStreamSource = Box<dyn WinAudioServer>;
@@ -87,12 +87,6 @@ pub(crate) fn create_stream_source_generators(
     _snd_data: &SndData,
 ) -> Vec<SysAudioStreamSourceGenerator> {
     vec![Box::new(WinAudioStreamSourceGenerator {})]
-}
-
-pub(crate) fn set_audio_thread_priority() {
-    if let Err(e) = set_audio_thread_priorities() {
-        error!("Failed to set audio thread priority: {}", e);
-    }
 }
 
 impl StreamInfo {
@@ -224,7 +218,6 @@ impl PlaybackBufferWriter for WinBufferWriter {
 
     async fn check_and_prefill(
         &mut self,
-        mem: &GuestMemory,
         desc_receiver: &mut UnboundedReceiver<DescriptorChain>,
         sender: &mut UnboundedSender<PcmResponse>,
     ) -> Result<(), Error> {
@@ -243,16 +236,13 @@ impl PlaybackBufferWriter for WinBufferWriter {
                 error!(" Prefill Unreachable. status should be Quit when the channel is closed");
                 return Err(Error::InvalidPCMWorkerState);
             }
-            Ok(Some(desc_chain)) => {
-                let (desc_index, mut reader, writer) =
-                    get_index_with_reader_and_writer(mem, desc_chain)?;
-                self.write_to_resampler_buffer(&mut reader)?;
+            Ok(Some(mut desc_chain)) => {
+                self.write_to_resampler_buffer(&mut desc_chain.reader)?;
 
                 sender
                     .send(PcmResponse {
-                        desc_index,
+                        desc_chain,
                         status: Ok(0).into(),
-                        writer,
                         done: None,
                     })
                     .await

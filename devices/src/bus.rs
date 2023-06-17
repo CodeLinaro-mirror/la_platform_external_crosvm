@@ -71,7 +71,7 @@ pub struct ConfigWriteResult {
     pub io_add: Vec<BusRange>,
 
     /// Device specified at PciAddress will be removed after this config write
-    /// - 'Vec<PciAddress>>': specified device will be removed after this config write
+    /// - `Vec<PciAddress>>`: specified device will be removed after this config write
     pub removed_pci_devices: Vec<PciAddress>,
 }
 
@@ -271,7 +271,7 @@ pub type Result<T> = result::Result<T, Error>;
 ///
 /// * base - The address at which the range start.
 /// * len - The length of the range in bytes.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct BusRange {
     pub base: u64,
     pub len: u64,
@@ -280,12 +280,12 @@ pub struct BusRange {
 impl BusRange {
     /// Returns true if `addr` is within the range.
     pub fn contains(&self, addr: u64) -> bool {
-        self.base <= addr && addr < self.base + self.len
+        self.base <= addr && addr < self.base.saturating_add(self.len)
     }
 
     /// Returns true if there is overlap with the given range.
     pub fn overlaps(&self, base: u64, len: u64) -> bool {
-        self.base < (base + len) && base < self.base + self.len
+        self.base < base.saturating_add(len) && base < self.base.saturating_add(self.len)
     }
 }
 
@@ -306,6 +306,12 @@ impl Ord for BusRange {
 impl PartialOrd for BusRange {
     fn partial_cmp(&self, other: &BusRange) -> Option<Ordering> {
         self.base.partial_cmp(&other.base)
+    }
+}
+
+impl std::fmt::Debug for BusRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}..+{:#x}", self.base, self.len)
     }
 }
 
@@ -697,6 +703,12 @@ impl Bus {
                 .end_stat(BusOperation::Write, start, device_index);
         }
         device_index.is_some()
+    }
+}
+
+impl Default for Bus {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

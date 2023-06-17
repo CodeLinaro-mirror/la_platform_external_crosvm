@@ -8,6 +8,8 @@ edition = "2021"
 balloon = []
 gdb = ["gdbstub", "gdbstub_arch"]
 gpu = []
+registered_events = ["protos/registered_events"]
+swap = ["swap/enable"]
 
 [dependencies]
 anyhow = "*"
@@ -19,18 +21,18 @@ gdbstub = { version = "0.6.3", optional = true }
 gdbstub_arch = { version = "0.2.4", optional = true }
 hypervisor = { path = "../hypervisor" }
 libc = "*"
+once_cell = "1.7.2"
+protos = { path = "../protos", optional = true }
 remain = "*"
 resources = { path = "../resources" }
 rutabaga_gfx = { path = "../rutabaga_gfx"}
 serde = { version = "1", features = [ "derive" ] }
 serde_json = "*"
 serde_keyvalue = { path = "../serde_keyvalue", features = ["argh_derive"] }
+swap = { path = "../swap" }
 sync = { path = "../common/sync" }
 thiserror = "*"
 vm_memory = { path = "../vm_memory" }
-
-[target.'cfg(target_os="linux")'.dependencies]
-swap = { path = "../swap", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = "*"

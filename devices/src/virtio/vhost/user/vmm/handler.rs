@@ -189,7 +189,7 @@ impl VhostUserHandler {
                     guest_phys_addr: guest_addr.0,
                     memory_size: size as u64,
                     userspace_addr: host_addr as u64,
-                    mmap_offset: shm_offset as u64,
+                    mmap_offset: shm_offset,
                     mmap_handle: shm.as_raw_descriptor(),
                 };
                 regions.push(region);
@@ -294,7 +294,6 @@ impl VhostUserHandler {
 
         Ok(WorkerThread::start(label.clone(), move |kill_evt| {
             let mut worker = worker::Worker {
-                queues,
                 mem,
                 kill_evt,
                 non_msix_evt,
@@ -370,6 +369,11 @@ impl VhostUserHandler {
             .lock()
             .unwrap()
             .set_shared_mapper_state(SharedMapperState { mapper, shmid });
+        Ok(())
+    }
+
+    pub fn sleep(&mut self) -> Result<()> {
+        self.vu.sleep().map_err(Error::Sleep)?;
         Ok(())
     }
 }

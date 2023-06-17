@@ -82,9 +82,15 @@ impl VtpmProxy {
         let response =
             SendCommandResponse::parse_from_bytes(&resp_bytes).map_err(Error::ProtobufError)?;
 
-        self.buf = response.get_response().to_vec();
+        self.buf = response.response().to_vec();
 
         Ok(())
+    }
+}
+
+impl Default for VtpmProxy {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -109,5 +115,5 @@ enum Error {
     #[error("D-Bus failure: {0:#}")]
     DBusError(dbus::Error),
     #[error("protocol buffers failure: {0:#}")]
-    ProtobufError(protobuf::ProtobufError),
+    ProtobufError(protobuf::Error),
 }

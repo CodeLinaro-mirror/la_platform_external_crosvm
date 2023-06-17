@@ -14,9 +14,8 @@ use std::sync::Arc;
 
 use arch::get_serial_cmdline;
 use arch::GetSerialCmdlineError;
-use arch::MsrConfig;
-use arch::MsrExitHandlerError;
 use arch::RunnableLinuxVm;
+use arch::VcpuAffinity;
 use arch::VmComponents;
 use arch::VmImage;
 use base::Event;
@@ -37,9 +36,10 @@ use devices::PciConfigMmio;
 use devices::PciDevice;
 use devices::PciRootCommand;
 use devices::Serial;
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+use devices::VirtCpufreq;
+#[cfg(feature = "gdb")]
 use gdbstub::arch::Arch;
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use gdbstub_arch::aarch64::AArch64 as GdbArch;
 use hypervisor::CpuConfigAArch64;
 use hypervisor::DeviceKind;
@@ -61,12 +61,14 @@ use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
+#[cfg(unix)]
+use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
 use vm_control::BatControl;
 use vm_control::BatteryType;
 use vm_memory::GuestAddress;
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
 use vm_memory::MemoryRegionOptions;
@@ -201,6 +203,11 @@ const AARCH64_MMIO_SIZE: u64 = 0x2000000;
 // Virtio devices start at SPI interrupt number 4
 const AARCH64_IRQ_BASE: u32 = 4;
 
+// Virtual CPU Frequency Device.
+const AARCH64_VIRTFREQ_BASE: u64 = 0x1040000;
+const AARCH64_VIRTFREQ_SIZE: u64 = 0x8;
+const AARCH64_VIRTFREQ_MAXSIZE: u64 = 0x10000;
+
 // PMU PPI interrupt, same as qemu
 const AARCH64_PMU_IRQ: u32 = 7;
 
@@ -219,6 +226,8 @@ pub enum Error {
     CloneIrqChip(base::Error),
     #[error("the given kernel command line was invalid: {0}")]
     Cmdline(kernel_cmdline::Error),
+    #[error("failed to configure CPU Frequencies: {0}")]
+    CpuFrequencies(base::Error),
     #[error("unable to create battery devices: {0}")]
     CreateBatDevices(arch::DeviceRegistrationError),
     #[error("unable to make an Event: {0}")]
@@ -277,6 +286,8 @@ pub enum Error {
     RegisterIrqfd(base::Error),
     #[error("error registering PCI bus: {0}")]
     RegisterPci(BusError),
+    #[error("error registering virtual cpufreq device: {0}")]
+    RegisterVirtCpufreq(BusError),
     #[error("error registering virtual socket device: {0}")]
     RegisterVsock(arch::DeviceRegistrationError),
     #[error("failed to set device attr: {0}")]
@@ -381,6 +392,7 @@ impl arch::LinuxArch for AArch64 {
         dump_device_tree_blob: Option<PathBuf>,
         _debugcon_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(unix)] _guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmAArch64,
@@ -608,6 +620,34 @@ impl arch::LinuxArch for AArch64 {
             .insert(pci_bus, AARCH64_PCI_CFG_BASE, AARCH64_PCI_CFG_SIZE)
             .map_err(Error::RegisterPci)?;
 
+        if !components.cpu_frequencies.is_empty() {
+            for vcpu in 0..vcpu_count {
+                let vcpu_affinity = match components.vcpu_affinity.clone() {
+                    Some(VcpuAffinity::Global(v)) => v,
+                    Some(VcpuAffinity::PerVcpu(mut m)) => m.remove(&vcpu).unwrap_or_default(),
+                    None => panic!("vcpu_affinity needs to be set for VirtCpufreq"),
+                };
+
+                let virt_cpufreq = Arc::new(Mutex::new(VirtCpufreq::new(
+                    vcpu_affinity[0].try_into().unwrap(),
+                )));
+
+                if vcpu as u64 * AARCH64_VIRTFREQ_SIZE + AARCH64_VIRTFREQ_SIZE
+                    > AARCH64_VIRTFREQ_MAXSIZE
+                {
+                    panic!("Exceeded maximum number of virt cpufreq devices");
+                }
+
+                mmio_bus
+                    .insert(
+                        virt_cpufreq,
+                        AARCH64_VIRTFREQ_BASE + (vcpu as u64 * AARCH64_VIRTFREQ_SIZE),
+                        AARCH64_VIRTFREQ_SIZE,
+                    )
+                    .map_err(Error::RegisterVirtCpufreq)?;
+            }
+        }
+
         let mut cmdline = Self::get_base_linux_cmdline();
         get_serial_cmdline(&mut cmdline, serial_parameters, "mmio")
             .map_err(Error::GetSerialCmdline)?;
@@ -683,6 +723,7 @@ impl arch::LinuxArch for AArch64 {
             vcpu_count as u32,
             components.cpu_clusters,
             components.cpu_capacity,
+            components.cpu_frequencies,
             fdt_offset,
             cmdline.as_str(),
             (payload.entry(), payload.size() as usize),
@@ -701,6 +742,7 @@ impl arch::LinuxArch for AArch64 {
             vmwdt_cfg,
             dump_device_tree_blob,
             &|writer, phandles| vm.create_fdt(writer, phandles),
+            components.dynamic_power_coefficient,
         )
         .map_err(Error::CreateFdt)?;
 
@@ -727,7 +769,7 @@ impl arch::LinuxArch for AArch64 {
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
             bat_control,
-            #[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+            #[cfg(feature = "gdb")]
             gdb: components.gdb,
             pm: None,
             resume_notify_devices: Vec::new(),
@@ -767,9 +809,20 @@ impl arch::LinuxArch for AArch64 {
         // hotplug function isn't verified on AArch64, so set it unsupported here.
         Err(Error::Unsupported)
     }
+
+    fn get_host_cpu_frequencies_khz() -> std::result::Result<BTreeMap<usize, Vec<u32>>, Self::Error>
+    {
+        Ok(
+            Self::collect_for_each_cpu(base::logical_core_frequencies_khz)
+                .map_err(Error::CpuFrequencies)?
+                .into_iter()
+                .enumerate()
+                .collect(),
+        )
+    }
 }
 
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
+#[cfg(feature = "gdb")]
 impl<T: VcpuAArch64> arch::GdbOps<T> for AArch64 {
     type Error = Error;
 
@@ -988,30 +1041,12 @@ impl AArch64 {
 
         VcpuInitAArch64 { regs }
     }
-}
 
-pub struct MsrHandlers;
-
-impl MsrHandlers {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub fn read(&self, _index: u32) -> Option<u64> {
-        None
-    }
-
-    pub fn write(&self, _index: u32, _data: u64) -> Option<()> {
-        None
-    }
-
-    pub fn add_handler(
-        &mut self,
-        _index: u32,
-        _msr_config: MsrConfig,
-        _cpu_id: usize,
-    ) -> std::result::Result<(), MsrExitHandlerError> {
-        Ok(())
+    fn collect_for_each_cpu<F, T>(func: F) -> std::result::Result<Vec<T>, base::Error>
+    where
+        F: Fn(usize) -> std::result::Result<T, base::Error>,
+    {
+        (0..base::number_of_logical_cores()?).map(func).collect()
     }
 }
 

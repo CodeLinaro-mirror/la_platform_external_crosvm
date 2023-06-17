@@ -39,14 +39,14 @@ use vm_memory::GuestMemory;
 fn get_supported_cpuid() {
     let hypervisor = Kvm::new().unwrap();
     let cpuid = hypervisor.get_supported_cpuid().unwrap();
-    assert!(cpuid.cpu_id_entries.len() > 0);
+    assert!(!cpuid.cpu_id_entries.is_empty());
 }
 
 #[test]
 fn get_emulated_cpuid() {
     let hypervisor = Kvm::new().unwrap();
     let cpuid = hypervisor.get_emulated_cpuid().unwrap();
-    assert!(cpuid.cpu_id_entries.len() > 0);
+    assert!(!cpuid.cpu_id_entries.is_empty());
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn get_msrs() {
         },
         // This one will fail to fetch
         Register {
-            id: 0x000003f1,
+            id: 0xffffffff,
             ..Default::default()
         },
     ];
@@ -406,6 +406,20 @@ fn set_msrs() {
     assert_eq!(msrs.len(), 1);
     assert_eq!(msrs[0].id, MSR_TSC_AUX);
     assert_eq!(msrs[0].value, 42);
+}
+
+#[test]
+fn set_msrs_unsupported() {
+    let kvm = Kvm::new().unwrap();
+    let gm = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
+    let vm = KvmVm::new(&kvm, gm, Default::default()).unwrap();
+    let vcpu = vm.create_vcpu(0).unwrap();
+
+    let msrs = vec![Register {
+        id: u32::MAX,
+        value: u64::MAX,
+    }];
+    assert_eq!(vcpu.set_msrs(&msrs), Err(base::Error::new(libc::EPERM)));
 }
 
 #[test]

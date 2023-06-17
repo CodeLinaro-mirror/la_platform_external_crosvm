@@ -9,12 +9,11 @@ use std::sync::Arc;
 use audio_streams::SampleFormat;
 use audio_streams::StreamEffect;
 use base::error;
-use cros_async::sync::Mutex as AsyncMutex;
+use cros_async::sync::RwLock as AsyncRwLock;
 use cros_async::Executor;
 use futures::channel::mpsc;
 use futures::Future;
 use futures::TryFutureExt;
-use vm_memory::GuestMemory;
 
 use super::Error;
 use super::PcmResponse;
@@ -95,7 +94,7 @@ pub struct StreamInfo {
     pub just_reset: bool,
 
     // Worker related
-    pub status_mutex: Rc<AsyncMutex<WorkerStatus>>,
+    pub status_mutex: Rc<AsyncRwLock<WorkerStatus>>,
     pub sender: Option<mpsc::UnboundedSender<DescriptorChain>>,
     worker_future: Option<Box<dyn Future<Output = Result<(), Error>> + Unpin>>,
     ex: Option<Executor>, // Executor provided on `prepare()`. Used on `drop()`.
@@ -151,7 +150,7 @@ impl From<StreamInfoBuilder> for StreamInfo {
             state: 0,
             effects: builder.effects,
             just_reset: false,
-            status_mutex: Rc::new(AsyncMutex::new(WorkerStatus::Pause)),
+            status_mutex: Rc::new(AsyncRwLock::new(WorkerStatus::Pause)),
             sender: None,
             worker_future: None,
             ex: None,
@@ -202,13 +201,11 @@ impl StreamInfo {
     /// Prepares the stream, putting it into [`VIRTIO_SND_R_PCM_PREPARE`] state.
     ///
     /// * `ex`: [`Executor`] to run the pcm worker.
-    /// * `mem`: [`GuestMemory`] to read or write stream data in descriptor chain.
     /// * `tx_send`: Sender for sending `PcmResponse` for tx queue. (playback stream)
     /// * `rx_send`: Sender for sending `PcmResponse` for rx queue. (capture stream)
     pub async fn prepare(
         &mut self,
         ex: &Executor,
-        mem: GuestMemory,
         tx_send: &mpsc::UnboundedSender<PcmResponse>,
         rx_send: &mpsc::UnboundedSender<PcmResponse>,
     ) -> Result<(), Error> {
@@ -293,13 +290,12 @@ impl StreamInfo {
         self.sender = Some(sender);
         self.state = VIRTIO_SND_R_PCM_PREPARE;
 
-        self.status_mutex = Rc::new(AsyncMutex::new(WorkerStatus::Pause));
+        self.status_mutex = Rc::new(AsyncRwLock::new(WorkerStatus::Pause));
         let f = start_pcm_worker(
             ex.clone(),
             stream,
             receiver,
             self.status_mutex.clone(),
-            mem,
             pcm_sender,
         );
         self.worker_future = Some(Box::new(ex.spawn_local(f).into_future()));
@@ -385,8 +381,6 @@ impl StreamInfo {
 #[cfg(test)]
 mod tests {
     use audio_streams::NoopStreamSourceGenerator;
-    #[cfg(windows)]
-    use vm_memory::GuestAddress;
 
     use super::*;
 
@@ -419,14 +413,10 @@ mod tests {
         expected_ok: bool,
         expected_state: u32,
     ) -> StreamInfo {
-        #[cfg(windows)]
-        let mem = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
-        #[cfg(unix)]
-        let mem = GuestMemory::new(&[]).unwrap();
         let (tx_send, _) = mpsc::unbounded();
         let (rx_send, _) = mpsc::unbounded();
 
-        let result = ex.run_until(stream.prepare(ex, mem, &tx_send, &rx_send));
+        let result = ex.run_until(stream.prepare(ex, &tx_send, &rx_send));
         assert_eq!(result.unwrap().is_ok(), expected_ok);
         assert_eq!(stream.state, expected_state);
         stream

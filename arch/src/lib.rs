@@ -40,10 +40,6 @@ use devices::BusError;
 use devices::BusResumeDevice;
 use devices::HotPlugBus;
 use devices::IrqChip;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use devices::IrqChipAArch64 as IrqChipArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use devices::IrqChipX86_64 as IrqChipArch;
 use devices::IrqEventSource;
 use devices::PciAddress;
 use devices::PciBus;
@@ -58,34 +54,10 @@ use devices::ProxyDevice;
 use devices::SerialHardware;
 use devices::SerialParameters;
 use devices::VirtioMmioDevice;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 use gdbstub::arch::Arch;
-#[cfg(all(target_arch = "aarch64", feature = "gdb"))]
-use gdbstub_arch::aarch64::AArch64 as GdbArch;
-#[cfg(all(target_arch = "x86_64", feature = "gdb"))]
-use gdbstub_arch::x86::X86_64_SSE as GdbArch;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::CpuConfigAArch64 as CpuConfigArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::CpuConfigX86_64 as CpuConfigArch;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::Hypervisor as HypervisorArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::HypervisorX86_64 as HypervisorArch;
 use hypervisor::IoEventAddress;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VcpuAArch64 as VcpuArch;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VcpuInitAArch64 as VcpuInitArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VcpuInitX86_64 as VcpuInitArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VcpuX86_64 as VcpuArch;
 use hypervisor::Vm;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VmAArch64 as VmArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VmX86_64 as VmArch;
 #[cfg(windows)]
 use jail::FakeMinijailStub as Minijail;
 #[cfg(unix)]
@@ -104,6 +76,8 @@ pub use serial::get_serial_cmdline;
 pub use serial::set_default_serial_parameters;
 pub use serial::GetSerialCmdlineError;
 pub use serial::SERIAL_ADDR;
+#[cfg(unix)]
+use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
 use vm_control::BatControl;
@@ -113,6 +87,37 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
 use vm_memory::MemoryRegionOptions;
+
+cfg_if::cfg_if! {
+    if #[cfg(any(target_arch = "arm", target_arch = "aarch64"))] {
+        pub use devices::IrqChipAArch64 as IrqChipArch;
+        #[cfg(feature = "gdb")]
+        pub use gdbstub_arch::aarch64::AArch64 as GdbArch;
+        pub use hypervisor::CpuConfigAArch64 as CpuConfigArch;
+        pub use hypervisor::Hypervisor as HypervisorArch;
+        pub use hypervisor::VcpuAArch64 as VcpuArch;
+        pub use hypervisor::VcpuInitAArch64 as VcpuInitArch;
+        pub use hypervisor::VmAArch64 as VmArch;
+    } else if #[cfg(target_arch = "riscv64")] {
+        pub use devices::IrqChipRiscv64 as IrqChipArch;
+        #[cfg(feature = "gdb")]
+        pub use gdbstub_arch::riscv::Riscv64 as GdbArch;
+        pub use hypervisor::CpuConfigRiscv64 as CpuConfigArch;
+        pub use hypervisor::Hypervisor as HypervisorArch;
+        pub use hypervisor::VcpuInitRiscv64 as VcpuInitArch;
+        pub use hypervisor::VcpuRiscv64 as VcpuArch;
+        pub use hypervisor::VmRiscv64 as VmArch;
+    } else if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
+        pub use devices::IrqChipX86_64 as IrqChipArch;
+        #[cfg(feature = "gdb")]
+        pub use gdbstub_arch::x86::X86_64_SSE as GdbArch;
+        pub use hypervisor::CpuConfigX86_64 as CpuConfigArch;
+        pub use hypervisor::HypervisorX86_64 as HypervisorArch;
+        pub use hypervisor::VcpuInitX86_64 as VcpuInitArch;
+        pub use hypervisor::VcpuX86_64 as VcpuArch;
+        pub use hypervisor::VmX86_64 as VmArch;
+    }
+}
 
 pub enum VmImage {
     Kernel(File),
@@ -311,16 +316,17 @@ pub struct VmComponents {
     pub android_fstab: Option<File>,
     pub cpu_capacity: BTreeMap<usize, u32>,
     pub cpu_clusters: Vec<CpuSet>,
+    pub cpu_frequencies: BTreeMap<usize, Vec<u32>>,
     pub delay_rt: bool,
     #[cfg(feature = "direct")]
     pub direct_fixed_evts: Vec<devices::ACPIPMFixedEvent>,
     #[cfg(feature = "direct")]
     pub direct_gpe: Vec<u32>,
-    pub dmi_path: Option<PathBuf>,
+    pub dynamic_power_coefficient: BTreeMap<usize, u32>,
     pub extra_kernel_params: Vec<String>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub force_s2idle: bool,
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     pub gdb: Option<(u32, Tube)>, // port and control tube.
     pub host_cpu_topology: bool,
     pub hugepages: bool,
@@ -356,7 +362,7 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub bat_control: Option<BatControl>,
     pub delay_rt: bool,
     pub devices_thread: Option<std::thread::JoinHandle<()>>,
-    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+    #[cfg(feature = "gdb")]
     pub gdb: Option<(u32, Tube)>,
     pub has_bios: bool,
     pub hotplug_bus: BTreeMap<u8, Arc<Mutex<dyn HotPlugBus>>>,
@@ -450,6 +456,7 @@ pub trait LinuxArch {
         debugcon_jail: Option<Minijail>,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] pflash_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmArch,
@@ -489,9 +496,12 @@ pub trait LinuxArch {
         hp_control_tube: &mpsc::Sender<PciRootCommand>,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
     ) -> Result<PciAddress, Self::Error>;
+
+    /// Returns frequency map for each of the host's logical cores.
+    fn get_host_cpu_frequencies_khz() -> Result<BTreeMap<usize, Vec<u32>>, Self::Error>;
 }
 
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), feature = "gdb"))]
+#[cfg(feature = "gdb")]
 pub trait GdbOps<T: VcpuArch> {
     type Error: StdError;
 
@@ -688,14 +698,6 @@ pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
     device
         .register_device_capabilities()
         .map_err(DeviceRegistrationError::RegisterDeviceCapabilities)?;
-    for (event, addr, datamatch) in device.ioevents() {
-        let io_addr = IoEventAddress::Mmio(addr);
-        linux
-            .vm
-            .register_ioevent(event, io_addr, datamatch)
-            .map_err(DeviceRegistrationError::RegisterIoevent)?;
-        keep_rds.push(event.as_raw_descriptor());
-    }
 
     #[cfg(unix)]
     let arced_dev: Arc<Mutex<dyn BusDevice>> = if let Some(jail) = jail {
@@ -1095,12 +1097,6 @@ pub fn generate_pci_root(
         device
             .register_device_capabilities()
             .map_err(DeviceRegistrationError::RegisterDeviceCapabilities)?;
-        for (event, addr, datamatch) in device.ioevents() {
-            let io_addr = IoEventAddress::Mmio(addr);
-            vm.register_ioevent(event, io_addr, datamatch)
-                .map_err(DeviceRegistrationError::RegisterIoevent)?;
-            keep_rds.push(event.as_raw_descriptor());
-        }
 
         if let Some(vcfg_base) = vcfg_base {
             let (methods, shm) = device.generate_acpi_methods();

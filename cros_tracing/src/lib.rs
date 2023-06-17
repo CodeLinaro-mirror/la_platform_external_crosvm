@@ -5,15 +5,15 @@
 cfg_if::cfg_if! {
     if #[cfg(feature = "trace_marker")] {
         /// A wrapper around trace_marker tracing features
-        pub mod trace_marker;
-        use trace_marker as platform;
-
+        mod trace_marker;
         pub use trace_marker::*;
-    } else {
+    } else if #[cfg(feature = "perfetto")] {
+        mod perfetto;
+        pub use perfetto::*;
+    }
+    else {
         /// A crate that provides noop tracing.
-        pub mod noop;
-        use noop as platform;
+        mod noop;
+        pub use noop::*;
     }
 }
-
-pub use platform::init;

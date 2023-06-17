@@ -12,6 +12,7 @@ use super::Result;
 use crate::syscall;
 
 /// Obtain file system type of the file system that the file is served from.
+#[allow(clippy::unnecessary_cast)]
 pub fn get_filesystem_type(file: &File) -> Result<i64> {
     let mut statfs_buf = MaybeUninit::<libc::statfs64>::uninit();
     // Safe because we just got the memory space with exact required amount and

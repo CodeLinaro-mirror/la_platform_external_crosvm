@@ -8,10 +8,13 @@ use std::arch::x86_64::__cpuid;
 #[cfg(any(unix, feature = "haxm", feature = "whpx"))]
 use std::arch::x86_64::_rdtsc;
 
+use base::custom_serde::deserialize_seq_to_arr;
+use base::custom_serde::serialize_arr;
 use base::error;
 use base::Result;
 use bit_field::*;
 use downcast_rs::impl_downcast;
+use libc::c_void;
 use serde::Deserialize;
 use serde::Serialize;
 use vm_memory::GuestAddress;
@@ -101,11 +104,13 @@ pub trait VcpuX86_64: Vcpu {
     /// Sets the VCPU x87 FPU, MMX, XMM, YMM and MXCSR registers.
     fn set_xsave(&self, xsave: &Xsave) -> Result<()>;
 
-    /// Gets the VCPU Events states.
-    fn get_vcpu_events(&self) -> Result<VcpuEvents>;
+    /// Gets interrupt state (hypervisor specific) for this VCPU that must be
+    /// saved/restored for snapshotting.
+    fn get_interrupt_state(&self) -> Result<serde_json::Value>;
 
-    /// Sets the VCPU Events states.
-    fn set_vcpu_events(&self, vcpu_evts: &VcpuEvents) -> Result<()>;
+    /// Sets interrupt state (hypervisor specific) for this VCPU. Only used for
+    /// snapshotting.
+    fn set_interrupt_state(&self, data: serde_json::Value) -> Result<()>;
 
     /// Gets the model-specific registers.  `msrs` specifies the MSR indexes to be queried, and
     /// on success contains their indexes and values.
@@ -147,7 +152,7 @@ pub trait VcpuX86_64: Vcpu {
             xcrs: self.get_xcrs()?,
             msrs: self.get_all_msrs()?,
             xsave: self.get_xsave()?,
-            vcpu_events: self.get_vcpu_events()?,
+            hypervisor_data: self.get_interrupt_state()?,
             tsc_offset: self.get_tsc_offset()?,
         })
     }
@@ -160,7 +165,7 @@ pub trait VcpuX86_64: Vcpu {
         self.set_xcrs(&snapshot.xcrs)?;
         self.set_msrs(&snapshot.msrs)?;
         self.set_xsave(&snapshot.xsave)?;
-        self.set_vcpu_events(&snapshot.vcpu_events)?;
+        self.set_interrupt_state(snapshot.hypervisor_data.clone())?;
         self.set_tsc_offset(snapshot.tsc_offset)?;
         Ok(())
     }
@@ -176,7 +181,7 @@ pub struct VcpuSnapshot {
     xcrs: Vec<Register>,
     msrs: Vec<Register>,
     xsave: Xsave,
-    vcpu_events: VcpuEvents,
+    hypervisor_data: serde_json::Value,
     tsc_offset: u64,
 }
 
@@ -430,7 +435,7 @@ pub const MAX_IOAPIC_PINS: usize = 120;
 
 /// Represents the state of the IOAPIC.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IoapicState {
     /// base_address is the memory base address for this IOAPIC. It cannot be changed.
     pub base_address: u64,
@@ -441,6 +446,10 @@ pub struct IoapicState {
     /// current_interrupt_level_bitmap represents a bitmap of the state of all of the irq lines
     pub current_interrupt_level_bitmap: u32,
     /// redirect_table contains the irq settings for each irq line
+    #[serde(
+        serialize_with = "serialize_arr",
+        deserialize_with = "deserialize_seq_to_arr"
+    )]
     pub redirect_table: [IoapicRedirectionTableEntry; 120],
 }
 
@@ -458,7 +467,7 @@ pub enum PicSelect {
 }
 
 #[repr(C)]
-#[derive(enumn::N, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(enumn::N, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PicInitState {
     #[default]
     Icw1 = 0,
@@ -479,7 +488,7 @@ impl From<u8> for PicInitState {
 
 /// Represents the state of the PIC.
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PicState {
     /// Edge detection.
     pub last_irr: u8,
@@ -513,8 +522,12 @@ pub struct PicState {
 /// The Local APIC consists of 64 128-bit registers, but only the first 32-bits of each register
 /// can be used, so this structure only stores the first 32-bits of each register.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct LapicState {
+    #[serde(
+        serialize_with = "serialize_arr",
+        deserialize_with = "deserialize_seq_to_arr"
+    )]
     pub regs: [LapicRegister; 64],
 }
 
@@ -540,7 +553,7 @@ impl Eq for LapicState {}
 /// The PitState represents the state of the PIT (aka the Programmable Interval Timer).
 /// The state is simply the state of it's three channels.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PitState {
     pub channels: [PitChannelState; 3],
     /// Hypervisor-specific flags for setting the pit state.
@@ -552,7 +565,7 @@ pub struct PitState {
 /// but the count values and latch values are two bytes. So the access mode controls which of the
 /// two bytes will be read when.
 #[repr(C)]
-#[derive(enumn::N, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(enumn::N, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PitRWMode {
     /// None mode means that no access mode has been set.
     None = 0,
@@ -579,7 +592,7 @@ impl From<u8> for PitRWMode {
 /// This is related to the PitRWMode, it mainly gives more detail about the state of the channel
 /// with respect to PitRWMode::Both.
 #[repr(C)]
-#[derive(enumn::N, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(enumn::N, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PitRWState {
     /// None mode means that no access mode has been set.
     None = 0,
@@ -608,7 +621,7 @@ impl From<u8> for PitRWState {
 
 /// The PitChannelState represents the state of one of the PIT's three counters.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PitChannelState {
     /// The starting value for the counter.
     pub count: u32,
@@ -886,54 +899,6 @@ impl Default for Fpu {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VcpuEvents {
-    pub exception: VcpuExceptionState,
-    pub interrupt: VcpuInterruptState,
-    pub nmi: VcpuNmiState,
-    pub sipi_vector: Option<u32>,
-    pub smi: VcpuSmiState,
-    pub triple_fault: VcpuTripleFaultState,
-    pub exception_payload: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VcpuExceptionState {
-    pub injected: bool,
-    pub nr: u8,
-    pub has_error_code: bool,
-    pub pending: Option<bool>,
-    pub error_code: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VcpuInterruptState {
-    pub injected: bool,
-    pub nr: u8,
-    pub soft: bool,
-    pub shadow: Option<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VcpuNmiState {
-    pub injected: bool,
-    pub pending: Option<bool>,
-    pub masked: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VcpuSmiState {
-    pub smm: Option<bool>,
-    pub pending: bool,
-    pub smm_inside_nmi: bool,
-    pub latched_init: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VcpuTripleFaultState {
-    pub pending: Option<bool>,
-}
-
 /// State of a VCPU's debug registers.
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
@@ -962,4 +927,40 @@ pub enum CpuHybridType {
 /// State of the VCPU's x87 FPU, MMX, XMM, YMM registers.
 /// May contain more state depending on enabled extensions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Xsave(pub Vec<u32>);
+pub struct Xsave {
+    data: Vec<u32>,
+
+    // Actual length in bytes. May be smaller than data if a non-u32 multiple of bytes is requested.
+    len: usize,
+}
+
+impl Xsave {
+    /// Create a new buffer to store Xsave data.
+    ///
+    /// # Argments
+    /// * `len` size in bytes.
+    pub fn new(len: usize) -> Self {
+        Xsave {
+            data: vec![0; (len + 3) / 4],
+            len,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const c_void {
+        self.data.as_ptr() as *const c_void
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut c_void {
+        self.data.as_mut_ptr() as *mut c_void
+    }
+
+    /// Length in bytes of the XSAVE data.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns true is length of XSAVE data is zero
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}

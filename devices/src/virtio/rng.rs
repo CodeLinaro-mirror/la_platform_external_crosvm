@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::io;
 use std::io::Write;
 
 use anyhow::anyhow;
@@ -26,7 +25,6 @@ use super::SignalableInterrupt;
 use super::VirtioDevice;
 use super::VirtioDeviceSaved;
 use crate::virtio::virtio_device::Error as VirtioError;
-use crate::virtio::Writer;
 use crate::Suspendable;
 
 const QUEUE_SIZE: u16 = 256;
@@ -49,32 +47,22 @@ impl Worker {
         let queue = &mut self.queue;
 
         let mut needs_interrupt = false;
-        while let Some(avail_desc) = queue.pop(&self.mem) {
-            let index = avail_desc.index;
+        while let Some(mut avail_desc) = queue.pop(&self.mem) {
+            let writer = &mut avail_desc.writer;
+            let avail_bytes = writer.available_bytes();
 
-            let writer_or_err = Writer::new(self.mem.clone(), avail_desc)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e));
-            let written_size = match writer_or_err {
-                Ok(mut writer) => {
-                    let avail_bytes = writer.available_bytes();
+            let mut rand_bytes = vec![0u8; avail_bytes];
+            OsRng.fill_bytes(&mut rand_bytes);
 
-                    let mut rand_bytes = vec![0u8; avail_bytes];
-                    OsRng.fill_bytes(&mut rand_bytes);
-
-                    match writer.write_all(&rand_bytes) {
-                        Ok(_) => rand_bytes.len(),
-                        Err(e) => {
-                            warn!("Failed to write random data to the guest: {}", e);
-                            0usize
-                        }
-                    }
-                }
+            let written_size = match writer.write_all(&rand_bytes) {
+                Ok(_) => rand_bytes.len(),
                 Err(e) => {
                     warn!("Failed to write random data to the guest: {}", e);
                     0usize
                 }
             };
-            queue.add_used(&self.mem, index, written_size as u32);
+
+            queue.add_used(&self.mem, avail_desc, written_size as u32);
             needs_interrupt = true;
         }
 

@@ -21,6 +21,7 @@ use minijail::Minijail;
 use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fs;
 use thiserror::Error;
 
 use crate::bus::ConfigWriteResult;
@@ -39,6 +40,8 @@ use crate::Suspendable;
 pub enum Error {
     #[error("Failed to fork jail process: {0}")]
     ForkingJail(#[from] minijail::Error),
+    #[error("Failed to configure swap: {0}")]
+    Swap(anyhow::Error),
     #[error("Failed to configure tube: {0}")]
     Tube(#[from] TubeError),
 }
@@ -122,13 +125,7 @@ fn child_proc<D: BusDevice>(tube: Tube, mut device: D) {
                 Ok(())
             }
             Command::ReadConfig(idx) => {
-                if idx < 5 && device.debug_label() == "pcivirtio-gpu" {
-                    info!("gpu read config {}", idx);
-                }
                 let val = device.config_register_read(idx as usize);
-                if idx < 5 && device.debug_label() == "pcivirtio-gpu" {
-                    info!("done gpu read config {}", idx);
-                }
                 tube.send(&CommandResult::ReadConfigResult(val))
             }
             Command::WriteConfig {
@@ -228,14 +225,30 @@ impl ProxyDevice {
         keep_rds.push(child_tube.as_raw_descriptor());
 
         #[cfg(feature = "swap")]
-        if let Some(swap_controller) = swap_controller {
-            keep_rds.extend(swap_controller.as_raw_descriptors());
+        let swap_device_uffd_sender = if let Some(swap_controller) = swap_controller {
+            let sender = swap_controller.prepare_fork().map_err(Error::Swap)?;
+            keep_rds.extend(sender.as_raw_descriptors());
+            Some(sender)
+        } else {
+            None
+        };
+
+        // This will be removed after b/183540186 gets fixed.
+        // Only enabled it for x86_64 since the original bug mostly happens on x86 boards.
+        if cfg!(target_arch = "x86_64") && debug_label == "pcivirtio-gpu" {
+            if let Ok(cmd) = fs::read_to_string("/proc/self/cmdline") {
+                if cmd.contains("arcvm") {
+                    if let Ok(share) = fs::read_to_string("/sys/fs/cgroup/cpu/arcvm/cpu.shares") {
+                        info!("arcvm cpu share when booting gpu is {:}", share.trim());
+                    }
+                }
+            }
         }
 
         let child_process = fork_process(jail, keep_rds, Some(debug_label.clone()), || {
             #[cfg(feature = "swap")]
-            if let Some(swap_controller) = swap_controller {
-                if let Err(e) = swap_controller.on_process_forked() {
+            if let Some(swap_device_uffd_sender) = swap_device_uffd_sender {
+                if let Err(e) = swap_device_uffd_sender.on_process_forked() {
                     error!("failed to SwapController::on_process_forked: {:?}", e);
                     // exit() is trivially safe.
                     unsafe { libc::exit(1) };
@@ -243,7 +256,6 @@ impl ProxyDevice {
             }
 
             device.on_sandboxed();
-            info!("begin child proc {}", debug_label);
             child_proc(child_tube, device);
 
             // We're explicitly not using std::process::exit here to avoid the cleanup of

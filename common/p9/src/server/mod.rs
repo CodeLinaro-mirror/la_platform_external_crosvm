@@ -128,7 +128,7 @@ const _P9_LOCK_GRACE: u8 = 3;
 
 // Minimum and maximum message size that we'll expect from the client.
 const MIN_MESSAGE_SIZE: u32 = 256;
-const MAX_MESSAGE_SIZE: u32 = ::std::u16::MAX as u32;
+const MAX_MESSAGE_SIZE: u32 = 64 * 1024 + 24; // 64 KiB of payload plus some extra for the header
 
 #[derive(PartialEq, Eq)]
 enum FileType {
@@ -724,10 +724,9 @@ impl Server {
         let st = stat(&file)?;
 
         fid.file = Some(file);
-        let iounit = st.st_blksize as u32;
         Ok(Rlopen {
             qid: st.into(),
-            iounit,
+            iounit: 0, // Allow the client to send requests up to the negotiated max message size.
         })
     }
 
@@ -758,7 +757,6 @@ impl Server {
         // Safe because we just opened this fd and we know it is valid.
         let file = unsafe { File::from_raw_fd(fd) };
         let st = stat(&file)?;
-        let iounit = st.st_blksize as u32;
 
         fid.file = Some(file);
         fid.filetype = FileType::Regular;
@@ -769,7 +767,7 @@ impl Server {
 
         Ok(Rlcreate {
             qid: st.into(),
-            iounit,
+            iounit: 0, // Allow the client to send requests up to the negotiated max message size.
         })
     }
 
@@ -810,6 +808,7 @@ impl Server {
         Ok(Rreadlink { target })
     }
 
+    #[allow(clippy::unnecessary_cast)] // nlink_t is u32 on 32-bit platforms
     fn get_attr(&mut self, get_attr: &Tgetattr) -> io::Result<Rgetattr> {
         let fid = self.fids.get_mut(&get_attr.fid).ok_or_else(ebadf)?;
 

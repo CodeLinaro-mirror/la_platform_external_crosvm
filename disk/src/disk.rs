@@ -86,8 +86,12 @@ pub enum Error {
     CreateSingleFileDisk(cros_async::AsyncError),
     #[error("failure with fallocate: {0}")]
     Fallocate(cros_async::AsyncError),
+    #[error("failure with fdatasync: {0}")]
+    Fdatasync(cros_async::AsyncError),
     #[error("failure with fsync: {0}")]
     Fsync(cros_async::AsyncError),
+    #[error("failure with fdatasync: {0}")]
+    IoFdatasync(io::Error),
     #[error("failure with fsync: {0}")]
     IoFsync(io::Error),
     #[error("checking host fs type: {0}")]
@@ -141,8 +145,8 @@ pub trait DiskGetLen {
 impl DiskGetLen for File {
     fn get_len(&self) -> io::Result<u64> {
         let mut s = self;
-        let orig_seek = s.seek(SeekFrom::Current(0))?;
-        let end = s.seek(SeekFrom::End(0))? as u64;
+        let orig_seek = s.stream_position()?;
+        let end = s.seek(SeekFrom::End(0))?;
         s.seek(SeekFrom::Start(orig_seek))?;
         Ok(end)
     }
@@ -212,7 +216,7 @@ fn log_host_fs_type(file: &File) -> Result<()> {
 pub fn detect_image_type(file: &File) -> Result<ImageType> {
     let mut f = file;
     let disk_size = f.get_len().map_err(Error::SeekingFile)?;
-    let orig_seek = f.seek(SeekFrom::Current(0)).map_err(Error::SeekingFile)?;
+    let orig_seek = f.stream_position().map_err(Error::SeekingFile)?;
     f.seek(SeekFrom::Start(0)).map_err(Error::SeekingFile)?;
 
     info!("disk size {}, ", disk_size);
@@ -327,6 +331,10 @@ pub trait AsyncDisk: DiskGetLen + FileSetLen + FileAllocate {
     /// Asynchronously fsyncs any completed operations to the disk.
     async fn fsync(&self) -> Result<()>;
 
+    /// Asynchronously fdatasyncs any completed operations to the disk.
+    /// Note that an implementation may simply call fsync for fdatasync.
+    async fn fdatasync(&self) -> Result<()>;
+
     /// Reads from the file at 'file_offset' into memory `mem` at `mem_offsets`.
     /// `mem_offsets` is similar to an iovec except relative to the start of `mem`.
     async fn read_to_mem<'a>(
@@ -426,6 +434,10 @@ impl AsyncDisk for SingleFileDisk {
         self.inner.fsync().await.map_err(Error::Fsync)
     }
 
+    async fn fdatasync(&self) -> Result<()> {
+        self.inner.fdatasync().await.map_err(Error::Fdatasync)
+    }
+
     async fn read_to_mem<'a>(
         &'a self,
         file_offset: u64,
@@ -476,7 +488,7 @@ impl AsyncDisk for SingleFileDisk {
             let buf = vec![0u8; write_size];
             nwritten += self
                 .inner
-                .write_from_vec(Some(file_offset + nwritten as u64), buf)
+                .write_from_vec(Some(file_offset + nwritten), buf)
                 .await
                 .map(|(n, _)| n as u64)
                 .map_err(Error::WriteFromVec)?;

@@ -14,7 +14,6 @@
     {"name": "bit_field_test_tests_test_enum"},
     {"name": "bit_field_test_tests_test_tuple_struct"},
     // {"name": "cros_async_test_src_lib"},
-    {"name": "cros-codecs_test_src_lib"},
     {"name": "cros_fdt_test_src_lib"},
     {"name": "crosvm_test_src_main"},
     {"name": "data_model_test_src_lib"},

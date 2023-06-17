@@ -6,6 +6,8 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::result;
+use std::sync::Arc;
+use std::sync::MutexGuard;
 
 use base::error;
 use base::named_pipes::OverlappedWrapper;
@@ -15,6 +17,7 @@ use base::ReadNotifier;
 use base::WaitContext;
 use libc::EEXIST;
 use net_util::TapT;
+use sync::Mutex;
 use virtio_sys::virtio_net;
 use vm_memory::GuestMemory;
 
@@ -28,54 +31,44 @@ use super::super::super::ProtectionType;
 use super::super::super::Queue;
 use super::super::super::Reader;
 use super::super::super::SignalableInterrupt;
-use super::super::super::Writer;
 
 // Copies a single frame from `self.rx_buf` into the guest. Returns true
 // if a buffer was used, and false if the frame must be deferred until a buffer
 // is made available by the driver.
 fn rx_single_frame(
-    rx_queue: &mut Queue,
+    rx_queue: &mut MutexGuard<Queue>,
     mem: &GuestMemory,
     rx_buf: &mut [u8],
     rx_count: usize,
 ) -> bool {
-    let desc_chain = match rx_queue.pop(mem) {
+    let mut desc_chain = match rx_queue.pop(mem) {
         Some(desc) => desc,
         None => return false,
     };
 
-    let index = desc_chain.index;
-    let bytes_written = match Writer::new(mem.clone(), desc_chain) {
-        Ok(mut writer) => {
-            match writer.write_all(&rx_buf[0..rx_count]) {
-                Ok(()) => (),
-                Err(ref e) if e.kind() == io::ErrorKind::WriteZero => {
-                    warn!(
-                        "net: rx: buffer is too small to hold frame of size {}",
-                        rx_count
-                    );
-                }
-                Err(e) => {
-                    warn!("net: rx: failed to write slice: {}", e);
-                }
-            };
-
-            writer.bytes_written() as u32
+    match desc_chain.writer.write_all(&rx_buf[0..rx_count]) {
+        Ok(()) => (),
+        Err(ref e) if e.kind() == io::ErrorKind::WriteZero => {
+            warn!(
+                "net: rx: buffer is too small to hold frame of size {}",
+                rx_count
+            );
         }
         Err(e) => {
-            error!("net: failed to create Writer: {}", e);
-            0
+            warn!("net: rx: failed to write slice: {}", e);
         }
     };
 
-    rx_queue.add_used(mem, index, bytes_written);
+    let bytes_written = desc_chain.writer.bytes_written() as u32;
+
+    rx_queue.add_used(mem, desc_chain, bytes_written);
 
     true
 }
 
 pub fn process_rx<I: SignalableInterrupt, T: TapT>(
     interrupt: &I,
-    rx_queue: &mut Queue,
+    rx_queue: &Arc<Mutex<Queue>>,
     mem: &GuestMemory,
     tap: &mut T,
     rx_buf: &mut [u8],
@@ -86,6 +79,7 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
     let mut needs_interrupt = false;
     let mut first_frame = true;
 
+    let mut rx_queue = rx_queue.try_lock().expect("Lock should not be unavailable");
     // Read as many frames as possible.
     loop {
         let res = if *deferred_rx {
@@ -97,7 +91,7 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
         match res {
             Ok(count) => {
                 *rx_count = count;
-                if !rx_single_frame(rx_queue, mem, rx_buf, *rx_count) {
+                if !rx_single_frame(&mut rx_queue, mem, rx_buf, *rx_count) {
                     *deferred_rx = true;
                     break;
                 } else if first_frame {
@@ -155,13 +149,13 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
 
 pub fn process_tx<I: SignalableInterrupt, T: TapT>(
     interrupt: &I,
-    tx_queue: &mut Queue,
+    tx_queue: &Arc<Mutex<Queue>>,
     mem: &GuestMemory,
     tap: &mut T,
 ) {
     // Reads up to `buf.len()` bytes or until there is no more data in `r`, whichever
     // is smaller.
-    fn read_to_end(mut r: Reader, buf: &mut [u8]) -> io::Result<usize> {
+    fn read_to_end(r: &mut Reader, buf: &mut [u8]) -> io::Result<usize> {
         let mut count = 0;
         while count < buf.len() {
             match r.read(&mut buf[count..]) {
@@ -174,27 +168,21 @@ pub fn process_tx<I: SignalableInterrupt, T: TapT>(
         Ok(count)
     }
 
-    while let Some(desc_chain) = tx_queue.pop(mem) {
-        let index = desc_chain.index;
-
-        match Reader::new(mem.clone(), desc_chain) {
-            Ok(reader) => {
-                let mut frame = [0u8; MAX_BUFFER_SIZE];
-                match read_to_end(reader, &mut frame[..]) {
-                    Ok(len) => {
-                        // We need to copy frame into continuous buffer before writing it to
-                        // slirp because tap requires frame to complete in a single write.
-                        if let Err(err) = tap.write_all(&frame[..len]) {
-                            error!("net: tx: failed to write to tap: {}", err);
-                        }
-                    }
-                    Err(e) => error!("net: tx: failed to read frame into buffer: {}", e),
+    let mut tx_queue = tx_queue.try_lock().expect("Lock should not be unavailable");
+    while let Some(mut desc_chain) = tx_queue.pop(mem) {
+        let mut frame = [0u8; MAX_BUFFER_SIZE];
+        match read_to_end(&mut desc_chain.reader, &mut frame[..]) {
+            Ok(len) => {
+                // We need to copy frame into continuous buffer before writing it to
+                // slirp because tap requires frame to complete in a single write.
+                if let Err(err) = tap.write_all(&frame[..len]) {
+                    error!("net: tx: failed to write to tap: {}", err);
                 }
             }
-            Err(e) => error!("net: failed to create Reader: {}", e),
+            Err(e) => error!("net: tx: failed to read frame into buffer: {}", e),
         }
 
-        tx_queue.add_used(mem, index, 0);
+        tx_queue.add_used(mem, desc_chain, 0);
     }
 
     tx_queue.trigger_interrupt(mem, interrupt);
@@ -243,7 +231,7 @@ where
     pub(super) fn process_rx_slirp(&mut self) -> bool {
         process_rx(
             &self.interrupt,
-            &mut self.rx_queue,
+            &self.rx_queue,
             &self.mem,
             &mut self.tap,
             &mut self.rx_buf,
@@ -262,7 +250,10 @@ where
         // until we manage to receive this deferred frame.
         if self.deferred_rx {
             if rx_single_frame(
-                &mut self.rx_queue,
+                &mut self
+                    .rx_queue
+                    .try_lock()
+                    .expect("Lock should not be unavailable"),
                 &self.mem,
                 &mut self.rx_buf,
                 self.rx_count,
@@ -281,7 +272,12 @@ where
         }
         needs_interrupt |= self.process_rx_slirp();
         if needs_interrupt {
-            self.interrupt.signal_used_queue(self.rx_queue.vector());
+            self.interrupt.signal_used_queue(
+                self.rx_queue
+                    .try_lock()
+                    .expect("Lock should not be unavailable")
+                    .vector(),
+            );
         }
         Ok(())
     }
@@ -291,14 +287,13 @@ where
         wait_ctx: &WaitContext<Token>,
         _tap_polling_enabled: bool,
     ) -> result::Result<(), NetError> {
+        let mut rx_queue = self
+            .rx_queue
+            .try_lock()
+            .expect("Lock should not be unavailable");
         // There should be a buffer available now to receive the frame into.
         if self.deferred_rx
-            && rx_single_frame(
-                &mut self.rx_queue,
-                &self.mem,
-                &mut self.rx_buf,
-                self.rx_count,
-            )
+            && rx_single_frame(&mut rx_queue, &self.mem, &mut self.rx_buf, self.rx_count)
         {
             // The guest has made buffers available, so add the tap back to the
             // poll context in case it was removed.
@@ -310,7 +305,7 @@ where
                 }
             }
             self.deferred_rx = false;
-            self.interrupt.signal_used_queue(self.rx_queue.vector());
+            self.interrupt.signal_used_queue(rx_queue.vector());
         }
         Ok(())
     }

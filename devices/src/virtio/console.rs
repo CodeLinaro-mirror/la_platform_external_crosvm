@@ -46,7 +46,6 @@ use crate::virtio::Queue;
 use crate::virtio::Reader;
 use crate::virtio::SignalableInterrupt;
 use crate::virtio::VirtioDevice;
-use crate::virtio::Writer;
 use crate::Suspendable;
 
 pub(crate) const QUEUE_SIZE: u16 = 256;
@@ -84,22 +83,17 @@ fn handle_input<I: SignalableInterrupt>(
     mem: &GuestMemory,
     interrupt: &I,
     buffer: &mut VecDeque<u8>,
-    receive_queue: &mut Queue,
+    receive_queue: &Arc<Mutex<Queue>>,
 ) -> result::Result<(), ConsoleError> {
+    let mut receive_queue = receive_queue
+        .try_lock()
+        .expect("Lock should not be unavailable");
     loop {
-        let desc = receive_queue
+        let mut desc = receive_queue
             .peek(mem)
             .ok_or(ConsoleError::RxDescriptorsExhausted)?;
-        let desc_index = desc.index;
-        // TODO(morg): Handle extra error cases as Err(ConsoleError) instead of just returning.
-        let mut writer = match Writer::new(mem.clone(), desc) {
-            Ok(w) => w,
-            Err(e) => {
-                error!("console: failed to create Writer: {}", e);
-                return Ok(());
-            }
-        };
 
+        let writer = &mut desc.writer;
         while writer.available_bytes() > 0 && !buffer.is_empty() {
             let (buffer_front, buffer_back) = buffer.as_slices();
             let buffer_chunk = if !buffer_front.is_empty() {
@@ -115,7 +109,7 @@ fn handle_input<I: SignalableInterrupt>(
 
         if bytes_written > 0 {
             receive_queue.pop_peeked(mem);
-            receive_queue.add_used(mem, desc_index, bytes_written);
+            receive_queue.add_used(mem, desc, bytes_written);
             receive_queue.trigger_interrupt(mem, interrupt);
         }
 
@@ -131,7 +125,7 @@ fn handle_input<I: SignalableInterrupt>(
 ///
 /// * `reader` - The Reader with the data we want to write.
 /// * `output` - The output sink we are going to write the data to.
-fn process_transmit_request(mut reader: Reader, output: &mut dyn io::Write) -> io::Result<()> {
+fn process_transmit_request(reader: &mut Reader, output: &mut dyn io::Write) -> io::Result<()> {
     let len = reader.available_bytes();
     let mut data = vec![0u8; len];
     reader.read_exact(&mut data)?;
@@ -151,22 +145,18 @@ fn process_transmit_request(mut reader: Reader, output: &mut dyn io::Write) -> i
 fn process_transmit_queue<I: SignalableInterrupt>(
     mem: &GuestMemory,
     interrupt: &I,
-    transmit_queue: &mut Queue,
+    transmit_queue: &Arc<Mutex<Queue>>,
     output: &mut dyn io::Write,
 ) {
     let mut needs_interrupt = false;
-    while let Some(avail_desc) = transmit_queue.pop(mem) {
-        let desc_index = avail_desc.index;
+    let mut transmit_queue = transmit_queue
+        .try_lock()
+        .expect("Lock should not be unavailable");
+    while let Some(mut avail_desc) = transmit_queue.pop(mem) {
+        process_transmit_request(&mut avail_desc.reader, output)
+            .unwrap_or_else(|e| error!("console: process_transmit_request failed: {}", e));
 
-        match Reader::new(mem.clone(), avail_desc) {
-            Ok(reader) => process_transmit_request(reader, output)
-                .unwrap_or_else(|e| error!("console: process_transmit_request failed: {}", e)),
-            Err(e) => {
-                error!("console: failed to create reader: {}", e);
-            }
-        };
-
-        transmit_queue.add_used(mem, desc_index, 0);
+        transmit_queue.add_used(mem, avail_desc, 0);
         needs_interrupt = true;
     }
 
@@ -182,9 +172,9 @@ struct Worker {
     output: Box<dyn io::Write + Send>,
     kill_evt: Event,
     in_avail_evt: Event,
-    receive_queue: Queue,
+    receive_queue: Arc<Mutex<Queue>>,
     receive_evt: Event,
-    transmit_queue: Queue,
+    transmit_queue: Arc<Mutex<Queue>>,
     transmit_evt: Event,
 }
 
@@ -300,7 +290,7 @@ impl Worker {
                         process_transmit_queue(
                             &self.mem,
                             &self.interrupt,
-                            &mut self.transmit_queue,
+                            &self.transmit_queue,
                             &mut self.output,
                         );
                     }
@@ -314,7 +304,7 @@ impl Worker {
                                 &self.mem,
                                 &self.interrupt,
                                 in_buf_ref.lock().deref_mut(),
-                                &mut self.receive_queue,
+                                &self.receive_queue,
                             ) {
                                 Ok(()) => {}
                                 // Console errors are no-ops, so just continue.
@@ -334,7 +324,7 @@ impl Worker {
                                 &self.mem,
                                 &self.interrupt,
                                 in_buf_ref.lock().deref_mut(),
-                                &mut self.receive_queue,
+                                &self.receive_queue,
                             ) {
                                 Ok(()) => {}
                                 // Console errors are no-ops, so just continue.
@@ -466,10 +456,10 @@ impl VirtioDevice for Console {
                 in_avail_evt,
                 kill_evt,
                 // Device -> driver
-                receive_queue,
+                receive_queue: Arc::new(Mutex::new(receive_queue)),
                 receive_evt,
                 // Driver -> device
-                transmit_queue,
+                transmit_queue: Arc::new(Mutex::new(transmit_queue)),
                 transmit_evt,
             };
             worker.run();

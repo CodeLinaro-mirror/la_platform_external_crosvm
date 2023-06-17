@@ -28,6 +28,8 @@ use hypervisor::IoEventAddress;
 use hypervisor::Vm;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use hypervisor::VmAArch64;
+#[cfg(target_arch = "riscv64")]
+use hypervisor::VmRiscv64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use hypervisor::VmX86_64;
 use kvm::Cap;
@@ -235,15 +237,6 @@ fn irqfd_resample() {
     // Ensures the ioctl is actually reading the resamplefd.
     vm.register_irqfd(4, &evtfd1, Some(unsafe { &Event::from_raw_descriptor(-1) }))
         .unwrap_err();
-}
-
-#[test]
-fn set_signal_mask() {
-    let kvm = Kvm::new().unwrap();
-    let gm = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
-    let vm = KvmVm::new(&kvm, gm, Default::default()).unwrap();
-    let vcpu = vm.create_vcpu(0).unwrap();
-    vcpu.set_signal_mask(&[base::SIGRTMIN() + 0]).unwrap();
 }
 
 #[test]

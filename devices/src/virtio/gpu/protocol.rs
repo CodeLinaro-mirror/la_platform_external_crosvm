@@ -36,7 +36,6 @@ pub use super::super::device_constants::gpu::VIRTIO_GPU_F_RESOURCE_BLOB;
 pub use super::super::device_constants::gpu::VIRTIO_GPU_F_RESOURCE_SYNC;
 pub use super::super::device_constants::gpu::VIRTIO_GPU_F_RESOURCE_UUID;
 pub use super::super::device_constants::gpu::VIRTIO_GPU_F_VIRGL;
-use super::super::DescriptorError;
 use super::edid::EdidBytes;
 use super::Reader;
 use super::Writer;
@@ -76,17 +75,16 @@ pub const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x300;
 pub const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x301;
 
 /* success responses */
-/* FIXME(b/2050923): Conflicts in enum values.  The value of
- * OK_RESOURCE_PLANE_INFO (which is not upstream) conflicts with upstream
- * OK_EDID.  We assign both OK_EDID and OK_RESOURCE_UUID to the same value. */
 pub const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 pub const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 pub const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 pub const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
-pub const VIRTIO_GPU_RESP_OK_RESOURCE_PLANE_INFO: u32 = 0x1104;
-pub const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1105;
+pub const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1104;
 pub const VIRTIO_GPU_RESP_OK_RESOURCE_UUID: u32 = 0x1105;
 pub const VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106;
+
+/* CHROMIUM(b/277982577): success responses */
+pub const VIRTIO_GPU_RESP_OK_RESOURCE_PLANE_INFO: u32 = 0x11FF;
 
 /* error responses */
 pub const VIRTIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
@@ -599,15 +597,6 @@ pub enum GpuCommandDecodeError {
     /// An I/O error occurred.
     #[error("an I/O error occurred: {0}")]
     IO(io::Error),
-    /// The command referenced an inaccessible area of memory.
-    #[error("command referenced an inaccessible area of memory: {0}")]
-    Memory(DescriptorError),
-}
-
-impl From<DescriptorError> for GpuCommandDecodeError {
-    fn from(e: DescriptorError) -> GpuCommandDecodeError {
-        GpuCommandDecodeError::Memory(e)
-    }
 }
 
 impl From<io::Error> for GpuCommandDecodeError {
@@ -654,7 +643,7 @@ impl GpuCommand {
     /// Decodes a command from the given chunk of memory.
     pub fn decode(cmd: &mut Reader) -> Result<GpuCommand, GpuCommandDecodeError> {
         use self::GpuCommand::*;
-        let hdr = cmd.clone().read_obj::<virtio_gpu_ctrl_hdr>()?;
+        let hdr = cmd.peek_obj::<virtio_gpu_ctrl_hdr>()?;
         Ok(match hdr.type_.into() {
             VIRTIO_GPU_CMD_GET_DISPLAY_INFO => GetDisplayInfo(cmd.read_obj()?),
             VIRTIO_GPU_CMD_RESOURCE_CREATE_2D => ResourceCreate2d(cmd.read_obj()?),
@@ -811,21 +800,12 @@ pub enum GpuResponseEncodeError {
     /// An I/O error occurred.
     #[error("an I/O error occurred: {0}")]
     IO(io::Error),
-    /// The response was encoded to an inaccessible area of memory.
-    #[error("response was encoded to an inaccessible area of memory: {0}")]
-    Memory(DescriptorError),
     /// More displays than are valid were in a `OkDisplayInfo`.
     #[error("{0} is more displays than are valid")]
     TooManyDisplays(usize),
     /// More planes than are valid were in a `OkResourcePlaneInfo`.
     #[error("{0} is more planes than are valid")]
     TooManyPlanes(usize),
-}
-
-impl From<DescriptorError> for GpuResponseEncodeError {
-    fn from(e: DescriptorError) -> GpuResponseEncodeError {
-        GpuResponseEncodeError::Memory(e)
-    }
 }
 
 impl From<io::Error> for GpuResponseEncodeError {

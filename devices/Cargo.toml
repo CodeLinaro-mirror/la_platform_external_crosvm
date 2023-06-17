@@ -4,14 +4,6 @@ version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
-# The passthroughfs test must execute each test case in single thread, which requires a custom test
-# harness.
-[[test]]
-name = "passthroughfs"
-path = "tests/passthroughfs/main.rs"
-harness = false
-
-
 [features]
 arc_quota = ["dbus", "protobuf", "system_api"]
 audio = []
@@ -25,7 +17,7 @@ libvda-stub = ["libvda/libvda-stub"]
 geniezone = []
 tpm = ["tpm2"]
 usb = []
-vaapi = ["libva", "cros-codecs/vaapi", "downcast-rs", "crc32fast"]
+vaapi = ["cros-codecs/vaapi", "downcast-rs", "crc32fast"]
 video-decoder = []
 video-encoder = []
 minigbm = ["rutabaga_gfx/minigbm"]
@@ -34,9 +26,11 @@ virgl_renderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
 virgl_renderer_next = ["gpu", "rutabaga_gfx/virgl_renderer_next"]
 vtpm = ["system_api", "protobuf", "dbus"]
 gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
+registered_events = []
 slirp = ["net_util/slirp"]
 stats = []
 seccomp_trace = []
+swap = ["swap/enable"]
 whpx = []
 
 [dependencies]
@@ -51,10 +45,10 @@ balloon_control = { path = "../common/balloon_control" }
 base = { path = "../base" }
 bit_field = { path = "../bit_field" }
 cfg-if = "1.0.0"
-chrono = "*"
+chrono = { version = "*", features = [ "serde" ] }
 crc32fast = { version = "1.2.1", optional = true }
 cros_async = { path = "../cros_async" }
-cros-codecs = { path = "../media/cros-codecs", optional = true }
+cros-codecs = { version = "0.0.2", optional = true }
 crosvm_cli = { path = "../crosvm_cli" }
 data_model = { path = "../common/data_model" }
 dbus = { version = "0.9", optional = true }
@@ -67,7 +61,6 @@ rutabaga_gfx = { path = "../rutabaga_gfx" }
 hypervisor = { path = "../hypervisor" }
 kvm_sys = { path = "../kvm_sys" }
 libc = "*"
-libva = { path = "../media/libva", optional = true }
 libvda = { path = "../media/libvda", optional = true }
 linux_input_sys = { path = "../linux_input_sys" }
 memoffset = { version = "0.6" }
@@ -76,7 +69,7 @@ net_util = { path = "../net_util" }
 num-traits = "0.2"
 once_cell = "1.7.2"
 power_monitor = { path = "../power_monitor" }
-protobuf = { version = "2.3", optional = true }
+protobuf = { version = "3.2", optional = true }
 protos = { path = "../protos", optional = true }
 rand = "0.8"
 remain = "*"
@@ -90,8 +83,8 @@ system_api = { path = "../system_api", optional = true }
 thiserror = "1.0.20"
 tpm2 = { path = "../tpm2", optional = true }
 cros_tracing = { path = "../cros_tracing" }
+swap = { path = "../swap" }
 uuid = { version = "1", features = [ "serde" ] }
-vhost = { path = "../vhost" }
 vmm_vhost = { path = "../third_party/vmm_vhost", features = ["vmm", "device", "vfio-device"] }
 virtio_sys = { path = "../virtio_sys" }
 vm_control = { path = "../vm_control" }
@@ -105,9 +98,7 @@ minijail = "*"
 p9 = "*"
 usb_util = { path = "../usb_util" }
 vfio_sys = { path = "../vfio_sys" }
-
-[target.'cfg(target_os="linux")'.dependencies]
-swap = { path = "../swap", optional = true }
+vhost = { path = "../vhost" }
 
 [target.'cfg(windows)'.dependencies]
 broker_ipc = { path = "../broker_ipc" }
@@ -126,4 +117,5 @@ default-features = false
 bytes = "1.1.0"
 crc32fast = "1"
 libtest-mimic = "0.6"
+named-lock = "0.3"
 tempfile = "3"

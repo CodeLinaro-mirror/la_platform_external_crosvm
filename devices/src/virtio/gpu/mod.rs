@@ -128,7 +128,7 @@ enum VirtioGpuRing {
 struct FenceDescriptor {
     ring: VirtioGpuRing,
     fence_id: u64,
-    index: u16,
+    desc_chain: DescriptorChain,
     len: u32,
 }
 
@@ -140,7 +140,7 @@ pub struct FenceState {
 
 pub trait QueueReader {
     fn pop(&self, mem: &GuestMemory) -> Option<DescriptorChain>;
-    fn add_used(&self, mem: &GuestMemory, desc_index: u16, len: u32);
+    fn add_used(&self, mem: &GuestMemory, desc_chain: DescriptorChain, len: u32);
     fn signal_used(&self, mem: &GuestMemory);
 }
 
@@ -163,8 +163,8 @@ impl QueueReader for LocalQueueReader {
         self.queue.borrow_mut().pop(mem)
     }
 
-    fn add_used(&self, mem: &GuestMemory, desc_index: u16, len: u32) {
-        self.queue.borrow_mut().add_used(mem, desc_index, len)
+    fn add_used(&self, mem: &GuestMemory, desc_chain: DescriptorChain, len: u32) {
+        self.queue.borrow_mut().add_used(mem, desc_chain, len)
     }
 
     fn signal_used(&self, mem: &GuestMemory) {
@@ -194,8 +194,8 @@ impl QueueReader for SharedQueueReader {
         self.queue.lock().pop(mem)
     }
 
-    fn add_used(&self, mem: &GuestMemory, desc_index: u16, len: u32) {
-        self.queue.lock().add_used(mem, desc_index, len)
+    fn add_used(&self, mem: &GuestMemory, desc_chain: DescriptorChain, len: u32) {
+        self.queue.lock().add_used(mem, desc_chain, len)
     }
 
     fn signal_used(&self, mem: &GuestMemory) {
@@ -275,14 +275,20 @@ where
             };
 
             let mut fence_state = fence_state.lock();
-            fence_state.descs.retain(|f_desc| {
-                if f_desc.ring == ring && f_desc.fence_id <= completed_fence.fence_id {
-                    ctrl_queue.add_used(&mem, f_desc.index, f_desc.len);
+            // TODO(dverkamp): use `drain_filter()` when it is stabilized
+            let mut i = 0;
+            while i < fence_state.descs.len() {
+                if fence_state.descs[i].ring == ring
+                    && fence_state.descs[i].fence_id <= completed_fence.fence_id
+                {
+                    let completed_desc = fence_state.descs.remove(i);
+                    ctrl_queue.add_used(&mem, completed_desc.desc_chain, completed_desc.len);
                     signal = true;
-                    return false;
+                } else {
+                    i += 1;
                 }
-                true
-            });
+            }
+
             // Update the last completed fence for this context
             fence_state
                 .completed_fences
@@ -296,7 +302,7 @@ where
 }
 
 pub struct ReturnDescriptor {
-    pub index: u16,
+    pub desc_chain: DescriptorChain,
     pub len: u32,
 }
 
@@ -630,23 +636,9 @@ impl Frontend {
     pub fn process_queue(&mut self, mem: &GuestMemory, queue: &dyn QueueReader) -> bool {
         let mut signal_used = false;
         while let Some(desc) = queue.pop(mem) {
-            match (
-                Reader::new(mem.clone(), desc.clone()),
-                Writer::new(mem.clone(), desc.clone()),
-            ) {
-                (Ok(mut reader), Ok(mut writer)) => {
-                    if let Some(ret_desc) =
-                        self.process_descriptor(mem, desc.index, &mut reader, &mut writer)
-                    {
-                        queue.add_used(mem, ret_desc.index, ret_desc.len);
-                        signal_used = true;
-                    }
-                }
-                (_, Err(e)) | (Err(e), _) => {
-                    debug!("invalid descriptor: {}", e);
-                    queue.add_used(mem, desc.index, 0);
-                    signal_used = true;
-                }
+            if let Some(ret_desc) = self.process_descriptor(mem, desc) {
+                queue.add_used(mem, ret_desc.desc_chain, ret_desc.len);
+                signal_used = true;
             }
         }
 
@@ -656,10 +648,10 @@ impl Frontend {
     fn process_descriptor(
         &mut self,
         mem: &GuestMemory,
-        desc_index: u16,
-        reader: &mut Reader,
-        writer: &mut Writer,
+        mut desc_chain: DescriptorChain,
     ) -> Option<ReturnDescriptor> {
+        let reader = &mut desc_chain.reader;
+        let writer = &mut desc_chain.writer;
         let mut resp = Err(GpuResponse::ErrUnspec);
         let mut gpu_cmd = None;
         let mut len = 0;
@@ -728,7 +720,7 @@ impl Frontend {
                     fence_state.descs.push(FenceDescriptor {
                         ring,
                         fence_id,
-                        index: desc_index,
+                        desc_chain,
                         len,
                     });
 
@@ -738,10 +730,7 @@ impl Frontend {
 
             // No fence (or already completed fence), respond now.
         }
-        Some(ReturnDescriptor {
-            index: desc_index,
-            len,
-        })
+        Some(ReturnDescriptor { desc_chain, len })
     }
 
     pub fn return_cursor(&mut self) -> Option<ReturnDescriptor> {
@@ -963,7 +952,8 @@ impl Worker {
 
             // All cursor commands go first because they have higher priority.
             while let Some(desc) = self.state.return_cursor() {
-                self.cursor_queue.add_used(&self.mem, desc.index, desc.len);
+                self.cursor_queue
+                    .add_used(&self.mem, desc.desc_chain, desc.len);
                 signal_used_cursor = true;
             }
 
@@ -1140,11 +1130,6 @@ impl Gpu {
             .set_use_external_blob(external_blob)
             .set_use_system_blob(system_blob)
             .set_use_render_server(use_render_server);
-
-        #[cfg(feature = "gfxstream")]
-        let rutabaga_builder = rutabaga_builder
-            .set_use_guest_angle(gpu_parameters.gfxstream_use_guest_angle.unwrap_or_default())
-            .set_support_gles31(gpu_parameters.gfxstream_support_gles31.unwrap_or_default());
 
         Gpu {
             exit_evt_wrtube,

@@ -3,6 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import os
 import typing
 from typing import Generator, List, Literal, Optional, Tuple
 
@@ -25,7 +26,7 @@ mdformat = cmd("mdformat")
 lucicfg = cmd("third_party/depot_tools/lucicfg")
 
 # All supported platforms as a type and a list.
-Platform = Literal["x86_64", "aarch64", "mingw64", "armhf"]
+Platform = Literal["x86_64", "aarch64", "mingw64", "armhf", "riscv64"]
 PLATFORMS: Tuple[Platform, ...] = typing.get_args(Platform)
 
 
@@ -102,6 +103,16 @@ def check_cargo_doc(_: CheckContext):
     return cmd("./tools/cargo-doc").with_env("RUSTDOCFLAGS", "-D warnings").with_color_flag()
 
 
+def check_doc_tests(_: CheckContext):
+    "Runs cargo doc tests. These cannot be run via nextest and run_tests."
+    return cmd(
+        "cargo test",
+        "--doc",
+        "--workspace",
+        "--features=all-x86_64",
+    ).with_color_flag()
+
+
 def check_mdbook(_: CheckContext):
     "Runs cargo-doc and verifies that no warnings are emitted."
     return cmd("mdbook build docs/book/")
@@ -112,11 +123,12 @@ def check_crosvm_tests(platform: Platform):
         if not platform_is_supported(platform):
             return None
         dut = None
-        if platform == "x86_64":
-            dut = "--dut=host"
-        elif platform == "aarch64":
-            dut = "--dut=vm"
-        return cmd("./tools/run_tests --platform", platform, dut).with_color_flag()
+        if os.access("/dev/kvm", os.W_OK):
+            if platform == "x86_64":
+                dut = "--dut=vm"
+            elif platform == "aarch64":
+                dut = "--dut=vm"
+        return cmd("./tools/run_tests --verbose --platform", platform, dut).with_color_flag()
 
     check.__doc__ = f"Runs all crosvm tests for {platform}."
 
@@ -127,7 +139,10 @@ def check_crosvm_unit_tests(platform: Platform):
     def check(_: CheckContext):
         if not platform_is_supported(platform):
             return None
-        return cmd("./tools/run_tests --platform", platform).with_color_flag()
+        command = cmd("./tools/run_tests --verbose --platform", platform).with_color_flag()
+        if platform == "riscv64":
+            command = command.with_args("--no-default-features")
+        return command
 
     check.__doc__ = f"Runs crosvm unit tests for {platform}."
 
@@ -137,7 +152,7 @@ def check_crosvm_unit_tests(platform: Platform):
 def check_crosvm_build(platform: Platform, features: Optional[str]):
     def check(_: CheckContext):
         return cmd(
-            "./tools/run_tests --no-run --platform",
+            "./tools/run_tests --no-run --verbose --platform",
             platform,
             f"--features={features}" if features is not None else None,
         ).with_color_flag()
@@ -213,6 +228,11 @@ CHECKS: List[Check] = [
         priority=True,
     ),
     Check(
+        check_doc_tests,
+        files=["**.rs", "**Cargo.toml"],
+        priority=True,
+    ),
+    Check(
         check_python_tests,
         files=["tools/**.py"],
         python_tools=True,
@@ -239,12 +259,6 @@ CHECKS: List[Check] = [
             "docs/book/src/appendix/memory_layout.md",
         ],
         can_fix=True,
-    ),
-    Check(
-        check_crosvm_build("x86_64", features="direct"),
-        custom_name=f"crosvm_build_direct",
-        files=["**.rs"],
-        priority=True,
     ),
     *(
         Check(
@@ -353,7 +367,7 @@ GROUPS: List[Group] = [
         name="default",
         doc="Checks run by default",
         checks=[
-            "health_checks",
+            "default_health_checks",
             # Run only one task per platform to prevent blocking on the build cache.
             "crosvm_tests_x86_64",
             "crosvm_unit_tests_aarch64",
@@ -365,7 +379,7 @@ GROUPS: List[Group] = [
         name="quick",
         doc="Runs a quick subset of presubmit checks.",
         checks=[
-            "health_checks",
+            "default_health_checks",
             "crosvm_unit_tests_x86_64",
             "clippy_aarch64",
         ],
@@ -376,7 +390,6 @@ GROUPS: List[Group] = [
         checks=[
             "health_checks",
             *(f"linux_{platform}" for platform in PLATFORMS),
-            "linux_x86_64_direct",
         ],
     ),
     # Convenience groups for local usage:
@@ -399,26 +412,34 @@ GROUPS: List[Group] = [
             "python_format",
         ],
     ),
-    # The groups below are used by builders in CI:
     Group(
-        name="health_checks",
-        doc="Checks run on the health_check builder",
+        name="default_health_checks",
+        doc="Health checks to run by default",
         checks=[
+            # Check if lockfiles need updating first. Otherwise another step may do the update.
+            "rust_lockfiles",
             "copyright_header",
             "file_ends_with_newline",
-            "infra_configs",
-            "infra_tests",
             "line_endings",
             "markdown_format",
             "mdbook",
             "cargo_doc",
             "python_format",
-            "python_tests",
             "python_types",
             "rust_features",
             "rust_format",
-            "rust_lockfiles",
         ],
+    ),
+    # The groups below are used by builders in CI:
+    Group(
+        name="health_checks",
+        doc="Checks run on the health_check builder",
+        checks=[
+            "default_health_checks",
+            "doc_tests",
+            "python_tests",
+        ]
+        + (["infra_configs", "infra_tests"] if not is_kiwi_repo() else []),
     ),
     *(
         Group(
@@ -431,13 +452,6 @@ GROUPS: List[Group] = [
             ],
         )
         for platform in PLATFORMS
-    ),
-    Group(
-        name=f"linux_x86_64_direct",
-        doc=f"Checks run on the linux_x86_64_direct builder",
-        checks=[
-            "crosvm_build_direct",
-        ],
     ),
 ]
 

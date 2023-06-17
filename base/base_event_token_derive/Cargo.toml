@@ -12,4 +12,4 @@ path = "event_token_derive.rs"
 [dependencies]
 proc-macro2 = "^1"
 quote = "^1"
-syn = "^1"
+syn = "^2"

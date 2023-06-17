@@ -4,6 +4,7 @@
 
 use std::io;
 use std::result;
+use std::sync::Arc;
 
 use base::error;
 use base::warn;
@@ -11,28 +12,28 @@ use base::EventType;
 use base::ReadNotifier;
 use base::WaitContext;
 use net_util::TapT;
+use sync::Mutex;
 use vm_memory::GuestMemory;
 
 use super::super::super::net::NetError;
 use super::super::super::net::Token;
 use super::super::super::net::Worker;
 use super::super::super::Queue;
-use super::super::super::Reader;
 use super::super::super::SignalableInterrupt;
-use super::super::super::Writer;
 
 pub fn process_rx<I: SignalableInterrupt, T: TapT>(
     interrupt: &I,
-    rx_queue: &mut Queue,
+    rx_queue: &Arc<Mutex<Queue>>,
     mem: &GuestMemory,
     mut tap: &mut T,
 ) -> result::Result<(), NetError> {
     let mut needs_interrupt = false;
     let mut exhausted_queue = false;
 
+    let mut rx_queue = rx_queue.try_lock().expect("Lock should not be unavailable");
     // Read as many frames as possible.
     loop {
-        let desc_chain = match rx_queue.peek(mem) {
+        let mut desc_chain = match rx_queue.peek(mem) {
             Some(desc) => desc,
             None => {
                 exhausted_queue = true;
@@ -40,36 +41,29 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
             }
         };
 
-        let index = desc_chain.index;
-        let bytes_written = match Writer::new(mem.clone(), desc_chain) {
-            Ok(mut writer) => {
-                match writer.write_from(&mut tap, writer.available_bytes()) {
-                    Ok(_) => {}
-                    Err(ref e) if e.kind() == io::ErrorKind::WriteZero => {
-                        warn!("net: rx: buffer is too small to hold frame");
-                        break;
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // No more to read from the tap.
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("net: rx: failed to write slice: {}", e);
-                        return Err(NetError::WriteBuffer(e));
-                    }
-                };
+        let writer = &mut desc_chain.writer;
 
-                writer.bytes_written() as u32
+        match writer.write_from(&mut tap, writer.available_bytes()) {
+            Ok(_) => {}
+            Err(ref e) if e.kind() == io::ErrorKind::WriteZero => {
+                warn!("net: rx: buffer is too small to hold frame");
+                break;
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // No more to read from the tap.
+                break;
             }
             Err(e) => {
-                error!("net: failed to create Writer: {}", e);
-                0
+                warn!("net: rx: failed to write slice: {}", e);
+                return Err(NetError::WriteBuffer(e));
             }
         };
 
+        let bytes_written = writer.bytes_written() as u32;
+
         if bytes_written > 0 {
             rx_queue.pop_peeked(mem);
-            rx_queue.add_used(mem, index, bytes_written);
+            rx_queue.add_used(mem, desc_chain, bytes_written);
             needs_interrupt = true;
         }
     }
@@ -87,34 +81,29 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
 
 pub fn process_tx<I: SignalableInterrupt, T: TapT>(
     interrupt: &I,
-    tx_queue: &mut Queue,
+    tx_queue: &Arc<Mutex<Queue>>,
     mem: &GuestMemory,
     mut tap: &mut T,
 ) {
-    while let Some(desc_chain) = tx_queue.pop(mem) {
-        let index = desc_chain.index;
-
-        match Reader::new(mem.clone(), desc_chain) {
-            Ok(mut reader) => {
-                let expected_count = reader.available_bytes();
-                match reader.read_to(&mut tap, expected_count) {
-                    Ok(count) => {
-                        // Tap writes must be done in one call. If the entire frame was not
-                        // written, it's an error.
-                        if count != expected_count {
-                            error!(
-                                "net: tx: wrote only {} bytes of {} byte frame",
-                                count, expected_count
-                            );
-                        }
-                    }
-                    Err(e) => error!("net: tx: failed to write frame to tap: {}", e),
+    let mut tx_queue = tx_queue.try_lock().expect("Lock should not be unavailable");
+    while let Some(mut desc_chain) = tx_queue.pop(mem) {
+        let reader = &mut desc_chain.reader;
+        let expected_count = reader.available_bytes();
+        match reader.read_to(&mut tap, expected_count) {
+            Ok(count) => {
+                // Tap writes must be done in one call. If the entire frame was not
+                // written, it's an error.
+                if count != expected_count {
+                    error!(
+                        "net: tx: wrote only {} bytes of {} byte frame",
+                        count, expected_count
+                    );
                 }
             }
-            Err(e) => error!("net: failed to create Reader: {}", e),
+            Err(e) => error!("net: tx: failed to write frame to tap: {}", e),
         }
 
-        tx_queue.add_used(mem, index, 0);
+        tx_queue.add_used(mem, desc_chain, 0);
     }
 
     tx_queue.trigger_interrupt(mem, interrupt);
@@ -152,11 +141,6 @@ where
         Ok(())
     }
     pub(super) fn process_rx(&mut self) -> result::Result<(), NetError> {
-        process_rx(
-            &self.interrupt,
-            &mut self.rx_queue,
-            &self.mem,
-            &mut self.tap,
-        )
+        process_rx(&self.interrupt, &self.rx_queue, &self.mem, &mut self.tap)
     }
 }

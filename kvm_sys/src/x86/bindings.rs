@@ -8,7 +8,6 @@
 #![allow(dead_code)]
 
 // Added by kvm_sys/bindgen.sh
-pub const KVM_SYSTEM_EVENT_S2IDLE: u32 = 4;
 // TODO(tjeznach): Remove this when reporting KVM_IOAPIC_NUM_PINS is no longer required.
 pub const KVM_CAP_IOAPIC_NUM_PINS: u32 = 8191;
 // TODO(qwandor): Update this once the pKVM patches are merged upstream with a stable capability ID.

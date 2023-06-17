@@ -112,12 +112,9 @@ where
 
     vcpu.set_sregs(&vcpu_sregs).expect("set sregs failed");
 
-    let run_handle = vcpu.take_run_handle(None).unwrap();
-
     // basic case, we set MSR to 0
     let tsc_now = unsafe { _rdtsc() };
     test_tsc_offset_run(
-        &run_handle,
         &mut vcpu,
         &mem_clone,
         load_addr,
@@ -128,21 +125,11 @@ where
     );
     // set offset to 0
     let tsc_now = unsafe { _rdtsc() };
-    test_tsc_offset_run(
-        &run_handle,
-        &mut vcpu,
-        &mem_clone,
-        load_addr,
-        None,
-        Some(0),
-        0,
-        tsc_now,
-    );
+    test_tsc_offset_run(&mut vcpu, &mem_clone, load_addr, None, Some(0), 0, tsc_now);
     // some moderately sized offset
     let tsc_now = unsafe { _rdtsc() };
     let ten_seconds = 2_500_000_000 * 10;
     test_tsc_offset_run(
-        &run_handle,
         &mut vcpu,
         &mem_clone,
         load_addr,
@@ -154,7 +141,6 @@ where
     // set offset to u64::MAX - tsc_now + 1
     let tsc_now = unsafe { _rdtsc() };
     test_tsc_offset_run(
-        &run_handle,
         &mut vcpu,
         &mem_clone,
         load_addr,
@@ -166,7 +152,6 @@ where
 }
 
 fn test_tsc_offset_run(
-    run_handle: &VcpuRunHandle,
     vcpu: &mut Box<dyn hypervisor::VcpuX86_64>,
     mem_clone: &GuestMemory,
     load_addr: GuestAddress,
@@ -180,7 +165,7 @@ fn test_tsc_offset_run(
     let threshold = 250_000_000;
 
     let vcpu_regs = Regs {
-        rip: load_addr.offset() as u64,
+        rip: load_addr.offset(),
         rflags: 2,
         rcx: 0x3000,
         ..Default::default()
@@ -201,7 +186,7 @@ fn test_tsc_offset_run(
     }
 
     loop {
-        match vcpu.run(run_handle).expect("run failed") {
+        match vcpu.run().expect("run failed") {
             VcpuExit::Hlt => {
                 break;
             }

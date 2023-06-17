@@ -36,7 +36,6 @@ use zerocopy::AsBytes;
 
 use crate::virtio::copy_config;
 use crate::virtio::device_constants::snd::virtio_snd_config;
-use crate::virtio::DescriptorError;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
@@ -56,14 +55,8 @@ pub enum SoundError {
     ClientNew(Error),
     #[error("Failed to create event pair: {0}")]
     CreateEvent(BaseError),
-    #[error("Failed to create Reader from descriptor chain: {0}")]
-    CreateReader(DescriptorError),
     #[error("Failed to create thread: {0}")]
     CreateThread(IoError),
-    #[error("Failed to create Writer from descriptor chain: {0}")]
-    CreateWriter(DescriptorError),
-    #[error("Error with queue descriptor: {0}")]
-    Descriptor(DescriptorError),
     #[error("Attempted a {0} operation while on the wrong state: {1}, this is a bug")]
     ImpossibleState(&'static str, &'static str),
     #[error("Error consuming queue event: {0}")]
@@ -73,7 +66,7 @@ pub enum SoundError {
     #[error("Failed to receive message: {0}")]
     StreamThreadRecv(RecvError),
     #[error("Failed to send message: {0}")]
-    StreamThreadSend(SendError<StreamMsg>),
+    StreamThreadSend(SendError<Box<StreamMsg>>),
     #[error("Error creating WaitContext: {0}")]
     WaitCtx(BaseError),
 }

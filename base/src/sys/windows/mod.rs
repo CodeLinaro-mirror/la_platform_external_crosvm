@@ -17,6 +17,8 @@ mod descriptor;
 mod event;
 mod events;
 pub mod file_traits;
+mod file_util;
+mod foreground_window;
 mod get_filesystem_type;
 mod mmap;
 mod mmap_platform;
@@ -30,8 +32,10 @@ mod sched;
 mod shm;
 mod shm_platform;
 mod stream_channel;
+mod system_info;
 mod terminal;
 mod timer;
+pub mod tube;
 mod wait;
 
 pub mod thread;
@@ -42,6 +46,9 @@ pub use console::*;
 pub use descriptor::*;
 pub use event::*;
 pub use events::*;
+pub use file_util::open_file;
+pub use file_util::set_sparse_file;
+pub use foreground_window::give_foregrounding_permission;
 pub use get_filesystem_type::*;
 pub use ioctl::*;
 pub use mmap::Error as MmapError;
@@ -55,6 +62,11 @@ pub use sched::*;
 pub use shm::*;
 pub use shm_platform::*;
 pub use stream_channel::*;
+pub use system_info::allocation_granularity;
+pub use system_info::getpid;
+pub use system_info::number_of_logical_cores;
+pub use system_info::pagesize;
+pub use system_info::round_up_to_page_size;
 pub use terminal::*;
 pub use timer::*;
 pub use win::*;
@@ -85,14 +97,31 @@ pub type Uid = uid_t;
 pub type Gid = gid_t;
 pub type Mode = mode_t;
 
-/// Uses the system's page size in bytes to round the given value up to the nearest page boundary.
-#[inline(always)]
-pub fn round_up_to_page_size(v: usize) -> usize {
-    let page_mask = pagesize() - 1;
-    (v + page_mask) & !page_mask
+/// Returns a list of supported frequencies in kHz for a given logical core.
+/// This is currently not supported on Windows.
+pub fn logical_core_frequencies_khz(_cpu_id: usize) -> Result<Vec<u32>> {
+    Err(Error::new(libc::ENOTSUP))
 }
 
-/// Returns the number of online logical cores on the system.
-pub fn number_of_logical_cores() -> Result<usize> {
-    Ok(win_util::number_of_processors())
+/// Stub impl for sched_attr.
+/// This is currently not supported on Windows.
+#[repr(C)]
+pub struct sched_attr {
+    pub sched_flags: u64,
+    pub sched_util_min: u32,
+}
+
+impl sched_attr {
+    pub fn default() -> Self {
+        Self {
+            sched_flags: 0,
+            sched_util_min: 0,
+        }
+    }
+}
+
+/// Sets scheduler related attributes for tasks.
+/// This is currently not supported on Windows.
+pub fn sched_setattr(_pid: Pid, _attr: &mut sched_attr, _flags: u32) -> Result<()> {
+    Err(Error::new(libc::ENOTSUP))
 }

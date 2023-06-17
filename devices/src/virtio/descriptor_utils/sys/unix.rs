@@ -22,7 +22,7 @@ mod tests {
         let memory_start_addr = GuestAddress(0x0);
         let memory = GuestMemory::new(&[(memory_start_addr, 0x10000)]).unwrap();
 
-        let chain = create_descriptor_chain(
+        let mut chain = create_descriptor_chain(
             &memory,
             GuestAddress(0x0),
             GuestAddress(0x100),
@@ -31,7 +31,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let mut reader = Reader::new(memory.clone(), chain).expect("failed to create Reader");
+        let reader = &mut chain.reader;
 
         // TODO(b/235104127): Potentially use tempfile for ro_file so that this
         // test can run on Windows.
@@ -60,7 +60,7 @@ mod tests {
         let memory_start_addr = GuestAddress(0x0);
         let memory = GuestMemory::new(&[(memory_start_addr, 0x10000)]).unwrap();
 
-        let chain = create_descriptor_chain(
+        let mut chain = create_descriptor_chain(
             &memory,
             GuestAddress(0x0),
             GuestAddress(0x100),
@@ -69,7 +69,7 @@ mod tests {
         )
         .expect("create_descriptor_chain failed");
 
-        let mut writer = Writer::new(memory.clone(), chain).expect("failed to create Writer");
+        let writer = &mut chain.writer;
 
         let file = tempfile().expect("failed to create temp file");
 

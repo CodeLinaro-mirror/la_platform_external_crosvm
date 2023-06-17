@@ -61,6 +61,9 @@ pub enum Error {
     #[error("the uffd in the corresponding process is already closed")]
     /// The corresponding process is already dead or has run exec(2).
     UffdClosed,
+    #[error("clone error: {0:?}")]
+    /// Failed to clone userfaultfd.
+    Clone(base::Error),
 }
 
 impl From<UffdError> for Error {
@@ -144,6 +147,12 @@ pub struct Factory {
     dev_file: Option<File>,
 }
 
+impl Default for Factory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Factory {
     /// Create [Factory] and try open `/dev/userfaultfd`.
     ///
@@ -201,6 +210,12 @@ impl Factory {
             Userfaultfd::new().context("create userfaultfd")
         }
     }
+
+    /// Create a new [Factory] object.
+    pub fn try_clone(&self) -> anyhow::Result<Self> {
+        let dev_file = self.dev_file.as_ref().map(File::try_clone).transpose()?;
+        Ok(Self { dev_file })
+    }
 }
 
 impl AsRawDescriptors for Factory {
@@ -239,6 +254,7 @@ impl AsRawDescriptors for Factory {
 ///
 /// Filling the (2) pages potentially may break the memory used by Rust. But the safety should be
 /// examined at `MADV_REMOVE` and `UFFDIO_REGISTER` timing.
+#[derive(Debug)]
 pub struct Userfaultfd {
     uffd: Uffd,
 }
@@ -358,6 +374,14 @@ impl Userfaultfd {
     /// Return `None` immediately if no events is ready to read.
     pub fn read_event(&self) -> Result<Option<UffdEvent>> {
         Ok(self.uffd.read_event()?)
+    }
+
+    /// Try to clone [Userfaultfd]
+    pub fn try_clone(&self) -> Result<Self> {
+        let dup_desc = base::clone_descriptor(self).map_err(Error::Clone)?;
+        // SAFETY: no one owns dup_desc.
+        let uffd = unsafe { Self::from_raw_descriptor(dup_desc) };
+        Ok(uffd)
     }
 }
 

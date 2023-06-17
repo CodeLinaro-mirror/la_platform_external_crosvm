@@ -33,6 +33,9 @@ use crate::AARCH64_GIC_DIST_SIZE;
 use crate::AARCH64_GIC_REDIST_SIZE;
 use crate::AARCH64_PMU_IRQ;
 use crate::AARCH64_PROTECTED_VM_FW_START;
+use crate::AARCH64_VIRTFREQ_BASE;
+use crate::AARCH64_VIRTFREQ_SIZE;
+
 // These are RTC related constants
 use crate::AARCH64_RTC_ADDR;
 use crate::AARCH64_RTC_IRQ;
@@ -51,6 +54,8 @@ const PHANDLE_RESTRICTED_DMA_POOL: u32 = 2;
 
 // CPUs are assigned phandles starting with this number.
 const PHANDLE_CPU0: u32 = 0x100;
+
+const PHANDLE_OPP_DOMAIN_BASE: u32 = 0x1000;
 
 // These are specified by the Linux GIC bindings
 const GIC_FDT_IRQ_NUM_CELLS: u32 = 3;
@@ -128,6 +133,8 @@ fn create_cpu_nodes(
     num_cpus: u32,
     cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
+    dynamic_power_coefficient: BTreeMap<usize, u32>,
+    cpu_frequencies: BTreeMap<usize, Vec<u32>>,
 ) -> Result<()> {
     let cpus_node = fdt.begin_node("cpus")?;
     fdt.property_u32("#address-cells", 0x1)?;
@@ -144,10 +151,19 @@ fn create_cpu_nodes(
         fdt.property_u32("reg", cpu_id)?;
         fdt.property_u32("phandle", PHANDLE_CPU0 + cpu_id)?;
 
+        if let Some(pwr_coefficient) = dynamic_power_coefficient.get(&(cpu_id as usize)) {
+            fdt.property_u32("dynamic-power-coefficient", *pwr_coefficient)?;
+        }
         if let Some(capacity) = cpu_capacity.get(&(cpu_id as usize)) {
             fdt.property_u32("capacity-dmips-mhz", *capacity)?;
         }
 
+        if !cpu_frequencies.is_empty() {
+            fdt.property_u32(
+                "operating-points-v2",
+                PHANDLE_OPP_DOMAIN_BASE + cpu_id as u32,
+            )?;
+        }
         fdt.end_node(cpu_node)?;
     }
 
@@ -166,6 +182,24 @@ fn create_cpu_nodes(
     }
 
     fdt.end_node(cpus_node)?;
+
+    if !cpu_frequencies.is_empty() {
+        for cpu_id in 0..num_cpus {
+            if let Some(frequencies) = cpu_frequencies.get(&(cpu_id as usize)) {
+                let opp_table_node = fdt.begin_node(&format!("opp_table{}", cpu_id))?;
+                fdt.property_u32("phandle", PHANDLE_OPP_DOMAIN_BASE + cpu_id as u32)?;
+                fdt.property_string("compatible", "operating-points-v2")?;
+                for freq in frequencies.iter() {
+                    let opp_hz = (*freq) as u64 * 1000;
+                    let opp_node = fdt.begin_node(&format!("opp{}", opp_hz))?;
+                    fdt.property_u64("opp-hz", opp_hz)?;
+                    fdt.end_node(opp_node)?;
+                }
+                fdt.end_node(opp_table_node)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -213,6 +247,17 @@ fn create_timer_node(fdt: &mut FdtWriter, num_cpus: u32) -> Result<()> {
     fdt.property_null("always-on")?;
     fdt.end_node(timer_node)?;
 
+    Ok(())
+}
+
+fn create_virt_cpufreq_node(fdt: &mut FdtWriter, num_cpus: u64) -> Result<()> {
+    let compatible = "virtual,kvm-cpufreq";
+    let vcf_node = fdt.begin_node("cpufreq")?;
+    let reg = [AARCH64_VIRTFREQ_BASE, AARCH64_VIRTFREQ_SIZE * num_cpus];
+
+    fdt.property_string("compatible", compatible)?;
+    fdt.property_array_u64("reg", &reg)?;
+    fdt.end_node(vcf_node)?;
     Ok(())
 }
 
@@ -331,6 +376,15 @@ fn create_config_node(fdt: &mut FdtWriter, (addr, size): (GuestAddress, usize)) 
     fdt.property_u32("kernel-address", addr)?;
     fdt.property_u32("kernel-size", size)?;
     fdt.end_node(config_node)?;
+
+    Ok(())
+}
+
+fn create_kvm_cpufreq_node(fdt: &mut FdtWriter) -> Result<()> {
+    let vcf_node = fdt.begin_node("cpufreq")?;
+
+    fdt.property_string("compatible", "virtual,kvm-cpufreq")?;
+    fdt.end_node(vcf_node)?;
 
     Ok(())
 }
@@ -560,6 +614,7 @@ pub fn create_fdt(
     num_cpus: u32,
     cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
+    cpu_frequencies: BTreeMap<usize, Vec<u32>>,
     fdt_address: GuestAddress,
     cmdline: &str,
     image: (GuestAddress, usize),
@@ -573,6 +628,7 @@ pub fn create_fdt(
     vmwdt_cfg: VmWdtConfig,
     dump_device_tree_blob: Option<PathBuf>,
     vm_generator: &impl Fn(&mut FdtWriter, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
+    dynamic_power_coefficient: BTreeMap<usize, u32>,
 ) -> Result<()> {
     let mut fdt = FdtWriter::new(&[]);
     let mut phandles = BTreeMap::new();
@@ -598,7 +654,14 @@ pub fn create_fdt(
         }
         None => None,
     };
-    create_cpu_nodes(&mut fdt, num_cpus, cpu_clusters, cpu_capacity)?;
+    create_cpu_nodes(
+        &mut fdt,
+        num_cpus,
+        cpu_clusters,
+        cpu_capacity,
+        dynamic_power_coefficient,
+        cpu_frequencies.clone(),
+    )?;
     create_gic_node(&mut fdt, is_gicv3, num_cpus as u64)?;
     create_timer_node(&mut fdt, num_cpus)?;
     if use_pmu {
@@ -612,7 +675,11 @@ pub fn create_fdt(
         create_battery_node(&mut fdt, bat_mmio_base, bat_irq)?;
     }
     create_vmwdt_node(&mut fdt, vmwdt_cfg)?;
+    create_kvm_cpufreq_node(&mut fdt)?;
     vm_generator(&mut fdt, &phandles)?;
+    if !cpu_frequencies.is_empty() {
+        create_virt_cpufreq_node(&mut fdt, num_cpus as u64)?;
+    }
     // End giant node
     fdt.end_node(root_node)?;
 

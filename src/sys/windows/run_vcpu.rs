@@ -20,13 +20,17 @@ use std::time::Instant;
 use aarch64::AArch64 as Arch;
 use anyhow::anyhow;
 use anyhow::Result;
+use arch::CpuConfigArch;
 use arch::CpuSet;
+use arch::IrqChipArch;
 use arch::LinuxArch;
 use arch::RunnableLinuxVm;
 use arch::VcpuAffinity;
+use arch::VcpuArch;
+use arch::VmArch;
 use base::error;
 use base::info;
-use base::set_audio_thread_priorities;
+use base::set_audio_thread_priority;
 use base::set_cpu_affinity;
 use base::warn;
 use base::Event;
@@ -48,12 +52,6 @@ use crosvm_cli::sys::windows::exit::ExitContext;
 use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
 use devices::tsc::TscSyncMitigations;
 use devices::Bus;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use devices::IrqChip;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use devices::IrqChipAArch64 as IrqChipArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use devices::IrqChipX86_64 as IrqChipArch;
 use devices::VcpuRunState;
 use futures::pin_mut;
 #[cfg(feature = "whpx")]
@@ -64,17 +62,8 @@ use hypervisor::HypervisorCap;
 use hypervisor::IoEventAddress;
 use hypervisor::IoOperation;
 use hypervisor::IoParams;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VcpuAArch64 as VcpuArch;
 use hypervisor::VcpuExit;
 use hypervisor::VcpuInitX86_64;
-use hypervisor::VcpuRunHandle;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VcpuX86_64 as VcpuArch;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use hypervisor::VmAArch64 as VmArch;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use hypervisor::VmX86_64 as VmArch;
 use sync::Condvar;
 use sync::Mutex;
 use vm_control::VmRunMode;
@@ -111,7 +100,6 @@ impl VcpuRunMode {
 struct RunnableVcpuInfo<V> {
     vcpu: V,
     thread_priority_handle: Option<SafeMultimediaHandle>,
-    vcpu_run_handle: VcpuRunHandle,
 }
 
 #[derive(Clone, Debug)]
@@ -239,7 +227,7 @@ impl VcpuRunThread {
             // Until we are multi process on Windows, we can't use the normal thread priority APIs;
             // instead, we use a trick from the audio device which is able to set a thread RT even
             // though the process itself is not RT.
-            thread_priority_handle = match set_audio_thread_priorities() {
+            thread_priority_handle = match set_audio_thread_priority() {
                 Ok(hndl) => Some(hndl),
                 Err(e) => {
                     warn!("Failed to set vcpu thread to real time priority: {}", e);
@@ -248,14 +236,9 @@ impl VcpuRunThread {
             };
         }
 
-        let vcpu_run_handle = vcpu
-            .take_run_handle(None)
-            .exit_context(Exit::RunnableVcpu, "failed to set thread id for vcpu")?;
-
         Ok(RunnableVcpuInfo {
             vcpu,
             thread_priority_handle,
-            vcpu_run_handle,
         })
     }
 
@@ -343,7 +326,6 @@ impl VcpuRunThread {
                     let RunnableVcpuInfo {
                         vcpu,
                         thread_priority_handle: _thread_priority_handle,
-                        vcpu_run_handle,
                     } = runnable_vcpu?;
 
                     if let Some(offset) = tsc_offset {
@@ -367,7 +349,6 @@ impl VcpuRunThread {
                         &context,
                         vcpu,
                         vm,
-                        vcpu_run_handle,
                         irq_chip,
                         io_bus,
                         mmio_bus,
@@ -461,7 +442,7 @@ impl VcpuStallMonitor {
                         )?;
                         reset_timer = false;
                     }
-                    let timer_future = timer.next_val();
+                    let timer_future = timer.wait();
                     pin_mut!(timer_future);
                     match ex.run_until(select2(timer_future, exit_future)) {
                         Ok((timer_result, exit_result)) => {
@@ -669,7 +650,6 @@ fn vcpu_loop<V>(
     context: &VcpuRunThread,
     mut vcpu: V,
     vm: impl VmArch + 'static,
-    vcpu_run_handle: VcpuRunHandle,
     irq_chip: Box<dyn IrqChipArch + 'static>,
     io_bus: Bus,
     mmio_bus: Bus,
@@ -725,7 +705,7 @@ where
                         Ordering::SeqCst,
                     );
                 }
-                vcpu.run(&vcpu_run_handle)
+                vcpu.run()
             };
             if let Some(ref monitoring_metadata) = context.monitoring_metadata {
                 *monitoring_metadata.last_exit_snapshot.lock() = Some(VcpuExitData {

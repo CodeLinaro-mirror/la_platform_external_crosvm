@@ -22,14 +22,11 @@ use thiserror::Error;
 use vm_memory::GuestMemory;
 
 use super::copy_config;
-use super::DescriptorError;
 use super::DeviceType;
 use super::Interrupt;
 use super::Queue;
-use super::Reader;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
-use super::Writer;
 use crate::Suspendable;
 
 const QUEUE_SIZE: u16 = 128;
@@ -51,9 +48,6 @@ pub enum P9Error {
     /// An internal I/O error occurred.
     #[error("P9 internal server error: {0}")]
     Internal(io::Error),
-    /// A DescriptorChain contains invalid data.
-    #[error("DescriptorChain contains invalid data: {0}")]
-    InvalidDescriptorChain(DescriptorError),
     /// A request is missing readable descriptors.
     #[error("request does not have any readable descriptors")]
     NoReadableDescriptors,
@@ -86,18 +80,14 @@ struct Worker {
 
 impl Worker {
     fn process_queue(&mut self) -> P9Result<()> {
-        while let Some(avail_desc) = self.queue.pop(&self.mem) {
-            let mut reader = Reader::new(self.mem.clone(), avail_desc.clone())
-                .map_err(P9Error::InvalidDescriptorChain)?;
-            let mut writer = Writer::new(self.mem.clone(), avail_desc.clone())
-                .map_err(P9Error::InvalidDescriptorChain)?;
-
+        while let Some(mut avail_desc) = self.queue.pop(&self.mem) {
             self.server
-                .handle_message(&mut reader, &mut writer)
+                .handle_message(&mut avail_desc.reader, &mut avail_desc.writer)
                 .map_err(P9Error::Internal)?;
 
-            self.queue
-                .add_used(&self.mem, avail_desc.index, writer.bytes_written() as u32);
+            let len = avail_desc.writer.bytes_written() as u32;
+
+            self.queue.add_used(&self.mem, avail_desc, len);
         }
         self.queue.trigger_interrupt(&self.mem, &self.interrupt);
 

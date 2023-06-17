@@ -12,6 +12,7 @@ use std::panic::catch_unwind;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::ptr::copy_nonoverlapping;
+use std::ptr::null;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts;
 use std::slice::from_raw_parts_mut;
@@ -71,7 +72,7 @@ pub struct rutabaga_iovecs {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct rutabaga_handle {
-    pub os_handle: i32,
+    pub os_handle: i64,
     pub handle_type: u32,
 }
 
@@ -106,6 +107,27 @@ pub struct rutabaga_builder<'a> {
 
 fn create_ffi_fence_handler(user_data: u64, fence_cb: write_fence_cb) -> RutabagaFenceHandler {
     RutabagaFenceClosure::new(move |completed_fence| fence_cb(user_data, completed_fence))
+}
+
+#[no_mangle]
+/// # Safety
+/// - `capset_names` must be a null-terminated C-string.
+pub unsafe extern "C" fn rutabaga_calculate_capset_mask(
+    capset_names: *const c_char,
+    capset_mask: &mut u64,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if capset_names == null() {
+            return -EINVAL;
+        }
+
+        let c_str_slice = CStr::from_ptr(capset_names);
+        let result = c_str_slice.to_str();
+        let str_slice = return_on_error!(result);
+        *capset_mask = rutabaga_gfx::calculate_capset_mask(str_slice.split(':'));
+        NO_ERROR
+    }))
+    .unwrap_or(-ESRCH)
 }
 
 /// # Safety
@@ -146,8 +168,6 @@ pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mu
         let result = RutabagaBuilder::new(component_type, (*builder).capset_mask)
             .set_use_egl(true)
             .set_use_surfaceless(true)
-            .set_use_guest_angle(false)
-            .set_use_vulkan(true)
             .set_use_external_blob(false)
             .set_rutabaga_channels(rutabaga_channels_opt)
             .build(fence_handler, None);
@@ -404,7 +424,9 @@ pub unsafe extern "C" fn rutabaga_resource_create_blob(
         let mut handle_opt: Option<RutabagaHandle> = None;
         if let Some(hnd) = handle {
             handle_opt = Some(RutabagaHandle {
-                os_handle: RutabagaDescriptor::from_raw_descriptor((*hnd).os_handle),
+                os_handle: RutabagaDescriptor::from_raw_descriptor(
+                    (*hnd).os_handle.try_into().unwrap(),
+                ),
                 handle_type: (*hnd).handle_type,
             });
         }
@@ -439,7 +461,7 @@ pub extern "C" fn rutabaga_resource_export_blob(
         let hnd = return_on_error!(result);
 
         (*handle).handle_type = hnd.handle_type;
-        (*handle).os_handle = hnd.os_handle.into_raw_descriptor();
+        (*handle).os_handle = hnd.os_handle.into_raw_descriptor() as i64;
         NO_ERROR
     }))
     .unwrap_or(-ESRCH)

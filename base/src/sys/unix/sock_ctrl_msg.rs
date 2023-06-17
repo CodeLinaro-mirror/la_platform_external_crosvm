@@ -6,6 +6,7 @@
 //! (e.g. Unix domain sockets).
 
 use std::fs::File;
+use std::io;
 use std::io::IoSlice;
 use std::io::IoSliceMut;
 use std::mem::size_of;
@@ -34,30 +35,25 @@ use libc::SCM_RIGHTS;
 use libc::SOL_SOCKET;
 
 use super::net::UnixSeqpacket;
-use super::Error;
-use super::Result;
 use super::StreamChannel;
 use crate::AsRawDescriptor;
 
-// Each of the following macros performs the same function as their C counterparts. They are each
-// macros because they are used to size statically allocated arrays.
+// Each of the following functions performs the same function as their C counterparts. They are
+// reimplemented as const fns here because they are used to size statically allocated arrays.
 
-macro_rules! CMSG_ALIGN {
-    ($len:expr) => {
-        ((($len) as usize) + size_of::<c_long>() - 1) & !(size_of::<c_long>() - 1)
-    };
+#[allow(non_snake_case)]
+const fn CMSG_ALIGN(len: usize) -> usize {
+    (len + size_of::<c_long>() - 1) & !(size_of::<c_long>() - 1)
 }
 
-macro_rules! CMSG_SPACE {
-    ($len:expr) => {
-        size_of::<cmsghdr>() + CMSG_ALIGN!($len)
-    };
+#[allow(non_snake_case)]
+const fn CMSG_SPACE(len: usize) -> usize {
+    size_of::<cmsghdr>() + CMSG_ALIGN(len)
 }
 
-macro_rules! CMSG_LEN {
-    ($len:expr) => {
-        size_of::<cmsghdr>() + (($len) as usize)
-    };
+#[allow(non_snake_case)]
+const fn CMSG_LEN(len: usize) -> usize {
+    size_of::<cmsghdr>() + len
 }
 
 // This function (macro in the C version) is not used in any compile time constant slots, so is just
@@ -72,9 +68,12 @@ fn CMSG_DATA(cmsg_buffer: *mut cmsghdr) -> *mut RawFd {
 
 // This function is like CMSG_NEXT, but safer because it reads only from references, although it
 // does some pointer arithmetic on cmsg_ptr.
-#[allow(clippy::cast_ptr_alignment)]
+#[allow(clippy::cast_ptr_alignment, clippy::unnecessary_cast)]
 fn get_next_cmsg(msghdr: &msghdr, cmsg: &cmsghdr, cmsg_ptr: *mut cmsghdr) -> *mut cmsghdr {
-    let next_cmsg = (cmsg_ptr as *mut u8).wrapping_add(CMSG_ALIGN!(cmsg.cmsg_len)) as *mut cmsghdr;
+    // The extra cast of cmsg_len to usize is required to build against musl libc, which uses
+    // u32 for cmsg_len.
+    let next_cmsg =
+        (cmsg_ptr as *mut u8).wrapping_add(CMSG_ALIGN(cmsg.cmsg_len as usize)) as *mut cmsghdr;
     if next_cmsg
         .wrapping_offset(1)
         .wrapping_sub(msghdr.msg_control as usize) as usize
@@ -86,7 +85,7 @@ fn get_next_cmsg(msghdr: &msghdr, cmsg: &cmsghdr, cmsg_ptr: *mut cmsghdr) -> *mu
     }
 }
 
-const CMSG_BUFFER_INLINE_CAPACITY: usize = CMSG_SPACE!(size_of::<RawFd>() * 32);
+const CMSG_BUFFER_INLINE_CAPACITY: usize = CMSG_SPACE(size_of::<RawFd>() * 32);
 
 enum CmsgBuffer {
     Inline([u64; (CMSG_BUFFER_INLINE_CAPACITY + 7) / 8]),
@@ -123,8 +122,8 @@ impl CmsgBuffer {
 // Musl requires a try_into when assigning to msg_iovlen and msg_controllen
 // that is unnecessary when compiling for glibc.
 #[allow(clippy::useless_conversion)]
-fn raw_sendmsg<D: AsIobuf>(fd: RawFd, out_data: &[D], out_fds: &[RawFd]) -> Result<usize> {
-    let cmsg_capacity = CMSG_SPACE!(size_of::<RawFd>() * out_fds.len());
+fn raw_sendmsg<D: AsIobuf>(fd: RawFd, out_data: &[D], out_fds: &[RawFd]) -> io::Result<usize> {
+    let cmsg_capacity = CMSG_SPACE(size_of::<RawFd>() * out_fds.len());
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
     let iovec = AsIobuf::as_iobuf_slice(out_data);
@@ -141,7 +140,7 @@ fn raw_sendmsg<D: AsIobuf>(fd: RawFd, out_data: &[D], out_fds: &[RawFd]) -> Resu
         // Safe because cmsghdr only contains primitive types for which zero
         // initialization is valid.
         let mut cmsg: cmsghdr = unsafe { MaybeUninit::zeroed().assume_init() };
-        cmsg.cmsg_len = CMSG_LEN!(size_of::<RawFd>() * out_fds.len())
+        cmsg.cmsg_len = CMSG_LEN(size_of::<RawFd>() * out_fds.len())
             .try_into()
             .unwrap();
         cmsg.cmsg_level = SOL_SOCKET;
@@ -167,7 +166,7 @@ fn raw_sendmsg<D: AsIobuf>(fd: RawFd, out_data: &[D], out_fds: &[RawFd]) -> Resu
     let write_count = unsafe { sendmsg(fd, &msg, MSG_NOSIGNAL) };
 
     if write_count == -1 {
-        Err(Error::last())
+        Err(io::Error::last_os_error())
     } else {
         Ok(write_count as usize)
     }
@@ -175,9 +174,13 @@ fn raw_sendmsg<D: AsIobuf>(fd: RawFd, out_data: &[D], out_fds: &[RawFd]) -> Resu
 
 // Musl requires a try_into when assigning to msg_iovlen, msg_controllen and
 // cmsg_len that is unnecessary when compiling for glibc.
-#[allow(clippy::useless_conversion)]
-fn raw_recvmsg(fd: RawFd, iovs: &mut [IoSliceMut], in_fds: &mut [RawFd]) -> Result<(usize, usize)> {
-    let cmsg_capacity = CMSG_SPACE!(size_of::<RawFd>() * in_fds.len());
+#[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+fn raw_recvmsg(
+    fd: RawFd,
+    iovs: &mut [IoSliceMut],
+    in_fds: &mut [RawFd],
+) -> io::Result<(usize, usize)> {
+    let cmsg_capacity = CMSG_SPACE(size_of::<RawFd>() * in_fds.len());
     let mut cmsg_buffer = CmsgBuffer::with_capacity(cmsg_capacity);
 
     // msghdr on musl has private __pad1 and __pad2 fields that cannot be initialized.
@@ -197,7 +200,7 @@ fn raw_recvmsg(fd: RawFd, iovs: &mut [IoSliceMut], in_fds: &mut [RawFd]) -> Resu
     let total_read = unsafe { recvmsg(fd, &mut msg, 0) };
 
     if total_read == -1 {
-        return Err(Error::last());
+        return Err(io::Error::last_os_error());
     }
 
     if total_read == 0 && (msg.msg_controllen as usize) < size_of::<cmsghdr>() {
@@ -212,7 +215,7 @@ fn raw_recvmsg(fd: RawFd, iovs: &mut [IoSliceMut], in_fds: &mut [RawFd]) -> Resu
         let cmsg = unsafe { (cmsg_ptr as *mut cmsghdr).read_unaligned() };
 
         if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
-            let fd_count = (cmsg.cmsg_len as usize - CMSG_LEN!(0)) / size_of::<RawFd>();
+            let fd_count = (cmsg.cmsg_len as usize - CMSG_LEN(0)) / size_of::<RawFd>();
             unsafe {
                 copy_nonoverlapping(
                     CMSG_DATA(cmsg_ptr),
@@ -242,11 +245,13 @@ pub trait ScmSocket {
     ///
     /// On success, returns the number of bytes sent.
     ///
+    /// The error is constructed via `std::io::Error::last_os_error()`.
+    ///
     /// # Arguments
     ///
     /// * `buf` - A buffer of data to send on the `socket`.
     /// * `fd` - A file descriptors to be sent.
-    fn send_with_fd<D: AsIobuf>(&self, buf: &[D], fd: RawFd) -> Result<usize> {
+    fn send_with_fd<D: AsIobuf>(&self, buf: &[D], fd: RawFd) -> io::Result<usize> {
         self.send_with_fds(buf, &[fd])
     }
 
@@ -254,11 +259,13 @@ pub trait ScmSocket {
     ///
     /// On success, returns the number of bytes sent.
     ///
+    /// The error is constructed via `std::io::Error::last_os_error()`.
+    ///
     /// # Arguments
     ///
     /// * `buf` - A buffer of data to send on the `socket`.
     /// * `fds` - A list of file descriptors to be sent.
-    fn send_with_fds<D: AsIobuf>(&self, buf: &[D], fd: &[RawFd]) -> Result<usize> {
+    fn send_with_fds<D: AsIobuf>(&self, buf: &[D], fd: &[RawFd]) -> io::Result<usize> {
         raw_sendmsg(self.socket_fd(), buf, fd)
     }
 
@@ -266,11 +273,13 @@ pub trait ScmSocket {
     ///
     /// On success, returns the number of bytes sent.
     ///
+    /// The error is constructed via `std::io::Error::last_os_error()`.
+    ///
     /// # Arguments
     ///
     /// * `bufs` - A slice of slices of data to send on the `socket`.
     /// * `fd` - A file descriptors to be sent.
-    fn send_bufs_with_fd(&self, bufs: &[IoSlice], fd: RawFd) -> Result<usize> {
+    fn send_bufs_with_fd(&self, bufs: &[IoSlice], fd: RawFd) -> io::Result<usize> {
         self.send_bufs_with_fds(bufs, &[fd])
     }
 
@@ -278,11 +287,13 @@ pub trait ScmSocket {
     ///
     /// On success, returns the number of bytes sent.
     ///
+    /// The error is constructed via `std::io::Error::last_os_error()`.
+    ///
     /// # Arguments
     ///
     /// * `bufs` - A slice of slices of data to send on the `socket`.
     /// * `fds` - A list of file descriptors to be sent.
-    fn send_bufs_with_fds(&self, bufs: &[IoSlice], fd: &[RawFd]) -> Result<usize> {
+    fn send_bufs_with_fds(&self, bufs: &[IoSlice], fd: &[RawFd]) -> io::Result<usize> {
         raw_sendmsg(self.socket_fd(), bufs, fd)
     }
 
@@ -290,10 +301,12 @@ pub trait ScmSocket {
     ///
     /// On success, returns the number of bytes and an optional file descriptor.
     ///
+    /// The error is constructed via `std::io::Error::last_os_error()`.
+    ///
     /// # Arguments
     ///
     /// * `buf` - A buffer to receive data from the socket.vm
-    fn recv_with_fd(&self, buf: IoSliceMut) -> Result<(usize, Option<File>)> {
+    fn recv_with_fd(&self, buf: IoSliceMut) -> io::Result<(usize, Option<File>)> {
         let mut fd = [0];
         let (read_count, fd_count) = self.recv_with_fds(buf, &mut fd)?;
         let file = if fd_count == 0 {
@@ -311,6 +324,8 @@ pub trait ScmSocket {
     /// On success, returns the number of bytes and file descriptors received as a tuple
     /// `(bytes count, files count)`.
     ///
+    /// The error is constructed via `std::io::Error::last_os_error()`.
+    ///
     /// # Arguments
     ///
     /// * `buf` - A buffer to receive data from the socket.
@@ -319,7 +334,7 @@ pub trait ScmSocket {
     ///           returned tuple. The caller owns these file descriptors, but they will not be
     ///           closed on drop like a `File`-like type would be. It is recommended that each valid
     ///           file descriptor gets wrapped in a drop type that closes it after this returns.
-    fn recv_with_fds(&self, buf: IoSliceMut, fds: &mut [RawFd]) -> Result<(usize, usize)> {
+    fn recv_with_fds(&self, buf: IoSliceMut, fds: &mut [RawFd]) -> io::Result<(usize, usize)> {
         raw_recvmsg(self.socket_fd(), &mut [buf], fds)
     }
 
@@ -327,6 +342,8 @@ pub trait ScmSocket {
     ///
     /// On success, returns the number of bytes and file descriptors received as a tuple
     /// `(bytes count, files count)`.
+    ///
+    /// The error is constructed via `std::io::Error::last_os_error()`.
     ///
     /// # Arguments
     ///
@@ -343,7 +360,7 @@ pub trait ScmSocket {
         &self,
         iovecs: &mut [IoSliceMut],
         fds: &mut [RawFd],
-    ) -> Result<(usize, usize)> {
+    ) -> io::Result<(usize, usize)> {
         raw_recvmsg(self.socket_fd(), iovecs, fds)
     }
 }
@@ -435,11 +452,8 @@ unsafe impl<'a> AsIobuf for VolatileSlice<'a> {
 mod tests {
     use std::io::Write;
     use std::mem::size_of;
-    use std::os::raw::c_long;
     use std::os::unix::net::UnixDatagram;
     use std::slice::from_raw_parts;
-
-    use libc::cmsghdr;
 
     use super::*;
     use crate::AsRawDescriptor;
@@ -450,7 +464,7 @@ mod tests {
     macro_rules! CMSG_SPACE_TEST {
         ($len:literal) => {
             assert_eq!(
-                CMSG_SPACE!(size_of::<[RawFd; $len]>()) as libc::c_uint,
+                CMSG_SPACE(size_of::<[RawFd; $len]>()) as libc::c_uint,
                 unsafe { libc::CMSG_SPACE(size_of::<[RawFd; $len]>() as libc::c_uint) }
             );
         };

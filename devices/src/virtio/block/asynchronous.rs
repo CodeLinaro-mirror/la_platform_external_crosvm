@@ -29,7 +29,7 @@ use base::Tube;
 use base::TubeError;
 use base::WorkerThread;
 use cros_async::select5;
-use cros_async::sync::Mutex as AsyncMutex;
+use cros_async::sync::RwLock as AsyncRwLock;
 use cros_async::AsyncError;
 use cros_async::AsyncTube;
 use cros_async::EventAsync;
@@ -79,7 +79,6 @@ use crate::virtio::device_constants::block::VIRTIO_BLK_T_OUT;
 use crate::virtio::device_constants::block::VIRTIO_BLK_T_WRITE_ZEROES;
 use crate::virtio::vhost::user::device::VhostBackendReqConnectionState;
 use crate::virtio::DescriptorChain;
-use crate::virtio::DescriptorError;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
@@ -109,8 +108,6 @@ const DISCARD_SECTOR_ALIGNMENT: u32 = 128;
 pub enum ExecuteError {
     #[error("failed to copy ID string: {0}")]
     CopyId(io::Error),
-    #[error("virtio descriptor error: {0}")]
-    Descriptor(DescriptorError),
     #[error("failed to perform discard or write zeroes; sector={sector} num_sectors={num_sectors} flags={flags}; {ioerr:?}")]
     DiscardWriteZeroes {
         ioerr: Option<disk::Error>,
@@ -156,7 +153,6 @@ impl ExecuteError {
     fn status(&self) -> u8 {
         match self {
             ExecuteError::CopyId(_) => VIRTIO_BLK_S_IOERR,
-            ExecuteError::Descriptor(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::DiscardWriteZeroes { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::Flush(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::MissingStatus => VIRTIO_BLK_S_IOERR,
@@ -206,7 +202,7 @@ pub struct DiskState {
     pub id: Option<BlockId>,
     /// A DiskState is owned by each worker's executor and cannot be shared by workers, thus
     /// `worker_shared_state` holds the state shared by workers in Arc.
-    worker_shared_state: Arc<AsyncMutex<WorkerSharedState>>,
+    worker_shared_state: Arc<AsyncRwLock<WorkerSharedState>>,
 }
 
 /// Disk state which can be modified by other worker threads
@@ -228,21 +224,22 @@ impl DiskState {
             disk_image,
             read_only,
             id,
-            worker_shared_state: Arc::new(AsyncMutex::new(WorkerSharedState { disk_size, sparse })),
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
+                disk_size,
+                sparse,
+            })),
         }
     }
 }
 
 async fn process_one_request(
-    avail_desc: DescriptorChain,
-    disk_state: Rc<AsyncMutex<DiskState>>,
+    avail_desc: &mut DescriptorChain,
+    disk_state: Rc<AsyncRwLock<DiskState>>,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
-    mem: &GuestMemory,
 ) -> result::Result<usize, ExecuteError> {
-    let mut reader =
-        Reader::new(mem.clone(), avail_desc.clone()).map_err(ExecuteError::Descriptor)?;
-    let mut writer = Writer::new(mem.clone(), avail_desc).map_err(ExecuteError::Descriptor)?;
+    let reader = &mut avail_desc.reader;
+    let writer = &mut avail_desc.writer;
 
     // The last byte of the buffer is virtio_blk_req::status.
     // Split it into a separate Writer so that status_writer is the final byte and
@@ -254,8 +251,8 @@ async fn process_one_request(
     let mut status_writer = writer.split_at(status_offset);
 
     let status = match BlockAsync::execute_request(
-        &mut reader,
-        &mut writer,
+        reader,
+        writer,
         disk_state,
         flush_timer,
         flush_timer_armed,
@@ -280,27 +277,25 @@ async fn process_one_request(
 /// Process one descriptor chain asynchronously.
 pub async fn process_one_chain<I: SignalableInterrupt>(
     queue: Rc<RefCell<Queue>>,
-    avail_desc: DescriptorChain,
-    disk_state: Rc<AsyncMutex<DiskState>>,
+    mut avail_desc: DescriptorChain,
+    disk_state: Rc<AsyncRwLock<DiskState>>,
     mem: GuestMemory,
     interrupt: &I,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
-    let descriptor_index = avail_desc.index;
-    let len =
-        match process_one_request(avail_desc, disk_state, flush_timer, flush_timer_armed, &mem)
-            .await
-        {
-            Ok(len) => len,
-            Err(e) => {
-                error!("block: failed to handle request: {}", e);
-                0
-            }
-        };
+    let len = match process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed)
+        .await
+    {
+        Ok(len) => len,
+        Err(e) => {
+            error!("block: failed to handle request: {}", e);
+            0
+        }
+    };
 
     let mut queue = queue.borrow_mut();
-    queue.add_used(&mem, descriptor_index, len as u32);
+    queue.add_used(&mem, avail_desc, len as u32);
     queue.trigger_interrupt(&mem, interrupt);
 }
 
@@ -309,7 +304,7 @@ pub async fn process_one_chain<I: SignalableInterrupt>(
 // executor.
 pub async fn handle_queue<I: SignalableInterrupt + 'static>(
     mem: GuestMemory,
-    disk_state: Rc<AsyncMutex<DiskState>>,
+    disk_state: Rc<AsyncRwLock<DiskState>>,
     queue: Rc<RefCell<Queue>>,
     evt: EventAsync,
     interrupt: I,
@@ -317,11 +312,19 @@ pub async fn handle_queue<I: SignalableInterrupt + 'static>(
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
     let mut background_tasks = FuturesUnordered::new();
+    let evt_future = evt.next_val().fuse();
+    pin_mut!(evt_future);
     loop {
         // Wait for the next signal from `evt` and process `background_tasks` in the meantime.
+        //
+        // NOTE: We can't call `evt.next_val()` directly in the `select!` expression. That would
+        // create a new future each time, which, in the completion-based async backends like
+        // io_uring, means we'd submit a new syscall each time (i.e. a race condition on the
+        // eventfd).
         futures::select! {
             _ = background_tasks.next() => continue,
-            res = evt.next_val().fuse() => {
+            res = evt_future => {
+                evt_future.set(evt.next_val().fuse());
                 if let Err(e) = res {
                     error!("Failed to read the next queue event: {}", e);
                     continue;
@@ -355,7 +358,7 @@ pub async fn handle_queue<I: SignalableInterrupt + 'static>(
 pub async fn handle_vhost_user_command_tube(
     command_tube: AsyncTube,
     backend_req_connection: Arc<Mutex<VhostBackendReqConnectionState>>,
-    disk_state: Rc<AsyncMutex<DiskState>>,
+    disk_state: Rc<AsyncRwLock<DiskState>>,
 ) -> Result<(), ExecuteError> {
     // Process the commands.
     handle_command_tube(
@@ -374,7 +377,7 @@ enum ConfigChangeSignal {
 async fn handle_command_tube(
     command_tube: &Option<AsyncTube>,
     signal: ConfigChangeSignal,
-    disk_state: Rc<AsyncMutex<DiskState>>,
+    disk_state: Rc<AsyncRwLock<DiskState>>,
 ) -> Result<(), ExecuteError> {
     let command_tube = match command_tube {
         Some(c) => c,
@@ -422,7 +425,7 @@ async fn handle_command_tube(
     }
 }
 
-async fn resize(disk_state: Rc<AsyncMutex<DiskState>>, new_size: u64) -> DiskControlResult {
+async fn resize(disk_state: Rc<AsyncRwLock<DiskState>>, new_size: u64) -> DiskControlResult {
     // Acquire exclusive, mutable access to the state so the virtqueue task won't be able to read
     // the state while resizing.
     let mut disk_state = disk_state.lock().await;
@@ -460,12 +463,12 @@ async fn resize(disk_state: Rc<AsyncMutex<DiskState>>, new_size: u64) -> DiskCon
 
 /// Periodically flushes the disk when the given timer fires.
 pub async fn flush_disk(
-    disk_state: Rc<AsyncMutex<DiskState>>,
+    disk_state: Rc<AsyncRwLock<DiskState>>,
     timer: TimerAsync,
     armed: Rc<RefCell<bool>>,
 ) -> Result<(), ControlError> {
     loop {
-        timer.next_val().await.map_err(ControlError::FlushTimer)?;
+        timer.wait().await.map_err(ControlError::FlushTimer)?;
         if !*armed.borrow() {
             continue;
         }
@@ -487,15 +490,15 @@ pub async fn flush_disk(
 // The main worker thread. Initialized the asynchronous worker tasks and passes them to the executor
 // to be processed.
 //
-// `disk_state` is wrapped by `AsyncMutex`, which provides both shared and exclusive locks. It's
-// because the state can be read from the virtqueue task while the control task is processing
-// a resizing command.
+// `disk_state` is wrapped by `AsyncRwLock`, which provides both shared and exclusive locks. It's
+// because the state can be read from the virtqueue task while the control task is processing a
+// resizing command.
 fn run_worker(
     ex: Executor,
     interrupt: Interrupt,
     queues: Vec<(Queue, Event)>,
     mem: GuestMemory,
-    disk_state: &Rc<AsyncMutex<DiskState>>,
+    disk_state: &Rc<AsyncRwLock<DiskState>>,
     control_tube: &Option<AsyncTube>,
     kill_evt: Event,
 ) -> Result<(), String> {
@@ -684,7 +687,7 @@ impl BlockAsync {
     async fn execute_request(
         reader: &mut Reader,
         writer: &mut Writer,
-        disk_state: Rc<AsyncMutex<DiskState>>,
+        disk_state: Rc<AsyncRwLock<DiskState>>,
         flush_timer: Rc<RefCell<TimerAsync>>,
         flush_timer_armed: Rc<RefCell<bool>>,
     ) -> result::Result<(), ExecuteError> {
@@ -829,7 +832,7 @@ impl BlockAsync {
             VIRTIO_BLK_T_FLUSH => {
                 disk_state
                     .disk_image
-                    .fsync()
+                    .fdatasync()
                     .await
                     .map_err(ExecuteError::Flush)?;
 
@@ -925,7 +928,7 @@ impl VirtioDevice for BlockAsync {
     ) -> anyhow::Result<()> {
         let read_only = self.read_only;
         let sparse = self.sparse;
-        let id = self.id.take();
+        let id = self.id;
         let executor_kind = self.executor_kind;
         let disk_image = self
             .disk_image
@@ -950,7 +953,7 @@ impl VirtioDevice for BlockAsync {
             vec![(queues, disk_image)]
         };
 
-        let shared_state = Arc::new(AsyncMutex::new(WorkerSharedState {
+        let shared_state = Arc::new(AsyncRwLock::new(WorkerSharedState {
             disk_size: self.disk_size.clone(),
             sparse,
         }));
@@ -972,7 +975,7 @@ impl VirtioDevice for BlockAsync {
                     Ok(d) => d,
                     Err(e) => panic!("Failed to create async disk {}", e),
                 };
-                let disk_state = Rc::new(AsyncMutex::new(DiskState {
+                let disk_state = Rc::new(AsyncRwLock::new(DiskState {
                     disk_image: async_image,
                     read_only,
                     id,
@@ -1249,7 +1252,7 @@ mod tests {
         mem.write_obj_at_addr(req_hdr, GuestAddress(0x1000))
             .expect("writing req failed");
 
-        let avail_desc = create_descriptor_chain(
+        let mut avail_desc = create_descriptor_chain(
             &mem,
             GuestAddress(0x100),  // Place descriptor chain at 0x100.
             GuestAddress(0x1000), // Describe buffer at 0x1000.
@@ -1271,17 +1274,17 @@ mod tests {
         ));
         let flush_timer_armed = Rc::new(RefCell::new(false));
 
-        let disk_state = Rc::new(AsyncMutex::new(DiskState {
+        let disk_state = Rc::new(AsyncRwLock::new(DiskState {
             disk_image: Box::new(af),
             read_only: false,
             id: None,
-            worker_shared_state: Arc::new(AsyncMutex::new(WorkerSharedState {
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
                 disk_size: Arc::new(AtomicU64::new(disk_size)),
                 sparse: true,
             })),
         }));
 
-        let fut = process_one_request(avail_desc, disk_state, flush_timer, flush_timer_armed, &mem);
+        let fut = process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed);
 
         ex.run_until(fut)
             .expect("running executor failed")
@@ -1310,7 +1313,7 @@ mod tests {
         mem.write_obj_at_addr(req_hdr, GuestAddress(0x1000))
             .expect("writing req failed");
 
-        let avail_desc = create_descriptor_chain(
+        let mut avail_desc = create_descriptor_chain(
             &mem,
             GuestAddress(0x100),  // Place descriptor chain at 0x100.
             GuestAddress(0x1000), // Describe buffer at 0x1000.
@@ -1334,17 +1337,17 @@ mod tests {
             TimerAsync::new(timer, &ex).expect("Failed to create an async timer"),
         ));
         let flush_timer_armed = Rc::new(RefCell::new(false));
-        let disk_state = Rc::new(AsyncMutex::new(DiskState {
+        let disk_state = Rc::new(AsyncRwLock::new(DiskState {
             disk_image: Box::new(af),
             read_only: false,
             id: None,
-            worker_shared_state: Arc::new(AsyncMutex::new(WorkerSharedState {
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
                 disk_size: Arc::new(AtomicU64::new(disk_size)),
                 sparse: true,
             })),
         }));
 
-        let fut = process_one_request(avail_desc, disk_state, flush_timer, flush_timer_armed, &mem);
+        let fut = process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed);
 
         ex.run_until(fut)
             .expect("running executor failed")
@@ -1374,7 +1377,7 @@ mod tests {
         mem.write_obj_at_addr(req_hdr, GuestAddress(0x1000))
             .expect("writing req failed");
 
-        let avail_desc = create_descriptor_chain(
+        let mut avail_desc = create_descriptor_chain(
             &mem,
             GuestAddress(0x100),  // Place descriptor chain at 0x100.
             GuestAddress(0x1000), // Describe buffer at 0x1000.
@@ -1399,17 +1402,17 @@ mod tests {
 
         let id = b"a20-byteserialnumber";
 
-        let disk_state = Rc::new(AsyncMutex::new(DiskState {
+        let disk_state = Rc::new(AsyncRwLock::new(DiskState {
             disk_image: Box::new(af),
             read_only: false,
             id: Some(*id),
-            worker_shared_state: Arc::new(AsyncMutex::new(WorkerSharedState {
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState {
                 disk_size: Arc::new(AtomicU64::new(disk_size)),
                 sparse: true,
             })),
         }));
 
-        let fut = process_one_request(avail_desc, disk_state, flush_timer, flush_timer_armed, &mem);
+        let fut = process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed);
 
         ex.run_until(fut)
             .expect("running executor failed")
@@ -1451,6 +1454,7 @@ mod tests {
 
         // Create a BlockAsync to test
         let features = base_features(ProtectionType::Unprotected);
+        let id = b"Block serial number\0";
         let mut b = BlockAsync::new(
             features,
             disk_image.try_clone().unwrap(),
@@ -1458,7 +1462,7 @@ mod tests {
             false,
             512,
             enables_multiple_workers,
-            None,
+            Some(*id),
             Some(Tube::pair().unwrap().0),
             None,
             None,
@@ -1496,6 +1500,7 @@ mod tests {
             b.control_tube.is_some(),
             "BlockAsync should have a control tube"
         );
+        assert_eq!(b.id, Some(*b"Block serial number\0"));
 
         // re-activate should succeed
         b.activate(

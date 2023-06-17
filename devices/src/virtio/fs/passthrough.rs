@@ -22,6 +22,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::MutexGuard;
 use std::time::Duration;
 
 use base::error;
@@ -76,6 +77,7 @@ use crate::virtio::fs::caps::Capability;
 use crate::virtio::fs::caps::Caps;
 use crate::virtio::fs::caps::Set as CapSet;
 use crate::virtio::fs::caps::Value as CapValue;
+use crate::virtio::fs::expiring_map::ExpiringMap;
 use crate::virtio::fs::multikey::MultikeyBTreeMap;
 use crate::virtio::fs::read_dir::ReadDir;
 
@@ -96,6 +98,13 @@ const FS_PROJINHERIT_FL: c_int = 0x20000000;
 // 25 seconds is the default timeout for dbus-send.
 #[cfg(feature = "arc_quota")]
 const DEFAULT_DBUS_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Internal utility wrapper for `cros_tracing::trace_event!()` macro with VirtioFS calls.
+macro_rules! fs_trace {
+    ($tag:expr, $name:expr, $($arg:expr),+) => {
+        cros_tracing::trace_event!(VirtioFs, $name, $tag, $($arg),*)
+    };
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, AsBytes, FromBytes)]
@@ -618,6 +627,104 @@ impl FromStr for Config {
     }
 }
 
+/// Per-directory cache for `PassthroughFs::ascii_casefold_lookup()`.
+///
+/// The key of the underlying `BTreeMap` is a lower-cased file name in the direcoty.
+/// The value is the case-sensitive file name stored in the host file system.
+/// We assume that if PassthroughFs has exclusive access to the filesystem, this cache exhaustively
+///  covers all file names that exist within the directory.
+/// So every `PassthroughFs`'s handler that adds or removes files in the directory is expected to
+/// update this cache.
+struct CasefoldCache(BTreeMap<Vec<u8>, CString>);
+
+impl CasefoldCache {
+    fn new(dir: &InodeData) -> io::Result<Self> {
+        let mut mp = BTreeMap::new();
+
+        let mut buf = [0u8; 1024];
+        let mut offset = 0;
+        loop {
+            let mut read_dir = ReadDir::new(dir, offset, &mut buf[..])?;
+            if read_dir.remaining() == 0 {
+                break;
+            }
+
+            while let Some(entry) = read_dir.next() {
+                offset = entry.offset as libc::off64_t;
+                let entry_name = entry.name;
+                mp.insert(
+                    entry_name.to_bytes().to_ascii_lowercase(),
+                    entry_name.to_owned(),
+                );
+            }
+        }
+        Ok(Self(mp))
+    }
+
+    fn insert(&mut self, name: &CStr) {
+        let lower_case = name.to_bytes().to_ascii_lowercase();
+        self.0.insert(lower_case, name.into());
+    }
+
+    fn lookup(&self, name: &[u8]) -> Option<CString> {
+        let lower = name.to_ascii_lowercase();
+        self.0.get(&lower).cloned()
+    }
+
+    fn remove(&mut self, name: &CStr) {
+        let lower_case = name.to_bytes().to_ascii_lowercase();
+        self.0.remove(&lower_case);
+    }
+}
+
+/// Time expiring mapping from an inode of a directory to `CasefoldCache` for the directory.
+/// Each entry will be expired after `timeout`.
+/// When ascii_casefold is disabled, this struct does nothing.
+struct ExpiringCasefoldLookupCaches {
+    inner: ExpiringMap<Inode, CasefoldCache>,
+}
+
+impl ExpiringCasefoldLookupCaches {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            inner: ExpiringMap::new(timeout),
+        }
+    }
+
+    fn insert(&mut self, parent: Inode, name: &CStr) {
+        if let Some(dir_cache) = self.inner.get_mut(&parent) {
+            dir_cache.insert(name);
+        }
+    }
+
+    fn remove(&mut self, parent: Inode, name: &CStr) {
+        if let Some(dir_cache) = self.inner.get_mut(&parent) {
+            dir_cache.remove(name);
+        }
+    }
+
+    fn forget(&mut self, parent: Inode) {
+        self.inner.remove(&parent);
+    }
+
+    /// Get `CasefoldCache` for the given directory.
+    /// If the cache doesn't exist, generate it by fetching directory information with
+    /// `getdents64()`.
+    fn get(&mut self, parent: &InodeData) -> io::Result<&CasefoldCache> {
+        self.inner
+            .get_or_insert_with(&parent.inode, || CasefoldCache::new(parent))
+    }
+
+    #[cfg(test)]
+    fn exists_in_cache(&mut self, parent: Inode, name: &CStr) -> bool {
+        if let Some(dir_cache) = self.inner.get(&parent) {
+            dir_cache.lookup(name.to_bytes()).is_some()
+        } else {
+            false
+        }
+    }
+}
+
 /// A file system that simply "passes through" all requests it receives to the underlying file
 /// system. To keep the implementation simple it servers the contents of its root directory. Users
 /// that wish to serve only a specific directory should set up the environment so that that
@@ -661,6 +768,14 @@ pub struct PassthroughFs {
     dbus_connection: Option<Mutex<dbus::blocking::Connection>>,
     #[cfg(feature = "arc_quota")]
     dbus_fd: Option<std::os::unix::io::RawFd>,
+
+    // Time-expiring cache for `ascii_casefold_lookup()`.
+    // The key is an inode of a directory, and the value is a cache for the directory.
+    // Each value will be expired `cfg.entry_timeout` after it's created.
+    //
+    // TODO(b/267748212): Instead of per-device Mutex, we might want to have per-directory Mutex
+    // if we use PassthroughFs in multi-threaded environments.
+    expiring_casefold_lookup_caches: Option<Mutex<ExpiringCasefoldLookupCaches>>,
 
     cfg: Config,
 }
@@ -713,6 +828,14 @@ impl PassthroughFs {
         // Safe because we just opened this descriptor.
         let proc = unsafe { File::from_raw_descriptor(raw_descriptor) };
 
+        let expiring_casefold_lookup_caches = if cfg.ascii_casefold {
+            Some(Mutex::new(ExpiringCasefoldLookupCaches::new(
+                cfg.entry_timeout,
+            )))
+        } else {
+            None
+        };
+
         let passthroughfs = PassthroughFs {
             process_lock: Mutex::new(()),
             tag: tag.to_string(),
@@ -732,11 +855,15 @@ impl PassthroughFs {
             dbus_connection,
             #[cfg(feature = "arc_quota")]
             dbus_fd,
-
+            expiring_casefold_lookup_caches,
             cfg,
         };
 
-        cros_tracing::trace_simple_print!("New PassthroughFS initialized: {:?}", passthroughfs);
+        cros_tracing::trace_simple_print!(
+            VirtioFs,
+            "New PassthroughFS initialized: {:?}",
+            passthroughfs
+        );
         Ok(passthroughfs)
     }
 
@@ -878,24 +1005,42 @@ impl PassthroughFs {
         }
     }
 
+    /// Acquires lock of `expiring_casefold_lookup_caches` if `ascii_casefold` is enabled.
+    fn lock_casefold_lookup_caches(&self) -> Option<MutexGuard<'_, ExpiringCasefoldLookupCaches>> {
+        self.expiring_casefold_lookup_caches
+            .as_ref()
+            .map(|c| c.lock())
+    }
+
+    // Returns an actual case-sensitive file name that matches with the given `name`.
+    // Returns `Ok(None)` if no file matches with the give `name`.
+    // This function will panic if casefold is not enabled.
+    fn lookup_case_unfolded_name(
+        &self,
+        parent: &InodeData,
+        name: &[u8],
+    ) -> io::Result<Option<CString>> {
+        let mut caches = self
+            .lock_casefold_lookup_caches()
+            .expect("casefold must be enabled");
+        let dir_cache = caches.get(parent)?;
+        Ok(dir_cache.lookup(name))
+    }
+
     // Performs an ascii case insensitive lookup.
     fn ascii_casefold_lookup(&self, parent: &InodeData, name: &[u8]) -> io::Result<Entry> {
-        let mut buf = [0u8; 1024];
-        let mut offset = 0;
-        loop {
-            let mut read_dir = ReadDir::new(parent, offset, &mut buf[..])?;
-            if read_dir.remaining() == 0 {
-                break;
-            }
-
-            while let Some(entry) = read_dir.next() {
-                offset = entry.offset as libc::off64_t;
-                if name.eq_ignore_ascii_case(entry.name.to_bytes()) {
-                    return self.do_lookup(parent, entry.name);
-                }
-            }
+        match self.lookup_case_unfolded_name(parent, name)? {
+            None => Err(io::Error::from_raw_os_error(libc::ENOENT)),
+            Some(actual_name) => self.do_lookup(parent, &actual_name),
         }
-        Err(io::Error::from_raw_os_error(libc::ENOENT))
+    }
+
+    #[cfg(test)]
+    fn exists_in_casefold_cache(&self, parent: Inode, name: &CStr) -> bool {
+        let mut cache = self
+            .lock_casefold_lookup_caches()
+            .expect("casefold must be enabled");
+        cache.exists_in_cache(parent, name)
     }
 
     fn do_lookup(&self, parent: &InodeData, name: &CStr) -> io::Result<Entry> {
@@ -1498,11 +1643,13 @@ impl PassthroughFs {
     }
 }
 
+/// Decrements the refcount of the inode.
+/// Returns `true` if the refcount became 0.
 fn forget_one(
     inodes: &mut MultikeyBTreeMap<Inode, InodeAltKey, Arc<InodeData>>,
     inode: Inode,
     count: u64,
-) {
+) -> bool {
     if let Some(data) = inodes.get(&inode) {
         // Acquiring the write lock on the inode map prevents new lookups from incrementing the
         // refcount but there is the possibility that a previous lookup already acquired a
@@ -1528,11 +1675,13 @@ fn forget_one(
                     // until we release the lock. So there's is no other release store for us to
                     // synchronize with before deleting the entry.
                     inodes.remove(&inode);
+                    return true;
                 }
                 break;
             }
         }
     }
+    false
 }
 
 // Strips any `user.virtiofs.` prefix from `buf`. If buf contains one or more nul-bytes, each
@@ -1633,13 +1782,13 @@ impl FileSystem for PassthroughFs {
     }
 
     fn destroy(&self) {
-        cros_tracing::trace_simple_print!("{:?}: destroy", self);
+        cros_tracing::trace_simple_print!(VirtioFs, "{:?}: destroy", self);
         self.handles.lock().clear();
         self.inodes.lock().clear();
     }
 
     fn statfs(&self, _ctx: Context, inode: Inode) -> io::Result<libc::statvfs64> {
-        cros_tracing::trace_simple_print!("{}: statfs: inode={inode}", self.tag);
+        let _trace = fs_trace!(self.tag, "statfs", inode);
         let data = self.find_inode(inode)?;
 
         let mut out = MaybeUninit::<libc::statvfs64>::zeroed();
@@ -1652,12 +1801,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
-        cros_tracing::trace_simple_print!(
-            "{}: lookup: inode={}, name={:?}",
-            self.tag,
-            parent,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "lookup", parent, name);
         let data = self.find_inode(parent)?;
         self.do_lookup(&data, name).or_else(|e| {
             if self.cfg.ascii_casefold {
@@ -1669,17 +1813,25 @@ impl FileSystem for PassthroughFs {
     }
 
     fn forget(&self, _ctx: Context, inode: Inode, count: u64) {
-        cros_tracing::trace_simple_print!("{}: forget: inode={inode}, count={count}", self.tag);
+        let _trace = fs_trace!(self.tag, "forget", inode, count);
         let mut inodes = self.inodes.lock();
-
-        forget_one(&mut inodes, inode, count)
+        let caches = self.lock_casefold_lookup_caches();
+        if forget_one(&mut inodes, inode, count) {
+            if let Some(mut c) = caches {
+                c.forget(inode);
+            }
+        }
     }
 
     fn batch_forget(&self, _ctx: Context, requests: Vec<(Inode, u64)>) {
         let mut inodes = self.inodes.lock();
-
+        let mut caches = self.lock_casefold_lookup_caches();
         for (inode, count) in requests {
-            forget_one(&mut inodes, inode, count)
+            if forget_one(&mut inodes, inode, count) {
+                if let Some(c) = caches.as_mut() {
+                    c.forget(inode);
+                }
+            }
         }
     }
 
@@ -1689,7 +1841,7 @@ impl FileSystem for PassthroughFs {
         inode: Inode,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        cros_tracing::trace_simple_print!("{}: opendir: inode={inode}, flags={flags}", self.tag);
+        let _trace = fs_trace!(self.tag, "opendir", inode, flags);
         if self.zero_message_opendir.load(Ordering::Relaxed) {
             Err(io::Error::from_raw_os_error(libc::ENOSYS))
         } else {
@@ -1704,10 +1856,7 @@ impl FileSystem for PassthroughFs {
         _flags: u32,
         handle: Handle,
     ) -> io::Result<()> {
-        cros_tracing::trace_simple_print!(
-            "{}: releasedir: inode={inode}, handle={handle}",
-            self.tag
-        );
+        let _trace = fs_trace!(self.tag, "releasedir", inode, handle);
         if self.zero_message_opendir.load(Ordering::Relaxed) {
             Ok(())
         } else {
@@ -1723,28 +1872,34 @@ impl FileSystem for PassthroughFs {
         mode: u32,
         umask: u32,
     ) -> io::Result<Entry> {
-        cros_tracing::trace_simple_print!(
-            "{}: mkdir: inode={parent}, name={:?}, mode={mode}, umask={umask}",
-            self.tag,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "mkdir", parent, name, mode, umask);
         let data = self.find_inode(parent)?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
         {
+            let casefold_cache = self.lock_casefold_lookup_caches();
             let _scoped_umask = ScopedUmask::new(umask);
 
             // Safe because this doesn't modify any memory and we check the return value.
             syscall!(unsafe { libc::mkdirat(data.as_raw_descriptor(), name.as_ptr(), mode) })?;
+            if let Some(mut c) = casefold_cache {
+                c.insert(data.inode, name);
+            }
         }
-
         self.do_lookup(&data, name)
     }
 
     fn rmdir(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
-        cros_tracing::trace_simple_print!("{}: rmdir: inode={parent}, name={:?}", self.tag, name);
+        let _trace = fs_trace!(self.tag, "rmdir", parent, name);
         let data = self.find_inode(parent)?;
-        self.do_unlink(&data, name, libc::AT_REMOVEDIR)
+        let casefold_cache = self.lock_casefold_lookup_caches();
+        // TODO(b/278691962): If ascii_casefold is enabled, we need to call
+        // `lookup_case_unfolded_name()` to get the actual name to be unlinked.
+        self.do_unlink(&data, name, libc::AT_REMOVEDIR)?;
+        if let Some(mut c) = casefold_cache {
+            c.remove(data.inode, name);
+        }
+        Ok(())
     }
 
     fn readdir(
@@ -1755,10 +1910,7 @@ impl FileSystem for PassthroughFs {
         size: u32,
         offset: u64,
     ) -> io::Result<Self::DirIter> {
-        cros_tracing::trace_simple_print!(
-            "{}: readdir: inode={inode}, handle={handle}, size={size}, offset={offset}",
-            self.tag
-        );
+        let _trace = fs_trace!(self.tag, "readdir", inode, handle, size, offset);
         let buf = vec![0; size as usize].into_boxed_slice();
 
         if self.zero_message_opendir.load(Ordering::Relaxed) {
@@ -1780,13 +1932,10 @@ impl FileSystem for PassthroughFs {
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
         if self.zero_message_open.load(Ordering::Relaxed) {
-            cros_tracing::trace_simple_print!(
-                "{}: open (zero-message): inode={inode}, flags={flags}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "open (zero-message)", inode, flags);
             Err(io::Error::from_raw_os_error(libc::ENOSYS))
         } else {
-            cros_tracing::trace_simple_print!("{}: open: inode={inode}, flags={flags}", self.tag);
+            let _trace = fs_trace!(self.tag, "open", inode, flags);
             self.do_open(inode, flags)
         }
     }
@@ -1802,16 +1951,10 @@ impl FileSystem for PassthroughFs {
         _lock_owner: Option<u64>,
     ) -> io::Result<()> {
         if self.zero_message_open.load(Ordering::Relaxed) {
-            cros_tracing::trace_simple_print!(
-                "{}: release (zero-message): inode={inode}, handle={handle}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "release (zero-message)", inode, handle);
             Ok(())
         } else {
-            cros_tracing::trace_simple_print!(
-                "{}: release: inode={inode}, handle={handle}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "release", inode, handle);
             self.do_release(inode, handle)
         }
     }
@@ -1823,10 +1966,7 @@ impl FileSystem for PassthroughFs {
         mode: u32,
         umask: u32,
     ) -> io::Result<Entry> {
-        cros_tracing::trace_simple_print!(
-            "{}: chromeos_tempfile: inode={parent}, mode={mode}, umask={umask}",
-            self.tag
-        );
+        let _trace = fs_trace!(self.tag, "chromeos_tempfile", parent, mode, umask);
         let data = self.find_inode(parent)?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
@@ -1849,6 +1989,7 @@ impl FileSystem for PassthroughFs {
                 )
             })?
         };
+        // No need to add casefold_cache becuase we created an anonymous file.
 
         // Safe because we just opened this fd.
         let tmpfile = unsafe { File::from_raw_descriptor(fd) };
@@ -1866,13 +2007,8 @@ impl FileSystem for PassthroughFs {
         flags: u32,
         umask: u32,
     ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
-        cros_tracing::trace_simple_print!(
-            "{}: create: inode={parent}, name={:?}, mode={mode}, flags={flags}, umask={umask}",
-            self.tag,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "create", parent, name, mode, flags, umask);
         let data = self.find_inode(parent)?;
-
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
         let create_flags =
@@ -1880,13 +2016,20 @@ impl FileSystem for PassthroughFs {
 
         let fd = {
             let _scoped_umask = ScopedUmask::new(umask);
+            let casefold_cache = self.lock_casefold_lookup_caches();
 
             // Safe because this doesn't modify any memory and we check the return value. We don't
             // really check `flags` because if the kernel can't handle poorly specified flags then
             // we have much bigger problems.
-            syscall!(unsafe {
+            // TODO(b/278691962): If ascii_casefold is enabled, we need to call
+            // `lookup_case_unfolded_name()` to get the actual name to be created.
+            let fd = syscall!(unsafe {
                 libc::openat64(data.as_raw_descriptor(), name.as_ptr(), create_flags, mode)
-            })?
+            })?;
+            if let Some(mut c) = casefold_cache {
+                c.insert(parent, name);
+            }
+            fd
         };
 
         // Safe because we just opened this fd.
@@ -1908,14 +2051,20 @@ impl FileSystem for PassthroughFs {
                 e
             })?
         };
-
         Ok((entry, handle, opts))
     }
 
     fn unlink(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
-        cros_tracing::trace_simple_print!("{}: unlink: inode={parent}, name={:?}", self.tag, name);
+        let _trace = fs_trace!(self.tag, "unlink", parent, name);
         let data = self.find_inode(parent)?;
-        self.do_unlink(&data, name, 0)
+        let casefold_cache = self.lock_casefold_lookup_caches();
+        // TODO(b/278691962): If ascii_casefold is enabled, we need to call
+        // `lookup_case_unfolded_name()` to get the actual name to be unlinked.
+        self.do_unlink(&data, name, 0)?;
+        if let Some(mut c) = casefold_cache {
+            c.remove(data.inode, name);
+        }
+        Ok(())
     }
 
     fn read<W: io::Write + ZeroCopyWriter>(
@@ -1930,7 +2079,7 @@ impl FileSystem for PassthroughFs {
         _flags: u32,
     ) -> io::Result<usize> {
         if self.zero_message_open.load(Ordering::Relaxed) {
-            cros_tracing::trace_simple_print!("{}: read (zero-message): inode={inode}, handle={handle}, size={size}, offset={offset}", self.tag);
+            let _trace = fs_trace!(self.tag, "read (zero-message)", inode, handle, size, offset);
             let data = self.find_inode(inode)?;
 
             let mut file = data.file.lock();
@@ -1950,10 +2099,7 @@ impl FileSystem for PassthroughFs {
 
             w.write_from(&mut file.0, size as usize, offset)
         } else {
-            cros_tracing::trace_simple_print!(
-                "{}: read: inode={inode}, handle={handle}, size={size}, offset={offset}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "read", inode, handle, size, offset);
             let data = self.find_handle(handle, inode)?;
 
             let mut f = data.file.lock();
@@ -1982,9 +2128,13 @@ impl FileSystem for PassthroughFs {
         };
 
         if self.zero_message_open.load(Ordering::Relaxed) {
-            cros_tracing::trace_simple_print!(
-                "{}: write (zero-message): inode={inode}, handle={handle}, size={size}, offset={offset}",
-                self.tag
+            let _trace = fs_trace!(
+                self.tag,
+                "write (zero-message)",
+                inode,
+                handle,
+                size,
+                offset
             );
 
             let data = self.find_inode(inode)?;
@@ -2006,10 +2156,7 @@ impl FileSystem for PassthroughFs {
 
             r.read_to(&mut file.0, size as usize, offset)
         } else {
-            cros_tracing::trace_simple_print!(
-                "{}: write: inode={inode}, handle={handle}, size={size}, offset={offset}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "write", inode, handle, size, offset);
 
             let data = self.find_handle(handle, inode)?;
 
@@ -2024,7 +2171,7 @@ impl FileSystem for PassthroughFs {
         inode: Inode,
         _handle: Option<Handle>,
     ) -> io::Result<(libc::stat64, Duration)> {
-        cros_tracing::trace_simple_print!("{}: getattr: inode={inode}", self.tag);
+        let _trace = fs_trace!(self.tag, "getattr", inode, _handle);
 
         let data = self.find_inode(inode)?;
         self.do_getattr(&data)
@@ -2038,11 +2185,7 @@ impl FileSystem for PassthroughFs {
         handle: Option<Handle>,
         valid: SetattrValid,
     ) -> io::Result<(libc::stat64, Duration)> {
-        cros_tracing::trace_simple_print!(
-            "{}: setattr: inode={inode}, handle={:?}",
-            self.tag,
-            handle
-        );
+        let _trace = fs_trace!(self.tag, "setattr", inode, handle);
         let inode_data = self.find_inode(inode)?;
 
         enum Data {
@@ -2164,29 +2307,32 @@ impl FileSystem for PassthroughFs {
         newname: &CStr,
         flags: u32,
     ) -> io::Result<()> {
-        cros_tracing::trace_simple_print!(
-            "{}: rename: olddir={olddir}, oldname={:?}, newdir={newdir}, newname={:?}, flags={flags}",
-            self.tag,
-            oldname,
-            newname
-        );
+        let _trace = fs_trace!(self.tag, "rename", olddir, oldname, newdir, newname, flags);
 
         let old_inode = self.find_inode(olddir)?;
         let new_inode = self.find_inode(newdir)?;
+        {
+            let casefold_cache = self.lock_casefold_lookup_caches();
 
-        // Safe because this doesn't modify any memory and we check the return value.
-        // TODO: Switch to libc::renameat2 once https://github.com/rust-lang/libc/pull/1508 lands
-        // and we have glibc 2.28.
-        syscall!(unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                old_inode.as_raw_descriptor(),
-                oldname.as_ptr(),
-                new_inode.as_raw_descriptor(),
-                newname.as_ptr(),
-                flags,
-            )
-        })?;
+            // Safe because this doesn't modify any memory and we check the return value.
+            // TODO: Switch to libc::renameat2 once https://github.com/rust-lang/libc/pull/1508 lands
+            // and we have glibc 2.28.
+            syscall!(unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    old_inode.as_raw_descriptor(),
+                    oldname.as_ptr(),
+                    new_inode.as_raw_descriptor(),
+                    newname.as_ptr(),
+                    flags,
+                )
+            })?;
+            if let Some(mut c) = casefold_cache {
+                c.remove(olddir, oldname);
+                c.insert(newdir, newname);
+            }
+        }
+
         Ok(())
     }
 
@@ -2199,17 +2345,13 @@ impl FileSystem for PassthroughFs {
         rdev: u32,
         umask: u32,
     ) -> io::Result<Entry> {
-        cros_tracing::trace_simple_print!(
-            "{}: mknod: inode={parent}, name={:?}, mode={mode}, rdev={rdev}, umask={umask}",
-            self.tag,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "mknod", parent, name, mode, rdev, umask);
         let data = self.find_inode(parent)?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
-
         {
             let _scoped_umask = ScopedUmask::new(umask);
+            let casefold_cache = self.lock_casefold_lookup_caches();
 
             // Safe because this doesn't modify any memory and we check the return value.
             syscall!(unsafe {
@@ -2220,6 +2362,9 @@ impl FileSystem for PassthroughFs {
                     rdev as libc::dev_t,
                 )
             })?;
+            if let Some(mut c) = casefold_cache {
+                c.insert(parent, name);
+            }
         }
 
         self.do_lookup(&data, name)
@@ -2232,27 +2377,29 @@ impl FileSystem for PassthroughFs {
         newparent: Inode,
         newname: &CStr,
     ) -> io::Result<Entry> {
-        cros_tracing::trace_simple_print!(
-            "{}: link: inode={inode}, newparent={newparent}, newmname={:?}",
-            self.tag,
-            newname
-        );
+        let _trace = fs_trace!(self.tag, "link", inode, newparent, newname);
         let data = self.find_inode(inode)?;
         let new_inode = self.find_inode(newparent)?;
 
         let path = CString::new(format!("self/fd/{}", data.as_raw_descriptor()))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        // Safe because this doesn't modify any memory and we check the return value.
-        syscall!(unsafe {
-            libc::linkat(
-                self.proc.as_raw_descriptor(),
-                path.as_ptr(),
-                new_inode.as_raw_descriptor(),
-                newname.as_ptr(),
-                libc::AT_SYMLINK_FOLLOW,
-            )
-        })?;
+        {
+            let casefold_cache = self.lock_casefold_lookup_caches();
+            // Safe because this doesn't modify any memory and we check the return value.
+            syscall!(unsafe {
+                libc::linkat(
+                    self.proc.as_raw_descriptor(),
+                    path.as_ptr(),
+                    new_inode.as_raw_descriptor(),
+                    newname.as_ptr(),
+                    libc::AT_SYMLINK_FOLLOW,
+                )
+            })?;
+            if let Some(mut c) = casefold_cache {
+                c.insert(newparent, newname);
+            }
+        }
 
         self.do_lookup(&new_inode, newname)
     }
@@ -2264,26 +2411,26 @@ impl FileSystem for PassthroughFs {
         parent: Inode,
         name: &CStr,
     ) -> io::Result<Entry> {
-        cros_tracing::trace_simple_print!(
-            "{}: symlink: inode={parent}, linkname={:?}, name={:?}",
-            self.tag,
-            linkname,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "symlink", parent, linkname, name);
         let data = self.find_inode(parent)?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
-
-        // Safe because this doesn't modify any memory and we check the return value.
-        syscall!(unsafe {
-            libc::symlinkat(linkname.as_ptr(), data.as_raw_descriptor(), name.as_ptr())
-        })?;
+        {
+            let casefold_cache = self.lock_casefold_lookup_caches();
+            // Safe because this doesn't modify any memory and we check the return value.
+            syscall!(unsafe {
+                libc::symlinkat(linkname.as_ptr(), data.as_raw_descriptor(), name.as_ptr())
+            })?;
+            if let Some(mut c) = casefold_cache {
+                c.insert(parent, name);
+            }
+        }
 
         self.do_lookup(&data, name)
     }
 
     fn readlink(&self, _ctx: Context, inode: Inode) -> io::Result<Vec<u8>> {
-        cros_tracing::trace_simple_print!("{}: readlink: inode={inode}", self.tag);
+        let _trace = fs_trace!(self.tag, "readlink", inode);
         let data = self.find_inode(inode)?;
 
         let mut buf = vec![0; libc::PATH_MAX as usize];
@@ -2312,7 +2459,7 @@ impl FileSystem for PassthroughFs {
         handle: Handle,
         _lock_owner: u64,
     ) -> io::Result<()> {
-        cros_tracing::trace_simple_print!("{}: flush: inode={inode}, handle={handle}", self.tag);
+        let _trace = fs_trace!(self.tag, "flush", inode, handle);
         let data: Arc<dyn AsRawDescriptor> = if self.zero_message_open.load(Ordering::Relaxed) {
             self.find_inode(inode)?
         } else {
@@ -2336,17 +2483,11 @@ impl FileSystem for PassthroughFs {
 
     fn fsync(&self, _ctx: Context, inode: Inode, datasync: bool, handle: Handle) -> io::Result<()> {
         if self.zero_message_open.load(Ordering::Relaxed) {
-            cros_tracing::trace_simple_print!(
-                "{}: fsync (zero-message): inode={inode}, datasync={datasync}, handle={handle}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "fsync (zero-message)", inode, datasync, handle);
             let data = self.find_inode(inode)?;
             self.do_fsync(&*data, datasync)
         } else {
-            cros_tracing::trace_simple_print!(
-                "{}: fsync: inode={inode}, datasync={datasync}, handle={handle}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "fsync", inode, datasync, handle);
             let data = self.find_handle(handle, inode)?;
 
             let file = data.file.lock();
@@ -2362,17 +2503,11 @@ impl FileSystem for PassthroughFs {
         handle: Handle,
     ) -> io::Result<()> {
         if self.zero_message_opendir.load(Ordering::Relaxed) {
-            cros_tracing::trace_simple_print!(
-                "{}: fsyncdir (zero-message): inode={inode}, datasync={datasync}, handle={handle}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "fsyncdir (zero-message)", inode, datasync, handle);
             let data = self.find_inode(inode)?;
             self.do_fsync(&*data, datasync)
         } else {
-            cros_tracing::trace_simple_print!(
-                "{}: fsyncdir: inode={inode}, datasync={datasync}, handle={handle}",
-                self.tag
-            );
+            let _trace = fs_trace!(self.tag, "fsyncdir", inode, datasync, handle);
             let data = self.find_handle(handle, inode)?;
 
             let file = data.file.lock();
@@ -2381,7 +2516,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn access(&self, ctx: Context, inode: Inode, mask: u32) -> io::Result<()> {
-        cros_tracing::trace_simple_print!("{}: access: inode={inode}, mask={mask}", self.tag);
+        let _trace = fs_trace!(self.tag, "access", inode, mask);
         let data = self.find_inode(inode)?;
 
         let st = stat(&*data)?;
@@ -2435,11 +2570,7 @@ impl FileSystem for PassthroughFs {
         value: &[u8],
         flags: u32,
     ) -> io::Result<()> {
-        cros_tracing::trace_simple_print!(
-            "{}: setxattr: inode={inode}, name={:?}, flags={flags}",
-            self.tag,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "setxattr", inode, name, flags);
         // We can't allow the VM to set this xattr because an unprivileged process may use it to set
         // a privileged xattr.
         if self.cfg.rewrite_security_xattrs && name.to_bytes().starts_with(USER_VIRTIOFS_XATTR) {
@@ -2493,11 +2624,7 @@ impl FileSystem for PassthroughFs {
         name: &CStr,
         size: u32,
     ) -> io::Result<GetxattrReply> {
-        cros_tracing::trace_simple_print!(
-            "{}: getxattr: inode={inode}, name={:?}, size={size}",
-            self.tag,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "getxattr", inode, name, size);
         // We don't allow the VM to set this xattr so we also pretend there is no value associated
         // with it.
         if self.cfg.rewrite_security_xattrs && name.to_bytes().starts_with(USER_VIRTIOFS_XATTR) {
@@ -2513,13 +2640,13 @@ impl FileSystem for PassthroughFs {
         if size == 0 {
             Ok(GetxattrReply::Count(res as u32))
         } else {
-            buf.truncate(res as usize);
+            buf.truncate(res);
             Ok(GetxattrReply::Value(buf))
         }
     }
 
     fn listxattr(&self, _ctx: Context, inode: Inode, size: u32) -> io::Result<ListxattrReply> {
-        cros_tracing::trace_simple_print!("{}: listxattr: inode={inode}, size={size}", self.tag);
+        let _trace = fs_trace!(self.tag, "listxattr", inode, size);
         let data = self.find_inode(inode)?;
 
         let mut buf = vec![0u8; size as usize];
@@ -2566,11 +2693,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn removexattr(&self, _ctx: Context, inode: Inode, name: &CStr) -> io::Result<()> {
-        cros_tracing::trace_simple_print!(
-            "{}: removexattr: inode={inode}, name={:?}",
-            self.tag,
-            name
-        );
+        let _trace = fs_trace!(self.tag, "removexattr", inode, name);
         // We don't allow the VM to set this xattr so we also pretend there is no value associated
         // with it.
         if self.cfg.rewrite_security_xattrs && name.to_bytes().starts_with(USER_VIRTIOFS_XATTR) {
@@ -2611,10 +2734,7 @@ impl FileSystem for PassthroughFs {
         offset: u64,
         length: u64,
     ) -> io::Result<()> {
-        cros_tracing::trace_simple_print!(
-            "{}: fallocate: inode={inode}, handle={handle}, mode={mode}, offset={offset}, lenght={length}",
-            self.tag
-        );
+        let _trace = fs_trace!(self.tag, "fallocate", inode, handle, mode, offset, length);
 
         let data: Arc<dyn AsRawDescriptor> = if self.zero_message_open.load(Ordering::Relaxed) {
             let data = self.find_inode(inode)?;
@@ -2668,10 +2788,7 @@ impl FileSystem for PassthroughFs {
         out_size: u32,
         r: R,
     ) -> io::Result<IoctlReply> {
-        cros_tracing::trace_simple_print!(
-            "{}: ioctl: inode={inode}, handle={handle}, cmd={cmd}, in_size={in_size}, out_size={out_size}",
-            self.tag
-        );
+        let _trace = fs_trace!(self.tag, "ioctl", inode, handle, cmd, in_size, out_size);
 
         const GET_ENCRYPTION_POLICY_EX: u32 = FS_IOC_GET_ENCRYPTION_POLICY_EX() as u32;
         const GET_FSXATTR: u32 = FS_IOC_FSGETXATTR() as u32;
@@ -2745,9 +2862,17 @@ impl FileSystem for PassthroughFs {
         length: u64,
         flags: u64,
     ) -> io::Result<usize> {
-        cros_tracing::trace_simple_print!(
-            "{}: copy_file_range: src=({inode_src}, {handle_src}, {offset_src}), dst=({inode_dst}, {handle_dst}, {offset_dst}), length={length}, flags={flags}",
-            self.tag
+        let _trace = fs_trace!(
+            self.tag,
+            "copy_file_range",
+            inode_src,
+            handle_src,
+            offset_src,
+            inode_dst,
+            handle_dst,
+            offset_dst,
+            length,
+            flags
         );
         // We need to change credentials during a write so that the kernel will remove setuid or
         // setgid bits from the file if it was written to by someone other than the owner.
@@ -2789,9 +2914,14 @@ impl FileSystem for PassthroughFs {
         prot: u32,
         mapper: M,
     ) -> io::Result<()> {
-        cros_tracing::trace_simple_print!(
-            "{}: set_up_mapping: inode={inode}, file_offset={file_offset}, mem_offset={mem_offset}, size={size}, prot={prot}",
-            self.tag
+        let _trace = fs_trace!(
+            self.tag,
+            "set_up_mapping",
+            inode,
+            file_offset,
+            mem_offset,
+            size,
+            prot
         );
         if !self.cfg.use_dax {
             return Err(io::Error::from_raw_os_error(libc::ENOSYS));
@@ -2838,7 +2968,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn remove_mapping<M: Mapper>(&self, msgs: &[RemoveMappingOne], mapper: M) -> io::Result<()> {
-        cros_tracing::trace_simple_print!("{}: remove_mapping: msgs={:?}", self.tag, msgs);
+        let _trace = fs_trace!(self.tag, "remove_mapping", msgs);
         if !self.cfg.use_dax {
             return Err(io::Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -2854,8 +2984,89 @@ impl FileSystem for PassthroughFs {
 mod tests {
     use super::*;
 
+    use std::path::Path;
+
+    use named_lock::NamedLock;
+    use tempfile::TempDir;
+
+    const UNITTEST_LOCK_NAME: &str = "passthroughfs_unittest_lock";
+
+    // Create an instance of `Context` with valid uid, gid, and pid.
+    // The correct ids are necessary for test cases where new files are created.
+    fn get_context() -> Context {
+        // Both these calls are safe because they take no parameters, and only return an integer
+        // value. The kernel also guarantees that they can never fail.
+        let uid = unsafe { libc::syscall(SYS_GETEUID) as libc::uid_t };
+        let gid = unsafe { libc::syscall(SYS_GETEGID) as libc::gid_t };
+        let pid = std::process::id() as libc::pid_t;
+        Context { uid, gid, pid }
+    }
+
+    /// Creates the given directories and files under `temp_dir`.
+    fn create_test_data(temp_dir: &TempDir, dirs: &[&str], files: &[&str]) {
+        let path = temp_dir.path();
+
+        for d in dirs {
+            std::fs::create_dir_all(path.join(d)).unwrap();
+        }
+
+        for f in files {
+            File::create(path.join(f)).unwrap();
+        }
+    }
+
+    /// Looks up the given `path` in `fs`.
+    fn lookup(fs: &PassthroughFs, path: &Path) -> io::Result<Inode> {
+        let mut inode = 1;
+        let ctx = get_context();
+        for name in path.iter() {
+            let name = CString::new(name.to_str().unwrap()).unwrap();
+            let ent = match fs.lookup(ctx, inode, &name) {
+                Ok(ent) => ent,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+            inode = ent.inode;
+        }
+        Ok(inode)
+    }
+
+    /// Creates a file at the given `path`.
+    fn create(fs: &PassthroughFs, path: &Path) -> io::Result<Entry> {
+        let parent = path.parent().unwrap();
+        let filename = CString::new(path.file_name().unwrap().to_str().unwrap()).unwrap();
+        let parent_inode = lookup(fs, parent)?;
+        let ctx = get_context();
+        fs.create(ctx, parent_inode, &filename, 0o666, libc::O_RDWR as u32, 0)
+            .map(|(entry, _, _)| entry)
+    }
+
+    /// Removes a file at the given `path`.
+    fn unlink(fs: &PassthroughFs, path: &Path) -> io::Result<()> {
+        let parent = path.parent().unwrap();
+        let filename = CString::new(path.file_name().unwrap().to_str().unwrap()).unwrap();
+        let parent_inode = lookup(fs, parent)?;
+        let ctx = get_context();
+        fs.unlink(ctx, parent_inode, &filename)
+    }
+
+    /// Forgets cache.
+    fn forget(fs: &PassthroughFs, path: &Path) -> io::Result<()> {
+        let ctx = get_context();
+        let inode = lookup(fs, path)?;
+        // Pass `u64::MAX` to ensure that the refcount goes to 0 and we forget inode.
+        fs.forget(ctx, inode, u64::MAX);
+        Ok(())
+    }
+
     #[test]
     fn rewrite_xattr_names() {
+        // Since PassthroughFs may executes process-wide operations such as `fchdir`, acquire
+        // `NamedLock` before starting each unit test creating a `PassthroughFs` instance.
+        let lock = NamedLock::create(UNITTEST_LOCK_NAME).expect("create named lock");
+        let _guard = lock.lock().expect("acquire named lock");
+
         let cfg = Config {
             rewrite_security_xattrs: true,
             ..Default::default()
@@ -2920,5 +3131,253 @@ mod tests {
         let mut actual = no_nul_with_prefix.to_vec();
         strip_xattr_prefix(&mut actual);
         assert_eq!(&actual[..], b"security.sehash");
+    }
+
+    #[test]
+    fn lookup_files() {
+        // Since PassthroughFs may executes process-wide operations such as `fchdir`, acquire
+        // `NamedLock` before starting each unit test creating a `PassthroughFs` instance.
+        let lock = NamedLock::create(UNITTEST_LOCK_NAME).expect("create named lock");
+        let _guard = lock.lock().expect("acquire named lock");
+
+        let temp_dir = TempDir::new().unwrap();
+        create_test_data(&temp_dir, &["dir"], &["a.txt", "dir/b.txt"]);
+
+        let cfg = Default::default();
+        let fs = PassthroughFs::new("tag", cfg).unwrap();
+
+        let capable = FsOptions::empty();
+        fs.init(capable).unwrap();
+
+        assert!(lookup(&fs, &temp_dir.path().join("a.txt")).is_ok());
+        assert!(lookup(&fs, &temp_dir.path().join("dir")).is_ok());
+        assert!(lookup(&fs, &temp_dir.path().join("dir/b.txt")).is_ok());
+
+        assert_eq!(
+            lookup(&fs, &temp_dir.path().join("nonexistent-file"))
+                .expect_err("file must not exist")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        // "A.txt" is different from "a.txt".
+        assert_eq!(
+            lookup(&fs, &temp_dir.path().join("A.txt"))
+                .expect_err("file must not exist")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn lookup_files_ascii_casefold() {
+        // Since PassthroughFs may executes process-wide operations such as `fchdir`, acquire
+        // `NamedLock` before starting each unit test creating a `PassthroughFs` instance.
+        let lock = NamedLock::create(UNITTEST_LOCK_NAME).expect("create named lock");
+        let _guard = lock.lock().expect("acquire named lock");
+
+        let temp_dir = TempDir::new().unwrap();
+        create_test_data(&temp_dir, &["dir"], &["a.txt", "dir/b.txt"]);
+
+        let cfg = Config {
+            ascii_casefold: true,
+            ..Default::default()
+        };
+        let fs = PassthroughFs::new("tag", cfg).unwrap();
+
+        let capable = FsOptions::empty();
+        fs.init(capable).unwrap();
+
+        // Ensure that "A.txt" is equated with "a.txt".
+        let a_inode = lookup(&fs, &temp_dir.path().join("a.txt")).expect("a.txt must be found");
+        assert_eq!(
+            lookup(&fs, &temp_dir.path().join("A.txt")).expect("A.txt must exist"),
+            a_inode
+        );
+
+        let dir_inode = lookup(&fs, &temp_dir.path().join("dir")).expect("dir must be found");
+        assert_eq!(
+            lookup(&fs, &temp_dir.path().join("DiR")).expect("DiR must exist"),
+            dir_inode
+        );
+
+        let b_inode =
+            lookup(&fs, &temp_dir.path().join("dir/b.txt")).expect("dir/b.txt must be found");
+        assert_eq!(
+            lookup(&fs, &temp_dir.path().join("dIr/B.TxT")).expect("dIr/B.TxT must exist"),
+            b_inode
+        );
+
+        assert_eq!(
+            lookup(&fs, &temp_dir.path().join("nonexistent-file"))
+                .expect_err("file must not exist")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    fn test_create_and_remove(ascii_casefold: bool) {
+        // Since PassthroughFs may executes process-wide operations such as `fchdir`, acquire
+        // `NamedLock` before starting each unit test creating a `PassthroughFs` instance.
+        let lock = NamedLock::create(UNITTEST_LOCK_NAME).expect("create named lock");
+        let _guard = lock.lock().expect("acquire named lock");
+
+        let temp_dir = TempDir::new().unwrap();
+        let timeout = Duration::from_millis(10);
+        let cfg = Config {
+            entry_timeout: timeout,
+            attr_timeout: timeout,
+            cache_policy: CachePolicy::Auto,
+            ascii_casefold,
+            ..Default::default()
+        };
+        let fs = PassthroughFs::new("tag", cfg).unwrap();
+
+        let capable = FsOptions::empty();
+        fs.init(capable).unwrap();
+
+        // Create a.txt and b.txt.
+        let a_path = temp_dir.path().join("a.txt");
+        let b_path = temp_dir.path().join("b.txt");
+        let a_entry = create(&fs, &a_path).expect("create a.txt");
+        let b_entry = create(&fs, &b_path).expect("create b.txt");
+        assert_eq!(
+            a_entry.inode,
+            lookup(&fs, &a_path).expect("lookup a.txt"),
+            "Created file 'a.txt' must be looked up"
+        );
+        assert_eq!(
+            b_entry.inode,
+            lookup(&fs, &b_path).expect("lookup b.txt"),
+            "Created file 'b.txt' must be looked up"
+        );
+
+        // Remove a.txt only
+        unlink(&fs, &a_path).expect("Remove");
+        assert_eq!(
+            lookup(&fs, &a_path)
+                .expect_err("file must not exist")
+                .kind(),
+            io::ErrorKind::NotFound,
+            "a.txt must be removed"
+        );
+        // "A.TXT" must not be found regardless of whether casefold is enabled or not.
+        let upper_a_path = temp_dir.path().join("A.TXT");
+        assert_eq!(
+            lookup(&fs, &upper_a_path)
+                .expect_err("file must not exist")
+                .kind(),
+            io::ErrorKind::NotFound,
+            "A.txt must be removed"
+        );
+
+        // Check if the host file system doesn't have a.txt but does b.txt.
+        assert!(!a_path.exists(), "a.txt must be removed");
+        assert!(b_path.exists(), "b.txt must exist");
+    }
+
+    #[test]
+    fn create_and_remove() {
+        test_create_and_remove(false /* casefold */);
+    }
+
+    #[test]
+    fn create_and_remove_casefold() {
+        test_create_and_remove(true /* casefold */);
+    }
+
+    fn test_create_and_forget(ascii_casefold: bool) {
+        // Since PassthroughFs may executes process-wide operations such as `fchdir`, acquire
+        // `NamedLock` before starting each unit test creating a `PassthroughFs` instance.
+        let lock = NamedLock::create(UNITTEST_LOCK_NAME).expect("create named lock");
+        let _guard = lock.lock().expect("acquire named lock");
+
+        let temp_dir = TempDir::new().unwrap();
+        let timeout = Duration::from_millis(10);
+        let cfg = Config {
+            entry_timeout: timeout,
+            attr_timeout: timeout,
+            cache_policy: CachePolicy::Auto,
+            ascii_casefold,
+            ..Default::default()
+        };
+        let fs = PassthroughFs::new("tag", cfg).unwrap();
+
+        let capable = FsOptions::empty();
+        fs.init(capable).unwrap();
+
+        // Create a.txt.
+        let a_path = temp_dir.path().join("a.txt");
+        let a_entry = create(&fs, &a_path).expect("create a.txt");
+        assert_eq!(
+            a_entry.inode,
+            lookup(&fs, &a_path).expect("lookup a.txt"),
+            "Created file 'a.txt' must be looked up"
+        );
+
+        // Forget a.txt's inode from PassthroughFs's internal cache.
+        forget(&fs, &a_path).expect("forget a.txt");
+
+        if ascii_casefold {
+            let upper_a_path = temp_dir.path().join("A.TXT");
+            let new_a_inode = lookup(&fs, &upper_a_path).expect("lookup a.txt");
+            assert_ne!(
+                a_entry.inode, new_a_inode,
+                "inode must be changed after forget()"
+            );
+            assert_eq!(
+                new_a_inode,
+                lookup(&fs, &a_path).expect("lookup a.txt"),
+                "inode must be same for a.txt and A.TXT"
+            );
+        } else {
+            assert_ne!(
+                a_entry.inode,
+                lookup(&fs, &a_path).expect("lookup a.txt"),
+                "inode must be changed after forget()"
+            );
+        }
+    }
+
+    #[test]
+    fn create_and_forget() {
+        test_create_and_forget(false /* ascii_casefold */);
+    }
+
+    #[test]
+    fn create_and_forget_casefold() {
+        test_create_and_forget(true /* ascii_casefold */);
+    }
+
+    #[test]
+    fn casefold_lookup_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        // Prepare `a.txt` before starting the test.
+        create_test_data(&temp_dir, &[], &["a.txt"]);
+
+        let cfg = Config {
+            ascii_casefold: true,
+            ..Default::default()
+        };
+        let fs = PassthroughFs::new("tag", cfg).unwrap();
+
+        let capable = FsOptions::empty();
+        fs.init(capable).unwrap();
+
+        let parent = lookup(&fs, temp_dir.path()).expect("lookup temp_dir");
+
+        // Since `a.txt` exists, "A.TXT" must exist.
+        let large_a_path = temp_dir.path().join("A.TXT");
+        // Looking up "A.TXT" must create a CasefoldCache entry.
+        lookup(&fs, &large_a_path).expect("A.TXT must exist");
+        assert!(fs.exists_in_casefold_cache(parent, &CString::new("A.TXT").unwrap()));
+
+        // Create b.txt.
+        let b_path = temp_dir.path().join("b.txt");
+        create(&fs, &b_path).expect("create b.txt");
+        // Then, b.txt must exists in the cache.
+        assert!(fs.exists_in_casefold_cache(parent, &CString::new("B.TXT").unwrap()));
+        // When removing b.txt, it must be removed from the cache as well.
+        unlink(&fs, &b_path).expect("remove b.txt");
+        assert!(!fs.exists_in_casefold_cache(parent, &CString::new("B.TXT").unwrap()));
     }
 }
