@@ -15,8 +15,6 @@ use data_model::VolatileMemoryError;
 #[cfg(unix)]
 use nix::Error as NixError;
 use remain::sorted;
-use serde::Deserialize;
-use serde::Serialize;
 use thiserror::Error;
 #[cfg(feature = "vulkano")]
 use vulkano::device::DeviceCreationError;
@@ -103,9 +101,7 @@ pub struct Resource3DInfo {
 }
 
 /// A unique identifier for a device.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceId {
     pub device_uuid: [u8; 16],
     pub driver_uuid: [u8; 16],
@@ -458,11 +454,10 @@ const STREAM_RENDERER_FLAGS_VULKAN_NATIVE_SWAPCHAIN_BIT: u32 = 1 << 8;
 #[derive(Copy, Clone, Default)]
 pub struct GfxstreamFlags(u32);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Debug)]
 pub enum RutabagaWsi {
-    #[serde(alias = "vk")]
-    Vulkan,
+    Surfaceless,
+    VulkanSwapchain,
 }
 
 impl GfxstreamFlags {
@@ -505,8 +500,8 @@ impl GfxstreamFlags {
     }
 
     /// Use the Vulkan swapchain to draw on the host window.
-    pub fn set_wsi(self, v: Option<&RutabagaWsi>) -> GfxstreamFlags {
-        let use_vulkan_swapchain = matches!(v, Some(RutabagaWsi::Vulkan));
+    pub fn set_wsi(self, v: RutabagaWsi) -> GfxstreamFlags {
+        let use_vulkan_swapchain = matches!(v, RutabagaWsi::VulkanSwapchain);
         self.set_flag(
             STREAM_RENDERER_FLAGS_VULKAN_NATIVE_SWAPCHAIN_BIT,
             use_vulkan_swapchain,

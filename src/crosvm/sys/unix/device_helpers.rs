@@ -85,11 +85,6 @@ use crate::crosvm::config::VvuOption;
 pub enum TaggedControlTube {
     Fs(Tube),
     Vm(Tube),
-    VmMemory {
-        tube: Tube,
-        /// See devices::virtio::VirtioDevice.expose_shared_memory_region_with_viommu
-        expose_with_viommu: bool,
-    },
     VmMsync(Tube),
 }
 
@@ -97,7 +92,7 @@ impl AsRef<Tube> for TaggedControlTube {
     fn as_ref(&self) -> &Tube {
         use self::TaggedControlTube::*;
         match &self {
-            Fs(tube) | Vm(tube) | VmMemory { tube, .. } | VmMsync(tube) => tube,
+            Fs(tube) | Vm(tube) | VmMsync(tube) => tube,
         }
     }
 }
@@ -109,6 +104,31 @@ impl AsRawDescriptor for TaggedControlTube {
 }
 
 impl ReadNotifier for TaggedControlTube {
+    fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
+        self.as_ref().get_read_notifier()
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct VmMemoryTube {
+    pub tube: Tube,
+    /// See devices::virtio::VirtioDevice.expose_shared_memory_region_with_viommu
+    pub expose_with_viommu: bool,
+}
+
+impl AsRef<Tube> for VmMemoryTube {
+    fn as_ref(&self) -> &Tube {
+        &self.tube
+    }
+}
+
+impl AsRawDescriptor for VmMemoryTube {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        self.as_ref().as_raw_descriptor()
+    }
+}
+
+impl ReadNotifier for VmMemoryTube {
     fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
         self.as_ref().get_read_notifier()
     }
@@ -1389,6 +1409,7 @@ pub fn create_vfio_device(
     vm: &impl Vm,
     resources: &mut SystemAllocator,
     irq_control_tubes: &mut Vec<Tube>,
+    vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
     control_tubes: &mut Vec<TaggedControlTube>,
     vfio_path: &Path,
     hotplug: bool,
@@ -1403,7 +1424,7 @@ pub fn create_vfio_device(
 
     let (vfio_host_tube_mem, vfio_device_tube_mem) =
         Tube::pair().context("failed to create tube")?;
-    control_tubes.push(TaggedControlTube::VmMemory {
+    vm_memory_control_tubes.push(VmMemoryTube {
         tube: vfio_host_tube_mem,
         expose_with_viommu: false,
     });

@@ -20,6 +20,8 @@ pub mod gpu;
 use base::MemoryMappingBuilderUnix;
 #[cfg(windows)]
 use base::MemoryMappingBuilderWindows;
+use hypervisor::BalloonEvent;
+use hypervisor::MemRegion;
 
 pub mod client;
 pub mod display;
@@ -48,7 +50,6 @@ use balloon_control::BalloonTubeResult;
 pub use balloon_control::BalloonWSS;
 pub use balloon_control::WSSBucket;
 pub use balloon_control::VIRTIO_BALLOON_WS_MAX_NUM_BINS;
-pub use balloon_control::VIRTIO_BALLOON_WS_MAX_NUM_INTERVALS;
 pub use balloon_control::VIRTIO_BALLOON_WS_MIN_NUM_BINS;
 use base::error;
 use base::info;
@@ -103,15 +104,11 @@ pub use sys::VmMsyncRequest;
 #[cfg(unix)]
 pub use sys::VmMsyncResponse;
 use thiserror::Error;
+pub use vm_control_product::GpuSendToMain;
+pub use vm_control_product::GpuSendToService;
+pub use vm_control_product::ServiceSendToGpu;
 use vm_memory::GuestAddress;
 
-use crate::display::AspectRatio;
-use crate::display::DisplaySize;
-use crate::display::GuestDisplayDensity;
-use crate::display::MouseMode;
-use crate::display::WindowEvent;
-use crate::display::WindowMode;
-use crate::display::WindowVisibility;
 #[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebug;
 #[cfg(feature = "gdb")]
@@ -372,7 +369,8 @@ pub enum VmMemorySource {
         descriptor: SafeDescriptor,
         handle_type: u32,
         memory_idx: u32,
-        device_id: DeviceId,
+        device_uuid: [u8; 16],
+        driver_uuid: [u8; 16],
         size: u64,
     },
     /// Register the current rutabaga external mapping.
@@ -430,9 +428,14 @@ impl VmMemorySource {
                 descriptor,
                 handle_type,
                 memory_idx,
-                device_id,
+                device_uuid,
+                driver_uuid,
                 size,
             } => {
+                let device_id = DeviceId {
+                    device_uuid,
+                    driver_uuid,
+                };
                 let mapped_region = match gralloc.import_and_map(
                     RutabagaHandle {
                         os_handle: to_rutabaga_desciptor(descriptor),
@@ -523,6 +526,8 @@ pub enum VmMemoryRequest {
         guest_address: GuestAddress,
         size: u64,
     },
+    /// Balloon allocation/deallocation target reached.
+    BalloonTargetReached { size: u64 },
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
     UnregisterMemory(VmMemoryRegionId),
     /// Register an ioeventfd by looking up using Alloc info.
@@ -538,14 +543,14 @@ pub enum VmMemoryRequest {
 }
 
 /// Struct for managing `VmMemoryRequest`s IOMMU related state.
-pub struct VmMemoryRequestIommuClient<'a> {
-    tube: &'a Tube,
+pub struct VmMemoryRequestIommuClient {
+    tube: Arc<Mutex<Tube>>,
     gpu_memory: BTreeSet<MemSlot>,
 }
 
-impl<'a> VmMemoryRequestIommuClient<'a> {
+impl VmMemoryRequestIommuClient {
     /// Constructs `VmMemoryRequestIommuClient` from a tube for communication with the viommu.
-    pub fn new(tube: &'a Tube) -> Self {
+    pub fn new(tube: Arc<Mutex<Tube>>) -> Self {
         Self {
             tube,
             gpu_memory: BTreeSet::new(),
@@ -697,7 +702,7 @@ impl VmMemoryRequest {
                             dma_buf: descriptor,
                         });
 
-                    match virtio_iommu_request(iommu_client.tube, &request) {
+                    match virtio_iommu_request(&iommu_client.tube.lock(), &request) {
                         Ok(VirtioIOMMUResponse::VfioResponse(VirtioIOMMUVfioResult::Ok)) => (),
                         resp => {
                             error!("Unexpected message response: {:?}", resp);
@@ -725,7 +730,7 @@ impl VmMemoryRequest {
                                     VirtioIOMMUVfioCommand::VfioDmabufUnmap(slot),
                                 );
 
-                                match virtio_iommu_request(iommu_client.tube, &request) {
+                                match virtio_iommu_request(&iommu_client.tube.lock(), &request) {
                                     Ok(VirtioIOMMUResponse::VfioResponse(
                                         VirtioIOMMUVfioResult::Ok,
                                     )) => VmMemoryResponse::Ok,
@@ -752,17 +757,29 @@ impl VmMemoryRequest {
             DynamicallyFreeMemoryRange {
                 guest_address,
                 size,
-            } => match vm.handle_inflate(guest_address, size) {
+            } => match vm.handle_balloon_event(BalloonEvent::Inflate(MemRegion {
+                guest_address,
+                size,
+            })) {
                 Ok(_) => VmMemoryResponse::Ok,
                 Err(e) => VmMemoryResponse::Err(e),
             },
             DynamicallyReclaimMemoryRange {
                 guest_address,
                 size,
-            } => match vm.handle_deflate(guest_address, size) {
+            } => match vm.handle_balloon_event(BalloonEvent::Deflate(MemRegion {
+                guest_address,
+                size,
+            })) {
                 Ok(_) => VmMemoryResponse::Ok,
                 Err(e) => VmMemoryResponse::Err(e),
             },
+            BalloonTargetReached { size } => {
+                match vm.handle_balloon_event(BalloonEvent::BalloonTargetReached(size)) {
+                    Ok(_) => VmMemoryResponse::Ok,
+                    Err(e) => VmMemoryResponse::Err(e),
+                }
+            }
             IoEventWithAlloc {
                 evt,
                 allocation,
@@ -2212,56 +2229,10 @@ impl Display for VmResponse {
     }
 }
 
-/// Enum that comes from the Gpu device that will be received by the main event loop.
-#[derive(Serialize, Deserialize, Debug)]
-pub enum GpuSendToService {
-    SendWindowState {
-        window_event: Option<WindowEvent>,
-        hwnd: usize,
-        visibility: WindowVisibility,
-        mode: WindowMode,
-        aspect_ratio: AspectRatio,
-        // TODO(b/203662783): Once we make the controller decide the initial size, this can be removed.
-        initial_guest_display_size: DisplaySize,
-        recommended_guest_display_density: GuestDisplayDensity,
-    },
-    SendExitWindowRequest,
-    SendMouseModeState {
-        mouse_mode: MouseMode,
-    },
-    SendGpuDevice {
-        description: String,
-    },
-}
-
-/// Enum that serves as a general purose Gpu device message that is sent to the main loop.
-#[derive(Serialize, Deserialize, Debug)]
-pub enum GpuSendToMain {
-    // Send these messages to the controller.
-    SendToService(GpuSendToService),
-    // Send to Ac97 device to set mute state.
-    MuteAc97(bool),
-}
-
 /// Enum to send control requests to all Ac97 audio devices.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Ac97Control {
     Mute(bool),
-}
-
-/// Enum that send controller Ipc requests from the main event loop to the GPU device.
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ServiceSendToGpu {
-    ShowWindow {
-        mode: WindowMode,
-        aspect_ratio: AspectRatio,
-        guest_display_size: DisplaySize,
-    },
-    HideWindow,
-    Shutdown,
-    MouseInputMode {
-        mouse_mode: MouseMode,
-    },
 }
 
 #[cfg(test)]

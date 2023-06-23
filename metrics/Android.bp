@@ -39,5 +39,6 @@ rust_library {
         "libcfg_if",
         "libprotobuf",
         "libserde",
+        "libsync_rust",
     ],
 }
