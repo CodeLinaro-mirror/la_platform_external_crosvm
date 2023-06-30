@@ -6,6 +6,7 @@ use std::mem;
 use std::slice;
 use std::sync::Mutex;
 
+use base::error;
 use base::AsRawDescriptor;
 use base::RawDescriptor;
 use data_model::DataInit;
@@ -106,6 +107,8 @@ pub trait VhostUserSlaveReqHandler {
     fn get_shared_memory_regions(&self) -> Result<Vec<VhostSharedMemoryRegion>>;
     fn sleep(&self) -> Result<()>;
     fn wake(&self) -> Result<()>;
+    fn snapshot(&self) -> Result<Vec<u8>>;
+    fn restore(&self, data_bytes: &[u8], queue_evts: Option<Vec<File>>) -> Result<()>;
 }
 
 /// Services provided to the master by the slave without interior mutability.
@@ -164,6 +167,8 @@ pub trait VhostUserSlaveReqHandlerMut {
     /// Request the device to wake up by starting up their workers. This should NOT be called if the
     /// device is already awake.
     fn wake(&mut self) -> Result<()>;
+    fn snapshot(&mut self) -> Result<Vec<u8>>;
+    fn restore(&mut self, data_bytes: &[u8], queue_evts: Option<Vec<File>>) -> Result<()>;
 }
 
 impl<T: VhostUserSlaveReqHandlerMut> VhostUserSlaveReqHandler for Mutex<T> {
@@ -287,6 +292,14 @@ impl<T: VhostUserSlaveReqHandlerMut> VhostUserSlaveReqHandler for Mutex<T> {
 
     fn wake(&self) -> Result<()> {
         self.lock().unwrap().wake()
+    }
+
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        self.lock().unwrap().snapshot()
+    }
+
+    fn restore(&self, data_bytes: &[u8], queue_evts: Option<Vec<File>>) -> Result<()> {
+        self.lock().unwrap().restore(data_bytes, queue_evts)
     }
 }
 
@@ -413,6 +426,14 @@ where
 
     fn wake(&self) -> Result<()> {
         self.as_ref().wake()
+    }
+
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        self.as_ref().snapshot()
+    }
+
+    fn restore(&self, data_bytes: &[u8], queue_evts: Option<Vec<File>>) -> Result<()> {
+        self.as_ref().restore(data_bytes, queue_evts)
     }
 }
 
@@ -957,6 +978,25 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> 
                 let res = self.backend.wake();
                 self.slave_req_helper.send_ack_message(&hdr, res.is_ok())?;
             }
+            MasterReq::SNAPSHOT => {
+                let (success_msg, payload) = match self.backend.snapshot() {
+                    Ok(snapshot_payload) => (VhostUserSuccess::new(true), snapshot_payload),
+                    Err(e) => {
+                        error!("Failed to snapshot: {}", e);
+                        (VhostUserSuccess::new(false), Vec::new())
+                    }
+                };
+                self.slave_req_helper.send_reply_with_payload(
+                    &hdr,
+                    &success_msg,
+                    payload.as_slice(),
+                )?;
+            }
+            MasterReq::RESTORE => {
+                let res = self.backend.restore(buf.as_slice(), files);
+                let msg = VhostUserSuccess::new(res.is_ok());
+                self.slave_req_helper.send_reply_message(&hdr, &msg)?;
+            }
             _ => {
                 return Err(Error::InvalidMessage);
             }
@@ -1119,6 +1159,7 @@ impl<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>> SlaveReqHandler<S, E> 
             | MasterReq::SET_LOG_FD
             | MasterReq::SET_SLAVE_REQ_FD
             | MasterReq::SET_INFLIGHT_FD
+            | MasterReq::RESTORE
             | MasterReq::ADD_MEM_REG => Ok(()),
             _ if files.is_some() => Err(Error::InvalidMessage),
             _ => Ok(()),

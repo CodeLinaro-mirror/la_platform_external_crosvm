@@ -37,15 +37,12 @@ use self::event_source::EvdevEventSource;
 use self::event_source::EventSource;
 use self::event_source::SocketEventSource;
 use super::copy_config;
-use super::virtio_device::Error as VirtioError;
 use super::DescriptorChain;
 use super::DeviceType;
 use super::Interrupt;
 use super::Queue;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
-use super::VirtioDeviceSaved;
-use crate::Suspendable;
 
 const EVENT_QUEUE_SIZE: u16 = 64;
 const STATUS_QUEUE_SIZE: u16 = 64;
@@ -608,22 +605,17 @@ where
         false
     }
 
-    fn stop(&mut self) -> std::result::Result<Option<VirtioDeviceSaved>, VirtioError> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         if let Some(worker_thread) = self.worker_thread.take() {
             let worker = worker_thread.stop();
             self.source = Some(worker.event_source);
-            let queues = vec![
-                /* 0 */ worker.event_queue,
-                /* 1 */ worker.status_queue,
-            ];
-            Ok(Some(VirtioDeviceSaved { queues }))
+            let queues = BTreeMap::from([(0, worker.event_queue), (1, worker.status_queue)]);
+            Ok(Some(queues))
         } else {
             Ok(None)
         }
     }
 }
-
-impl<T> Suspendable for Input<T> where T: 'static + EventSource + Send {}
 
 /// Creates a new virtio input device from an event device node
 pub fn new_evdev<T>(source: T, virtio_features: u64) -> Result<Input<EvdevEventSource<T>>>

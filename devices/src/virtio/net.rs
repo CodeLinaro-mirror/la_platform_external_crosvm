@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod sys;
+
 use std::fmt;
 use std::io;
 use std::io::Write;
@@ -53,7 +55,6 @@ use super::Queue;
 use super::Reader;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
-use crate::Suspendable;
 
 /// The maximum buffer size when segmentation offload is enabled. This
 /// includes the 12-byte virtio net header.
@@ -65,8 +66,8 @@ const QUEUE_SIZE: u16 = 256;
 #[cfg(unix)]
 pub static VHOST_NET_DEFAULT_PATH: &str = "/dev/vhost-net";
 
-pub(crate) use super::sys::process_rx;
-pub(crate) use super::sys::process_tx;
+pub(crate) use sys::process_rx;
+pub(crate) use sys::process_tx;
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -814,8 +815,6 @@ where
         true
     }
 }
-
-impl<T> Suspendable for Net<T> where T: 'static + TapT + ReadNotifier {}
 
 impl<T> std::fmt::Debug for Net<T>
 where

@@ -80,7 +80,6 @@ use super::SharedMemoryRegion;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
 use super::Writer;
-use crate::Suspendable;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GpuMode {
@@ -108,6 +107,13 @@ impl Default for GpuMode {
         )))]
         return GpuMode::Mode2D;
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GpuWsi {
+    #[serde(alias = "vk")]
+    Vulkan,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -210,7 +216,7 @@ fn build(
     display_event: Arc<AtomicBool>,
     rutabaga_builder: RutabagaBuilder,
     event_devices: Vec<EventDevice>,
-    mapper: Box<dyn SharedMemoryMapper>,
+    mapper: Arc<Mutex<Option<Box<dyn SharedMemoryMapper>>>>,
     external_blob: bool,
     #[cfg(windows)] wndproc_thread: &mut Option<WindowProcedureThread>,
     udmabuf: bool,
@@ -1048,7 +1054,7 @@ pub struct Gpu {
     exit_evt_wrtube: SendTube,
     #[cfg(unix)]
     gpu_control_tube: Option<Tube>,
-    mapper: Option<Box<dyn SharedMemoryMapper>>,
+    mapper: Arc<Mutex<Option<Box<dyn SharedMemoryMapper>>>>,
     resource_bridges: Option<ResourceBridges>,
     event_devices: Vec<EventDevice>,
     worker_thread: Option<WorkerThread<()>>,
@@ -1117,6 +1123,11 @@ impl Gpu {
         let use_render_server = rutabaga_server_descriptor.is_some()
             || gpu_parameters.allow_implicit_render_server_exec;
 
+        let rutabaga_wsi = match gpu_parameters.wsi {
+            Some(GpuWsi::Vulkan) => RutabagaWsi::VulkanSwapchain,
+            _ => RutabagaWsi::Surfaceless,
+        };
+
         let rutabaga_builder = RutabagaBuilder::new(component, gpu_parameters.capset_mask)
             .set_display_width(display_width)
             .set_display_height(display_height)
@@ -1126,7 +1137,7 @@ impl Gpu {
             .set_use_glx(gpu_parameters.renderer_use_glx)
             .set_use_surfaceless(gpu_parameters.renderer_use_surfaceless)
             .set_use_vulkan(gpu_parameters.use_vulkan.unwrap_or_default())
-            .set_wsi(gpu_parameters.wsi.as_ref())
+            .set_wsi(rutabaga_wsi)
             .set_use_external_blob(gpu_parameters.external_blob)
             .set_use_system_blob(gpu_parameters.system_blob)
             .set_use_render_server(use_render_server);
@@ -1135,7 +1146,7 @@ impl Gpu {
             exit_evt_wrtube,
             #[cfg(unix)]
             gpu_control_tube: Some(gpu_control_tube),
-            mapper: None,
+            mapper: Arc::new(Mutex::new(None)),
             resource_bridges: Some(ResourceBridges::new(resource_bridges)),
             event_devices,
             worker_thread: None,
@@ -1162,7 +1173,7 @@ impl Gpu {
         &mut self,
         fence_state: Arc<Mutex<FenceState>>,
         fence_handler: RutabagaFenceHandler,
-        mapper: Box<dyn SharedMemoryMapper>,
+        mapper: Arc<Mutex<Option<Box<dyn SharedMemoryMapper>>>>,
     ) -> Option<Frontend> {
         let rutabaga_builder = self.rutabaga_builder.take()?;
         let rutabaga_server_descriptor = self.rutabaga_server_descriptor.take();
@@ -1258,7 +1269,7 @@ impl VirtioDevice for Gpu {
             keep_rds.push(libc::STDERR_FILENO);
         }
 
-        if let Some(ref mapper) = self.mapper {
+        if let Some(ref mapper) = *self.mapper.lock() {
             if let Some(descriptor) = mapper.as_raw_descriptor() {
                 keep_rds.push(descriptor);
             }
@@ -1376,7 +1387,7 @@ impl VirtioDevice for Gpu {
         #[cfg(unix)]
         let gpu_cgroup_path = self.gpu_cgroup_path.clone();
 
-        let mapper = self.mapper.take().context("missing mapper")?;
+        let mapper = Arc::clone(&self.mapper);
         let rutabaga_builder = self
             .rutabaga_builder
             .take()
@@ -1438,15 +1449,13 @@ impl VirtioDevice for Gpu {
     }
 
     fn set_shared_memory_mapper(&mut self, mapper: Box<dyn SharedMemoryMapper>) {
-        self.mapper = Some(mapper);
+        self.mapper.lock().replace(mapper);
     }
 
     fn expose_shmem_descriptors_with_viommu(&self) -> bool {
         true
     }
 }
-
-impl Suspendable for Gpu {}
 
 /// This struct takes the ownership of resource bridges and tracks which ones should be processed.
 struct ResourceBridges {

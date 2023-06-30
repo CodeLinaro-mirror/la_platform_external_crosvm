@@ -27,16 +27,16 @@ use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
 
 use crate::virtio::gpu;
+use crate::virtio::gpu::QueueReader;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
 use crate::virtio::vhost::user::device::handler::Error as DeviceError;
 use crate::virtio::vhost::user::device::handler::VhostBackendReqConnection;
-use crate::virtio::vhost::user::device::handler::VhostBackendReqConnectionState;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
 use crate::virtio::vhost::user::device::handler::WorkerState;
 use crate::virtio::DescriptorChain;
 use crate::virtio::Gpu;
 use crate::virtio::Queue;
-use crate::virtio::QueueReader;
+use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
 use crate::virtio::VirtioDevice;
 
@@ -92,7 +92,7 @@ struct GpuBackend {
     fence_state: Arc<Mutex<gpu::FenceState>>,
     queue_workers: [Option<WorkerState<Arc<Mutex<Queue>>, ()>>; MAX_QUEUE_NUM],
     platform_workers: Rc<RefCell<Vec<AbortHandle>>>,
-    backend_req_conn: VhostBackendReqConnectionState,
+    shmem_mapper: Arc<Mutex<Option<Box<dyn SharedMemoryMapper>>>>,
 }
 
 impl VhostUserBackend for GpuBackend {
@@ -178,21 +178,14 @@ impl VhostUserBackend for GpuBackend {
             let fence_handler =
                 gpu::create_fence_handler(mem.clone(), reader.clone(), self.fence_state.clone());
 
-            let mapper = {
-                match &mut self.backend_req_conn {
-                    VhostBackendReqConnectionState::Connected(request) => {
-                        request.take_shmem_mapper()?
-                    }
-                    VhostBackendReqConnectionState::NoConnection => {
-                        bail!("No backend request connection found")
-                    }
-                }
-            };
-
             let state = Rc::new(RefCell::new(
                 self.gpu
                     .borrow_mut()
-                    .initialize_frontend(self.fence_state.clone(), fence_handler, mapper)
+                    .initialize_frontend(
+                        self.fence_state.clone(),
+                        fence_handler,
+                        Arc::clone(&self.shmem_mapper),
+                    )
                     .ok_or_else(|| anyhow!("failed to initialize gpu frontend"))?,
             ));
             self.state = Some(state.clone());
@@ -224,6 +217,9 @@ impl VhostUserBackend for GpuBackend {
             // Wait for queue_task to be aborted.
             let _ = self.ex.run_until(async { worker.queue_task.await });
 
+            // Valid as the GPU device has a single Queue, so clearing the state here is ok.
+            self.state = None;
+
             let queue = match Arc::try_unwrap(worker.queue) {
                 Ok(queue_mutex) => queue_mutex.into_inner(),
                 Err(_) => panic!("failed to recover queue from worker"),
@@ -241,8 +237,12 @@ impl VhostUserBackend for GpuBackend {
         }
 
         for queue_num in 0..self.max_queue_num() {
-            if let Err(e) = self.stop_queue(queue_num) {
-                error!("Failed to stop_queue during reset: {}", e);
+            // The cursor queue is never used, so we should check if the queue is set before
+            // stopping.
+            if self.queue_workers[queue_num].is_some() {
+                if let Err(e) = self.stop_queue(queue_num) {
+                    error!("Failed to stop_queue during reset: {}", e);
+                }
             }
         }
     }
@@ -251,12 +251,12 @@ impl VhostUserBackend for GpuBackend {
         self.gpu.borrow().get_shared_memory_region()
     }
 
-    fn set_backend_req_connection(&mut self, conn: VhostBackendReqConnection) {
-        if let VhostBackendReqConnectionState::Connected(_) = &self.backend_req_conn {
+    fn set_backend_req_connection(&mut self, mut conn: VhostBackendReqConnection) {
+        let mut opt = self.shmem_mapper.lock();
+
+        if opt.replace(conn.take_shmem_mapper().unwrap()).is_some() {
             warn!("connection already established. overwriting");
         }
-
-        self.backend_req_conn = VhostBackendReqConnectionState::Connected(conn);
     }
 }
 

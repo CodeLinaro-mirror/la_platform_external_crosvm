@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap as Map;
 use std::io::Write;
 
 use anyhow::anyhow;
@@ -23,9 +24,6 @@ use super::Interrupt;
 use super::Queue;
 use super::SignalableInterrupt;
 use super::VirtioDevice;
-use super::VirtioDeviceSaved;
-use crate::virtio::virtio_device::Error as VirtioError;
-use crate::Suspendable;
 
 const QUEUE_SIZE: u16 = 256;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
@@ -69,7 +67,7 @@ impl Worker {
         needs_interrupt
     }
 
-    fn run(mut self, kill_evt: Event) -> anyhow::Result<VirtioDeviceSaved> {
+    fn run(mut self, kill_evt: Event) -> anyhow::Result<Vec<Queue>> {
         #[derive(EventToken)]
         enum Token {
             QueueAvailable,
@@ -105,6 +103,7 @@ impl Worker {
             };
 
             let mut needs_interrupt = false;
+            let mut exiting = false;
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     Token::QueueAvailable => {
@@ -117,22 +116,23 @@ impl Worker {
                     Token::InterruptResample => {
                         self.interrupt.interrupt_resample();
                     }
-                    Token::Kill => break 'wait,
+                    Token::Kill => exiting = true,
                 }
             }
             if needs_interrupt {
                 self.queue.trigger_interrupt(&self.mem, &self.interrupt);
             }
+            if exiting {
+                break;
+            }
         }
-        Ok(VirtioDeviceSaved {
-            queues: vec![self.queue],
-        })
+        Ok(vec![self.queue])
     }
 }
 
 /// Virtio device for exposing entropy to the guest OS through virtio.
 pub struct Rng {
-    worker_thread: Option<WorkerThread<anyhow::Result<VirtioDeviceSaved>>>,
+    worker_thread: Option<WorkerThread<anyhow::Result<Vec<Queue>>>>,
     virtio_features: u64,
 }
 
@@ -199,13 +199,37 @@ impl VirtioDevice for Rng {
         false
     }
 
-    fn stop(&mut self) -> std::result::Result<Option<VirtioDeviceSaved>, VirtioError> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
         if let Some(worker_thread) = self.worker_thread.take() {
-            let state = worker_thread.stop().map_err(VirtioError::InThreadFailure)?;
-            return Ok(Some(state));
+            let queues = worker_thread.stop()?;
+            return Ok(Some(Map::from_iter(queues.into_iter().enumerate())));
         }
         Ok(None)
     }
-}
 
-impl Suspendable for Rng {}
+    fn virtio_wake(
+        &mut self,
+        queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        if let Some((mem, interrupt, mut queues)) = queues_state {
+            let queues_vec = vec![queues.remove(&0).expect("missing requestq")];
+            self.activate(mem, interrupt, queues_vec)?;
+        }
+        Ok(())
+    }
+
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        // `virtio_sleep` ensures there is no pending state, except for the `Queue`s, which are
+        // handled at a higher layer.
+        Ok(serde_json::Value::Null)
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            data == serde_json::Value::Null,
+            "unexpected snapshot data: should be null, got {}",
+            data,
+        );
+        Ok(())
+    }
+}

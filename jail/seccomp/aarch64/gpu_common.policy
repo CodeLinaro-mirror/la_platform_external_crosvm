@@ -75,8 +75,8 @@ prctl: arg0 == PR_SET_NAME || arg0 == PR_GET_NAME
 # (from wl_device) arg1 == FIONBIO || arg1 == DMA_BUF_IOCTL_SYNC || arg1 == SYNC_IOC_FILE_INFO || arg1 & DRM_IOCTL_BASE
 ioctl: arg1 & 0x6400 || arg1 & 0x8000 || arg1 == 0x40086200 || arg1 == 0x40087543 || arg1 == 0xc018aa3f || arg1 == 0xaa00 || arg1 == 0x5421 || arg1 == 0x40086200 || arg1 == 0xc0383e04 || arg1 & 0x6400
 
-# Used for sharing memory with wayland. arg1 == MFD_CLOEXEC|MFD_ALLOW_SEALING
-memfd_create: arg1 == 3
+# Used for sharing memory with wayland. arg1 == MFD_CLOEXEC|MFD_ALLOW_SEALING, with or without MFD_NOEXEC_SEAL
+memfd_create: arg1 == 3 || arg1 == 11
 
 ## mmap/mprotect differ from the common_device.policy
 mmap: arg2 == PROT_READ|PROT_WRITE || arg2 == PROT_NONE || arg2 == PROT_READ|PROT_EXEC || arg2 == PROT_WRITE || arg2 == PROT_READ

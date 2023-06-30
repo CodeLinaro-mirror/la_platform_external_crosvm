@@ -2,30 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap as Map;
 use std::sync::Arc;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use acpi_tables::sdt::SDT;
 use anyhow::Result;
-use base::Error as BaseError;
 use base::Event;
 use base::Protection;
 use base::RawDescriptor;
-use remain::sorted;
 use sync::Mutex;
-use thiserror::Error;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
 use super::*;
-use crate::pci::MsixStatus;
 use crate::pci::PciAddress;
 use crate::pci::PciBarConfiguration;
 use crate::pci::PciBarIndex;
 use crate::pci::PciCapability;
+use crate::pci::{MsixConfig, MsixStatus};
 use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
-use crate::Suspendable;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VirtioTransportType {
@@ -61,7 +58,7 @@ pub trait SharedMemoryMapper: Send {
 /// and all the events, memory, and queues for device operation will be moved into the device.
 /// Optionally, a virtio device can implement device reset in which it returns said resources and
 /// resets its internal.
-pub trait VirtioDevice: Send + Suspendable {
+pub trait VirtioDevice: Send {
     /// Returns a label suitable for debug output.
     fn debug_label(&self) -> String {
         format!("virtio-{}", self.device_type())
@@ -205,26 +202,63 @@ pub trait VirtioDevice: Send + Suspendable {
     /// devices can remain backwards compatible with older drivers.
     fn set_shared_memory_region_base(&mut self, _addr: GuestAddress) {}
 
-    /// Stop the device and return queues and GuestMemory to the underlying bus that the virtio
-    /// device resides on (Pci/Mmio) to preserve their state.
-    fn stop(&mut self) -> Result<Option<VirtioDeviceSaved>, Error> {
-        Err(Error::NotImplemented(self.debug_label()))
+    /// Pause all processing.
+    ///
+    /// Gives up the queues so that a higher layer can potentially snapshot them. The
+    /// implementations should also drop the `Interrupt` and queues `Event`s that were given along
+    /// with the queues originally.
+    ///
+    /// Unlike `Suspendable::sleep`, this is not idempotent. Attempting to sleep while already
+    /// asleep is an error.
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+        anyhow::bail!("virtio_sleep not implemented for {}", self.debug_label());
     }
-}
 
-#[sorted]
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("thread error: {0}")]
-    InThreadFailure(anyhow::Error),
-    #[error("failed to kill {0} worker thread")]
-    KillEventFailure(BaseError),
-    #[error("Stop is not implemented for: {0}")]
-    NotImplemented(String),
-    #[error("thread ending failed: {0}")]
-    ThreadJoinFailure(String),
-}
+    /// Resume all processing.
+    ///
+    /// If the device's queues are active, then the queues and associated data will is included.
+    ///
+    /// Unlike `Suspendable::wake`, this is not idempotent. Attempting to wake while already awake
+    /// is an error.
+    fn virtio_wake(
+        &mut self,
+        _queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("virtio_wake not implemented for {}", self.debug_label());
+    }
 
-pub struct VirtioDeviceSaved {
-    pub queues: Vec<Queue>,
+    /// Snapshot current state. Device must be asleep.
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("virtio_snapshot not implemented for {}", self.debug_label());
+    }
+
+    /// Restore device state from a snapshot.
+    /// TODO(b/280607404): Vhost user will need fds passed to the device process.
+    fn virtio_restore(&mut self, _data: serde_json::Value) -> anyhow::Result<()> {
+        anyhow::bail!("virtio_restore not implemented for {}", self.debug_label());
+    }
+
+    /// Returns true if the device uses the vhost user protocol.
+    fn is_vhost_user(&self) -> bool {
+        false
+    }
+
+    /// Vhost user device specific restore to be called instead of `virtio_restore`. This will
+    /// rewire irqfds, queue_evts, start up the worker if needed, and send a RESTORE request to
+    /// the device process.
+    fn vhost_user_restore(
+        &mut self,
+        _data: serde_json::Value,
+        _queue_configs: &[Queue],
+        _queue_evts: Option<Vec<Event>>,
+        _interrupt: Option<Interrupt>,
+        _mem: GuestMemory,
+        _msix_config: &Arc<Mutex<MsixConfig>>,
+        _device_activated: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!(
+            "vhost_user_restore not implemented for {}",
+            self.debug_label()
+        );
+    }
 }

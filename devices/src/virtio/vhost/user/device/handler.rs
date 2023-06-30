@@ -70,6 +70,8 @@ use base::SharedMemory;
 use cros_async::TaskHandle;
 use futures::future::AbortHandle;
 use futures::future::Aborted;
+use serde::Deserialize;
+use serde::Serialize;
 use sys::Doorbell;
 use thiserror::Error as ThisError;
 use vm_control::VmMemorySource;
@@ -235,6 +237,7 @@ pub trait VhostUserBackend {
 
 /// A virtio ring entry.
 struct Vring {
+    // The queue config. This doesn't get mutated by the queue workers.
     queue: Queue,
     doorbell: Option<Doorbell>,
     enabled: bool,
@@ -243,6 +246,15 @@ struct Vring {
     // This queue kick_evt is saved so that the queues handlers can start back up with the
     // same events when it is woken up.
     kick_evt: Option<Event>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VringSnapshot {
+    // Snapshot of queue config.
+    queue: serde_json::Value,
+    // Snapshot of the activated queue state.
+    paused_queue: Option<serde_json::Value>,
+    enabled: bool,
 }
 
 impl Vring {
@@ -262,6 +274,28 @@ impl Vring {
         self.enabled = false;
         self.paused_queue = None;
         self.kick_evt = None;
+    }
+
+    fn snapshot(&self) -> anyhow::Result<VringSnapshot> {
+        Ok(VringSnapshot {
+            queue: self.queue.snapshot()?,
+            enabled: self.enabled,
+            paused_queue: self
+                .paused_queue
+                .as_ref()
+                .map(Queue::snapshot)
+                .transpose()?,
+        })
+    }
+
+    fn restore(&mut self, vring_snapshot: VringSnapshot) -> anyhow::Result<()> {
+        self.queue = Queue::restore(vring_snapshot.queue)?;
+        self.enabled = vring_snapshot.enabled;
+        self.paused_queue = vring_snapshot
+            .paused_queue
+            .map(Queue::restore)
+            .transpose()?;
+        Ok(())
     }
 }
 
@@ -390,6 +424,12 @@ pub struct DeviceRequestHandler {
     mem: Option<GuestMemory>,
     backend: Box<dyn VhostUserBackend>,
     ops: Box<dyn VhostUserPlatformOps>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeviceRequestHandlerSnapshot {
+    vrings: Vec<VringSnapshot>,
+    // TODO(rizhang): Add VhostUserBackend snapshot.
 }
 
 impl DeviceRequestHandler {
@@ -720,7 +760,9 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
                 Err(e) => return Err(VhostError::StopQueueError(e)),
             }
         }
-        Ok(())
+        self.backend
+            .stop_non_queue_workers()
+            .map_err(VhostError::SleepError)
     }
 
     fn wake(&mut self) -> VhostResult<()> {
@@ -744,9 +786,62 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
                 }
             }
         }
-        self.backend
-            .stop_non_queue_workers()
-            .map_err(VhostError::SleepError)
+        Ok(())
+    }
+
+    fn snapshot(&mut self) -> VhostResult<Vec<u8>> {
+        match serde_json::to_vec(&DeviceRequestHandlerSnapshot {
+            vrings: self
+                .vrings
+                .iter()
+                .map(|vring| vring.snapshot())
+                .collect::<anyhow::Result<Vec<VringSnapshot>>>()
+                .map_err(VhostError::SnapshotError)?,
+        }) {
+            Ok(serialized_json) => Ok(serialized_json),
+            Err(e) => {
+                error!("Failed to serialize DeviceRequestHandlerSnapshot: {}", e);
+                Err(VhostError::SerializationFailed)
+            }
+        }
+    }
+
+    fn restore(&mut self, data_bytes: &[u8], queue_evts: Option<Vec<File>>) -> VhostResult<()> {
+        let device_request_handler_snapshot: DeviceRequestHandlerSnapshot =
+            serde_json::from_slice(data_bytes).map_err(|e| {
+                error!("Failed to deserialize DeviceRequestHandlerSnapshot: {}", e);
+                VhostError::DeserializationFailed
+            })?;
+
+        let snapshotted_vrings = device_request_handler_snapshot.vrings;
+        assert_eq!(snapshotted_vrings.len(), self.vrings.len());
+        for (vring, snapshotted_vring) in self.vrings.iter_mut().zip(snapshotted_vrings.into_iter())
+        {
+            vring
+                .restore(snapshotted_vring)
+                .map_err(VhostError::RestoreError)?;
+        }
+
+        // `queue_evts` should only be `Some` if the snapshotted device is already activated.
+        // This wire up the doorbell events.
+        if let Some(queue_evts) = queue_evts {
+            // TODO(b/288596005): It is assumed that the index of `queue_evts` should map to the
+            // index of `self.vrings`. However, this assumption may break in the future, so a Map
+            // of indexes to queue_evt should be used to support sparse activated queues.
+            for (index, queue_evt_fd) in queue_evts.into_iter().enumerate() {
+                if let Some(vring) = self.vrings.get_mut(index) {
+                    let kick_evt = self.ops.set_vring_kick(index as u8, Some(queue_evt_fd))?;
+                    // Save kick_evts so they can be re-used when waking up the device.
+                    vring.kick_evt = Some(kick_evt);
+                } else {
+                    return Err(VhostError::VringIndexNotFound(index));
+                }
+            }
+        }
+
+        // TODO(rizhang): Restore self.backend.
+
+        Ok(())
     }
 }
 
@@ -822,7 +917,8 @@ impl SharedMemoryMapper for VhostShmemMapper {
                     descriptor,
                     handle_type,
                     memory_idx,
-                    device_id,
+                    device_uuid,
+                    driver_uuid,
                     size,
                 } => {
                     let msg = VhostUserGpuMapMsg::new(
@@ -831,8 +927,8 @@ impl SharedMemoryMapper for VhostShmemMapper {
                         size,
                         memory_idx,
                         handle_type,
-                        device_id.device_uuid,
-                        device_id.driver_uuid,
+                        device_uuid,
+                        driver_uuid,
                     );
                     self.conn
                         .gpu_map(&msg, &descriptor)

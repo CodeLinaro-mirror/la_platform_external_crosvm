@@ -1864,7 +1864,7 @@ pub struct RunCommand {
     /// Possible key values:
     ///     type=(stdout,syslog,sink,file) - Where to route the
     ///        serial device
-    ///     hardware=(serial,virtio-console,debugcon) - Which type
+    ///     hardware=(serial,virtio-console,debugcon,legacy-virtio-console) - Which type
     ///        of serial hardware to emulate. Defaults to 8250 UART
     ///        (serial).
     ///     num=(1,2,3,4) - Serial Device Number. If not provided,
@@ -2170,6 +2170,13 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// path to the vhost-net device. (default /dev/vhost-net)
     pub vhost_net_device: Option<PathBuf>,
+
+    #[cfg(unix)]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[argh(switch)]
+    #[merge(strategy = overwrite_option)]
+    /// use vhost for scmi
+    pub vhost_scmi: Option<bool>,
 
     #[argh(option, arg_name = "SOCKET_PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -2779,6 +2786,12 @@ impl TryFrom<RunCommand> for super::config::Config {
                     }
                 }
             }
+        }
+
+        #[cfg(unix)]
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            cfg.vhost_scmi = cmd.vhost_scmi.unwrap_or_default();
         }
 
         #[cfg(feature = "tpm")]

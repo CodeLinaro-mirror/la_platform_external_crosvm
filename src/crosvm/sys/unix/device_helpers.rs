@@ -20,6 +20,7 @@ use anyhow::Result;
 use arch::VirtioDeviceStub;
 use base::ReadNotifier;
 use base::*;
+use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
 use devices::serial_device::SerialType;
 use devices::vfio::VfioCommonSetup;
@@ -85,11 +86,6 @@ use crate::crosvm::config::VvuOption;
 pub enum TaggedControlTube {
     Fs(Tube),
     Vm(Tube),
-    VmMemory {
-        tube: Tube,
-        /// See devices::virtio::VirtioDevice.expose_shared_memory_region_with_viommu
-        expose_with_viommu: bool,
-    },
     VmMsync(Tube),
 }
 
@@ -97,7 +93,7 @@ impl AsRef<Tube> for TaggedControlTube {
     fn as_ref(&self) -> &Tube {
         use self::TaggedControlTube::*;
         match &self {
-            Fs(tube) | Vm(tube) | VmMemory { tube, .. } | VmMsync(tube) => tube,
+            Fs(tube) | Vm(tube) | VmMsync(tube) => tube,
         }
     }
 }
@@ -109,6 +105,31 @@ impl AsRawDescriptor for TaggedControlTube {
 }
 
 impl ReadNotifier for TaggedControlTube {
+    fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
+        self.as_ref().get_read_notifier()
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct VmMemoryTube {
+    pub tube: Tube,
+    /// See devices::virtio::VirtioDevice.expose_shared_memory_region_with_viommu
+    pub expose_with_viommu: bool,
+}
+
+impl AsRef<Tube> for VmMemoryTube {
+    fn as_ref(&self) -> &Tube {
+        &self.tube
+    }
+}
+
+impl AsRawDescriptor for VmMemoryTube {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        self.as_ref().as_raw_descriptor()
+    }
+}
+
+impl ReadNotifier for VmMemoryTube {
     fn get_read_notifier(&self) -> &dyn AsRawDescriptor {
         self.as_ref().get_read_notifier()
     }
@@ -556,7 +577,7 @@ pub fn create_single_touch_device(
         .context("failed configuring virtio single touch")?;
 
     let (width, height) = single_touch_spec.get_size();
-    let dev = virtio::new_single_touch(
+    let dev = virtio::input::new_single_touch(
         idx,
         socket,
         width,
@@ -582,7 +603,7 @@ pub fn create_multi_touch_device(
         .context("failed configuring virtio multi touch")?;
 
     let (width, height) = multi_touch_spec.get_size();
-    let dev = virtio::new_multi_touch(
+    let dev = virtio::input::new_multi_touch(
         idx,
         socket,
         width,
@@ -609,7 +630,7 @@ pub fn create_trackpad_device(
         .context("failed configuring virtio trackpad")?;
 
     let (width, height) = trackpad_spec.get_size();
-    let dev = virtio::new_trackpad(
+    let dev = virtio::input::new_trackpad(
         idx,
         socket,
         width,
@@ -634,7 +655,7 @@ pub fn create_mouse_device<T: IntoUnixStream>(
         .into_unix_stream()
         .context("failed configuring virtio mouse")?;
 
-    let dev = virtio::new_mouse(idx, socket, virtio::base_features(protection_type))
+    let dev = virtio::input::new_mouse(idx, socket, virtio::base_features(protection_type))
         .context("failed to set up input device")?;
 
     Ok(VirtioDeviceStub {
@@ -653,7 +674,7 @@ pub fn create_keyboard_device<T: IntoUnixStream>(
         .into_unix_stream()
         .context("failed configuring virtio keyboard")?;
 
-    let dev = virtio::new_keyboard(idx, socket, virtio::base_features(protection_type))
+    let dev = virtio::input::new_keyboard(idx, socket, virtio::base_features(protection_type))
         .context("failed to set up input device")?;
 
     Ok(VirtioDeviceStub {
@@ -672,7 +693,7 @@ pub fn create_switches_device<T: IntoUnixStream>(
         .into_unix_stream()
         .context("failed configuring virtio switches")?;
 
-    let dev = virtio::new_switches(idx, socket, virtio::base_features(protection_type))
+    let dev = virtio::input::new_switches(idx, socket, virtio::base_features(protection_type))
         .context("failed to set up input device")?;
 
     Ok(VirtioDeviceStub {
@@ -691,7 +712,7 @@ pub fn create_rotary_device<T: IntoUnixStream>(
         .into_unix_stream()
         .context("failed configuring virtio rotary")?;
 
-    let dev = virtio::new_rotary(idx, socket, virtio::base_features(protection_type))
+    let dev = virtio::input::new_rotary(idx, socket, virtio::base_features(protection_type))
         .context("failed to set up input device")?;
 
     Ok(VirtioDeviceStub {
@@ -711,7 +732,7 @@ pub fn create_vinput_device(
         .open(dev_path)
         .with_context(|| format!("failed to open vinput device {}", dev_path.display()))?;
 
-    let dev = virtio::new_evdev(dev_file, virtio::base_features(protection_type))
+    let dev = virtio::input::new_evdev(dev_file, virtio::base_features(protection_type))
         .context("failed to set up input device")?;
 
     Ok(VirtioDeviceStub {
@@ -1077,6 +1098,23 @@ impl VirtioDeviceBuilder for &VsockConfig {
     }
 }
 
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+pub fn create_vhost_scmi_device(
+    protected_vm: ProtectionType,
+    jail_config: &Option<JailConfig>,
+    vhost_scmi_dev_path: PathBuf,
+) -> DeviceResult {
+    let features = virtio::base_features(protected_vm);
+
+    let dev = virtio::vhost::Scmi::new(&vhost_scmi_dev_path, features)
+        .context("failed to set up vhost scmi device")?;
+
+    Ok(VirtioDeviceStub {
+        dev: Box::new(dev),
+        jail: simple_jail(jail_config, "vhost_scmi_device")?,
+    })
+}
+
 pub fn create_fs_device(
     protection_type: ProtectionType,
     jail_config: &Option<JailConfig>,
@@ -1327,11 +1365,18 @@ impl VirtioDeviceBuilder for &SerialParameters {
         let mut keep_rds = Vec::new();
         let evt = Event::new().context("failed to create event")?;
 
-        // TODO(b/238440998): Switch back to AsyncConsole in android.
-        Ok(Box::new(
-            self.create_serial_device::<Console>(protection_type, &evt, &mut keep_rds)
-                .context("failed to create console device")?,
-        ))
+        // TODO(b/243198718): Switch back to AsyncConsole in android (remove the `true ||`).
+        if true || self.hardware == SerialHardware::LegacyVirtioConsole {
+            Ok(Box::new(
+                self.create_serial_device::<Console>(protection_type, &evt, &mut keep_rds)
+                    .context("failed to create console device")?,
+            ))
+        } else {
+            Ok(Box::new(
+                self.create_serial_device::<AsyncConsole>(protection_type, &evt, &mut keep_rds)
+                    .context("failed to create console device")?,
+            ))
+        }
     }
 
     fn create_vhost_user_device(
@@ -1389,6 +1434,7 @@ pub fn create_vfio_device(
     vm: &impl Vm,
     resources: &mut SystemAllocator,
     irq_control_tubes: &mut Vec<Tube>,
+    vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
     control_tubes: &mut Vec<TaggedControlTube>,
     vfio_path: &Path,
     hotplug: bool,
@@ -1403,7 +1449,7 @@ pub fn create_vfio_device(
 
     let (vfio_host_tube_mem, vfio_device_tube_mem) =
         Tube::pair().context("failed to create tube")?;
-    control_tubes.push(TaggedControlTube::VmMemory {
+    vm_memory_control_tubes.push(VmMemoryTube {
         tube: vfio_host_tube_mem,
         expose_with_viommu: false,
     });
