@@ -6,6 +6,7 @@
 // isn't marked so. Remove this when we do so.
 #![allow(dead_code, unused_imports, unused_variables, unreachable_code)]
 
+pub(crate) mod control_server;
 pub(crate) mod irq_wait;
 pub(crate) mod main;
 #[cfg(not(feature = "crash-report"))]
@@ -19,6 +20,7 @@ pub(crate) mod run_vcpu;
 use std::arch::x86_64::__cpuid;
 #[cfg(feature = "whpx")]
 use std::arch::x86_64::__cpuid_count;
+use std::cmp::Reverse;
 #[cfg(feature = "gpu")]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -29,6 +31,7 @@ use std::iter;
 use std::mem;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::Arc;
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -54,8 +57,11 @@ use base::open_file;
 use base::warn;
 #[cfg(feature = "gpu")]
 use base::BlockingMode;
+use base::CloseNotifier;
 use base::Event;
 use base::EventToken;
+use base::EventType;
+use base::FlushOnDropTube;
 #[cfg(feature = "gpu")]
 use base::FramingMode;
 use base::FromRawDescriptor;
@@ -74,6 +80,7 @@ use base::VmEventType;
 use base::WaitContext;
 use broker_ipc::common_child_setup;
 use broker_ipc::CommonChildStartupArgs;
+use control_server::ControlServer;
 use crosvm_cli::sys::windows::exit::Exit;
 use crosvm_cli::sys::windows::exit::ExitContext;
 use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
@@ -110,6 +117,7 @@ use devices::GvmIrqChip;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use devices::IrqChip;
 use devices::UserspaceIrqChip;
+use devices::VcpuRunState;
 use devices::VirtioPciDevice;
 #[cfg(feature = "whpx")]
 use devices::WhpxSplitIrqChip;
@@ -169,14 +177,19 @@ use resources::SystemAllocator;
 use run_vcpu::run_all_vcpus;
 use run_vcpu::VcpuRunMode;
 use rutabaga_gfx::RutabagaGralloc;
+use smallvec::SmallVec;
 use sync::Mutex;
 use tube_transporter::TubeToken;
 use tube_transporter::TubeTransporterReader;
+use vm_control::api::VmMemoryClient;
 use vm_control::BalloonControlCommand;
 use vm_control::DeviceControlCommand;
 use vm_control::IrqHandlerRequest;
+use vm_control::PvClockCommand;
+use vm_control::VcpuControl;
 use vm_control::VmMemoryRegionState;
 use vm_control::VmMemoryRequest;
+use vm_control::VmRequest;
 use vm_control::VmRunMode;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -216,9 +229,11 @@ use crate::sys::windows::product::MetricEventType;
 
 const DEFAULT_GUEST_CID: u64 = 3;
 
+// by default, if enabled, the balloon WS features will use 4 bins.
+const VIRTIO_BALLOON_WS_DEFAULT_NUM_BINS: u8 = 4;
+
 enum TaggedControlTube {
-    #[allow(dead_code)]
-    Vm(Tube),
+    Vm(FlushOnDropTube),
     VmMemory(Tube),
     Product(product::TaggedControlTube),
 }
@@ -430,7 +445,7 @@ fn create_balloon_device(
     let dev = virtio::Balloon::new(
         virtio::base_features(cfg.protection_type),
         balloon_device_tube,
-        dynamic_mapping_device_tube,
+        VmMemoryClient::new(dynamic_mapping_device_tube),
         inflate_tube,
         init_balloon_size,
         if cfg.strict_balloon {
@@ -441,6 +456,7 @@ fn create_balloon_device(
         balloon_features,
         #[cfg(feature = "registered_events")]
         None,
+        VIRTIO_BALLOON_WS_DEFAULT_NUM_BINS,
     )
     .exit_context(Exit::BalloonDeviceNew, "failed to create balloon")?;
 
@@ -719,8 +735,8 @@ fn create_devices(
                 stub.dev,
                 msi_device_tube,
                 cfg.disable_virtio_intx,
-                shared_memory_tube,
-                ioevent_device_tube,
+                shared_memory_tube.map(VmMemoryClient::new),
+                VmMemoryClient::new(ioevent_device_tube),
             )
             .exit_context(Exit::VirtioPciDev, "failed to create virtio pci dev")?,
         ) as Box<dyn BusDeviceObj>;
@@ -759,9 +775,10 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     vm_control_indices_to_remove: &mut Vec<usize>,
     service_vm_state: &mut ServiceVmState,
     ac97_host_tubes: &[Tube],
+    disk_host_tubes: &[Tube],
     ipc_main_loop_tube: Option<&Tube>,
     vm_evt_rdtube: &RecvTube,
-    control_tubes: &[TaggedControlTube],
+    control_tubes: &mut Vec<TaggedControlTube>,
     guest_os: &mut RunnableLinuxVm<V, Vcpu>,
     sys_allocator_mutex: &Arc<Mutex<SystemAllocator>>,
     gralloc: &mut RutabagaGralloc,
@@ -774,6 +791,12 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     pvclock_host_tube: &Option<Tube>,
     run_mode_arc: &VcpuRunMode,
     region_state: &mut VmMemoryRegionState,
+    vm_control_server: Option<&mut ControlServer>,
+    irq_handler_control: &Tube,
+    device_ctrl_tube: &Tube,
+    wait_ctx: &WaitContext<Token>,
+    force_s2idle: bool,
+    vcpu_control_channels: &[mpsc::Sender<VcpuControl>],
 ) -> Result<(bool, Option<ExitState>)> {
     match event.token {
         Token::VmEvent => match vm_evt_rdtube.recv::<VmEventType>() {
@@ -810,6 +833,34 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             info!("main loop got broker shutdown event");
             return Ok((true, None));
         }
+        Token::VmControlServer => {
+            let server =
+                vm_control_server.expect("control server must exist if this event triggers");
+            let client = server.accept();
+            wait_ctx
+                .add(
+                    client.0.get_read_notifier(),
+                    Token::VmControl {
+                        index: control_tubes.len(),
+                    },
+                )
+                .exit_context(
+                    Exit::WaitContextAdd,
+                    "failed to add trigger to wait context",
+                )?;
+            wait_ctx
+                .add(
+                    client.0.get_close_notifier(),
+                    Token::VmControl {
+                        index: control_tubes.len(),
+                    },
+                )
+                .exit_context(
+                    Exit::WaitContextAdd,
+                    "failed to add trigger to wait context",
+                )?;
+            control_tubes.push(TaggedControlTube::Vm(client));
+        }
         #[allow(clippy::collapsible_match)]
         Token::VmControl { index } => {
             if let Some(tube) = control_tubes.get(index) {
@@ -845,23 +896,103 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             ac97_host_tubes,
                         )
                     }
-                    _ => (),
-                    // TODO: handle vm_control messages.
-                    /* TaggedControlTube::Vm(tube) => match tube.recv::<VmRequest>() {
+                    TaggedControlTube::Vm(tube) => match tube.0.recv::<VmRequest>() {
                         Ok(request) => {
                             let mut run_mode_opt = None;
-                            let response = request.execute(
-                                &mut run_mode_opt,
-                                disk_host_tubes,
-                            );
-                            if let Err(e) = tube.send(&response) {
+                            let response = match request {
+                                VmRequest::HotPlugCommand { device, add } => {
+                                    // Suppress warnings.
+                                    let _ = (device, add);
+                                    unimplemented!("not implemented on Windows");
+                                }
+                                #[cfg(feature = "registered_events")]
+                                VmRequest::RegisterListener { socket_addr, event } => {
+                                    unimplemented!("not implemented on Windows");
+                                }
+                                #[cfg(feature = "registered_events")]
+                                VmRequest::UnregisterListener { socket_addr, event } => {
+                                    unimplemented!("not implemented on Windows");
+                                }
+                                #[cfg(feature = "registered_events")]
+                                VmRequest::Unregister { socket_addr } => {
+                                    unimplemented!("not implemented on Windows");
+                                }
+                                _ => {
+                                    #[cfg(feature = "balloon")]
+                                    let mut balloon_stats_id = 0;
+                                    #[cfg(feature = "balloon")]
+                                    let mut balloon_wss_id = 0;
+                                    let vcpu_size = vcpu_boxes.lock().len();
+                                    let response = request.execute(
+                                        &mut run_mode_opt,
+                                        #[cfg(feature = "balloon")]
+                                        balloon_host_tube.as_ref(),
+                                        #[cfg(feature = "balloon")]
+                                        &mut balloon_stats_id,
+                                        #[cfg(feature = "balloon")]
+                                        &mut balloon_wss_id,
+                                        disk_host_tubes,
+                                        &mut guest_os.pm,
+                                        #[cfg(feature = "gpu")]
+                                        None,
+                                        None,
+                                        &mut None,
+                                        |msg| {
+                                            kick_all_vcpus(
+                                                run_mode_arc,
+                                                vcpu_control_channels,
+                                                vcpu_boxes,
+                                                guest_os.irq_chip.as_ref(),
+                                                pvclock_host_tube,
+                                                msg,
+                                            );
+                                        },
+                                        |msg, index| {
+                                            kick_vcpu(
+                                                run_mode_arc,
+                                                vcpu_control_channels,
+                                                vcpu_boxes,
+                                                guest_os.irq_chip.as_ref(),
+                                                pvclock_host_tube,
+                                                index,
+                                                msg,
+                                            );
+                                        },
+                                        force_s2idle,
+                                        #[cfg(feature = "swap")]
+                                        None,
+                                        device_ctrl_tube,
+                                        vcpu_size,
+                                        irq_handler_control,
+                                        || guest_os.irq_chip.as_ref().snapshot(vcpu_size),
+                                        |snapshot| {
+                                            guest_os
+                                                .irq_chip
+                                                .try_box_clone()?
+                                                .restore(snapshot, vcpu_size)
+                                        },
+                                    );
+
+                                    response
+                                }
+                            };
+
+                            if let Err(e) = tube.0.send(&response) {
                                 error!("failed to send VmResponse: {}", e);
                             }
+
                             if let Some(run_mode) = run_mode_opt {
-                                info!("control tube changed run mode to {}", run_mode);
+                                info!("control socket changed run mode to {}", run_mode);
                                 match run_mode {
                                     VmRunMode::Exiting => {
-                                        break 'poll;
+                                        unimplemented!("not implemented on Windows");
+                                    }
+                                    other => {
+                                        if other == VmRunMode::Running {
+                                            for dev in &guest_os.resume_notify_devices {
+                                                dev.lock().resume_imminent();
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -873,7 +1004,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 error!("failed to recv VmRequest: {}", e);
                             }
                         }
-                    }, */
+                    },
                 }
             }
         }
@@ -898,6 +1029,31 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     Ok((false, None))
 }
 
+fn create_control_server(
+    control_server_path: Option<PathBuf>,
+    wait_ctx: &WaitContext<Token>,
+) -> Result<Option<ControlServer>> {
+    #[cfg(not(feature = "prod-build"))]
+    {
+        if let Some(path) = control_server_path {
+            let server =
+                ControlServer::new(path.to_str().expect("control socket path must be a string"))
+                    .exit_context(
+                        Exit::FailedToCreateControlServer,
+                        "failed to create control server",
+                    )?;
+            wait_ctx
+                .add(server.client_waiting(), Token::VmControlServer)
+                .exit_context(
+                    Exit::WaitContextAdd,
+                    "failed to add control server to wait context",
+                )?;
+            return Ok(Some(server));
+        }
+    }
+    Ok::<Option<ControlServer>, anyhow::Error>(None)
+}
+
 fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     mut guest_os: RunnableLinuxVm<V, Vcpu>,
     sys_allocator: SystemAllocator,
@@ -908,6 +1064,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     broker_shutdown_evt: Option<Event>,
     balloon_host_tube: Option<Tube>,
     pvclock_host_tube: Option<Tube>,
+    disk_host_tubes: Vec<Tube>,
     mut gralloc: RutabagaGralloc,
     #[cfg(feature = "stats")] stats: Option<Arc<Mutex<StatisticsCollector>>>,
     service_pipe_name: Option<String>,
@@ -916,9 +1073,11 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     host_cpu_topology: bool,
     tsc_sync_mitigations: TscSyncMitigations,
     force_calibrated_tsc_leaf: bool,
-    product_args: RunControlArgs,
+    mut product_args: RunControlArgs,
     mut virtio_snd_host_mute_tube: Option<Tube>,
     restore_path: Option<PathBuf>,
+    control_server_path: Option<PathBuf>,
+    force_s2idle: bool,
 ) -> Result<ExitState> {
     let (ipc_main_loop_tube, proto_main_loop_tube, _service_ipc) =
         start_service_ipc_listener(service_pipe_name)?;
@@ -1003,13 +1162,21 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     let anti_tamper_main_thread_tube = spawn_anti_tamper_thread(&wait_ctx);
 
-    let ime_thread = run_ime_thread(product_args, &exit_evt)?;
+    let mut vm_control_server = create_control_server(control_server_path, &wait_ctx)?;
+
+    let ime_thread = run_ime_thread(&mut product_args, &exit_evt)?;
 
     let original_terminal_mode = stdin().set_raw_mode().ok();
 
     let vcpu_boxes: Arc<Mutex<Vec<Box<dyn VcpuArch>>>> = Arc::new(Mutex::new(Vec::new()));
     let run_mode_arc = Arc::new(VcpuRunMode::default());
-    let vcpu_threads = run_all_vcpus(
+
+    // If we are restoring from a snapshot, then start suspended.
+    if restore_path.is_some() {
+        run_mode_arc.set_and_notify(VmRunMode::Suspending);
+    }
+
+    let (vcpu_threads, vcpu_control_channels) = run_all_vcpus(
         vcpus,
         vcpu_boxes.clone(),
         &guest_os,
@@ -1026,8 +1193,51 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
 
     // Restore VM (if applicable).
     if let Some(path) = restore_path {
-        // TODO(b/273992211): Port the unix --restore code to Windows.
-        todo!();
+        vm_control::do_restore(
+            path,
+            |msg| {
+                kick_all_vcpus(
+                    run_mode_arc.as_ref(),
+                    &vcpu_control_channels,
+                    vcpu_boxes.as_ref(),
+                    guest_os.irq_chip.as_ref(),
+                    &pvclock_host_tube,
+                    msg,
+                )
+            },
+            |msg, index| {
+                kick_vcpu(
+                    run_mode_arc.as_ref(),
+                    &vcpu_control_channels,
+                    vcpu_boxes.as_ref(),
+                    guest_os.irq_chip.as_ref(),
+                    &pvclock_host_tube,
+                    index,
+                    msg,
+                )
+            },
+            &irq_handler_control,
+            &device_ctrl_tube,
+            guest_os.vcpu_count,
+            |image| {
+                guest_os
+                    .irq_chip
+                    .try_box_clone()?
+                    .restore(image, guest_os.vcpu_count)
+            },
+        )?;
+        // Allow the vCPUs to start for real.
+        kick_all_vcpus(
+            run_mode_arc.as_ref(),
+            &vcpu_control_channels,
+            vcpu_boxes.as_ref(),
+            guest_os.irq_chip.as_ref(),
+            &pvclock_host_tube,
+            // Other platforms (unix) have multiple modes they could start in (e.g. starting for
+            // guest kernel debugging, etc). If/when we support those modes on Windows, we'll need
+            // to enter that mode here rather than VmRunMode::Running.
+            VcpuControl::RunState(VmRunMode::Running),
+        );
     }
 
     let mut exit_state = ExitState::Stop;
@@ -1050,10 +1260,11 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 event,
                 &mut vm_control_indices_to_remove,
                 &mut service_vm_state,
+                disk_host_tubes.as_slice(),
                 &ac97_host_tubes,
                 ipc_main_loop_tube.as_ref(),
                 &vm_evt_rdtube,
-                &control_tubes,
+                &mut control_tubes,
                 &mut guest_os,
                 &sys_allocator_mutex,
                 &mut gralloc,
@@ -1066,6 +1277,12 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 &pvclock_host_tube,
                 run_mode_arc.as_ref(),
                 &mut region_state,
+                vm_control_server.as_mut(),
+                &irq_handler_control,
+                &device_ctrl_tube,
+                &wait_ctx,
+                force_s2idle,
+                &vcpu_control_channels,
             )?;
             if let Some(state) = state {
                 exit_state = state;
@@ -1074,44 +1291,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 break 'poll;
             }
         }
-        for event in events.iter().filter(|e| e.is_hungup) {
-            match event.token {
-                Token::VmEvent | Token::BrokerShutdown => {}
-                #[allow(unused_variables)]
-                Token::VmControl { index } => {
-                    // TODO: handle vm control messages as they get ported.
-                    // It's possible more data is readable and buffered while the tube is hungup,
-                    // so don't delete the tube from the poll context until we're sure all the
-                    // data is read.
-                    /*match control_tubes
-                        .get(index)
-                        .map(|s| s.as_ref().get_readable_bytes())
-                    {
-                        Some(Ok(0)) | Some(Err(_)) => vm_control_indices_to_remove.push(index),
-                        Some(Ok(x)) => info!("control index {} has {} bytes readable", index, x),
-                        _ => {}
-                    }*/
-                }
-                #[allow(unreachable_patterns)]
-                _ => product::handle_hungup_event(&event.token),
-            }
-        }
 
-        // Sort in reverse so the highest indexes are removed first. This removal algorithm
-        // preserved correct indexes as each element is removed.
-        //vm_control_indices_to_remove.sort_unstable_by(|a, b| b.cmp(a));
-        vm_control_indices_to_remove.dedup();
-        for index in vm_control_indices_to_remove {
-            control_tubes.swap_remove(index);
-            /*if let Some(tube) = control_tubes.get(index) {
-                wait_ctx
-                    .modify(
-                        tube, Token::VmControl { index },
-                        EventType::Read
-                    )
-                    .exit_context(Exit::WaitContextAdd, "failed to add trigger to wait context")?;
-            }*/
-        }
+        remove_closed_tubes(&wait_ctx, &mut control_tubes, vm_control_indices_to_remove)?;
     }
 
     info!("run_control poll loop completed, forcing vCPUs to exit...");
@@ -1198,6 +1379,215 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     info!("guest_os dropped, run_control is done.");
 
     res
+}
+
+/// Remove Tubes that have been closed from the WaitContext.
+fn remove_closed_tubes(
+    wait_ctx: &WaitContext<Token>,
+    tubes: &mut Vec<TaggedControlTube>,
+    mut tube_indices_to_remove: Vec<usize>,
+) -> anyhow::Result<()> {
+    // Sort in reverse so the highest indexes are removed first. This removal algorithm
+    // preserves correct indexes as each element is removed. (Consider the input [0, 10], with 10
+    // being the last item in the `tubes` list. If we remove 0 first, 10 is swapped to 0, and then
+    // index 10 is dropped. Then we would attempt to remove item 10 and go out of range. If we
+    // remove the largest first, this problem does not occur.)
+    tube_indices_to_remove.sort_unstable_by_key(|&k| Reverse(k));
+    tube_indices_to_remove.dedup();
+    for index in tube_indices_to_remove {
+        if let Some(socket) = tubes.get(index) {
+            match socket {
+                TaggedControlTube::VmMemory(t) => {
+                    wait_ctx
+                        .delete(t.get_read_notifier())
+                        .context("failed to remove descriptor from wait context")?;
+                }
+                TaggedControlTube::Product(t) => {
+                    wait_ctx
+                        .delete(t.get_read_notifier())
+                        .context("failed to remove descriptor from wait context")?;
+                }
+                TaggedControlTube::Vm(t) => {
+                    wait_ctx
+                        .delete(t.0.get_close_notifier())
+                        .context("failed to remove descriptor from wait context")?;
+                    wait_ctx
+                        .delete(t.0.get_read_notifier())
+                        .context("failed to remove descriptor from wait context")?;
+                }
+            }
+        }
+
+        // This line implicitly drops the socket at `index` when it gets returned by
+        // `swap_remove`. After this line, the socket at `index` is not the one from
+        // `tube_indices_to_remove`. Because of this socket's change in index, we need to
+        // use `wait_ctx.modify` to change the associated index in its `Token::VmControl`.
+        tubes.swap_remove(index);
+        if let Some(tube) = tubes.get(index) {
+            match tube {
+                TaggedControlTube::VmMemory(t) => {
+                    wait_ctx
+                        .modify(
+                            t.get_read_notifier(),
+                            EventType::Read,
+                            Token::VmControl { index },
+                        )
+                        .context("failed to remove descriptor from wait context")?;
+                }
+                TaggedControlTube::Product(t) => {
+                    wait_ctx
+                        .modify(
+                            t.get_read_notifier(),
+                            EventType::Read,
+                            Token::VmControl { index },
+                        )
+                        .context("failed to remove descriptor from wait context")?;
+                }
+                TaggedControlTube::Vm(t) => {
+                    wait_ctx
+                        .modify(
+                            t.0.get_read_notifier(),
+                            EventType::Read,
+                            Token::VmControl { index },
+                        )
+                        .context("failed to remove descriptor from wait context")?;
+                    wait_ctx
+                        .modify(
+                            t.0.get_close_notifier(),
+                            EventType::Read,
+                            Token::VmControl { index },
+                        )
+                        .context("failed to remove descriptor from wait context")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Sends a message to all VCPUs.
+fn kick_all_vcpus(
+    run_mode: &VcpuRunMode,
+    vcpu_control_channels: &[mpsc::Sender<VcpuControl>],
+    vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
+    irq_chip: &dyn IrqChipArch,
+    pvclock_host_tube: &Option<Tube>,
+    msg: VcpuControl,
+) {
+    // On Windows, we handle run mode switching directly rather than delegating to the VCPU thread
+    // like unix does.
+    match &msg {
+        VcpuControl::RunState(VmRunMode::Suspending) => {
+            suspend_all_vcpus(run_mode, vcpu_boxes, irq_chip, pvclock_host_tube);
+            return;
+        }
+        VcpuControl::RunState(VmRunMode::Running) => {
+            resume_all_vcpus(run_mode, vcpu_boxes, irq_chip, pvclock_host_tube);
+            return;
+        }
+        _ => (),
+    }
+
+    // For non RunState commands, we dispatch just like unix would.
+    for vcpu in vcpu_control_channels {
+        if let Err(e) = vcpu.send(msg.clone()) {
+            error!("failed to send VcpuControl message: {}", e);
+        }
+    }
+
+    // Now that we've sent a message, we need VCPUs to exit so they can process it.
+    for vcpu in vcpu_boxes.lock().iter() {
+        vcpu.set_immediate_exit(true);
+    }
+    irq_chip.kick_halted_vcpus();
+
+    // If the VCPU isn't running, we have to notify the run_mode condvar to wake it so it processes
+    // the control message.
+    let current_run_mode = run_mode.get_mode();
+    if current_run_mode != VmRunMode::Running {
+        run_mode.set_and_notify(current_run_mode);
+    }
+}
+
+/// Sends a message to a single VCPU. On Windows, `VcpuControl::RunState` cannot be sent to a single
+/// VCPU.
+fn kick_vcpu(
+    run_mode: &VcpuRunMode,
+    vcpu_control_channels: &[mpsc::Sender<VcpuControl>],
+    vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
+    irq_chip: &dyn IrqChipArch,
+    pvclock_host_tube: &Option<Tube>,
+    index: usize,
+    msg: VcpuControl,
+) {
+    assert!(
+        !matches!(msg, VcpuControl::RunState(_)),
+        "Windows does not support RunState changes on a per VCPU basis"
+    );
+
+    let vcpu = vcpu_control_channels
+        .get(index)
+        .expect("invalid vcpu index specified");
+    if let Err(e) = vcpu.send(msg) {
+        error!("failed to send VcpuControl message: {}", e);
+    }
+
+    // Now that we've sent a message, we need the VCPU to exit so it can
+    // process the message.
+    vcpu_boxes
+        .lock()
+        .get(index)
+        .expect("invalid vcpu index specified")
+        .set_immediate_exit(true);
+    irq_chip.kick_halted_vcpus();
+
+    // If the VCPU isn't running, we have to notify the run_mode condvar to wake it so it processes
+    // the control message. (Technically this wakes all VCPUs, but those without messages will go
+    // back to sleep.)
+    let current_run_mode = run_mode.get_mode();
+    if current_run_mode != VmRunMode::Running {
+        run_mode.set_and_notify(current_run_mode);
+    }
+}
+
+/// Suspends all VCPUs. The VM will be effectively frozen in time once this function is called,
+/// though devices on the host will continue to run.
+pub(crate) fn suspend_all_vcpus(
+    run_mode: &VcpuRunMode,
+    vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
+    irq_chip: &dyn IrqChipArch,
+    pvclock_host_tube: &Option<Tube>,
+) {
+    // VCPU threads MUST see the VmRunMode::Suspending flag first, otherwise
+    // they may re-enter the VM.
+    run_mode.set_and_notify(VmRunMode::Suspending);
+
+    // Force all vcpus to exit from the hypervisor
+    for vcpu in vcpu_boxes.lock().iter() {
+        vcpu.set_immediate_exit(true);
+    }
+    irq_chip.kick_halted_vcpus();
+
+    handle_pvclock_request(pvclock_host_tube, PvClockCommand::Suspend)
+        .unwrap_or_else(|e| error!("Error handling pvclock suspend: {:?}", e));
+}
+
+/// Resumes all VCPUs.
+pub(crate) fn resume_all_vcpus(
+    run_mode: &VcpuRunMode,
+    vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
+    irq_chip: &dyn IrqChipArch,
+    pvclock_host_tube: &Option<Tube>,
+) {
+    handle_pvclock_request(pvclock_host_tube, PvClockCommand::Resume)
+        .unwrap_or_else(|e| error!("Error handling pvclock resume: {:?}", e));
+
+    // Make sure any immediate exit bits are disabled
+    for vcpu in vcpu_boxes.lock().iter() {
+        vcpu.set_immediate_exit(false);
+    }
+
+    run_mode.set_and_notify(VmRunMode::Running);
 }
 
 #[cfg(feature = "gvm")]
@@ -2027,6 +2417,7 @@ where
         cfg.broker_shutdown_event.take(),
         balloon_host_tube,
         pvclock_host_tube,
+        disk_host_tubes,
         gralloc,
         #[cfg(feature = "stats")]
         stats,
@@ -2039,6 +2430,8 @@ where
         product_args,
         virtio_snd_host_mute_tube,
         cfg.restore_path,
+        cfg.socket_path,
+        cfg.force_s2idle,
     )
 }
 

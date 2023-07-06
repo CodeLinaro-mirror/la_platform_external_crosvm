@@ -779,6 +779,10 @@ fn overwrite<T>(left: &mut T, right: T) {
     let _ = std::mem::replace(left, right);
 }
 
+fn bool_default_true() -> bool {
+    true
+}
+
 /// User-specified configuration for the `crosvm run` command.
 ///
 /// All fields of this structure MUST be either an `Option` or a `Vec` of their type. Arguments of
@@ -899,6 +903,12 @@ pub struct RunCommand {
     /// enable page reporting in balloon.
     pub balloon_page_reporting: Option<bool>,
 
+    #[argh(option)]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// set number of WSS bins to use (default = 4).
+    pub balloon_wss_num_bins: Option<u8>,
+
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -991,6 +1001,13 @@ pub struct RunCommand {
     ///        pinned page must be busy for to be aged into the
     ///        older which is less frequently checked generation.
     pub coiommu: Option<devices::CoIommuParameters>,
+
+    #[argh(option, default = "true")]
+    #[merge(strategy = overwrite)]
+    #[serde(default = "bool_default_true")]
+    /// protect VM threads from hyperthreading-based attacks by scheduling them on different cores.
+    /// Enabled by default, and required for per_vm_core_scheduling.
+    pub core_scheduling: bool,
 
     #[argh(option, arg_name = "CPUSET", from_str_fn(parse_cpu_affinity))]
     #[serde(skip)] // TODO(b/255223604)
@@ -1495,7 +1512,12 @@ pub struct RunCommand {
     ///      )
     ///   )
     /// AND
-    ///   vhost-net=BOOL  - whether enable vhost_net or not.
+    ///   vhost-net
+    ///   OR
+    ///   vhost-net=[device=/vhost_net/device] - use vhost_net.
+    ///                       If the device path is not the default
+    ///                       /dev/vhost-net, it can also be
+    ///                       specified.
     ///                       Default: false.  [Optional]
     ///   vq-pairs=N      - number of rx/tx queue pairs.
     ///                       Default: 1.      [Optional]
@@ -1759,6 +1781,12 @@ pub struct RunCommand {
     ///     string, up to 20 characters (default: no ID)
     ///     o_direct=BOOL - Use O_DIRECT mode to bypass page cache
     root: Option<DiskOptionWithId>,
+
+    #[argh(option, arg_name = "PATH")]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = append)]
+    /// path to a socket from where to read rotary input events and write status updates to
+    pub rotary: Vec<PathBuf>,
 
     #[argh(option, arg_name = "CPUSET")]
     #[serde(skip)] // TODO(b/255223604)
@@ -2379,14 +2407,6 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.hypervisor = Some(crate::crosvm::config::HypervisorKind::Kvm { device: Some(p) });
         }
 
-        #[cfg(unix)]
-        if let Some(p) = cmd.vhost_net_device {
-            if !p.exists() {
-                return Err(format!("vhost-net-device path {:?} does not exist", p));
-            }
-            cfg.vhost_net_device_path = p;
-        }
-
         cfg.android_fstab = cmd.android_fstab;
 
         cfg.async_executor = cmd.async_executor;
@@ -2398,6 +2418,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.params.extend(cmd.params);
 
+        cfg.core_scheduling = cmd.core_scheduling;
         cfg.per_vm_core_scheduling = cmd.per_vm_core_scheduling.unwrap_or_default();
 
         // `--cpu` parameters.
@@ -2776,6 +2797,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.virtio_mice = cmd.mouse;
         cfg.virtio_keyboard = cmd.keyboard;
         cfg.virtio_switches = cmd.switches;
+        cfg.virtio_rotary = cmd.rotary;
         cfg.virtio_input_evdevs = cmd.evdev;
 
         cfg.irq_chip = cmd.irqchip;
@@ -2818,6 +2840,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.rng = !cmd.no_rng.unwrap_or_default();
         cfg.balloon = !cmd.no_balloon.unwrap_or_default();
         cfg.balloon_page_reporting = cmd.balloon_page_reporting.unwrap_or_default();
+        cfg.balloon_wss_num_bins = cmd.balloon_wss_num_bins.unwrap_or(4);
         cfg.balloon_wss_reporting = cmd.balloon_wss_reporting.unwrap_or_default();
         #[cfg(feature = "audio")]
         {
@@ -2858,9 +2881,30 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(unix)]
         {
+            use devices::virtio::VhostNetParameters;
+            use devices::virtio::VHOST_NET_DEFAULT_PATH;
+
             cfg.shared_dirs = cmd.shared_dir;
 
             cfg.net = cmd.net;
+
+            if let Some(vhost_net_device) = &cmd.vhost_net_device {
+                let vhost_net_path = vhost_net_device.to_string_lossy();
+                log::warn!(
+                    "`--vhost-net-device` is deprecated; please use \
+                    `--net ...,vhost-net=[device={vhost_net_path}]`"
+                );
+            }
+
+            let vhost_net_config = if cmd.vhost_net.unwrap_or_default() {
+                Some(VhostNetParameters {
+                    device: cmd
+                        .vhost_net_device
+                        .unwrap_or_else(|| PathBuf::from(VHOST_NET_DEFAULT_PATH)),
+                })
+            } else {
+                None
+            };
 
             let vhost_net_msg = match cmd.vhost_net.unwrap_or_default() {
                 true => ",vhost-net=true",
@@ -2881,7 +2925,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                         tap_name,
                         mac: None,
                     },
-                    vhost_net: cmd.vhost_net.unwrap_or_default(),
+                    vhost_net: vhost_net_config.clone(),
                     vq_pairs: cmd.net_vq_pairs,
                 });
             }
@@ -2893,7 +2937,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                 );
                 cfg.net.push(NetParameters {
                     mode: NetParametersMode::TapFd { tap_fd, mac: None },
-                    vhost_net: cmd.vhost_net.unwrap_or_default(),
+                    vhost_net: vhost_net_config.clone(),
                     vq_pairs: cmd.net_vq_pairs,
                 });
             }
@@ -2930,9 +2974,20 @@ impl TryFrom<RunCommand> for super::config::Config {
                         netmask,
                         mac,
                     },
-                    vhost_net: cmd.vhost_net.unwrap_or_default(),
+                    vhost_net: vhost_net_config,
                     vq_pairs: cmd.net_vq_pairs,
                 });
+            }
+
+            // The number of vq pairs on a network device shall never exceed the number of vcpu
+            // cores. Fix that up if needed.
+            for mut net in &mut cfg.net {
+                if let Some(vq_pairs) = net.vq_pairs {
+                    if vq_pairs as usize > cfg.vcpu_count.unwrap_or(1) {
+                        log::warn!("the number of net vq pairs must not exceed the vcpu count, falling back to single queue mode");
+                        net.vq_pairs = None;
+                    }
+                }
             }
 
             cfg.coiommu_param = cmd.coiommu;

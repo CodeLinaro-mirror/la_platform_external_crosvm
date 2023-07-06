@@ -9,6 +9,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Barrier;
 use std::thread;
@@ -19,6 +20,7 @@ use std::time::Instant;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use aarch64::AArch64 as Arch;
 use anyhow::anyhow;
+use anyhow::Context;
 use anyhow::Result;
 use arch::CpuConfigArch;
 use arch::CpuSet;
@@ -66,6 +68,7 @@ use hypervisor::VcpuExit;
 use hypervisor::VcpuInitX86_64;
 use sync::Condvar;
 use sync::Mutex;
+use vm_control::VcpuControl;
 use vm_control::VmRunMode;
 use winapi::shared::winerror::ERROR_RETRY;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -91,6 +94,10 @@ pub struct VcpuRunMode {
 }
 
 impl VcpuRunMode {
+    pub fn get_mode(&self) -> VmRunMode {
+        *self.mtx.lock()
+    }
+
     pub fn set_and_notify(&self, new_mode: VmRunMode) {
         *self.mtx.lock() = new_mode;
         self.cvar.notify_all();
@@ -266,6 +273,7 @@ impl VcpuRunThread {
         host_cpu_topology: bool,
         tsc_offset: Option<u64>,
         force_calibrated_tsc_leaf: bool,
+        vcpu_control: mpsc::Receiver<VcpuControl>,
     ) -> Result<JoinHandle<Result<()>>>
     where
         V: VcpuArch + 'static,
@@ -358,6 +366,7 @@ impl VcpuRunThread {
                         stats,
                         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
                         cpuid_context,
+                        vcpu_control,
                     )
                 };
 
@@ -551,8 +560,9 @@ pub fn run_all_vcpus<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     run_mode_arc: Arc<VcpuRunMode>,
     tsc_sync_mitigations: TscSyncMitigations,
     force_calibrated_tsc_leaf: bool,
-) -> Result<Vec<JoinHandle<Result<()>>>> {
+) -> Result<(Vec<JoinHandle<Result<()>>>, Vec<mpsc::Sender<VcpuControl>>)> {
     let mut vcpu_threads = Vec::with_capacity(guest_os.vcpu_count + 1);
+    let mut vcpu_control_channels = Vec::with_capacity(guest_os.vcpu_count);
     let start_barrier = Arc::new(Barrier::new(guest_os.vcpu_count + 1));
     let enable_vcpu_monitoring = anti_tamper::enable_vcpu_monitoring();
     setup_vcpu_signal_handler()?;
@@ -596,6 +606,8 @@ pub fn run_all_vcpus<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         // - GHAXM/HAXM cannot create vcpu0 in parallel with other Vcpus.
         let vcpu_create_barrier = Arc::new(Barrier::new(2));
         let vcpu_run_thread = VcpuRunThread::new(cpu_id, enable_vcpu_monitoring);
+        let (vcpu_control_send, vcpu_control_recv) = mpsc::channel();
+        vcpu_control_channels.push(vcpu_control_send);
         let join_handle = vcpu_run_thread.run(
             vcpu,
             vcpu_init.clone(),
@@ -628,6 +640,7 @@ pub fn run_all_vcpus<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             host_cpu_topology,
             tsc_offset,
             force_calibrated_tsc_leaf,
+            vcpu_control_recv,
         )?;
         if let Some(ref mut monitor) = stall_monitor {
             monitor.add_vcpu_thread(vcpu_run_thread);
@@ -643,7 +656,7 @@ pub fn run_all_vcpus<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     }
     // Now wait on the start barrier to start all threads at the same time.
     start_barrier.wait();
-    Ok(vcpu_threads)
+    Ok((vcpu_threads, vcpu_control_channels))
 }
 
 fn vcpu_loop<V>(
@@ -657,6 +670,7 @@ fn vcpu_loop<V>(
     run_mode_arc: Arc<VcpuRunMode>,
     #[cfg(feature = "stats")] stats: Option<Arc<Mutex<StatisticsCollector>>>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] cpuid_context: CpuIdContext,
+    vcpu_control: mpsc::Receiver<VcpuControl>,
 ) -> Result<ExitState>
 where
     V: VcpuArch + 'static,
@@ -894,7 +908,10 @@ where
             let mut run_mode_lock = run_mode_arc.mtx.lock();
             loop {
                 match *run_mode_lock {
-                    VmRunMode::Running => break,
+                    VmRunMode::Running => {
+                        process_vcpu_control_messages(&mut vcpu, *run_mode_lock, &vcpu_control);
+                        break;
+                    }
                     VmRunMode::Suspending => {
                         // On KVM implementations that use a paravirtualized clock (e.g.
                         // x86), a flag must be set to indicate to the guest kernel that
@@ -920,6 +937,15 @@ where
                         return Ok(ExitState::Stop);
                     }
                 }
+
+                // For non running modes, we don't want to process messages until we've completed
+                // *all* work for any VmRunMode transition. This is because one control message
+                // asks us to inform the requestor of our current state. We want to make sure our
+                // our state has completely transitioned before we respond to the requestor. If
+                // we do this elsewhere, we might respond while in a partial state which could
+                // break features like snapshotting (e.g. by introducing a race condition).
+                process_vcpu_control_messages(&mut vcpu, *run_mode_lock, &vcpu_control);
+
                 // Give ownership of our exclusive lock to the condition variable that
                 // will block. When the condition variable is notified, `wait` will
                 // unblock and return a new exclusive lock.
@@ -933,6 +959,58 @@ where
                 context.cpu_id, e
             )
         });
+    }
+}
+
+fn process_vcpu_control_messages<V>(
+    vcpu: &mut V,
+    run_mode: VmRunMode,
+    vcpu_control: &mpsc::Receiver<VcpuControl>,
+) where
+    V: VcpuArch + 'static,
+{
+    let control_messages: Vec<VcpuControl> = vcpu_control.try_iter().collect();
+
+    for msg in control_messages {
+        match msg {
+            VcpuControl::RunState(new_mode) => {
+                panic!("VCPUs do not handle RunState messages on Windows")
+            }
+            #[cfg(feature = "gdb")]
+            VcpuControl::Debug(d) => {
+                unimplemented!("Windows VCPUs do not support debug yet.");
+            }
+            VcpuControl::MakeRT => {
+                unimplemented!("Windows VCPUs do not support on demand RT.");
+            }
+            VcpuControl::GetStates(response_chan) => {
+                // Wondering why we need this given that the state value is already in an Arc?
+                //
+                // The control loop generally sets the run mode directly via the Arc; however,
+                // it has no way of knowing *when* the VCPU threads have actually acknowledged
+                // the new value. By returning the value in here, we prove the the control loop
+                // we have accepted the new value and are done with our state change.
+                if let Err(e) = response_chan.send(run_mode) {
+                    error!("Failed to send GetState: {}", e);
+                };
+            }
+            VcpuControl::Snapshot(response_chan) => {
+                let resp = vcpu
+                    .snapshot()
+                    .with_context(|| format!("Failed to snapshot Vcpu #{}", vcpu.id()));
+                if let Err(e) = response_chan.send(resp) {
+                    error!("Failed to send snapshot response: {}", e);
+                }
+            }
+            VcpuControl::Restore(response_chan, vcpu_data) => {
+                let resp = vcpu
+                    .restore(&vcpu_data)
+                    .with_context(|| format!("Failed to restore Vcpu #{}", vcpu.id()));
+                if let Err(e) = response_chan.send(resp) {
+                    error!("Failed to send restore response: {}", e);
+                }
+            }
+        }
     }
 }
 

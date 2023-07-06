@@ -5,6 +5,7 @@
 mod sys;
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -13,8 +14,9 @@ use balloon_control::BalloonStats;
 use balloon_control::BalloonTubeCommand;
 use balloon_control::BalloonTubeResult;
 use balloon_control::BalloonWSS;
-use balloon_control::VIRTIO_BALLOON_WSS_CONFIG_SIZE;
-use balloon_control::VIRTIO_BALLOON_WSS_NUM_BINS;
+use balloon_control::WSSBucket;
+use balloon_control::VIRTIO_BALLOON_WS_MAX_NUM_BINS;
+use balloon_control::VIRTIO_BALLOON_WS_MIN_NUM_BINS;
 use base::error;
 use base::warn;
 use base::AsRawDescriptor;
@@ -41,6 +43,8 @@ use futures::FutureExt;
 use futures::StreamExt;
 use remain::sorted;
 use thiserror::Error as ThisError;
+#[cfg(windows)]
+use vm_control::api::VmMemoryClient;
 #[cfg(feature = "registered_events")]
 use vm_control::RegisteredEventWithData;
 use vm_memory::GuestAddress;
@@ -213,17 +217,15 @@ struct virtio_balloon_wss {
 }
 
 impl virtio_balloon_wss {
-    fn update_wss(&self, wss: &mut BalloonWSS, index: usize) {
-        if index >= VIRTIO_BALLOON_WSS_NUM_BINS {
-            error!(
-                "index {} outside of known WSS bins: {}",
-                index, VIRTIO_BALLOON_WSS_NUM_BINS
-            );
-            return;
-        }
-        wss.wss[index].age = self.idle_age_ms.to_native();
-        wss.wss[index].bytes[0] = self.memory_size_bytes[0].to_native();
-        wss.wss[index].bytes[1] = self.memory_size_bytes[1].to_native();
+    fn update_wss(&self, wss: &mut BalloonWSS) {
+        let bucket = WSSBucket {
+            age: self.idle_age_ms.to_native(),
+            bytes: [
+                self.memory_size_bytes[0].to_native(),
+                self.memory_size_bytes[1].to_native(),
+            ],
+        };
+        wss.wss.push(bucket);
     }
 }
 
@@ -570,7 +572,9 @@ enum WSSOp {
         id: u64,
     },
     WSSConfig {
-        config: [u64; VIRTIO_BALLOON_WSS_CONFIG_SIZE],
+        bins: Vec<u64>,
+        refresh_threshold: u64,
+        report_threshold: u64,
     },
 }
 
@@ -610,13 +614,25 @@ async fn handle_wss_op_queue(
 
                 writer.write_obj(wss_r).map_err(BalloonError::WriteQueue)?;
             }
-            WSSOp::WSSConfig { config } => {
+            WSSOp::WSSConfig {
+                bins,
+                refresh_threshold,
+                report_threshold,
+            } => {
                 let cmd = virtio_balloon_op {
                     type_: VIRTIO_BALLOON_WSS_OP_CONFIG.into(),
                 };
 
                 writer.write_obj(cmd).map_err(BalloonError::WriteQueue)?;
-                writer.write_obj(config).map_err(BalloonError::WriteQueue)?;
+                writer
+                    .write_all(bins.as_bytes())
+                    .map_err(BalloonError::WriteQueue)?;
+                writer
+                    .write_obj(refresh_threshold)
+                    .map_err(BalloonError::WriteQueue)?;
+                writer
+                    .write_obj(report_threshold)
+                    .map_err(BalloonError::WriteQueue)?;
             }
         }
 
@@ -629,26 +645,22 @@ async fn handle_wss_op_queue(
 }
 
 fn parse_balloon_wss(reader: &mut Reader) -> BalloonWSS {
-    let mut count = 0;
     let mut wss = BalloonWSS::new();
     for res in reader.iter::<virtio_balloon_wss>() {
         match res {
             Ok(wss_msg) => {
-                wss_msg.update_wss(&mut wss, count);
-                count += 1;
-                if count > VIRTIO_BALLOON_WSS_NUM_BINS {
-                    error!(
-                        "we should never receive more than {} wss buckets",
-                        VIRTIO_BALLOON_WSS_NUM_BINS
-                    );
-                    break;
-                }
+                wss_msg.update_wss(&mut wss);
             }
             Err(e) => {
                 error!("error while reading wss: {}", e);
                 break;
             }
         }
+    }
+    if wss.wss.len() < VIRTIO_BALLOON_WS_MIN_NUM_BINS
+        || wss.wss.len() > VIRTIO_BALLOON_WS_MAX_NUM_BINS
+    {
+        error!("unexpected number of WSS buckets: {}", wss.wss.len());
     }
     wss
 }
@@ -708,18 +720,6 @@ async fn handle_wss_data_queue(
     }
 }
 
-fn send_initial_wss_config(mut wss_op_tx: mpsc::Sender<WSSOp>) {
-    // NOTE: first VIRTIO_BALLOON_WSS_NUM_BINS - 1 values are the
-    // interval boundaries, then refresh and reporting thresholds.
-    let config = WSSOp::WSSConfig {
-        config: [1_000, 5_000, 10_000, 750, 1_000],
-    };
-
-    if let Err(e) = wss_op_tx.try_send(config) {
-        error!("failed to send inital WSS config to guest: {}", e);
-    }
-}
-
 // Async task that handles the command socket. The command socket handles messages from the host
 // requesting that the guest balloon be adjusted or to report guest memory statistics.
 async fn handle_command_tube(
@@ -752,8 +752,16 @@ async fn handle_command_tube(
                         }
                     }
                 }
-                BalloonTubeCommand::WorkingSetSizeConfig { config } => {
-                    if let Err(e) = wss_op_tx.try_send(WSSOp::WSSConfig { config }) {
+                BalloonTubeCommand::WorkingSetSizeConfig {
+                    bins,
+                    refresh_threshold,
+                    report_threshold,
+                } => {
+                    if let Err(e) = wss_op_tx.try_send(WSSOp::WSSConfig {
+                        bins,
+                        refresh_threshold,
+                        report_threshold,
+                    }) {
                         error!("failed to send config to wss handler: {}", e);
                     }
                 }
@@ -808,7 +816,7 @@ fn run_worker(
     events_queue: Option<(Queue, Event)>,
     wss_queues: (Option<(Queue, Event)>, Option<(Queue, Event)>),
     command_tube: Tube,
-    #[cfg(windows)] dynamic_mapping_tube: Tube,
+    #[cfg(windows)] vm_memory_client: VmMemoryClient,
     release_memory_tube: Option<Tube>,
     interrupt: Interrupt,
     kill_evt: Event,
@@ -838,7 +846,7 @@ fn run_worker(
                     &guest_address,
                     len,
                     #[cfg(windows)]
-                    &dynamic_mapping_tube,
+                    &vm_memory_client,
                     #[cfg(unix)]
                     &mem,
                 )
@@ -858,7 +866,7 @@ fn run_worker(
                     &guest_address,
                     len,
                     #[cfg(windows)]
-                    &dynamic_mapping_tube,
+                    &vm_memory_client,
                 )
             },
         );
@@ -899,7 +907,7 @@ fn run_worker(
                         &guest_address,
                         len,
                         #[cfg(windows)]
-                        &dynamic_mapping_tube,
+                        &vm_memory_client,
                         #[cfg(unix)]
                         &mem,
                     )
@@ -932,8 +940,6 @@ fn run_worker(
 
         let (wss_op_tx, wss_op_rx) = mpsc::channel::<WSSOp>(1);
         let wss_op = if let Some((wss_op_queue, wss_op_queue_evt)) = wss_queues.1 {
-            send_initial_wss_config(wss_op_tx.clone());
-
             handle_wss_op_queue(
                 &mem,
                 wss_op_queue,
@@ -1022,7 +1028,7 @@ fn run_worker(
 pub struct Balloon {
     command_tube: Option<Tube>,
     #[cfg(windows)]
-    dynamic_mapping_tube: Option<Tube>,
+    vm_memory_client: Option<VmMemoryClient>,
     release_memory_tube: Option<Tube>,
     pending_adjusted_response_event: Event,
     state: Arc<AsyncRwLock<BalloonState>>,
@@ -1031,6 +1037,7 @@ pub struct Balloon {
     worker_thread: Option<WorkerThread<WorkerReturn>>,
     #[cfg(feature = "registered_events")]
     registered_evt_q: Option<SendTube>,
+    wss_num_bins: u8,
 }
 
 /// Operation mode of the balloon.
@@ -1051,12 +1058,13 @@ impl Balloon {
     pub fn new(
         base_features: u64,
         command_tube: Tube,
-        #[cfg(windows)] dynamic_mapping_tube: Tube,
+        #[cfg(windows)] vm_memory_client: VmMemoryClient,
         release_memory_tube: Option<Tube>,
         init_balloon_size: u64,
         mode: BalloonMode,
         enabled_features: u64,
         #[cfg(feature = "registered_events")] registered_evt_q: Option<SendTube>,
+        wss_num_bins: u8,
     ) -> Result<Balloon> {
         let features = base_features
             | 1 << VIRTIO_BALLOON_F_MUST_TELL_HOST
@@ -1072,7 +1080,7 @@ impl Balloon {
         Ok(Balloon {
             command_tube: Some(command_tube),
             #[cfg(windows)]
-            dynamic_mapping_tube: Some(dynamic_mapping_tube),
+            vm_memory_client: Some(vm_memory_client),
             release_memory_tube,
             pending_adjusted_response_event: Event::new().map_err(BalloonError::CreatingEvent)?,
             state: Arc::new(AsyncRwLock::new(BalloonState {
@@ -1088,6 +1096,7 @@ impl Balloon {
             acked_features: 0,
             #[cfg(feature = "registered_events")]
             registered_evt_q,
+            wss_num_bins,
         })
     }
 
@@ -1102,7 +1111,7 @@ impl Balloon {
             // config correctly.
             free_page_hint_cmd_id: 0.into(),
             poison_val: 0.into(),
-            wss_num_bins: (VIRTIO_BALLOON_WSS_NUM_BINS as u32).into(),
+            wss_num_bins: (self.wss_num_bins as u32).into(),
         }
     }
 
@@ -1227,7 +1236,7 @@ impl VirtioDevice for Balloon {
         let command_tube = self.command_tube.take().unwrap();
 
         #[cfg(windows)]
-        let mapping_tube = self.dynamic_mapping_tube.take().unwrap();
+        let vm_memory_client = self.vm_memory_client.take().unwrap();
         let release_memory_tube = self.release_memory_tube.take();
         #[cfg(feature = "registered_events")]
         let registered_evt_q = self.registered_evt_q.take();
@@ -1246,7 +1255,7 @@ impl VirtioDevice for Balloon {
                 wss_queues,
                 command_tube,
                 #[cfg(windows)]
-                mapping_tube,
+                vm_memory_client,
                 release_memory_tube,
                 interrupt,
                 kill_evt,

@@ -31,7 +31,7 @@ function check_location() {
 }
 
 my_name=`basename $0`
-all_archs=("x86_64" "aarch64" "arm" "x86")
+all_archs=("x86_64" "aarch64" "arm" "x86" "riscv64")
 seccomp_archs=("x86_64" "aarch64")
 
 # define arch dir pattern: e.g. ${ARCH}-linux-gnu
@@ -55,13 +55,24 @@ function scan_policy_name() {
     # pushd but no output to stdout/stderr
     # the output is taken and used by the caller
     pushd $seccomp_dir > /dev/null 2>&1
-    ls --hide=common_device.policy \
+    ls \
+      `# Not policy files.` \
+       --hide=constants.json \
+      `# Non-root policy files.` \
+       --hide=common_device.policy \
        --hide=common_device.frequency \
        --hide=gpu_common.policy \
        --hide=serial.policy \
+       --hide=net.policy \
        --hide=block.policy \
        --hide=vvu.policy \
        --hide=vhost_user.policy \
+       --hide=vhost_vsock.policy \
+      `# Root policy files we don't need yet.` \
+       --hide=net_device_vhost_user.policy \
+       --hide=swap_monitor.policy \
+       --hide=vhost_vsock_device_vhost_user.policy \
+       --hide=vhost_vsock_device_vvu.policy \
        -1
     popd > /dev/null 2>&1
   )
@@ -87,6 +98,8 @@ ${cchars} WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implie
 ${cchars} See the License for the specific language governing permissions and
 ${cchars} limitations under the License.
 
+${cchars} DO NOT MODIFY DIRECTLY, ALL CHANGES WILL BE OVERWRITTEN BY ${my_name}
+
 EOF
 }
 
@@ -102,28 +115,45 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
+python_binary_host {
+    name: "detect_duplication",
+    main: "detect_duplication.py",
+    srcs: [
+        "detect_duplication.py",
+    ],
+}
+
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "\$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) \$(location x86_64/serial.policy) \$(location x86_64/block.policy) \$(location x86_64/vvu.policy) \$(location x86_64/vhost_user.policy) < \$(in) > \$(out)",
+    cmd: "set -o pipefail; \$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) \$(location x86_64/serial.policy) \$(location x86_64/net.policy) \$(location x86_64/block.policy) \$(location x86_64/vvu.policy) \$(location x86_64/vhost_user.policy) \$(location x86_64/vhost_vsock.policy) < \$(in) | \$(location detect_duplication) > \$(out)",
+    tools: [
+        "detect_duplication",
+    ],
     tool_files: [
         "policy-inliner.sh",
         "x86_64/common_device.policy",
         "x86_64/gpu_common.policy",
         "x86_64/serial.policy",
+        "x86_64/net.policy",
         "x86_64/block.policy",
         "x86_64/vvu.policy",
         "x86_64/vhost_user.policy",
+        "x86_64/vhost_vsock.policy",
     ],
 }
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_aarch64",
-    cmd: "\$(location policy-inliner.sh) \$(location aarch64/common_device.policy) \$(location aarch64/gpu_common.policy) \$(location aarch64/serial.policy) < \$(in) > \$(out)",
+    cmd: "set -o pipefail; \$(location policy-inliner.sh) \$(location aarch64/common_device.policy) \$(location aarch64/gpu_common.policy) \$(location aarch64/serial.policy) \$(location aarch64/net.policy) DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST < \$(in) | \$(location detect_duplication) > \$(out)",
+    tools: [
+        "detect_duplication",
+    ],
     tool_files: [
         "policy-inliner.sh",
         "aarch64/common_device.policy",
         "aarch64/gpu_common.policy",
         "aarch64/serial.policy",
+        "aarch64/net.policy",
     ],
 }
 

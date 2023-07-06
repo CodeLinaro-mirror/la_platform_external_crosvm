@@ -332,7 +332,7 @@ const MB: u64 = 1 << 20;
 const GB: u64 = 1 << 30;
 
 pub const BOOT_STACK_POINTER: u64 = 0x8000;
-const START_OF_RAM_32BITS: u64 = if cfg!(feature = "direct") { 0x1000 } else { 0 };
+const START_OF_RAM_32BITS: u64 = 0;
 const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 // Linux (with 4-level paging) has a physical memory limit of 46 bits (64 TiB).
 const HIGH_MMIO_MAX_END: u64 = (1u64 << 46) - 1;
@@ -382,17 +382,7 @@ static LOW_MEMORY_LAYOUT: OnceCell<LowMemoryLayout> = OnceCell::new();
 pub fn init_low_memory_layout(pcie_ecam: Option<AddressRange>, pci_low_start: Option<u64>) {
     LOW_MEMORY_LAYOUT.get_or_init(|| {
         // Make sure it align to 256MB for MTRR convenient
-        const MEM_32BIT_GAP_SIZE: u64 = if cfg!(feature = "direct") {
-            // Allow space for identity mapping coreboot memory regions on the host
-            // which is found at around 7a00_0000 (little bit before 2GB)
-            //
-            // TODO(b/188011323): stop hardcoding sizes and addresses here and instead
-            // determine the memory map from how the VM has been configured via the
-            // command line.
-            2560 * MB
-        } else {
-            768 * MB
-        };
+        const MEM_32BIT_GAP_SIZE: u64 = 768 * MB;
         // Reserved memory for nand_bios/LAPIC/IOAPIC/HPET/.....
         const RESERVED_MEM_SIZE: u64 = 0x800_0000;
         const PCI_MMIO_END: u64 = FIRST_ADDR_PAST_32BITS - RESERVED_MEM_SIZE - 1;
@@ -697,7 +687,7 @@ impl arch::LinuxArch for X8664arch {
         dump_device_tree_blob: Option<PathBuf>,
         debugcon_jail: Option<Minijail>,
         pflash_jail: Option<Minijail>,
-        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
         #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
@@ -1108,7 +1098,7 @@ impl arch::LinuxArch for X8664arch {
         #[cfg(unix)] minijail: Option<Minijail>,
         resources: &mut SystemAllocator,
         hp_control_tube: &mpsc::Sender<PciRootCommand>,
-        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
     ) -> Result<PciAddress> {
         arch::configure_pci_device(
             linux,
@@ -1531,7 +1521,7 @@ impl X8664arch {
         bios_size: u64,
         mmio_bus: &devices::Bus,
         jail: Option<Minijail>,
-        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
     ) -> Result<()> {
         let size = pflash_image.metadata().map_err(Error::LoadPflash)?.len();
         let start = FIRST_ADDR_PAST_32BITS - bios_size - size;
@@ -1811,7 +1801,7 @@ impl X8664arch {
         #[cfg_attr(windows, allow(unused_variables))] mmio_bus: &devices::Bus,
         max_bus: u8,
         resume_notify_devices: &mut Vec<Arc<Mutex<dyn BusResumeDevice>>>,
-        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
         #[cfg(unix)] ac_adapter: bool,
         #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> Result<(acpi::AcpiDevResource, Option<BatControl>)> {
@@ -2058,7 +2048,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         serial_jail: Option<Minijail>,
-        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
     ) -> Result<()> {
         let com_evt_1_3 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         let com_evt_2_4 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
@@ -2095,7 +2085,7 @@ impl X8664arch {
         io_bus: &devices::Bus,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
         debugcon_jail: Option<Minijail>,
-        #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
+        #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
     ) -> Result<()> {
         for param in serial_parameters.values() {
             if param.hardware != SerialHardware::Debugcon {
@@ -2374,22 +2364,6 @@ mod tests {
         assert_eq!(read_pci_mmio_before_32bit().start, 2 * GB);
         assert_eq!(read_pcie_cfg_mmio().start, 3 * GB);
         assert_eq!(read_pcie_cfg_mmio().len().unwrap(), 256 * MB);
-    }
-
-    #[test]
-    #[cfg(feature = "direct")]
-    #[ignore] // TODO(b/236253615): Fix and re-enable this test.
-    fn end_addr_before_32bits() {
-        setup();
-        // On volteer, type16 (coreboot) region is at 0x00000000769f3000-0x0000000076ffffff.
-        // On brya, type16 region is at 0x0000000076876000-0x00000000803fffff
-        let brya_type16_address = 0x7687_6000;
-        assert!(
-            read_pci_mmio_before_32bit().start < brya_type16_address,
-            "{} < {}",
-            read_pci_mmio_before_32bit().start,
-            brya_type16_address
-        );
     }
 
     #[test]

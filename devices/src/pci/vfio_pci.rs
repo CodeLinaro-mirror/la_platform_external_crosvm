@@ -39,12 +39,11 @@ use resources::MmioType;
 use resources::SystemAllocator;
 use sync::Mutex;
 use vfio_sys::*;
+use vm_control::api::VmMemoryClient;
 use vm_control::HotPlugDeviceInfo;
 use vm_control::HotPlugDeviceType;
 use vm_control::VmMemoryDestination;
 use vm_control::VmMemoryRegionId;
-use vm_control::VmMemoryRequest;
-use vm_control::VmMemoryResponse;
 use vm_control::VmMemorySource;
 use vm_control::VmRequest;
 use vm_control::VmResponse;
@@ -232,10 +231,10 @@ struct VfioMsixCap {
     config: MsixConfig,
     offset: u32,
     table_size: u16,
-    table_pci_bar: u32,
+    table_pci_bar: PciBarIndex,
     table_offset: u64,
     table_size_bytes: u64,
-    pba_pci_bar: u32,
+    pba_pci_bar: PciBarIndex,
     pba_offset: u64,
     pba_size_bytes: u64,
     msix_interrupt_evt: Vec<Event>,
@@ -251,10 +250,10 @@ impl VfioMsixCap {
     ) -> Self {
         let msix_ctl: u16 = config.read_config(msix_cap_start + PCI_MSIX_FLAGS);
         let table: u32 = config.read_config(msix_cap_start + PCI_MSIX_TABLE);
-        let table_pci_bar = table & PCI_MSIX_TABLE_BIR;
+        let table_pci_bar = (table & PCI_MSIX_TABLE_BIR) as PciBarIndex;
         let table_offset = (table & PCI_MSIX_TABLE_OFFSET) as u64;
         let pba: u32 = config.read_config(msix_cap_start + PCI_MSIX_PBA);
-        let pba_pci_bar = pba & PCI_MSIX_PBA_BIR;
+        let pba_pci_bar = (pba & PCI_MSIX_PBA_BIR) as PciBarIndex;
         let pba_offset = (pba & PCI_MSIX_PBA_OFFSET) as u64;
 
         let mut table_size = (msix_ctl & PCI_MSIX_FLAGS_QSIZE) as u64 + 1;
@@ -320,13 +319,13 @@ impl VfioMsixCap {
         }
     }
 
-    fn is_msix_table(&self, bar_index: u32, offset: u64) -> bool {
+    fn is_msix_table(&self, bar_index: PciBarIndex, offset: u64) -> bool {
         bar_index == self.table_pci_bar
             && offset >= self.table_offset
             && offset < self.table_offset + self.table_size_bytes
     }
 
-    fn get_msix_table(&self, bar_index: u32) -> Option<AddressRange> {
+    fn get_msix_table(&self, bar_index: PciBarIndex) -> Option<AddressRange> {
         if bar_index == self.table_pci_bar {
             AddressRange::from_start_and_size(self.table_offset, self.table_size_bytes)
         } else {
@@ -344,13 +343,13 @@ impl VfioMsixCap {
         self.config.write_msix_table(offset, data)
     }
 
-    fn is_msix_pba(&self, bar_index: u32, offset: u64) -> bool {
+    fn is_msix_pba(&self, bar_index: PciBarIndex, offset: u64) -> bool {
         bar_index == self.pba_pci_bar
             && offset >= self.pba_offset
             && offset < self.pba_offset + self.pba_size_bytes
     }
 
-    fn get_msix_pba(&self, bar_index: u32) -> Option<AddressRange> {
+    fn get_msix_pba(&self, bar_index: PciBarIndex) -> Option<AddressRange> {
         if bar_index == self.pba_pci_bar {
             AddressRange::from_start_and_size(self.pba_offset, self.pba_size_bytes)
         } else {
@@ -524,6 +523,7 @@ impl VfioPciWorker {
         wakeup_evt: Event,
         kill_evt: Event,
         msix_evt: Vec<Event>,
+        is_in_low_power: Arc<Mutex<bool>>,
     ) {
         #[derive(EventToken)]
         enum Token {
@@ -589,12 +589,20 @@ impl VfioPciWorker {
                     }
                     Token::WakeUp => {
                         let _ = wakeup_evt.wait();
-                        if let Some(pm_cap) = &self.pm_cap {
-                            if pm_cap.lock().should_trigger_pme() {
-                                let request = VmRequest::PciPme(self.address.pme_requester_id());
-                                if self.vm_socket.send(&request).is_ok() {
-                                    if let Err(e) = self.vm_socket.recv::<VmResponse>() {
-                                        error!("{} failed to send PME: {}", self.name.clone(), e);
+
+                        if *is_in_low_power.lock() {
+                            if let Some(pm_cap) = &self.pm_cap {
+                                if pm_cap.lock().should_trigger_pme() {
+                                    let request =
+                                        VmRequest::PciPme(self.address.pme_requester_id());
+                                    if self.vm_socket.send(&request).is_ok() {
+                                        if let Err(e) = self.vm_socket.recv::<VmResponse>() {
+                                            error!(
+                                                "{} failed to send PME: {}",
+                                                self.name.clone(),
+                                                e
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -651,9 +659,10 @@ pub struct VfioPciDevice {
     msi_cap: Option<VfioMsiCap>,
     msix_cap: Option<Arc<Mutex<VfioMsixCap>>>,
     irq_type: Option<VfioIrqType>,
-    vm_socket_mem: Tube,
+    vm_memory_client: VmMemoryClient,
     device_data: Option<DeviceData>,
     pm_evt: Option<Event>,
+    is_in_low_power: Arc<Mutex<bool>>,
     worker_thread: Option<WorkerThread<VfioPciWorker>>,
     vm_socket_vm: Option<Tube>,
     sysfs_path: PathBuf,
@@ -695,7 +704,7 @@ impl VfioPciDevice {
         guest_address: Option<PciAddress>,
         vfio_device_socket_msi: Tube,
         vfio_device_socket_msix: Tube,
-        vfio_device_socket_mem: Tube,
+        vm_memory_client: VmMemoryClient,
         vfio_device_socket_vm: Tube,
         #[cfg(feature = "direct")] is_intel_lpss: bool,
     ) -> Result<Self, PciDeviceError> {
@@ -871,9 +880,10 @@ impl VfioPciDevice {
             msi_cap,
             msix_cap,
             irq_type: None,
-            vm_socket_mem: vfio_device_socket_mem,
+            vm_memory_client,
             device_data,
             pm_evt: None,
+            is_in_low_power: Arc::new(Mutex::new(false)),
             worker_thread: None,
             vm_socket_vm: Some(vfio_device_socket_vm),
             sysfs_path: sysfs_path.to_path_buf(),
@@ -907,16 +917,6 @@ impl VfioPciDevice {
         }
 
         ret
-    }
-
-    fn find_region(&self, addr: u64) -> Option<PciBarConfiguration> {
-        for mmio_info in self.mmio_regions.iter() {
-            if addr >= mmio_info.address() && addr < mmio_info.address() + mmio_info.size() {
-                return Some(*mmio_info);
-            }
-        }
-
-        None
     }
 
     fn enable_intx(&mut self) {
@@ -1146,7 +1146,7 @@ impl VfioPciDevice {
 
     fn remove_bar_mmap_msix(
         &self,
-        bar_index: u32,
+        bar_index: PciBarIndex,
         bar_mmaps: Vec<vfio_region_sparse_mmap_area>,
     ) -> Vec<vfio_region_sparse_mmap_area> {
         let msix_cap = &self.msix_cap.as_ref().unwrap().lock();
@@ -1183,7 +1183,7 @@ impl VfioPciDevice {
         }
     }
 
-    fn add_bar_mmap(&self, index: u32, bar_addr: u64) -> Vec<VmMemoryRegionId> {
+    fn add_bar_mmap(&self, index: PciBarIndex, bar_addr: u64) -> Vec<VmMemoryRegionId> {
         let mut mmaps_ids: Vec<VmMemoryRegionId> = Vec::new();
         if self.device.get_region_flags(index) & VFIO_REGION_INFO_FLAG_MMAP != 0 {
             // the bar storing msix table and pba couldn't mmap.
@@ -1211,31 +1211,22 @@ impl VfioPciDevice {
                     Ok(device_file) => device_file.into(),
                     Err(_) => break,
                 };
-                if self
-                    .vm_socket_mem
-                    .send(&VmMemoryRequest::RegisterMemory {
-                        source: VmMemorySource::Descriptor {
-                            descriptor,
-                            offset,
-                            size: mmap_size,
-                        },
-                        dest: VmMemoryDestination::GuestPhysicalAddress(guest_map_start),
-                        prot: Protection::read_write(),
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-
-                let response: VmMemoryResponse = match self.vm_socket_mem.recv() {
-                    Ok(res) => res,
-                    Err(_) => break,
-                };
-                match response {
-                    VmMemoryResponse::RegisterMemory(id) => {
+                match self.vm_memory_client.register_memory(
+                    VmMemorySource::Descriptor {
+                        descriptor,
+                        offset,
+                        size: mmap_size,
+                    },
+                    VmMemoryDestination::GuestPhysicalAddress(guest_map_start),
+                    Protection::read_write(),
+                ) {
+                    Ok(id) => {
                         mmaps_ids.push(id);
                     }
-                    _ => break,
+                    Err(e) => {
+                        error!("register_memory failed: {}", e);
+                        break;
+                    }
                 }
             }
         }
@@ -1245,16 +1236,8 @@ impl VfioPciDevice {
 
     fn remove_bar_mmap(&self, mmap_ids: &[VmMemoryRegionId]) {
         for mmap_id in mmap_ids {
-            if self
-                .vm_socket_mem
-                .send(&VmMemoryRequest::UnregisterMemory(*mmap_id))
-                .is_err()
-            {
-                error!("failed to send UnregisterMemory request");
-                return;
-            }
-            if self.vm_socket_mem.recv::<VmMemoryResponse>().is_err() {
-                error!("failed to receive UnregisterMemory response");
+            if let Err(e) = self.vm_memory_client.unregister_memory(*mmap_id) {
+                error!("unregister_memory failed: {}", e);
             }
         }
     }
@@ -1288,7 +1271,7 @@ impl VfioPciDevice {
         }
 
         for (bar_idx, addr) in needs_map.iter() {
-            let ids = self.add_bar_mmap(*bar_idx as u32, *addr);
+            let ids = self.add_bar_mmap(*bar_idx, *addr);
             self.mapped_mmio_bars.insert(*bar_idx, (*addr, ids));
         }
     }
@@ -1347,6 +1330,7 @@ impl VfioPciDevice {
         let sysfs_path = self.sysfs_path.clone();
         let pm_cap = self.pm_cap.clone();
         let msix_cap = self.msix_cap.clone();
+        let is_in_low_power = self.is_in_low_power.clone();
         self.worker_thread = Some(WorkerThread::start("vfio_pci", move |kill_evt| {
             let mut worker = VfioPciWorker {
                 address,
@@ -1356,7 +1340,7 @@ impl VfioPciDevice {
                 pm_cap,
                 msix_cap,
             };
-            worker.run(req_evt, pm_evt, kill_evt, msix_evt);
+            worker.run(req_evt, pm_evt, kill_evt, msix_evt, is_in_low_power);
             worker
         }));
         self.activated = true;
@@ -1770,7 +1754,7 @@ impl PciDevice for VfioPciDevice {
         if let Some(ref interrupt_evt) = self.interrupt_evt {
             rds.extend(interrupt_evt.as_raw_descriptors());
         }
-        rds.push(self.vm_socket_mem.as_raw_descriptor());
+        rds.push(self.vm_memory_client.as_raw_descriptor());
         if let Some(vm_socket_vm) = &self.vm_socket_vm {
             rds.push(vm_socket_vm.as_raw_descriptor());
         }
@@ -2045,7 +2029,7 @@ impl PciDevice for VfioPciDevice {
 
         if !self.is_skipped_reg(start as u32) {
             self.device
-                .region_write(VFIO_PCI_CONFIG_REGION_INDEX, data, start);
+                .region_write(VFIO_PCI_CONFIG_REGION_INDEX as usize, data, start);
         }
 
         // if guest enable memory access, then enable bar mappable once
@@ -2117,12 +2101,14 @@ impl PciDevice for VfioPciDevice {
                         if let Some(pm_evt) =
                             self.pm_evt.as_ref().map(|evt| evt.try_clone().unwrap())
                         {
+                            *self.is_in_low_power.lock() = true;
                             let _ = self.device.pm_low_power_enter_with_wakeup(pm_evt);
                         } else {
                             let _ = self.device.pm_low_power_enter();
                         }
                     }
                     _ => {
+                        *self.is_in_low_power.lock() = false;
                         let _ = self.device.pm_low_power_exit();
                     }
                 };
@@ -2135,102 +2121,93 @@ impl PciDevice for VfioPciDevice {
         };
     }
 
-    fn read_bar(&mut self, addr: u64, data: &mut [u8]) {
-        if let Some(mmio_info) = self.find_region(addr) {
-            let offset = addr - mmio_info.address();
-            let bar_index = mmio_info.bar_index() as u32;
-            if let Some(msix_cap) = &self.msix_cap {
-                let msix_cap = msix_cap.lock();
-                if msix_cap.is_msix_table(bar_index, offset) {
-                    msix_cap.read_table(offset, data);
-                    return;
-                } else if msix_cap.is_msix_pba(bar_index, offset) {
-                    msix_cap.read_pba(offset, data);
-                    return;
-                }
-            }
-            self.device.region_read(bar_index, data, offset);
-        }
-    }
-
-    fn write_bar(&mut self, addr: u64, data: &[u8]) {
-        if let Some(mmio_info) = self.find_region(addr) {
-            // Ignore igd opregion's write
-            if let Some(device_data) = &self.device_data {
-                match *device_data {
-                    DeviceData::IntelGfxData { opregion_index } => {
-                        if opregion_index == mmio_info.bar_index() as u32 {
-                            return;
-                        }
-                    }
-                }
-            }
-
-            let offset = addr - mmio_info.address();
-            let bar_index = mmio_info.bar_index() as u32;
-
-            if let Some(msix_cap) = &self.msix_cap {
-                let mut msix_cap = msix_cap.lock();
-                if msix_cap.is_msix_table(bar_index, offset) {
-                    let behavior = msix_cap.write_table(offset, data);
-                    if let MsixStatus::EntryChanged(index) = behavior {
-                        let irqfd = msix_cap.get_msix_irqfd(index);
-                        self.msix_vector_update(index, irqfd);
-                    }
-                    return;
-                } else if msix_cap.is_msix_pba(bar_index, offset) {
-                    msix_cap.write_pba(offset, data);
-                    return;
-                }
-            }
-
-            #[cfg(feature = "direct")]
-            if self.is_intel_lpss
-                && bar_index == 0
-                && offset >= LPSS_MANATEE_OFFSET
-                && offset < LPSS_MANATEE_OFFSET + LPSS_MANATEE_SIZE
-            {
-                if offset != LPSS_MANATEE_OFFSET {
-                    warn!(
-                        "{} write_bar invalid offset 0x{:x}",
-                        self.debug_label(),
-                        offset,
-                    );
-                    return;
-                }
-
-                let val = if let Ok(bytes) = data.try_into() {
-                    u64::from_le_bytes(bytes)
-                } else {
-                    warn!(
-                        "{} write_bar invalid len 0x{:x}",
-                        self.debug_label(),
-                        data.len()
-                    );
-                    return;
-                };
-                let addr = val as u16;
-                let id = (val >> 32) as u8;
-
-                match self.i2c_devs.get(&addr) {
-                    Some(path) => {
-                        if let Err(e) = VfioPciDevice::op_call(path, id) {
-                            error!("{} Failed to perform op call: {}", self.debug_label(), e);
-                        }
-                    }
-                    None => {
-                        warn!(
-                            "{} write_bar addr 0x{:x} id 0x{:x} not found",
-                            self.debug_label(),
-                            addr,
-                            id
-                        );
-                    }
-                }
+    fn read_bar(&mut self, bar_index: PciBarIndex, offset: u64, data: &mut [u8]) {
+        if let Some(msix_cap) = &self.msix_cap {
+            let msix_cap = msix_cap.lock();
+            if msix_cap.is_msix_table(bar_index, offset) {
+                msix_cap.read_table(offset, data);
+                return;
+            } else if msix_cap.is_msix_pba(bar_index, offset) {
+                msix_cap.read_pba(offset, data);
                 return;
             }
-            self.device.region_write(bar_index, data, offset);
         }
+        self.device.region_read(bar_index, data, offset);
+    }
+
+    fn write_bar(&mut self, bar_index: PciBarIndex, offset: u64, data: &[u8]) {
+        // Ignore igd opregion's write
+        if let Some(device_data) = &self.device_data {
+            match *device_data {
+                DeviceData::IntelGfxData { opregion_index } => {
+                    if opregion_index == bar_index as u32 {
+                        return;
+                    }
+                }
+            }
+        }
+
+        if let Some(msix_cap) = &self.msix_cap {
+            let mut msix_cap = msix_cap.lock();
+            if msix_cap.is_msix_table(bar_index, offset) {
+                let behavior = msix_cap.write_table(offset, data);
+                if let MsixStatus::EntryChanged(index) = behavior {
+                    let irqfd = msix_cap.get_msix_irqfd(index);
+                    self.msix_vector_update(index, irqfd);
+                }
+                return;
+            } else if msix_cap.is_msix_pba(bar_index, offset) {
+                msix_cap.write_pba(offset, data);
+                return;
+            }
+        }
+
+        #[cfg(feature = "direct")]
+        if self.is_intel_lpss
+            && bar_index == 0
+            && offset >= LPSS_MANATEE_OFFSET
+            && offset < LPSS_MANATEE_OFFSET + LPSS_MANATEE_SIZE
+        {
+            if offset != LPSS_MANATEE_OFFSET {
+                warn!(
+                    "{} write_bar invalid offset 0x{:x}",
+                    self.debug_label(),
+                    offset,
+                );
+                return;
+            }
+
+            let val = if let Ok(bytes) = data.try_into() {
+                u64::from_le_bytes(bytes)
+            } else {
+                warn!(
+                    "{} write_bar invalid len 0x{:x}",
+                    self.debug_label(),
+                    data.len()
+                );
+                return;
+            };
+            let addr = val as u16;
+            let id = (val >> 32) as u8;
+
+            match self.i2c_devs.get(&addr) {
+                Some(path) => {
+                    if let Err(e) = VfioPciDevice::op_call(path, id) {
+                        error!("{} Failed to perform op call: {}", self.debug_label(), e);
+                    }
+                }
+                None => {
+                    warn!(
+                        "{} write_bar addr 0x{:x} id 0x{:x} not found",
+                        self.debug_label(),
+                        addr,
+                        id
+                    );
+                }
+            }
+            return;
+        }
+        self.device.region_write(bar_index, data, offset);
     }
 
     fn destroy_device(&mut self) {

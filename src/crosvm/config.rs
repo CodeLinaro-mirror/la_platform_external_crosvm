@@ -79,8 +79,6 @@ cfg_if::cfg_if! {
         #[cfg(feature = "gpu")]
         use crate::crosvm::sys::GpuRenderServerParameters;
         use libc::{getegid, geteuid};
-
-        static VHOST_NET_PATH: &str = "/dev/vhost-net";
     } else if #[cfg(windows)] {
         use base::{Event, Tube};
     }
@@ -93,6 +91,9 @@ const MB_ALIGNED: u64 = ONE_MB - 1;
 // the max bus number is 256 and each bus occupy 1MB, so the max pcie cfg mmio size = 256M
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const MAX_PCIE_ECAM_SIZE: u64 = ONE_MB * 256;
+
+// by default, if enabled, the balloon WS features will use 4 bins.
+const VIRTIO_BALLOON_WS_DEFAULT_NUM_BINS: u8 = 4;
 
 /// Indicates the location and kind of executable kernel for a VM.
 #[allow(dead_code)]
@@ -1053,6 +1054,7 @@ pub struct Config {
     pub balloon_bias: i64,
     pub balloon_control: Option<PathBuf>,
     pub balloon_page_reporting: bool,
+    pub balloon_wss_num_bins: u8,
     pub balloon_wss_reporting: bool,
     pub battery_config: Option<BatteryConfig>,
     #[cfg(windows)]
@@ -1065,6 +1067,7 @@ pub struct Config {
     pub bus_lock_ratelimit: u64,
     #[cfg(unix)]
     pub coiommu_param: Option<devices::CoIommuParameters>,
+    pub core_scheduling: bool,
     pub cpu_capacity: BTreeMap<usize, u32>, // CPU index -> capacity
     pub cpu_clusters: Vec<CpuSet>,
     #[cfg(feature = "crash-report")]
@@ -1212,8 +1215,6 @@ pub struct Config {
     pub vfio: Vec<super::sys::config::VfioOption>,
     #[cfg(unix)]
     pub vfio_isolate_hotplug: bool,
-    #[cfg(unix)]
-    pub vhost_net_device_path: PathBuf,
     pub vhost_user_blk: Vec<VhostUserOption>,
     pub vhost_user_console: Vec<VhostUserOption>,
     pub vhost_user_fs: Vec<VhostUserFsOption>,
@@ -1233,6 +1234,7 @@ pub struct Config {
     pub virtio_keyboard: Vec<PathBuf>,
     pub virtio_mice: Vec<PathBuf>,
     pub virtio_multi_touch: Vec<TouchDeviceOption>,
+    pub virtio_rotary: Vec<PathBuf>,
     pub virtio_single_touch: Vec<TouchDeviceOption>,
     #[cfg(feature = "audio")]
     #[serde(skip)]
@@ -1261,6 +1263,7 @@ impl Default for Config {
             balloon_bias: 0,
             balloon_control: None,
             balloon_page_reporting: false,
+            balloon_wss_num_bins: VIRTIO_BALLOON_WS_DEFAULT_NUM_BINS,
             balloon_wss_reporting: false,
             battery_config: None,
             #[cfg(windows)]
@@ -1273,6 +1276,7 @@ impl Default for Config {
             bus_lock_ratelimit: 0,
             #[cfg(unix)]
             coiommu_param: None,
+            core_scheduling: true,
             #[cfg(feature = "crash-report")]
             crash_pipe_name: None,
             #[cfg(feature = "crash-report")]
@@ -1421,8 +1425,6 @@ impl Default for Config {
             vfio: Vec::new(),
             #[cfg(unix)]
             vfio_isolate_hotplug: false,
-            #[cfg(unix)]
-            vhost_net_device_path: PathBuf::from(VHOST_NET_PATH),
             vhost_user_blk: Vec::new(),
             vhost_user_console: Vec::new(),
             vhost_user_video_dec: Vec::new(),
@@ -1443,6 +1445,7 @@ impl Default for Config {
             virtio_keyboard: Vec::new(),
             virtio_mice: Vec::new(),
             virtio_multi_touch: Vec::new(),
+            virtio_rotary: Vec::new(),
             virtio_single_touch: Vec::new(),
             #[cfg(feature = "audio")]
             virtio_snds: Vec::new(),
@@ -2318,7 +2321,7 @@ mod tests {
     fn parse_shared_dir() {
         // Although I want to test /usr/local/bin, Use / instead of
         // /usr/local/bin, as /usr/local/bin doesn't always exist.
-        let s = "/:usr_local_bin:type=fs:cache=always:uidmap=0 655360 5000,5000 600 50,5050 660410 1994950:gidmap=0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950:timeout=3600:rewrite-security-xattrs=true:ascii_casefold=false:writeback=true:posix_acl=true";
+        let s = "/:usr_local_bin:type=fs:cache=always:uidmap=0 655360 5000,5000 600 50,5050 660410 1994950:gidmap=0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950:timeout=3600:rewrite-security-xattrs=true:writeback=true";
 
         let shared_dir: SharedDir = s.parse().unwrap();
         assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
@@ -2344,6 +2347,18 @@ mod tests {
         assert_eq!(shared_dir.fs_cfg.use_dax, false);
         assert_eq!(shared_dir.fs_cfg.posix_acl, true);
         assert_eq!(shared_dir.ugid, (None, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_shared_dir_parses_ascii_casefold_and_posix_acl() {
+        // Although I want to test /usr/local/bin, Use / instead of
+        // /usr/local/bin, as /usr/local/bin doesn't always exist.
+        let s = "/:usr_local_bin:type=fs:ascii_casefold=true:posix_acl=false";
+
+        let shared_dir: SharedDir = s.parse().unwrap();
+        assert_eq!(shared_dir.fs_cfg.ascii_casefold, true);
+        assert_eq!(shared_dir.fs_cfg.posix_acl, false);
     }
 
     #[cfg(unix)]

@@ -49,14 +49,19 @@ use vm_memory::MemoryRegionInformation;
 
 #[cfg(feature = "log_page_fault")]
 use crate::logger::PageFaultEventLogger;
+use crate::page_handler::Error as PageHandlerError;
 use crate::page_handler::MoveToStaging;
 use crate::page_handler::PageHandler;
 use crate::page_handler::MLOCK_BUDGET;
 use crate::pagesize::THP_SIZE;
 use crate::processes::freeze_child_processes;
 use crate::processes::ProcessesGuard;
+use crate::uffd_list::Token as UffdListToken;
+use crate::uffd_list::UffdList;
 use crate::userfaultfd::register_regions;
 use crate::userfaultfd::unregister_regions;
+use crate::userfaultfd::DeadUffdCheckerImpl;
+use crate::userfaultfd::Error as UffdError;
 use crate::userfaultfd::Factory as UffdFactory;
 use crate::userfaultfd::UffdEvent;
 use crate::userfaultfd::Userfaultfd;
@@ -89,6 +94,7 @@ enum Command {
         uffd: Userfaultfd,
         reply_tube: Tube,
     },
+    StaticDeviceSetupComplete(u32),
 }
 
 /// [SwapController] provides APIs to control vmm-swap.
@@ -96,6 +102,10 @@ pub struct SwapController {
     child_process: Child,
     uffd_factory: UffdFactory,
     command_tube: Tube,
+    num_static_devices: u32,
+    // Keep 1 page dummy mmap in the main process to make it present in all the descendant
+    // processes.
+    _dead_uffd_checker: DeadUffdCheckerImpl,
 }
 
 impl SwapController {
@@ -137,6 +147,8 @@ impl SwapController {
 
         // Allocate eventfd before creating sandbox.
         let bg_job_control = BackgroundJobControl::new().context("create background job event")?;
+
+        let dead_uffd_checker = DeadUffdCheckerImpl::new().context("create dead uffd checker")?;
 
         #[cfg(feature = "log_page_fault")]
         let page_fault_logger = PageFaultEventLogger::create(&swap_dir, &guest_memory)
@@ -187,6 +199,7 @@ impl SwapController {
                     uffd,
                     swap_file,
                     bg_job_control,
+                    &dead_uffd_checker,
                     #[cfg(feature = "log_page_fault")]
                     page_fault_logger,
                 ) {
@@ -216,6 +229,8 @@ impl SwapController {
             child_process,
             uffd_factory,
             command_tube: command_tube_main,
+            num_static_devices: 0,
+            _dead_uffd_checker: dead_uffd_checker,
         })
     }
 
@@ -317,11 +332,20 @@ impl SwapController {
         freeze_child_processes(self.child_process.pid)
     }
 
-    /// Create a new [SwapDeviceUffdSender].
+    /// Notify the monitor process that all static devices are forked.
     ///
-    /// This should be called from the main process because creating a [Tube]s requires seccomp
-    /// policy.
-    pub fn prepare_fork(&self) -> anyhow::Result<SwapDeviceUffdSender> {
+    /// Devices forked after this call are treated as dynamic devices which can die (e.g. hotplug
+    /// devices).
+    pub fn on_static_devices_setup_complete(&self) -> anyhow::Result<()> {
+        // This sends the number of static devices counted on the main process because device
+        // initializations are executed on child processes asynchronously.
+        self.command_tube
+            .send(&Command::StaticDeviceSetupComplete(self.num_static_devices))
+            .context("send command")
+    }
+
+    /// Create [SwapDeviceHelper].
+    pub fn create_device_helper(&self) -> anyhow::Result<SwapDeviceHelper> {
         let uffd_factory = self
             .uffd_factory
             .try_clone()
@@ -330,20 +354,51 @@ impl SwapController {
             .command_tube
             .try_clone_send_tube()
             .context("try clone tube")?;
-        let (sender, receiver) = Tube::pair().context("create tube")?;
-        receiver
-            .set_recv_timeout(Some(Duration::from_secs(60)))
-            .context("set recv timeout")?;
-        Ok(SwapDeviceUffdSender {
+        Ok(SwapDeviceHelper {
             uffd_factory,
             command_tube,
-            sender,
-            receiver,
         })
     }
 }
 
-impl AsRawDescriptors for SwapController {
+/// Create a new [SwapDeviceUffdSender] which is passed to the forked child process.
+pub trait PrepareFork {
+    /// Create a new [SwapDeviceUffdSender].
+    fn prepare_fork(&mut self) -> anyhow::Result<SwapDeviceUffdSender>;
+}
+
+impl PrepareFork for SwapController {
+    /// Create a new [SwapDeviceUffdSender].
+    ///
+    /// This should be called from the main process because creating a [Tube]s requires seccomp
+    /// policy.
+    ///
+    /// This also counts the number of static devices which are created before booting.
+    fn prepare_fork(&mut self) -> anyhow::Result<SwapDeviceUffdSender> {
+        let command_tube = self
+            .command_tube
+            .try_clone_send_tube()
+            .context("try clone tube")?;
+        self.num_static_devices += 1;
+        SwapDeviceUffdSender::new(command_tube, &self.uffd_factory)
+    }
+}
+
+/// Helper to create [SwapDeviceUffdSender] from child processes (e.g. JailWarden for hotplug devices).
+pub struct SwapDeviceHelper {
+    uffd_factory: UffdFactory,
+    command_tube: SendTube,
+}
+
+impl PrepareFork for SwapDeviceHelper {
+    /// Create a new [SwapDeviceUffdSender].
+    fn prepare_fork(&mut self) -> anyhow::Result<SwapDeviceUffdSender> {
+        let command_tube = self.command_tube.try_clone().context("try clone tube")?;
+        SwapDeviceUffdSender::new(command_tube, &self.uffd_factory)
+    }
+}
+
+impl AsRawDescriptors for SwapDeviceHelper {
     fn as_raw_descriptors(&self) -> Vec<RawDescriptor> {
         let mut rds = self.uffd_factory.as_raw_descriptors();
         rds.push(self.command_tube.as_raw_descriptor());
@@ -360,6 +415,20 @@ pub struct SwapDeviceUffdSender {
 }
 
 impl SwapDeviceUffdSender {
+    fn new(command_tube: SendTube, uffd_factory: &UffdFactory) -> anyhow::Result<Self> {
+        let uffd_factory = uffd_factory.try_clone().context("try clone uffd factory")?;
+        let (sender, receiver) = Tube::pair().context("create tube")?;
+        receiver
+            .set_recv_timeout(Some(Duration::from_secs(60)))
+            .context("set recv timeout")?;
+        Ok(SwapDeviceUffdSender {
+            uffd_factory,
+            command_tube,
+            sender,
+            receiver,
+        })
+    }
+
     /// Create a new userfaultfd and send it to the monitor process.
     ///
     /// This must be called as soon as a child process which may touch the guest memory is forked.
@@ -394,58 +463,16 @@ impl AsRawDescriptors for SwapDeviceUffdSender {
     }
 }
 
-#[derive(EventToken)]
+#[derive(EventToken, Clone, Copy)]
 enum Token {
     UffdEvents(u32),
     Command,
     BackgroundJobCompleted,
 }
 
-struct UffdList<'a> {
-    list: Vec<Userfaultfd>,
-    wait_ctx: &'a WaitContext<Token>,
-}
-
-impl<'a> UffdList<'a> {
-    const ID_MAIN_UFFD: u32 = 0;
-
-    fn new(main_uffd: Userfaultfd, wait_ctx: &'a WaitContext<Token>) -> Self {
-        Self {
-            list: vec![main_uffd],
-            wait_ctx,
-        }
-    }
-
-    fn register(&mut self, uffd: Userfaultfd) -> anyhow::Result<()> {
-        let id_uffd = self
-            .list
-            .len()
-            .try_into()
-            .context("too many userfaultfd forked")?;
-
-        self.wait_ctx
-            .add(&uffd, Token::UffdEvents(id_uffd))
-            .context("add to wait context")?;
-        self.list.push(uffd);
-
-        Ok(())
-    }
-
-    fn get(&self, id: u32) -> Option<&Userfaultfd> {
-        self.list.get(id as usize)
-    }
-
-    fn main_uffd(&self) -> &Userfaultfd {
-        &self.list[Self::ID_MAIN_UFFD as usize]
-    }
-
-    // Return cloned main [Userfaultfd]
-    fn clone_main_uffd(&self) -> crate::userfaultfd::Result<Userfaultfd> {
-        self.list[Self::ID_MAIN_UFFD as usize].try_clone()
-    }
-
-    fn get_list(&self) -> &[Userfaultfd] {
-        &self.list
+impl UffdListToken for Token {
+    fn uffd_token(idx: u32) -> Self {
+        Token::UffdEvents(idx)
     }
 }
 
@@ -471,16 +498,13 @@ fn monitor_process(
     uffd: Userfaultfd,
     swap_file: File,
     bg_job_control: BackgroundJobControl,
+    dead_uffd_checker: &DeadUffdCheckerImpl,
     #[cfg(feature = "log_page_fault")] mut page_fault_logger: PageFaultEventLogger,
 ) -> anyhow::Result<()> {
     info!("monitor_process started");
 
     let wait_ctx = WaitContext::build_with(&[
         (&command_tube, Token::Command),
-        // Even though swap isn't enabled until the enable command is received, it's necessary to
-        // start waiting on the main uffd here so that uffd fork events can be processed, because
-        // child processes will block until their corresponding uffd fork event is read.
-        (&uffd, Token::UffdEvents(UffdList::ID_MAIN_UFFD)),
         (
             bg_job_control.get_completion_event(),
             Token::BackgroundJobCompleted,
@@ -493,8 +517,10 @@ fn monitor_process(
     // The worker threads are killed when the main thread of the monitor process dies.
     let worker = Worker::new(n_worker, n_worker);
 
-    let mut uffd_list = UffdList::new(uffd, &wait_ctx);
+    let mut uffd_list =
+        UffdList::new(uffd, dead_uffd_checker, &wait_ctx).context("create uffd list")?;
     let mut state_transition = SwapStateTransition::default();
+    let mut try_gc_uffds = false;
 
     loop {
         let events = wait_ctx.wait().context("wait poll events")?;
@@ -527,14 +553,24 @@ fn monitor_process(
                 {
                     Command::ProcessForked { uffd, reply_tube } => {
                         debug!("new fork uffd: {:?}", uffd);
-                        let result = if let Err(e) = uffd_list.register(uffd) {
-                            error!("failed to register uffd to list: {:?}", e);
-                            false
-                        } else {
-                            true
+                        let result = match uffd_list.register(uffd) {
+                            Ok(is_dynamic_uffd) => {
+                                try_gc_uffds = is_dynamic_uffd;
+                                true
+                            }
+                            Err(e) => {
+                                error!("failed to register uffd to list: {:?}", e);
+                                false
+                            }
                         };
                         if let Err(e) = reply_tube.send(&result) {
                             error!("failed to response to new process: {:?}", e);
+                        }
+                    }
+                    Command::StaticDeviceSetupComplete(num_static_devices) => {
+                        info!("static device setup complete: n={}", num_static_devices);
+                        if !uffd_list.set_num_static_devices(num_static_devices) {
+                            bail!("failed to set num_static_devices");
                         }
                     }
                     Command::Enable => {
@@ -637,6 +673,10 @@ fn monitor_process(
                     bg_job_control.reset()?;
                 }
             };
+        }
+        if try_gc_uffds {
+            uffd_list.gc_dead_uffds().context("gc dead uffds")?;
+            try_gc_uffds = false;
         }
     }
 }
@@ -761,7 +801,7 @@ fn handle_vmm_swap<'scope, 'env>(
     scope: &'scope Scope<'scope, 'env>,
     wait_ctx: &WaitContext<Token>,
     page_handler: &'env PageHandler<'env>,
-    uffd_list: &'env mut UffdList,
+    uffd_list: &'env mut UffdList<Token, DeadUffdCheckerImpl>,
     guest_memory: &GuestMemory,
     regions: &[Range<usize>],
     command_tube: &Tube,
@@ -789,6 +829,7 @@ fn handle_vmm_swap<'scope, 'env>(
         .send(&SwapStatus::dummy())
         .context("send enable finish signal")?;
 
+    let mut try_gc_uffds = false;
     loop {
         let events = match &state {
             State::SwapOutInProgress { started_time } => {
@@ -841,9 +882,17 @@ fn handle_vmm_swap<'scope, 'env>(
                             UffdEvent::Pagefault { addr, .. } => {
                                 #[cfg(feature = "log_page_fault")]
                                 page_fault_logger.log_page_fault(addr as usize, id_uffd);
-                                page_handler
-                                    .handle_page_fault(uffd, addr as usize)
-                                    .context("handle fault")?;
+                                match page_handler.handle_page_fault(uffd, addr as usize) {
+                                    Ok(()) => {}
+                                    Err(PageHandlerError::Userfaultfd(UffdError::UffdClosed)) => {
+                                        // Do nothing for the uffd. It will be garbage-collected
+                                        // when a new uffd is registered.
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        bail!("failed to handle page fault: {:?}", e);
+                                    }
+                                }
                             }
                             UffdEvent::Remove { start, end } => {
                                 page_handler
@@ -869,14 +918,26 @@ fn handle_vmm_swap<'scope, 'env>(
                         {
                             error!("failed to setup uffd: {:?}", e);
                             false
-                        } else if let Err(e) = uffd_list.register(uffd) {
-                            error!("failed to register uffd to list: {:?}", e);
-                            false
                         } else {
-                            true
+                            match uffd_list.register(uffd) {
+                                Ok(is_dynamic_uffd) => {
+                                    try_gc_uffds = is_dynamic_uffd;
+                                    true
+                                }
+                                Err(e) => {
+                                    error!("failed to register uffd to list: {:?}", e);
+                                    false
+                                }
+                            }
                         };
                         if let Err(e) = reply_tube.send(&result) {
                             error!("failed to response to new process: {:?}", e);
+                        }
+                    }
+                    Command::StaticDeviceSetupComplete(num_static_devices) => {
+                        info!("static device setup complete: n={}", num_static_devices);
+                        if !uffd_list.set_num_static_devices(num_static_devices) {
+                            bail!("failed to set num_static_devices");
                         }
                     }
                     Command::Enable => {
@@ -1076,6 +1137,10 @@ fn handle_vmm_swap<'scope, 'env>(
                     }
                 }
             };
+        }
+        if try_gc_uffds {
+            uffd_list.gc_dead_uffds().context("gc dead uffds")?;
+            try_gc_uffds = false;
         }
     }
 }

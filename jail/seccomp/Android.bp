@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// DO NOT MODIFY DIRECTLY, ALL CHANGES WILL BE OVERWRITTEN BY gen_android.sh
+
 package {
     // See: http://go/android-license-faq
     // A large-scale-change added 'default_applicable_licenses' to import
@@ -34,7 +36,7 @@ python_binary_host {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/block.policy) $(location x86_64/vvu.policy) $(location x86_64/vhost_user.policy) $(location x86_64/vhost_vsock.policy) < $(in) | $(location detect_duplication) > $(out)",
+    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/net.policy) $(location x86_64/block.policy) $(location x86_64/vvu.policy) $(location x86_64/vhost_user.policy) $(location x86_64/vhost_vsock.policy) < $(in) | $(location detect_duplication) > $(out)",
     tools: [
         "detect_duplication",
     ],
@@ -43,6 +45,7 @@ genrule_defaults {
         "x86_64/common_device.policy",
         "x86_64/gpu_common.policy",
         "x86_64/serial.policy",
+        "x86_64/net.policy",
         "x86_64/block.policy",
         "x86_64/vvu.policy",
         "x86_64/vhost_user.policy",
@@ -52,7 +55,7 @@ genrule_defaults {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_aarch64",
-    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location aarch64/common_device.policy) $(location aarch64/gpu_common.policy) $(location aarch64/serial.policy) DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST < $(in) | $(location detect_duplication) > $(out)",
+    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location aarch64/common_device.policy) $(location aarch64/gpu_common.policy) $(location aarch64/serial.policy) $(location aarch64/net.policy) DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST DOESNT_EXIST < $(in) | $(location detect_duplication) > $(out)",
     tools: [
         "detect_duplication",
     ],
@@ -61,6 +64,7 @@ genrule_defaults {
         "aarch64/common_device.policy",
         "aarch64/gpu_common.policy",
         "aarch64/serial.policy",
+        "aarch64/net.policy",
     ],
 }
 

@@ -19,12 +19,10 @@ use base::MemoryMapping;
 use base::MemoryMappingBuilder;
 use base::Protection;
 use base::RawDescriptor;
-use base::Tube;
 use resources::SystemAllocator;
 use vfio_sys::*;
+use vm_control::api::VmMemoryClient;
 use vm_control::VmMemoryDestination;
-use vm_control::VmMemoryRequest;
-use vm_control::VmMemoryResponse;
 use vm_control::VmMemorySource;
 
 use crate::pci::CrosvmDeviceId;
@@ -40,7 +38,7 @@ use crate::IrqLevelEvent;
 use crate::Suspendable;
 
 struct MmioInfo {
-    index: u32,
+    index: usize,
     start: u64,
     length: u64,
 }
@@ -50,7 +48,7 @@ pub struct VfioPlatformDevice {
     interrupt_edge_evt: Vec<IrqEdgeEvent>,
     interrupt_level_evt: Vec<IrqLevelEvent>,
     mmio_regions: Vec<MmioInfo>,
-    vm_socket_mem: Tube,
+    vm_memory_client: VmMemoryClient,
     // scratch MemoryMapping to avoid unmap beform vm exit
     mem: Vec<MemoryMapping>,
 }
@@ -89,14 +87,14 @@ impl BusDeviceObj for VfioPlatformDevice {
 
 impl VfioPlatformDevice {
     /// Constructs a new Vfio Platform device for the given Vfio device
-    pub fn new(device: VfioDevice, vfio_device_socket_mem: Tube) -> Self {
+    pub fn new(device: VfioDevice, vm_memory_client: VmMemoryClient) -> Self {
         let dev = Arc::new(device);
         VfioPlatformDevice {
             device: dev,
             interrupt_edge_evt: Vec::new(),
             interrupt_level_evt: Vec::new(),
             mmio_regions: Vec::new(),
-            vm_socket_mem: vfio_device_socket_mem,
+            vm_memory_client,
             mem: Vec::new(),
         }
     }
@@ -183,7 +181,7 @@ impl VfioPlatformDevice {
         Ok(ranges)
     }
 
-    fn region_mmap(&self, index: u32, start_addr: u64) -> Vec<MemoryMapping> {
+    fn region_mmap(&self, index: usize, start_addr: u64) -> Vec<MemoryMapping> {
         let mut mem_map: Vec<MemoryMapping> = Vec::new();
         if self.device.get_region_flags(index) & VFIO_REGION_INFO_FLAG_MMAP != 0 {
             let mmaps = self.device.get_region_mmap(index);
@@ -201,28 +199,16 @@ impl VfioPlatformDevice {
                     Ok(device_file) => device_file.into(),
                     Err(_) => break,
                 };
-                if self
-                    .vm_socket_mem
-                    .send(&VmMemoryRequest::RegisterMemory {
-                        source: VmMemorySource::Descriptor {
-                            descriptor,
-                            offset,
-                            size: mmap_size,
-                        },
-                        dest: VmMemoryDestination::GuestPhysicalAddress(guest_map_start),
-                        prot: Protection::read_write(),
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-
-                let response: VmMemoryResponse = match self.vm_socket_mem.recv() {
-                    Ok(res) => res,
-                    Err(_) => break,
-                };
-                match response {
-                    VmMemoryResponse::Ok => {
+                match self.vm_memory_client.register_memory(
+                    VmMemorySource::Descriptor {
+                        descriptor,
+                        offset,
+                        size: mmap_size,
+                    },
+                    VmMemoryDestination::GuestPhysicalAddress(guest_map_start),
+                    Protection::read_write(),
+                ) {
+                    Ok(_region) => {
                         // Even if vm has mapped this region, but it is in vm main process,
                         // device process doesn't has this mapping, but vfio_dma_map() need it
                         // in device process, so here map it again.
@@ -251,7 +237,10 @@ impl VfioPlatformDevice {
                             }
                         }
                     }
-                    _ => break,
+                    Err(e) => {
+                        error!("register_memory failed: {}", e);
+                        break;
+                    }
                 }
             }
         }
@@ -305,7 +294,7 @@ impl VfioPlatformDevice {
             rds.extend(irq_evt.as_raw_descriptors());
         }
 
-        rds.push(self.vm_socket_mem.as_raw_descriptor());
+        rds.push(self.vm_memory_client.as_raw_descriptor());
         rds
     }
 

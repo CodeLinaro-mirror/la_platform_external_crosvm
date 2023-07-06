@@ -2,11 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::fmt;
 use std::io;
 use std::io::Write;
 use std::mem;
 use std::net::Ipv4Addr;
 use std::os::raw::c_uint;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -59,6 +61,9 @@ use crate::Suspendable;
 #[cfg(windows)]
 pub(crate) const MAX_BUFFER_SIZE: usize = 65562;
 const QUEUE_SIZE: u16 = 256;
+
+#[cfg(unix)]
+pub static VHOST_NET_DEFAULT_PATH: &str = "/dev/vhost-net";
 
 pub(crate) use super::sys::process_rx;
 pub(crate) use super::sys::process_tx;
@@ -164,14 +169,38 @@ pub enum NetParametersMode {
     },
 }
 
+#[cfg(unix)]
+fn vhost_net_device_path_default() -> PathBuf {
+    PathBuf::from(VHOST_NET_DEFAULT_PATH)
+}
+
+#[cfg(unix)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct VhostNetParameters {
+    #[serde(default = "vhost_net_device_path_default")]
+    pub device: PathBuf,
+}
+
+#[cfg(unix)]
+impl Default for VhostNetParameters {
+    fn default() -> Self {
+        Self {
+            device: vhost_net_device_path_default(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub struct NetParameters {
     #[serde(flatten)]
     pub mode: NetParametersMode,
-    #[serde(default)]
-    pub vhost_net: bool,
     pub vq_pairs: Option<u16>,
+    // Style-guide asks to refrain against #[cfg] directives in structs, this is an exception due
+    // to the fact this struct is used for argument parsing.
+    #[cfg(unix)]
+    pub vhost_net: Option<VhostNetParameters>,
 }
 
 impl FromStr for NetParameters {
@@ -408,10 +437,12 @@ where
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     Token::RxTap => {
+                        let _trace = cros_tracing::trace_event!(VirtioNet, "handle RxTap event");
                         self.handle_rx_token(&wait_ctx)?;
                         tap_polling_enabled = false;
                     }
                     Token::RxQueue => {
+                        let _trace = cros_tracing::trace_event!(VirtioNet, "handle RxQueue event");
                         if let Err(e) = rx_queue_evt.wait() {
                             error!("net: error reading rx queue Event: {}", e);
                             break 'wait;
@@ -420,6 +451,7 @@ where
                         tap_polling_enabled = true;
                     }
                     Token::TxQueue => {
+                        let _trace = cros_tracing::trace_event!(VirtioNet, "handle TxQueue event");
                         if let Err(e) = tx_queue_evt.wait() {
                             error!("net: error reading tx queue Event: {}", e);
                             break 'wait;
@@ -427,6 +459,8 @@ where
                         self.process_tx();
                     }
                     Token::CtrlQueue => {
+                        let _trace =
+                            cros_tracing::trace_event!(VirtioNet, "handle CtrlQueue event");
                         if let Some(ctrl_evt) = &ctrl_queue_evt {
                             if let Err(e) = ctrl_evt.wait() {
                                 error!("net: error reading ctrl queue Event: {}", e);
@@ -441,6 +475,8 @@ where
                         }
                     }
                     Token::InterruptResample => {
+                        let _trace =
+                            cros_tracing::trace_event!(VirtioNet, "handle InterruptResample event");
                         // We can unwrap safely because interrupt must have the event.
                         let _ = self.interrupt.get_resample_evt().unwrap().wait();
                         self.interrupt.do_interrupt_resample();
@@ -545,7 +581,7 @@ where
         mac_addr: Option<MacAddress>,
         #[cfg(windows)] slirp_kill_evt: Option<Event>,
     ) -> Result<Self, NetError> {
-        Ok(Self {
+        let net = Self {
             guest_mac: mac_addr.map(|mac| mac.octets()),
             queue_sizes: vec![QUEUE_SIZE; taps.len() * 2 + 1].into_boxed_slice(),
             worker_threads: Vec::new(),
@@ -555,7 +591,9 @@ where
             mtu,
             #[cfg(windows)]
             slirp_kill_evt: None,
-        })
+        };
+        cros_tracing::trace_simple_print!("New Net device created: {:?}", net);
+        Ok(net)
     }
 
     /// Returns the maximum number of receive/transmit queue pairs for this device.
@@ -763,6 +801,7 @@ where
                     worker
                 }));
         }
+        cros_tracing::trace_simple_print!("Net device activated: {:?}", self);
         Ok(())
     }
 
@@ -777,6 +816,23 @@ where
 }
 
 impl<T> Suspendable for Net<T> where T: 'static + TapT + ReadNotifier {}
+
+impl<T> std::fmt::Debug for Net<T>
+where
+    T: TapT + ReadNotifier,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Net")
+            .field("guest_mac", &self.guest_mac)
+            .field("queue_sizes", &self.queue_sizes)
+            .field("worker_threads_size", &self.worker_threads.len())
+            .field("taps_size", &self.taps.len())
+            .field("avail_features", &self.avail_features)
+            .field("acked_features", &self.acked_features)
+            .field("mtu", &self.mtu)
+            .finish()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -797,7 +853,8 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: false,
+                #[cfg(unix)]
+                vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {
                     tap_name: "tap".to_string(),
@@ -810,7 +867,8 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: false,
+                #[cfg(unix)]
+                vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {
                     tap_name: "tap".to_string(),
@@ -823,7 +881,8 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: false,
+                #[cfg(unix)]
+                vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapFd {
                     tap_fd: 12,
@@ -836,7 +895,8 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: false,
+                #[cfg(unix)]
+                vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapFd {
                     tap_fd: 12,
@@ -852,7 +912,8 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: false,
+                #[cfg(unix)]
+                vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::RawConfig {
                     host_ip: Ipv4Addr::from_str("192.168.10.1").unwrap(),
@@ -862,8 +923,18 @@ mod tests {
             }
         );
 
+        // missing netmask
+        assert!(from_net_arg("host-ip=\"192.168.10.1\",mac=\"3d:70:eb:61:1a:91\"").is_err());
+
+        // invalid parameter
+        assert!(from_net_arg("tap-name=tap,foomatic=true").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn params_from_key_values_vhost_net() {
         let params = from_net_arg(
-            "vhost-net=true,\
+            "vhost-net=[device=/dev/foo],\
                 host-ip=\"192.168.10.1\",\
                 netmask=\"255.255.255.0\",\
                 mac=\"3d:70:eb:61:1a:91\"",
@@ -872,7 +943,9 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: true,
+                vhost_net: Some(VhostNetParameters {
+                    device: PathBuf::from("/dev/foo")
+                }),
                 vq_pairs: None,
                 mode: NetParametersMode::RawConfig {
                     host_ip: Ipv4Addr::from_str("192.168.10.1").unwrap(),
@@ -882,11 +955,11 @@ mod tests {
             }
         );
 
-        let params = from_net_arg("tap-fd=3,vhost-net=true").unwrap();
+        let params = from_net_arg("tap-fd=3,vhost-net").unwrap();
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: true,
+                vhost_net: Some(Default::default()),
                 vq_pairs: None,
                 mode: NetParametersMode::TapFd {
                     tap_fd: 3,
@@ -895,38 +968,11 @@ mod tests {
             }
         );
 
-        let params = from_net_arg("tap-fd=4,vhost-net=false,mac=\"3d:70:eb:61:1a:91\"").unwrap();
+        let params = from_net_arg("vhost-net,tap-name=crosvm_tap").unwrap();
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: false,
-                vq_pairs: None,
-                mode: NetParametersMode::TapFd {
-                    tap_fd: 4,
-                    mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
-                }
-            }
-        );
-
-        let params =
-            from_net_arg("tap-fd=4,vhost-net=false,mac=\"3d:70:eb:61:1a:91\",vq-pairs=16").unwrap();
-        assert_eq!(
-            params,
-            NetParameters {
-                vhost_net: false,
-                vq_pairs: Some(16),
-                mode: NetParametersMode::TapFd {
-                    tap_fd: 4,
-                    mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
-                }
-            }
-        );
-
-        let params = from_net_arg("vhost-net=true,tap-name=crosvm_tap").unwrap();
-        assert_eq!(
-            params,
-            NetParameters {
-                vhost_net: true,
+                vhost_net: Some(Default::default()),
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {
                     tap_name: "crosvm_tap".to_owned(),
@@ -936,11 +982,11 @@ mod tests {
         );
 
         let params =
-            from_net_arg("vhost-net=true,mac=\"3d:70:eb:61:1a:91\",tap-name=crosvm_tap").unwrap();
+            from_net_arg("vhost-net,mac=\"3d:70:eb:61:1a:91\",tap-name=crosvm_tap").unwrap();
         assert_eq!(
             params,
             NetParameters {
-                vhost_net: true,
+                vhost_net: Some(Default::default()),
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {
                     tap_name: "crosvm_tap".to_owned(),
@@ -952,17 +998,11 @@ mod tests {
         // mixed configs
         assert!(from_net_arg(
             "tap-name=tap,\
-            vhost-net=true,\
+            vhost-net,\
             host-ip=\"192.168.10.1\",\
             netmask=\"255.255.255.0\",\
             mac=\"3d:70:eb:61:1a:91\"",
         )
         .is_err());
-
-        // missing netmask
-        assert!(from_net_arg("host-ip=\"192.168.10.1\",mac=\"3d:70:eb:61:1a:91\"").is_err());
-
-        // invalid parameter
-        assert!(from_net_arg("tap-name=tap,foomatic=true").is_err());
     }
 }

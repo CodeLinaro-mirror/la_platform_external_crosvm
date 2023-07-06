@@ -15,6 +15,15 @@ use serde::Deserialize;
 use serde::Serialize;
 
 impl Tube {
+    /// Given a Tube end, creates two new ends, one each for sending and receiving.
+    pub fn split_to_send_recv(self) -> Result<(SendTube, RecvTube)> {
+        // Safe because receiving isn't allowd on this end.
+        #[allow(deprecated)]
+        let send_end = self.try_clone()?;
+
+        Ok((SendTube(send_end), RecvTube(self)))
+    }
+
     /// Creates a Send/Recv pair of Tubes.
     pub fn directional_pair() -> Result<(SendTube, RecvTube)> {
         let (t1, t2) = Self::pair()?;
@@ -130,8 +139,6 @@ pub enum Error {
     RecvUnexpectedEmptyBody,
     #[error("failed to send packet: {0}")]
     Send(io::Error),
-    #[error("failed to send packet: {0}")]
-    SendIo(io::Error),
     #[error("failed to write packet to intermediate buffer: {0}")]
     SendIoBuf(io::Error),
     #[error("attempted to send too many file descriptors")]

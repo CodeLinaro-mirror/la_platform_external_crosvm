@@ -56,6 +56,7 @@ use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::MemoryRegionInformation;
+use vm_memory::MemoryRegionPurpose;
 
 use crate::ClockState;
 use crate::Config;
@@ -192,10 +193,19 @@ impl VmAArch64 for GeniezoneVm {
     fn init_arch(
         &self,
         _payload_entry_address: GuestAddress,
-        _fdt_address: GuestAddress,
-        _fdt_size: usize,
+        fdt_address: GuestAddress,
+        fdt_size: usize,
     ) -> Result<()> {
-        Ok(())
+        let dtb_config = gzvm_dtb_config {
+            dtb_addr: fdt_address.offset(),
+            dtb_size: fdt_size.try_into().unwrap(),
+        };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_SET_DTB_CONFIG(), &dtb_config) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            errno_result()
+        }
     }
 }
 
@@ -493,8 +503,8 @@ unsafe fn set_user_memory_region(
     guest_addr: u64,
     memory_size: u64,
     userspace_addr: *mut u8,
+    flags: u32,
 ) -> Result<()> {
-    let flags = 0;
     let region = gzvm_userspace_memory_region {
         slot,
         flags,
@@ -554,7 +564,7 @@ impl Geniezone {
     /// Gets the size of the mmap required to use vcpu's `gzvm_vcpu_run` structure.
     pub fn get_vcpu_mmap_size(&self) -> Result<usize> {
         // We don't use mmap, return sizeof(gzvm_vcpu_run) directly
-        let res = std::mem::size_of::<gzvm_vcpu_run>() as usize;
+        let res = std::mem::size_of::<gzvm_vcpu_run>();
         Ok(res)
     }
 }
@@ -573,10 +583,14 @@ impl Hypervisor for Geniezone {
     }
 
     fn check_capability(&self, cap: HypervisorCap) -> bool {
-        matches!(
-            cap,
-            HypervisorCap::UserMemory | HypervisorCap::ImmediateExit
-        )
+        match cap {
+            HypervisorCap::UserMemory => true,
+            HypervisorCap::ArmPmuV3 => false,
+            HypervisorCap::ImmediateExit => true,
+            HypervisorCap::StaticSwiotlbAllocationRequired => true,
+            HypervisorCap::HypervisorInitializedBootContext => false,
+            HypervisorCap::S390UserSigp | HypervisorCap::TscDeadlineTimer => false,
+        }
     }
 }
 
@@ -607,8 +621,14 @@ impl GeniezoneVm {
                  guest_addr,
                  size,
                  host_addr,
+                 options,
                  ..
              }| {
+                let flags = match options.purpose {
+                    MemoryRegionPurpose::GuestMemoryRegion => GZVM_USER_MEM_REGION_GUEST_MEM,
+                    MemoryRegionPurpose::ProtectedFirmwareRegion => GZVM_USER_MEM_REGION_PROTECT_FW,
+                    MemoryRegionPurpose::StaticSwiotlbRegion => GZVM_USER_MEM_REGION_STATIC_SWIOTLB,
+                };
                 unsafe {
                     // Safe because the guest regions are guaranteed not to overlap.
                     set_user_memory_region(
@@ -619,6 +639,7 @@ impl GeniezoneVm {
                         guest_addr.offset(),
                         size as u64,
                         host_addr as *mut u8,
+                        flags,
                     )
                 }
             },
@@ -656,18 +677,11 @@ impl GeniezoneVm {
             .build()
             .map_err(|_| Error::new(ENOSPC))?;
 
-        let signal_handle = Arc::new(GeniezoneVcpuSignalHandle {
-            // SAFETY: `run_mmap` is known to be a valid pointer to a `gzvm_vcpu_run` structure from
-            // the allocation above.
-            run: unsafe { &mut *(run_mmap.as_ptr() as *mut gzvm_vcpu_run) },
-        });
-
         Ok(GeniezoneVcpu {
             vm: self.vm.try_clone()?,
             vcpu,
             id,
-            run_mmap,
-            signal_handle,
+            run_mmap: Arc::new(run_mmap),
         })
     }
 
@@ -773,7 +787,7 @@ impl GeniezoneVm {
                 None => (false, 0, 4),
             },
             Datamatch::U64(v) => match v {
-                Some(u) => (true, u as u64, 8),
+                Some(u) => (true, u, 8),
                 None => (false, 0, 8),
             },
         };
@@ -791,7 +805,7 @@ impl GeniezoneVm {
             datamatch: datamatch_value,
             len: datamatch_len,
             addr: match addr {
-                IoEventAddress::Pio(p) => p as u64,
+                IoEventAddress::Pio(p) => p,
                 IoEventAddress::Mmio(m) => m,
             },
             fd: evt.as_raw_descriptor(),
@@ -912,6 +926,7 @@ impl Vm for GeniezoneVm {
             Some(gap) => gap.0,
             None => (regions.len() + self.guest_mem.num_regions() as usize) as MemSlot,
         };
+        let flags = 0;
 
         // Safe because we check that the given guest address is valid and has no overlaps. We also
         // know that the pointer and size are correct because the MemoryMapping interface ensures
@@ -923,9 +938,10 @@ impl Vm for GeniezoneVm {
                 slot,
                 read_only,
                 log_dirty_pages,
-                guest_addr.offset() as u64,
+                guest_addr.offset(),
                 size,
                 mem.as_ptr(),
+                flags,
             )
         };
 
@@ -956,7 +972,7 @@ impl Vm for GeniezoneVm {
         }
         // Safe because the slot is checked against the list of memory slots.
         unsafe {
-            set_user_memory_region(&self.vm, slot, false, false, 0, 0, std::ptr::null_mut())?;
+            set_user_memory_region(&self.vm, slot, false, false, 0, 0, std::ptr::null_mut(), 0)?;
         }
         self.mem_slot_gaps.lock().push(Reverse(slot));
         // This remove will always succeed because of the contains_key check above.
@@ -1054,18 +1070,17 @@ impl AsRawDescriptor for GeniezoneVm {
 }
 
 struct GeniezoneVcpuSignalHandle {
-    run: *mut gzvm_vcpu_run,
+    run_mmap: Arc<MemoryMapping>,
 }
 
-// It is safe to write to the `immediate_exit` field from any thread.
-unsafe impl Send for GeniezoneVcpuSignalHandle {}
-unsafe impl Sync for GeniezoneVcpuSignalHandle {}
-
 impl VcpuSignalHandleInner for GeniezoneVcpuSignalHandle {
-    // The caller must ensure that the VCPU lifetime is at least as long as the
-    // VcpuSignalHandleInner lifetime.
-    unsafe fn signal_immediate_exit(&self) {
-        (*(self.run)).immediate_exit = 1;
+    fn signal_immediate_exit(&self) {
+        // SAFETY: we ensure `run_mmap` is a valid mapping of `kvm_run` at creation time, and the
+        // `Arc` ensures the mapping still exists while we hold a reference to it.
+        unsafe {
+            let run = self.run_mmap.as_ptr() as *mut gzvm_vcpu_run;
+            (*run).immediate_exit = 1;
+        }
     }
 }
 
@@ -1074,24 +1089,19 @@ pub struct GeniezoneVcpu {
     vm: SafeDescriptor,
     vcpu: SafeDescriptor,
     id: usize,
-    run_mmap: MemoryMapping,
-    signal_handle: Arc<GeniezoneVcpuSignalHandle>,
+    run_mmap: Arc<MemoryMapping>,
 }
 
 impl Vcpu for GeniezoneVcpu {
     fn try_clone(&self) -> Result<Self> {
         let vm = self.vm.try_clone()?;
         let vcpu = self.vcpu.try_clone()?;
-        let run_mmap = MemoryMappingBuilder::new(self.run_mmap.size())
-            .build()
-            .map_err(|_| Error::new(ENOSPC))?;
 
         Ok(GeniezoneVcpu {
             vm,
             vcpu,
             id: self.id,
-            run_mmap,
-            signal_handle: self.signal_handle.clone(),
+            run_mmap: self.run_mmap.clone(),
         })
     }
 
@@ -1111,7 +1121,9 @@ impl Vcpu for GeniezoneVcpu {
 
     fn signal_handle(&self) -> VcpuSignalHandle {
         VcpuSignalHandle {
-            inner: Arc::downgrade(&self.signal_handle) as _,
+            inner: Box::new(GeniezoneVcpuSignalHandle {
+                run_mmap: self.run_mmap.clone(),
+            }),
         }
     }
 

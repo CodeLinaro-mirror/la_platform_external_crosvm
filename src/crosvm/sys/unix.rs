@@ -58,6 +58,7 @@ use arch::VirtioDeviceStub;
 use arch::VmArch;
 use arch::VmComponents;
 use arch::VmImage;
+use argh::FromArgs;
 use base::ReadNotifier;
 #[cfg(feature = "balloon")]
 use base::UnixSeqpacket;
@@ -168,6 +169,7 @@ use smallvec::SmallVec;
 use swap::SwapController;
 use sync::Condvar;
 use sync::Mutex;
+use vm_control::api::VmMemoryClient;
 use vm_control::*;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -286,15 +288,15 @@ fn create_virtio_devices(
     #[cfg(feature = "gpu")]
     {
         if let Some(gpu_parameters) = &cfg.gpu_parameters {
-            let display_param = if gpu_parameters.display_params.is_empty() {
-                Default::default()
-            } else {
-                gpu_parameters.display_params[0].clone()
-            };
-            let (gpu_display_w, gpu_display_h) = display_param.get_virtual_display_size();
-
             let mut event_devices = Vec::new();
             if cfg.display_window_mouse {
+                let display_param = if gpu_parameters.display_params.is_empty() {
+                    Default::default()
+                } else {
+                    gpu_parameters.display_params[0].clone()
+                };
+                let (gpu_display_w, gpu_display_h) = display_param.get_virtual_display_size();
+
                 let (event_device_socket, virtio_dev_socket) =
                     StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte)
                         .context("failed to create socket")?;
@@ -344,9 +346,6 @@ fn create_virtio_devices(
                 vm_evt_wrtube,
                 gpu_control_tube,
                 resource_bridges,
-                // Use the unnamed socket for GPU display screens.
-                cfg.wayland_socket_paths.get(""),
-                cfg.x_display.clone(),
                 render_server_fd,
                 event_devices,
             )?);
@@ -471,6 +470,15 @@ fn create_virtio_devices(
         )?);
     }
 
+    for (idx, rotary_socket) in cfg.virtio_rotary.iter().enumerate() {
+        devs.push(create_rotary_device(
+            cfg.protection_type,
+            &cfg.jail_config,
+            rotary_socket,
+            idx as u32,
+        )?);
+    }
+
     for dev_path in &cfg.virtio_input_evdevs {
         devs.push(create_vinput_device(
             cfg.protection_type,
@@ -502,34 +510,12 @@ fn create_virtio_devices(
                     .try_clone()
                     .context("failed to clone registered_evt_q tube")?,
             ),
+            cfg.balloon_wss_num_bins,
         )?);
     }
 
     for opt in &cfg.net {
-        let vq_pairs = opt.vq_pairs.unwrap_or(1);
-        let vcpu_count = cfg.vcpu_count.unwrap_or(1);
-        let multi_vq = vq_pairs > 1 && !opt.vhost_net;
-        let (tap, mac) = create_tap_for_net_device(&opt.mode, multi_vq)?;
-        let dev = if opt.vhost_net {
-            create_virtio_vhost_net_device_from_tap(
-                cfg.protection_type,
-                &cfg.jail_config,
-                vq_pairs,
-                vcpu_count,
-                cfg.vhost_net_device_path.clone(),
-                tap,
-                mac,
-            )
-        } else {
-            create_virtio_net_device_from_tap(
-                cfg.protection_type,
-                &cfg.jail_config,
-                vq_pairs,
-                vcpu_count,
-                tap,
-                mac,
-            )
-        }?;
+        let dev = opt.create_virtio_device_and_jail(cfg.protection_type, &cfg.jail_config)?;
         devs.push(dev);
     }
 
@@ -786,7 +772,7 @@ fn create_devices(
             let dev = CoIommuDev::new(
                 vm.get_memory().clone(),
                 vfio_container,
-                coiommu_device_tube,
+                VmMemoryClient::new(coiommu_device_tube),
                 coiommu_tube,
                 coiommu_attached_endpoints,
                 vcpu_count,
@@ -856,8 +842,8 @@ fn create_devices(
                     stub.dev,
                     msi_device_tube,
                     cfg.disable_virtio_intx,
-                    shared_memory_tube,
-                    ioevent_device_tube,
+                    shared_memory_tube.map(VmMemoryClient::new),
+                    VmMemoryClient::new(ioevent_device_tube),
                 )
                 .context("failed to create virtio pci dev")?;
 
@@ -1171,7 +1157,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
 
             // Check that the physical CPUs that the vCPU is affined to all share the same
             // frequency domain.
-            if let Some(freq_domain) = host_cpu_frequencies.get(&(vcpu_affinity[0] as usize)) {
+            if let Some(freq_domain) = host_cpu_frequencies.get(&vcpu_affinity[0]) {
                 for cpu in vcpu_affinity.iter() {
                     if let Some(frequencies) = host_cpu_frequencies.get(cpu) {
                         if frequencies != freq_domain {
@@ -1179,7 +1165,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
                         }
                     }
                 }
-                cpu_frequencies.insert(cpu_id as usize, freq_domain.clone());
+                cpu_frequencies.insert(cpu_id, freq_domain.clone());
             } else {
                 panic!("No frequency domain for cpu:{}", cpu_id);
             }
@@ -1609,7 +1595,7 @@ fn run_vm<Vcpu, V>(
     mut vm: V,
     irq_chip: &mut dyn IrqChipArch,
     ioapic_host_tube: Option<Tube>,
-    #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
+    #[cfg(feature = "swap")] mut swap_controller: Option<SwapController>,
 ) -> Result<ExitState>
 where
     Vcpu: VcpuArch + 'static,
@@ -1968,7 +1954,7 @@ where
             msi_device_tube,
             cfg.disable_virtio_intx,
             None,
-            ioevent_device_tube,
+            VmMemoryClient::new(ioevent_device_tube),
         )
         .context("failed to create virtio pci dev")?;
         // early reservation for viommu.
@@ -2023,7 +2009,7 @@ where
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         simple_jail(&cfg.jail_config, "block_device")?,
         #[cfg(feature = "swap")]
-        swap_controller.as_ref(),
+        &mut swap_controller,
         guest_suspended_cvar.clone(),
     )
     .context("the architecture failed to build the vm")?;
@@ -2174,7 +2160,7 @@ fn add_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
     hp_control_tube: &mpsc::Sender<PciRootCommand>,
     iommu_host_tube: &Option<Tube>,
     device: &HotPlugDeviceInfo,
-    #[cfg(feature = "swap")] swap_controller: Option<&SwapController>,
+    #[cfg(feature = "swap")] swap_controller: &mut Option<SwapController>,
 ) -> Result<()> {
     let host_addr = PciAddress::from_path(&device.path)
         .context("failed to parse hotplug device's PCI address")?;
@@ -2498,7 +2484,7 @@ fn handle_hotplug_command<V: VmArch, Vcpu: VcpuArch>(
     iommu_host_tube: &Option<Tube>,
     device: &HotPlugDeviceInfo,
     add: bool,
-    #[cfg(feature = "swap")] swap_controller: Option<&SwapController>,
+    #[cfg(feature = "swap")] swap_controller: &mut Option<SwapController>,
 ) -> VmResponse {
     let iommu_host_tube = if cfg.vfio_isolate_hotplug {
         iommu_host_tube
@@ -2554,7 +2540,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         PciRootCommand,
     >,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] hp_thread: std::thread::JoinHandle<()>,
-    #[cfg(feature = "swap")] swap_controller: Option<SwapController>,
+    #[allow(unused_mut)] // mut is required x86 only
+    #[cfg(feature = "swap")]
+    mut swap_controller: Option<SwapController>,
     #[cfg(feature = "registered_events")] reg_evt_rdtube: RecvTube,
     guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
 ) -> Result<ExitState> {
@@ -2731,7 +2719,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     // shared by all vCPU threads.
     // TODO(b/199312402): Avoid enabling core scheduling for the crosvm process
     // itself for even better performance. Only vCPUs need the feature.
-    if cfg.per_vm_core_scheduling {
+    if cfg.core_scheduling && cfg.per_vm_core_scheduling {
         if let Err(e) = enable_core_scheduling() {
             error!("Failed to enable core scheduling: {}", e);
         }
@@ -2850,6 +2838,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             from_main_channel,
             #[cfg(feature = "gdb")]
             to_gdb_channel.clone(),
+            cfg.core_scheduling,
             cfg.per_vm_core_scheduling,
             cpu_config,
             match vcpu_cgroup_tasks_file {
@@ -2928,6 +2917,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             linux.irq_chip.as_irq_chip(),
             VcpuControl::RunState(post_restore_run_mode),
         )
+    }
+
+    #[cfg(feature = "swap")]
+    if let Some(swap_controller) = &swap_controller {
+        swap_controller
+            .on_static_devices_setup_complete()
+            .context("static device setup complete")?;
     }
 
     let mut exit_state = ExitState::Stop;
@@ -3035,7 +3031,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     // here since they are used by the vmm-swap feature.
                     let mut do_exit = false;
                     while let Some(siginfo) =
-                        sigchld_fd.read().context("failed to create signalfd")?
+                        sigchld_fd.read().context("failed to read signalfd")?
                     {
                         let pid = siginfo.ssi_pid;
                         let pid_label = match linux.pid_debug_label_map.get(&pid) {
@@ -3111,7 +3107,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                     &device,
                                                     add,
                                                     #[cfg(feature = "swap")]
-                                                    swap_controller.as_ref(),
+                                                    &mut swap_controller,
                                                 )
                                             }
 
@@ -3185,7 +3181,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 disk_host_tubes,
                                                 &mut linux.pm,
                                                 #[cfg(feature = "gpu")]
-                                                &gpu_control_tube,
+                                                Some(&gpu_control_tube),
                                                 #[cfg(feature = "usb")]
                                                 Some(&usb_control_tube),
                                                 #[cfg(not(feature = "usb"))]
@@ -3999,6 +3995,22 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
     // Create vsock devices.
     for (i, params) in opts.vsock.iter().enumerate() {
         add_device(i, &params.device, &params.vhost, &jail, &mut devices_jails)?;
+    }
+
+    // Create network devices.
+    for (i, params) in opts.net.iter().enumerate() {
+        add_device(i, &params.device, &params.vhost, &jail, &mut devices_jails)?;
+    }
+
+    // No device created, that's probably not intended - print the help in that case.
+    if devices_jails.is_empty() {
+        let err = DevicesCommand::from_args(
+            &[&std::env::args().next().unwrap_or(String::from("crosvm"))],
+            &["--help"],
+        )
+        .unwrap_err();
+        println!("{}", err.output);
+        return Ok(());
     }
 
     let ex = Executor::new()?;
