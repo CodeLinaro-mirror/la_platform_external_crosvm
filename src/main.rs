@@ -174,7 +174,11 @@ fn stop_vms(cmd: cmdline::StopCommand) -> std::result::Result<(), ()> {
 }
 
 fn suspend_vms(cmd: cmdline::SuspendCommand) -> std::result::Result<(), ()> {
-    vms_request(&VmRequest::Suspend, cmd.socket_path)
+    if cmd.full {
+        vms_request(&VmRequest::SuspendVm, cmd.socket_path)
+    } else {
+        vms_request(&VmRequest::SuspendVcpus, cmd.socket_path)
+    }
 }
 
 fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
@@ -183,7 +187,12 @@ fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
         Enable(params) => (VmRequest::Swap(SwapCommand::Enable), &params.socket_path),
         Trim(params) => (VmRequest::Swap(SwapCommand::Trim), &params.socket_path),
         SwapOut(params) => (VmRequest::Swap(SwapCommand::SwapOut), &params.socket_path),
-        Disable(params) => (VmRequest::Swap(SwapCommand::Disable), &params.socket_path),
+        Disable(params) => (
+            VmRequest::Swap(SwapCommand::Disable {
+                slow_file_cleanup: params.slow_file_cleanup,
+            }),
+            &params.socket_path,
+        ),
         Status(params) => (VmRequest::Swap(SwapCommand::Status), &params.socket_path),
     };
     if let VmRequest::Swap(SwapCommand::Status) = req {
@@ -194,7 +203,11 @@ fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
 }
 
 fn resume_vms(cmd: cmdline::ResumeCommand) -> std::result::Result<(), ()> {
-    vms_request(&VmRequest::Resume, cmd.socket_path)
+    if cmd.full {
+        vms_request(&VmRequest::ResumeVm, cmd.socket_path)
+    } else {
+        vms_request(&VmRequest::ResumeVcpus, cmd.socket_path)
+    }
 }
 
 fn powerbtn_vms(cmd: cmdline::PowerbtnCommand) -> std::result::Result<(), ()> {

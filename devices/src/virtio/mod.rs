@@ -76,6 +76,7 @@ pub use self::iommu::memory_util;
 pub use self::iommu::Iommu;
 pub use self::iommu::IommuError;
 pub use self::queue::Queue;
+pub use self::queue::QueueType;
 pub use self::rng::Rng;
 #[cfg(any(feature = "tpm", feature = "vtpm"))]
 pub use self::tpm::Tpm;

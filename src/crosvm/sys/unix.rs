@@ -154,7 +154,6 @@ use hypervisor::ProtectionType;
 use hypervisor::Vm;
 use hypervisor::VmCap;
 use jail::*;
-use libc;
 use minijail::Minijail;
 use resources::AddressRange;
 use resources::Alloc;
@@ -187,8 +186,6 @@ use crate::crosvm::config::FileBackedMappingParameters;
 use crate::crosvm::config::HostPcieRootPortParameters;
 use crate::crosvm::config::HypervisorKind;
 use crate::crosvm::config::IrqChipKind;
-use crate::crosvm::config::SharedDir;
-use crate::crosvm::config::SharedDirKind;
 #[cfg(feature = "gdb")]
 use crate::crosvm::gdb::gdb_thread;
 #[cfg(feature = "gdb")]
@@ -196,6 +193,8 @@ use crate::crosvm::gdb::GdbStub;
 #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
 use crate::crosvm::ratelimit::Ratelimit;
 use crate::crosvm::sys::cmdline::DevicesCommand;
+use crate::crosvm::sys::config::SharedDir;
+use crate::crosvm::sys::config::SharedDirKind;
 
 const KVM_PATH: &str = "/dev/kvm";
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -1462,7 +1461,7 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
                         vm_clone,
                         components.vcpu_count,
                         ioapic_device_tube,
-                        Some(120),
+                        Some(24),
                     )
                     .context("failed to create IRQ chip")?,
                 )
@@ -2784,7 +2783,22 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     android::set_process_profiles(&cfg.task_profiles)?;
 
     #[allow(unused_mut)]
-    let mut run_mode = VmRunMode::Running;
+    let mut run_mode = if cfg.suspended {
+        // Sleep devices before creating vcpus.
+        device_ctrl_tube
+            .send(&DeviceControlCommand::SleepDevices)
+            .context("send command to devices control socket")?;
+        match device_ctrl_tube
+            .recv()
+            .context("receive from devices control socket")?
+        {
+            VmResponse::Ok => (),
+            resp => bail!("device sleep failed: {}", resp),
+        }
+        VmRunMode::Suspending
+    } else {
+        VmRunMode::Running
+    };
     #[cfg(feature = "gdb")]
     if to_gdb_channel.is_some() {
         // Wait until a GDB client attaches
@@ -2856,7 +2870,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             vm_evt_wrtube
                 .try_clone()
                 .context("failed to clone vm event tube")?,
-            linux.vm.check_capability(VmCap::PvClockSuspend),
             from_main_channel,
             #[cfg(feature = "gdb")]
             to_gdb_channel.clone(),
@@ -3281,7 +3294,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                             );
 
                                             // For non s2idle guest suspension we are done
-                                            if let VmRequest::Suspend = request {
+                                            if let VmRequest::SuspendVcpus = request {
                                                 if cfg.force_s2idle {
                                                     suspend_requested = true;
 
@@ -3449,6 +3462,11 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         if let Err(e) = handle.join() {
             error!("failed to join vcpu thread: {:?}", e);
         }
+    }
+
+    // After joining all vcpu threads, unregister the process-wide signal handler.
+    if let Err(e) = vcpu::remove_vcpu_signal_handler() {
+        error!("failed to remove vcpu thread signal handler: {:#}", e);
     }
 
     #[cfg(feature = "swap")]

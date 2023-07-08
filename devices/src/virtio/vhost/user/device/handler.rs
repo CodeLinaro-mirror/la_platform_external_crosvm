@@ -49,7 +49,6 @@ pub(super) mod sys;
 
 use std::collections::BTreeMap;
 use std::convert::From;
-use std::convert::TryFrom;
 use std::fs::File;
 use std::num::Wrapping;
 #[cfg(unix)]
@@ -72,7 +71,6 @@ use futures::future::AbortHandle;
 use futures::future::Aborted;
 use serde::Deserialize;
 use serde::Serialize;
-use sys::Doorbell;
 use thiserror::Error as ThisError;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
@@ -100,52 +98,14 @@ use vmm_vhost::Slave;
 use vmm_vhost::VhostUserMasterReqHandler;
 use vmm_vhost::VhostUserSlaveReqHandlerMut;
 
+use crate::virtio::Interrupt;
 use crate::virtio::Queue;
+use crate::virtio::QueueType::Split;
 use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
-use crate::virtio::SignalableInterrupt;
 
 /// Largest valid number of entries in a virtqueue.
 const MAX_VRING_LEN: u16 = 32768;
-
-/// An event to deliver an interrupt to the guest.
-///
-/// Unlike `devices::Interrupt`, this doesn't support interrupt status and signal resampling.
-// TODO(b/187487351): To avoid sending unnecessary events, we might want to support interrupt
-// status. For this purpose, we need a mechanism to share interrupt status between the vmm and the
-// device process.
-#[derive(Clone)]
-pub struct CallEvent(Arc<Event>);
-
-impl CallEvent {
-    #[cfg_attr(windows, allow(dead_code))]
-    pub fn into_inner(self) -> Event {
-        Arc::try_unwrap(self.0).unwrap()
-    }
-}
-
-impl SignalableInterrupt for CallEvent {
-    fn signal(&self, _vector: u16, _interrupt_status_mask: u32) {
-        self.0.signal().unwrap();
-    }
-
-    fn signal_config_changed(&self) {} // TODO(dgreid)
-
-    fn get_resample_evt(&self) -> Option<&Event> {
-        None
-    }
-
-    fn do_interrupt_resample(&self) {}
-}
-
-impl From<File> for CallEvent {
-    fn from(file: File) -> Self {
-        // Safe because we own the file.
-        CallEvent(Arc::new(unsafe {
-            Event::from_raw_descriptor(file.into_raw_descriptor())
-        }))
-    }
-}
 
 /// Keeps a mapping from the vmm's virtual addresses to guest addresses.
 /// used to translate messages from the vmm to guest offsets.
@@ -202,7 +162,7 @@ pub trait VhostUserBackend {
         idx: usize,
         queue: Queue,
         mem: GuestMemory,
-        doorbell: Doorbell,
+        doorbell: Interrupt,
         kick_evt: Event,
     ) -> anyhow::Result<()>;
 
@@ -229,7 +189,20 @@ pub trait VhostUserBackend {
 
     /// Used to stop non queue workers that `VhostUserBackend::stop_queue` can't stop.
     fn stop_non_queue_workers(&mut self) -> anyhow::Result<()> {
-        error!("sleep not implemented for device");
+        error!("sleep not implemented for vhost user device");
+        // TODO(rizhang): Return error once basic devices support this.
+        Ok(())
+    }
+
+    /// Snapshot device and return serialized bytes.
+    fn snapshot(&self) -> anyhow::Result<Vec<u8>> {
+        error!("snapshot not implemented for vhost user device");
+        // TODO(rizhang): Return error once basic devices support this.
+        Ok(Vec::new())
+    }
+
+    fn restore(&mut self, _data: Vec<u8>) -> anyhow::Result<()> {
+        error!("restore not implemented for vhost user device");
         // TODO(rizhang): Return error once basic devices support this.
         Ok(())
     }
@@ -239,7 +212,7 @@ pub trait VhostUserBackend {
 struct Vring {
     // The queue config. This doesn't get mutated by the queue workers.
     queue: Queue,
-    doorbell: Option<Doorbell>,
+    doorbell: Option<Interrupt>,
     enabled: bool,
     // Active queue that is only `Some` when the device is sleeping.
     paused_queue: Option<Queue>,
@@ -260,7 +233,7 @@ struct VringSnapshot {
 impl Vring {
     fn new(max_size: u16) -> Self {
         Self {
-            queue: Queue::new(max_size),
+            queue: Queue::new(Split, max_size),
             doorbell: None,
             enabled: false,
             paused_queue: None,
@@ -289,11 +262,11 @@ impl Vring {
     }
 
     fn restore(&mut self, vring_snapshot: VringSnapshot) -> anyhow::Result<()> {
-        self.queue = Queue::restore(vring_snapshot.queue)?;
+        self.queue = Queue::restore(Split, vring_snapshot.queue)?;
         self.enabled = vring_snapshot.enabled;
         self.paused_queue = vring_snapshot
             .paused_queue
-            .map(Queue::restore)
+            .map(|value| Queue::restore(Split, value))
             .transpose()?;
         Ok(())
     }
@@ -325,13 +298,13 @@ pub trait VhostUserPlatformOps {
     /// provided by `file`. For other protocols, `file` will be `None`.
     fn set_vring_kick(&mut self, index: u8, file: Option<File>) -> VhostResult<Event>;
 
-    /// Return a `Doorbell` that the backend will signal whenever it puts used buffers for vring
+    /// Return an `Interrupt` that the backend will signal whenever it puts used buffers for vring
     /// `index`.
     ///
     /// For protocols that support listening to a file descriptor (`Regular`), `file` provides a
-    /// file descriptor from which the `Doorbell` should be built. For other protocols, it will be
+    /// file descriptor from which the `Interrupt` should be built. For other protocols, it will be
     /// `None`.
-    fn set_vring_call(&mut self, index: u8, file: Option<File>) -> VhostResult<Doorbell>;
+    fn set_vring_call(&mut self, index: u8, file: Option<File>) -> VhostResult<Interrupt>;
 }
 
 /// Ops for running vhost-user over a stream (i.e. regular protocol).
@@ -402,17 +375,12 @@ impl VhostUserPlatformOps for VhostUserRegularOps {
         Ok(unsafe { Event::from_raw_descriptor(file.into_raw_descriptor()) })
     }
 
-    fn set_vring_call(&mut self, _index: u8, file: Option<File>) -> VhostResult<Doorbell> {
+    fn set_vring_call(&mut self, _index: u8, file: Option<File>) -> VhostResult<Interrupt> {
         let file = file.ok_or(VhostError::InvalidParam)?;
-        Ok(
-            // `Doorbell` is defined as `CallEvent` on Windows, prevent clippy from giving us a
-            // warning about the unneeded conversion.
-            #[allow(clippy::useless_conversion)]
-            Doorbell::from(CallEvent::try_from(file).map_err(|_| {
-                error!("failed to convert callfd to CallSignal");
-                VhostError::InvalidParam
-            })?),
-        )
+
+        // Safe because we own the file.
+        let call_evt = unsafe { Event::from_raw_descriptor(file.into_raw_descriptor()) };
+        Ok(Interrupt::new_vhost_user(call_evt))
     }
 }
 
@@ -429,7 +397,7 @@ pub struct DeviceRequestHandler {
 #[derive(Serialize, Deserialize)]
 pub struct DeviceRequestHandlerSnapshot {
     vrings: Vec<VringSnapshot>,
-    // TODO(rizhang): Add VhostUserBackend snapshot.
+    backend: Vec<u8>,
 }
 
 impl DeviceRequestHandler {
@@ -577,8 +545,8 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
         }
 
         let vring = &mut self.vrings[index as usize];
-        vring.queue.next_avail = Wrapping(base as u16);
-        vring.queue.next_used = Wrapping(base as u16);
+        vring.queue.set_next_avail(Wrapping(base as u16));
+        vring.queue.set_next_used(Wrapping(base as u16));
 
         Ok(())
     }
@@ -602,7 +570,7 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
 
         Ok(VhostUserVringState::new(
             index,
-            vring.queue.next_avail.0 as u32,
+            vring.queue.next_avail().0 as u32,
         ))
     }
 
@@ -797,6 +765,7 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
                 .map(|vring| vring.snapshot())
                 .collect::<anyhow::Result<Vec<VringSnapshot>>>()
                 .map_err(VhostError::SnapshotError)?,
+            backend: self.backend.snapshot().map_err(VhostError::SnapshotError)?,
         }) {
             Ok(serialized_json) => Ok(serialized_json),
             Err(e) => {
@@ -839,7 +808,9 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
             }
         }
 
-        // TODO(rizhang): Restore self.backend.
+        self.backend
+            .restore(device_request_handler_snapshot.backend)
+            .map_err(VhostError::RestoreError)?;
 
         Ok(())
     }
@@ -1100,7 +1071,7 @@ mod tests {
             idx: usize,
             queue: Queue,
             _mem: GuestMemory,
-            _doorbell: Doorbell,
+            _doorbell: Interrupt,
             _kick_evt: Event,
         ) -> anyhow::Result<()> {
             self.active_queues[idx] = Some(queue);
@@ -1169,7 +1140,7 @@ mod tests {
 
             for idx in 0..QUEUES_NUM {
                 println!("activate_mem_table: queue_index={}", idx);
-                let queue = Queue::new(0x10);
+                let queue = Queue::new(Split, 0x10);
                 let queue_evt = Event::new().unwrap();
                 let irqfd = Event::new().unwrap();
 
@@ -1251,7 +1222,7 @@ mod tests {
 
         for idx in 0..queues_num {
             println!("activate_mem_table: queue_index={}", idx);
-            let queue = Queue::new(0x10);
+            let queue = Queue::new(Split, 0x10);
             let queue_evt = Event::new().unwrap();
             let irqfd = Event::new().unwrap();
 

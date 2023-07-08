@@ -28,13 +28,13 @@ use vmm_vhost::message::VhostUserVirtioFeatures;
 
 use crate::virtio::gpu;
 use crate::virtio::gpu::QueueReader;
-use crate::virtio::vhost::user::device::handler::sys::Doorbell;
 use crate::virtio::vhost::user::device::handler::Error as DeviceError;
 use crate::virtio::vhost::user::device::handler::VhostBackendReqConnection;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
 use crate::virtio::vhost::user::device::handler::WorkerState;
 use crate::virtio::DescriptorChain;
 use crate::virtio::Gpu;
+use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
@@ -45,7 +45,7 @@ const MAX_QUEUE_NUM: usize = gpu::QUEUE_SIZES.len();
 #[derive(Clone)]
 struct SharedReader {
     queue: Arc<Mutex<Queue>>,
-    doorbell: Doorbell,
+    doorbell: Interrupt,
 }
 
 impl gpu::QueueReader for SharedReader {
@@ -147,7 +147,7 @@ impl VhostUserBackend for GpuBackend {
         idx: usize,
         queue: Queue,
         mem: GuestMemory,
-        doorbell: Doorbell,
+        doorbell: Interrupt,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
         if self.queue_workers[idx].is_some() {
@@ -175,8 +175,13 @@ impl VhostUserBackend for GpuBackend {
         let state = if let Some(s) = self.state.as_ref() {
             s.clone()
         } else {
+            let fence_handler_resources =
+                Arc::new(Mutex::new(Some(gpu::FenceHandlerActivationResources {
+                    mem: mem.clone(),
+                    ctrl_queue: reader.clone(),
+                })));
             let fence_handler =
-                gpu::create_fence_handler(mem.clone(), reader.clone(), self.fence_state.clone());
+                gpu::create_fence_handler(fence_handler_resources, self.fence_state.clone());
 
             let state = Rc::new(RefCell::new(
                 self.gpu
@@ -231,10 +236,16 @@ impl VhostUserBackend for GpuBackend {
         }
     }
 
-    fn reset(&mut self) {
+    fn stop_non_queue_workers(&mut self) -> anyhow::Result<()> {
         for handle in self.platform_workers.borrow_mut().drain(..) {
             handle.abort();
         }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.stop_non_queue_workers()
+            .expect("Failed to stop platform workers.");
 
         for queue_num in 0..self.max_queue_num() {
             // The cursor queue is never used, so we should check if the queue is set before
@@ -257,6 +268,24 @@ impl VhostUserBackend for GpuBackend {
         if opt.replace(conn.take_shmem_mapper().unwrap()).is_some() {
             warn!("connection already established. overwriting");
         }
+    }
+
+    fn snapshot(&self) -> anyhow::Result<Vec<u8>> {
+        // TODO(b/289431114): Snapshot more fields if needed. Right now we just need a bare bones
+        // snapshot of the GPU to create a POC.
+        serde_json::to_vec(&serde_json::Value::Null)
+            .context("Failed to serialize Null in the GPU device")
+    }
+
+    fn restore(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+        let data =
+            serde_json::to_value(data).context("Failed to deserialize NULL in the GPU device")?;
+        anyhow::ensure!(
+            data == serde_json::Value::Null,
+            "unexpected snapshot data: should be null, got {}",
+            data
+        );
+        Ok(())
     }
 }
 

@@ -9,8 +9,8 @@ cfg_if::cfg_if! {
         use base::RawDescriptor;
         use devices::virtio::vhost::user::device::parse_wayland_sock;
 
-        use super::sys::config::VfioOption;
-        use super::config::SharedDir;
+        use crate::crosvm::sys::config::VfioOption;
+        use crate::crosvm::sys::config::SharedDir;
     }
 }
 
@@ -296,6 +296,9 @@ pub struct ResumeCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
+    /// suspend VM VCPUs and Devices
+    #[argh(switch)]
+    pub full: bool,
 }
 
 #[derive(FromArgs)]
@@ -314,6 +317,9 @@ pub struct SuspendCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
+    /// suspend VM VCPUs and Devices
+    #[argh(switch)]
+    pub full: bool,
 }
 
 #[derive(FromArgs)]
@@ -350,6 +356,9 @@ pub struct SwapDisableCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
+    #[argh(switch)]
+    /// clean up the swap file in the background.
+    pub slow_file_cleanup: bool,
 }
 
 #[derive(FromArgs)]
@@ -2030,6 +2039,12 @@ pub struct RunCommand {
     ///     revision=NUM - revision
     pub stub_pci_device: Vec<StubPciParameters>,
 
+    #[argh(switch)]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// start a VM with vCPUs and devices suspended
+    pub suspended: Option<bool>,
+
     #[argh(option, long = "swap", arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -2700,6 +2715,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.swap_dir = cmd.swap_dir;
         cfg.restore_path = cmd.restore;
+        cfg.suspended = cmd.suspended.unwrap_or_default();
 
         if let Some(mut socket_path) = cmd.socket {
             if socket_path.is_dir() {

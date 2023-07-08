@@ -236,7 +236,7 @@ impl DiskState {
 async fn process_one_request(
     avail_desc: &mut DescriptorChain,
     disk_state: &AsyncRwLock<DiskState>,
-    flush_timer: &RefCell<TimerAsync>,
+    flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
 ) -> result::Result<usize, ExecuteError> {
     let reader = &mut avail_desc.reader;
@@ -282,7 +282,7 @@ pub async fn process_one_chain<I: SignalableInterrupt>(
     disk_state: &AsyncRwLock<DiskState>,
     mem: &GuestMemory,
     interrupt: &I,
-    flush_timer: &RefCell<TimerAsync>,
+    flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
 ) {
     let len = match process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed)
@@ -309,7 +309,7 @@ async fn handle_queue<I: SignalableInterrupt + 'static>(
     queue: Rc<RefCell<Queue>>,
     evt: EventAsync,
     interrupt: I,
-    flush_timer: Rc<RefCell<TimerAsync>>,
+    flush_timer: Rc<RefCell<TimerAsync<Timer>>>,
     flush_timer_armed: Rc<RefCell<bool>>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Rc<RefCell<Queue>> {
@@ -446,7 +446,7 @@ async fn resize(disk_state: &AsyncRwLock<DiskState>, new_size: u64) -> DiskContr
 /// Periodically flushes the disk when the given timer fires.
 async fn flush_disk(
     disk_state: Rc<AsyncRwLock<DiskState>>,
-    timer: TimerAsync,
+    timer: TimerAsync<Timer>,
     armed: Rc<RefCell<bool>>,
 ) -> Result<(), ControlError> {
     loop {
@@ -469,12 +469,12 @@ async fn flush_disk(
     }
 }
 
-pub enum WorkerCmd<I: SignalableInterrupt + 'static> {
+pub enum WorkerCmd {
     StartQueue {
         index: usize,
         queue: Queue,
         kick_evt: Event,
-        interrupt: I,
+        interrupt: Interrupt,
         mem: GuestMemory,
     },
     StopQueue {
@@ -491,12 +491,12 @@ pub enum WorkerCmd<I: SignalableInterrupt + 'static> {
 // `disk_state` is wrapped by `AsyncRwLock`, which provides both shared and exclusive locks. It's
 // because the state can be read from the virtqueue task while the control task is processing a
 // resizing command.
-pub async fn run_worker<I: SignalableInterrupt + 'static>(
+pub async fn run_worker(
     ex: &Executor,
     signal: ConfigChangeSignal,
     disk_state: &Rc<AsyncRwLock<DiskState>>,
     control_tube: &Option<AsyncTube>,
-    mut worker_rx: mpsc::UnboundedReceiver<WorkerCmd<I>>,
+    mut worker_rx: mpsc::UnboundedReceiver<WorkerCmd>,
     kill_evt: Event,
     resample_future: impl std::future::Future<Output = anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
@@ -626,7 +626,7 @@ pub struct BlockAsync {
     pub(crate) executor_kind: ExecutorKind,
     worker_threads: Vec<(
         WorkerThread<(Box<dyn DiskFile>, Option<Tube>)>,
-        mpsc::UnboundedSender<WorkerCmd<Interrupt>>,
+        mpsc::UnboundedSender<WorkerCmd>,
     )>,
     // Whether to run worker threads in parallel for each queue
     worker_per_queue: bool,
@@ -734,7 +734,7 @@ impl BlockAsync {
         reader: &mut Reader,
         writer: &mut Writer,
         disk_state: &AsyncRwLock<DiskState>,
-        flush_timer: &RefCell<TimerAsync>,
+        flush_timer: &RefCell<TimerAsync<Timer>>,
         flush_timer_armed: &RefCell<bool>,
     ) -> result::Result<(), ExecuteError> {
         // Acquire immutable access to prevent tasks from resizing disk.
@@ -1633,8 +1633,14 @@ mod tests {
             mem.clone(),
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
             vec![
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
             ],
         )
         .expect("activate should succeed");
@@ -1665,8 +1671,14 @@ mod tests {
             mem,
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
             vec![
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
             ],
         )
         .expect("re-activate should succeed");
@@ -1730,8 +1742,14 @@ mod tests {
             mem,
             interrupt.clone(),
             vec![
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
             ],
         )
         .expect("activate should succeed");
@@ -1783,6 +1801,7 @@ mod tests {
         assert_eq!(
             interrupt
                     .get_interrupt_evt()
+                    .unwrap()
                     // Wait a bit until the blk signals the interrupt
                     .wait_timeout(Duration::from_millis(300)),
             Ok(base::EventWaitResult::Signaled),
@@ -1831,8 +1850,14 @@ mod tests {
             mem.clone(),
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
             vec![
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
             ],
         )
         .expect("activate should succeed");
@@ -1852,8 +1877,14 @@ mod tests {
             mem,
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
             vec![
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
-                (Queue::new(DEFAULT_QUEUE_SIZE), Event::new().unwrap()),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
+                (
+                    Queue::new(b.queue_type(), DEFAULT_QUEUE_SIZE),
+                    Event::new().unwrap(),
+                ),
             ],
         )
         .expect("activate should succeed");
