@@ -69,48 +69,6 @@ rust_test {
 }
 
 rust_test {
-    name: "base_test_tests_process",
-    defaults: ["crosvm_inner_defaults"],
-    // Suffers from strange linker error on host when run on Oxygen or non-bazel
-    // `atest`. See http://b/262748006 discussion.
-    host_supported: false,
-    crate_name: "process",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    srcs: ["tests/process.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libaudio_streams",
-        "libbase_rust",
-        "libcfg_if",
-        "libchrono",
-        "libdata_model",
-        "libenv_logger",
-        "liblibc",
-        "liblog_rust",
-        "libminijail_rust",
-        "libonce_cell",
-        "libserde",
-        "libserde_json",
-        "libsmallvec",
-        "libsync_rust",
-        "libtempfile",
-        "libthiserror",
-        "libuuid",
-        "libzerocopy",
-    ],
-    proc_macros: [
-        "libbase_event_token_derive",
-        "libremain",
-    ],
-}
-
-rust_test {
     name: "base_test_tests_tube",
     defaults: ["crosvm_inner_defaults"],
     host_supported: true,
@@ -261,5 +219,8 @@ rust_library {
         },
     },
     shared_libs: ["libcap"], // specified in src/unix/capabilities.rs
-    visibility: ["//packages/modules/Virtualization/virtualizationmanager"],
+    visibility: [
+        "//packages/modules/Virtualization/virtualizationmanager",
+        "//vendor:__subpackages__",
+    ],
 }

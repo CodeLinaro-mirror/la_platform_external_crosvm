@@ -33,16 +33,19 @@ use crate::virtio::device_constants::snd::virtio_snd_config;
 use crate::virtio::snd::common_backend::async_funcs::handle_ctrl_queue;
 use crate::virtio::snd::common_backend::async_funcs::handle_pcm_queue;
 use crate::virtio::snd::common_backend::async_funcs::send_pcm_response_worker;
-use crate::virtio::snd::common_backend::create_stream_source_generators;
+use crate::virtio::snd::common_backend::create_stream_info_builders;
 use crate::virtio::snd::common_backend::hardcoded_snd_data;
 use crate::virtio::snd::common_backend::hardcoded_virtio_snd_config;
 use crate::virtio::snd::common_backend::stream_info::StreamInfo;
+use crate::virtio::snd::common_backend::stream_info::StreamInfoBuilder;
 use crate::virtio::snd::common_backend::PcmResponse;
 use crate::virtio::snd::common_backend::SndData;
 use crate::virtio::snd::common_backend::MAX_QUEUE_NUM;
 use crate::virtio::snd::parameters::Parameters;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
+use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
+use crate::virtio::vhost::user::VhostUserDevice;
 
 static SND_EXECUTOR: OnceCell<Executor> = OnceCell::new();
 
@@ -74,19 +77,21 @@ impl SndBackend {
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
         let snd_data = hardcoded_snd_data(&params);
-        let generators = create_stream_source_generators(&params, &snd_data);
+        let mut keep_rds = Vec::new();
+        let builders = create_stream_info_builders(&params, &snd_data, &mut keep_rds)?;
 
-        if snd_data.pcm_info_len() != generators.len() {
+        if snd_data.pcm_info_len() != builders.len() {
             error!(
-                "snd: expected {} stream source generators, got {}",
+                "snd: expected {} stream info builders, got {}",
                 snd_data.pcm_info_len(),
-                generators.len(),
+                builders.len(),
             )
         }
 
-        let streams = generators
+        let streams = builders
             .into_iter()
-            .map(|generator| AsyncMutex::new(StreamInfo::new(generator)))
+            .map(StreamInfoBuilder::build)
+            .map(AsyncMutex::new)
             .collect();
         let streams = Rc::new(AsyncMutex::new(streams));
 
@@ -107,6 +112,21 @@ impl SndBackend {
             tx_recv: Some(tx_recv),
             rx_recv: Some(rx_recv),
         })
+    }
+}
+
+impl VhostUserDevice for SndBackend {
+    fn max_queue_num(&self) -> usize {
+        MAX_QUEUE_NUM
+    }
+
+    fn into_req_handler(
+        self: Box<Self>,
+        ops: Box<dyn super::handler::VhostUserPlatformOps>,
+        _ex: &Executor,
+    ) -> anyhow::Result<Box<dyn vmm_vhost::VhostUserSlaveReqHandler>> {
+        let handler = DeviceRequestHandler::new(self, ops);
+        Ok(Box::new(std::sync::Mutex::new(handler)))
     }
 }
 

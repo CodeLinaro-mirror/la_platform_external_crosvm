@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use devices::IommuDevType;
 use devices::PciAddress;
@@ -14,20 +13,21 @@ use serde_keyvalue::FromKeyValues;
 
 use crate::crosvm::config::Config;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub enum HypervisorKind {
-    Kvm,
-}
-
-impl FromStr for HypervisorKind {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "kvm" => Ok(HypervisorKind::Kvm),
-            _ => Err("invalid hypervisor backend"),
-        }
-    }
+    Kvm {
+        device: Option<PathBuf>,
+    },
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(feature = "geniezone")]
+    Geniezone {
+        device: Option<PathBuf>,
+    },
+    #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
+    Gunyah {
+        device: Option<PathBuf>,
+    },
 }
 
 #[cfg(feature = "audio")]
@@ -54,19 +54,7 @@ pub fn check_serial_params(_serial_params: &SerialParameters) -> Result<(), Stri
     Ok(())
 }
 
-pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
-    if cfg.host_ip.is_some() || cfg.netmask.is_some() || cfg.mac_address.is_some() {
-        if cfg.host_ip.is_none() {
-            return Err("`host-ip` missing from network config".to_string());
-        }
-        if cfg.netmask.is_none() {
-            return Err("`netmask` missing from network config".to_string());
-        }
-        if cfg.mac_address.is_none() {
-            return Err("`mac` missing from network config".to_string());
-        }
-    }
-
+pub fn validate_config(_cfg: &mut Config) -> std::result::Result<(), String> {
     Ok(())
 }
 

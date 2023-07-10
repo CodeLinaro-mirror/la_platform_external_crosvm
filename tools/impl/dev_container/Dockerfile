@@ -20,7 +20,7 @@ FROM docker.io/debian:testing-slim
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+    PATH=/workspace/tools:/usr/local/cargo/bin:$PATH
 
 # Install pipx applications globally in /usr/local/bin
 ENV PIPX_HOME=/usr/local/pipx \
@@ -53,6 +53,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
     && ./install-aarch64-deps \
     && ./install-armhf-deps \
     && ./install-mingw64-deps
+
+# Add wine64 to PATH, as debian removed alternative entry to wine64
+ENV PATH=/usr/lib/wine:$PATH
 
 # Install an older version of binutils-mingw-w64-x86-64. The latest version is crashing when
 # linking crosvm. See b/265995780

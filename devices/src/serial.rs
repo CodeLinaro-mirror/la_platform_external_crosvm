@@ -20,6 +20,9 @@ use base::Event;
 use base::EventToken;
 use base::Result;
 use base::WaitContext;
+use base::WorkerThread;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::bus::BusAccessInfo;
 use crate::pci::CrosvmDeviceId;
@@ -28,10 +31,6 @@ use crate::suspendable::DeviceState;
 use crate::suspendable::Suspendable;
 use crate::BusDevice;
 use crate::DeviceId;
-use base::WorkerThread;
-
-use serde::Deserialize;
-use serde::Serialize;
 
 const LOOP_SIZE: usize = 0x40;
 
@@ -296,6 +295,10 @@ impl Serial {
         (self.interrupt_enable.load(Ordering::SeqCst) & IER_THR_BIT) != 0
     }
 
+    fn is_thr_intr_changed(&self, bit: u8) -> bool {
+        (self.interrupt_enable.load(Ordering::SeqCst) ^ bit) & IER_FIFO_BITS != 0
+    }
+
     fn is_loop(&self) -> bool {
         (self.modem_control & MCR_LOOP_BIT) != 0
     }
@@ -340,6 +343,10 @@ impl Serial {
         self.line_status |= LSR_DATA_BIT;
     }
 
+    fn is_data_avaiable(&self) -> bool {
+        (self.line_status & LSR_DATA_BIT) != 0
+    }
+
     fn iir_reset(&mut self) {
         self.interrupt_identification = DEFAULT_INTERRUPT_IDENTIFICATION;
     }
@@ -364,9 +371,19 @@ impl Serial {
                     self.trigger_thr_empty()?;
                 }
             }
-            IER => self
-                .interrupt_enable
-                .store(v & IER_FIFO_BITS, Ordering::SeqCst),
+            IER => {
+                let tx_changed = self.is_thr_intr_changed(v);
+                self.interrupt_enable
+                    .store(v & IER_FIFO_BITS, Ordering::SeqCst);
+
+                if self.is_data_avaiable() {
+                    self.trigger_recv_interrupt()?;
+                }
+
+                if tx_changed {
+                    self.trigger_thr_empty()?;
+                }
+            }
             LCR => self.line_control = v,
             MCR => self.modem_control = v,
             SCR => self.scratch = v,
@@ -571,11 +588,11 @@ mod tests {
     use std::io;
     use std::sync::Arc;
 
-    use crate::suspendable_tests;
     use hypervisor::ProtectionType;
     use sync::Mutex;
 
     use super::*;
+    use crate::suspendable_tests;
     pub use crate::sys::serial_device::SerialDevice;
 
     #[derive(Clone)]

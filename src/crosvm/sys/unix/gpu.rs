@@ -5,11 +5,13 @@
 //! GPU related things
 //! depends on "gpu" feature
 
-#[cfg(feature = "virgl_renderer_next")]
+#[cfg(feature = "gpu")]
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
+#[cfg(feature = "gpu")]
+use base::platform::move_proc_to_cgroup;
 use jail::*;
 use serde::Deserialize;
 use serde::Serialize;
@@ -88,20 +90,13 @@ pub fn create_gpu_device(
     resource_bridges: Vec<Tube>,
     wayland_socket_path: Option<&PathBuf>,
     x_display: Option<String>,
-    #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
+    render_server_fd: Option<SafeDescriptor>,
     event_devices: Vec<EventDevice>,
 ) -> DeviceResult {
     let mut display_backends = vec![
         virtio::DisplayBackend::X(x_display),
         virtio::DisplayBackend::Stub,
     ];
-
-    let wayland_socket_dirs = cfg
-        .wayland_socket_paths
-        .iter()
-        .map(|(_name, path)| path.parent())
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| anyhow!("wayland socket path has no parent or file name"))?;
 
     if let Some(socket_path) = wayland_socket_path {
         display_backends.insert(
@@ -118,13 +113,13 @@ pub fn create_gpu_device(
         resource_bridges,
         display_backends,
         cfg.gpu_parameters.as_ref().unwrap(),
-        #[cfg(feature = "virgl_renderer_next")]
         render_server_fd,
         event_devices,
         /*external_blob=*/ cfg.jail_config.is_some(),
         /*system_blob=*/ false,
         virtio::base_features(cfg.protection_type),
         cfg.wayland_socket_paths.clone(),
+        cfg.gpu_cgroup_path.as_ref(),
     );
 
     let jail = if let Some(jail_config) = &cfg.jail_config {
@@ -156,7 +151,13 @@ pub fn create_gpu_device(
         // each new wayland context must open() the socket. If the wayland socket is ever
         // destroyed and remade in the same host directory, new connections will be possible
         // without restarting the wayland device.
-        for dir in &wayland_socket_dirs {
+        for socket_path in cfg.wayland_socket_paths.values() {
+            let dir = socket_path.parent().with_context(|| {
+                format!(
+                    "wayland socket path '{}' has no parent",
+                    socket_path.display(),
+                )
+            })?;
             jail.mount_bind(dir, dir, true)?;
         }
 
@@ -178,9 +179,10 @@ pub struct GpuRenderServerParameters {
     pub cache_path: Option<String>,
     pub cache_size: Option<String>,
     pub foz_db_list_path: Option<String>,
+    pub precompiled_cache_path: Option<String>,
 }
 
-#[cfg(feature = "virgl_renderer_next")]
+#[cfg(feature = "gpu")]
 fn get_gpu_render_server_environment(cache_info: Option<&GpuCacheInfo>) -> Result<Vec<String>> {
     let mut env = HashMap::<String, String>::new();
     let os_env_len = env::vars_os().count();
@@ -210,7 +212,7 @@ fn get_gpu_render_server_environment(cache_info: Option<&GpuCacheInfo>) -> Resul
     Ok(env.iter().map(|(k, v)| format!("{}={}", k, v)).collect())
 }
 
-#[cfg(feature = "virgl_renderer_next")]
+#[cfg(feature = "gpu")]
 pub fn start_gpu_render_server(
     cfg: &Config,
     render_server_parameters: &GpuRenderServerParameters,
@@ -240,6 +242,9 @@ pub fn start_gpu_render_server(
             // Manually bind mount recursively to allow DLC shader caches
             // to be propagated to the GPU process.
             jail.mount(dir, dir, "", (libc::MS_BIND | libc::MS_REC) as usize)?;
+        }
+        if let Some(precompiled_cache_dir) = &render_server_parameters.precompiled_cache_path {
+            jail.mount_bind(precompiled_cache_dir, precompiled_cache_dir, true)?;
         }
 
         // bind mount /dev/log for syslog
@@ -272,13 +277,18 @@ pub fn start_gpu_render_server(
         envp = Some(env.iter().map(AsRef::as_ref).collect());
     }
 
-    jail.run_command(minijail::Command::new_for_path(
-        cmd,
-        &inheritable_fds,
-        &args,
-        envp.as_deref(),
-    )?)
-    .context("failed to start gpu render server")?;
+    let render_server_pid = jail
+        .run_command(minijail::Command::new_for_path(
+            cmd,
+            &inheritable_fds,
+            &args,
+            envp.as_deref(),
+        )?)
+        .context("failed to start gpu render server")?;
+
+    if let Some(gpu_server_cgroup_path) = &cfg.gpu_server_cgroup_path {
+        move_proc_to_cgroup(gpu_server_cgroup_path.to_path_buf(), render_server_pid)?;
+    }
 
     Ok((jail, SafeDescriptor::from(client_socket)))
 }
@@ -298,6 +308,7 @@ mod tests {
                 cache_path: None,
                 cache_size: None,
                 foz_db_list_path: None,
+                precompiled_cache_path: None,
             }
         );
 
@@ -309,6 +320,7 @@ mod tests {
                 cache_path: None,
                 cache_size: None,
                 foz_db_list_path: None,
+                precompiled_cache_path: None,
             }
         );
 
@@ -321,11 +333,12 @@ mod tests {
                 cache_path: Some("/cache/path".into()),
                 cache_size: Some("16M".into()),
                 foz_db_list_path: None,
+                precompiled_cache_path: None,
             }
         );
 
         let res: GpuRenderServerParameters = from_key_values(
-            "path=/some/path,cache-path=/cache/path,cache-size=16M,foz-db-list-path=/db/list/path",
+            "path=/some/path,cache-path=/cache/path,cache-size=16M,foz-db-list-path=/db/list/path,precompiled-cache-path=/precompiled/path",
         )
         .unwrap();
         assert_eq!(
@@ -335,6 +348,7 @@ mod tests {
                 cache_path: Some("/cache/path".into()),
                 cache_size: Some("16M".into()),
                 foz_db_list_path: Some("/db/list/path".into()),
+                precompiled_cache_path: Some("/precompiled/path".into()),
             }
         );
 

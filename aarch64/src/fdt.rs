@@ -17,6 +17,7 @@ use devices::pl030::PL030_AMBA_ID;
 use devices::PciAddress;
 use devices::PciInterruptPin;
 use hypervisor::PsciVersion;
+use hypervisor::VmAArch64;
 use hypervisor::PSCI_0_2;
 use hypervisor::PSCI_1_0;
 use rand::rngs::OsRng;
@@ -63,12 +64,27 @@ const IRQ_TYPE_LEVEL_LOW: u32 = 0x00000008;
 
 fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemory) -> Result<()> {
     let mut mem_reg_prop = Vec::new();
-    for region in guest_mem.guest_memory_regions() {
+    let mut previous_memory_region_end = None;
+    let mut regions = guest_mem.guest_memory_regions();
+    regions.sort();
+    for region in regions {
         if region.0.offset() == AARCH64_PROTECTED_VM_FW_START {
             continue;
         }
+        // Merge with the previous region if possible.
+        if let Some(previous_end) = previous_memory_region_end {
+            if region.0 == previous_end {
+                *mem_reg_prop.last_mut().unwrap() += region.1 as u64;
+                previous_memory_region_end =
+                    Some(previous_end.checked_add(region.1 as u64).unwrap());
+                continue;
+            }
+            assert!(region.0 > previous_end, "Memory regions overlap");
+        }
+
         mem_reg_prop.push(region.0.offset());
         mem_reg_prop.push(region.1 as u64);
+        previous_memory_region_end = Some(region.0.checked_add(region.1 as u64).unwrap());
     }
 
     let memory_node = fdt.begin_node("memory")?;
@@ -534,6 +550,7 @@ fn create_vmwdt_node(fdt: &mut FdtWriter, vmwdt_cfg: VmWdtConfig) -> Result<()> 
 /// * `bat_mmio_base_and_irq` - The battery base address and irq number
 /// * `vmwdt_cfg` - The virtual watchdog configuration
 /// * `dump_device_tree_blob` - Option path to write DTB to
+/// * `vm_generator` - Callback to add additional nodes to DTB. create_vm uses Aarch64Vm::create_fdt
 pub fn create_fdt(
     fdt_max_size: usize,
     guest_mem: &GuestMemory,
@@ -555,12 +572,15 @@ pub fn create_fdt(
     bat_mmio_base_and_irq: Option<(u64, u32)>,
     vmwdt_cfg: VmWdtConfig,
     dump_device_tree_blob: Option<PathBuf>,
+    vm_generator: &impl Fn(&mut FdtWriter, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
 ) -> Result<()> {
     let mut fdt = FdtWriter::new(&[]);
+    let mut phandles = BTreeMap::new();
 
     // The whole thing is put into one giant node with some top level properties
     let root_node = fdt.begin_node("")?;
     fdt.property_u32("interrupt-parent", PHANDLE_GIC)?;
+    phandles.insert("intc", PHANDLE_GIC);
     fdt.property_string("compatible", "linux,dummy-virt")?;
     fdt.property_u32("#address-cells", 0x2)?;
     fdt.property_u32("#size-cells", 0x2)?;
@@ -571,7 +591,11 @@ pub fn create_fdt(
     create_config_node(&mut fdt, image)?;
     create_memory_node(&mut fdt, guest_mem)?;
     let dma_pool_phandle = match swiotlb {
-        Some(x) => Some(create_resv_memory_node(&mut fdt, x)?),
+        Some(x) => {
+            let phandle = create_resv_memory_node(&mut fdt, x)?;
+            phandles.insert("restricted_dma_reserved", phandle);
+            Some(phandle)
+        }
         None => None,
     };
     create_cpu_nodes(&mut fdt, num_cpus, cpu_clusters, cpu_capacity)?;
@@ -588,6 +612,7 @@ pub fn create_fdt(
         create_battery_node(&mut fdt, bat_mmio_base, bat_irq)?;
     }
     create_vmwdt_node(&mut fdt, vmwdt_cfg)?;
+    vm_generator(&mut fdt, &phandles)?;
     // End giant node
     fdt.end_node(root_node)?;
 

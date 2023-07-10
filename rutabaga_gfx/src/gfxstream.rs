@@ -8,7 +8,6 @@
 
 #![cfg(feature = "gfxstream")]
 
-use std::convert::TryInto;
 use std::mem::size_of;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
@@ -19,9 +18,6 @@ use std::ptr::null;
 use std::ptr::null_mut;
 use std::sync::Arc;
 
-use base::FromRawDescriptor;
-use base::IntoRawDescriptor;
-use base::SafeDescriptor;
 use data_model::VolatileSlice;
 
 use crate::generated::virgl_renderer_bindings::iovec;
@@ -31,6 +27,10 @@ use crate::renderer_utils::*;
 use crate::rutabaga_core::RutabagaComponent;
 use crate::rutabaga_core::RutabagaContext;
 use crate::rutabaga_core::RutabagaResource;
+use crate::rutabaga_os::FromRawDescriptor;
+use crate::rutabaga_os::IntoRawDescriptor;
+use crate::rutabaga_os::RawDescriptor;
+use crate::rutabaga_os::SafeDescriptor;
 use crate::rutabaga_utils::*;
 
 // User data, for custom use by renderer. An example is VirglCookie which includes a fence
@@ -149,6 +149,8 @@ extern "C" {
     fn pipe_virgl_renderer_create_fence(client_fence_id: c_int, ctx_id: u32) -> c_int;
     fn pipe_virgl_renderer_ctx_attach_resource(ctx_id: c_int, res_handle: c_int);
     fn pipe_virgl_renderer_ctx_detach_resource(ctx_id: c_int, res_handle: c_int);
+    fn pipe_virgl_renderer_get_cap_set(set: u32, max_ver: *mut u32, max_size: *mut u32);
+    fn pipe_virgl_renderer_fill_caps(set: u32, version: u32, caps: *mut c_void);
 
     fn stream_renderer_flush_resource_and_readback(
         res_handle: u32,
@@ -194,6 +196,7 @@ pub struct Gfxstream {}
 
 struct GfxstreamContext {
     ctx_id: u32,
+    fence_handler: RutabagaFenceHandler,
 }
 
 impl RutabagaContext for GfxstreamContext {
@@ -202,7 +205,7 @@ impl RutabagaContext for GfxstreamContext {
             return Err(RutabagaError::InvalidCommandSize(commands.len()));
         }
         let dword_count = (commands.len() / size_of::<u32>()) as i32;
-        // Safe because the context and buffer are valid and virglrenderer will have been
+        // Safe because the context and buffer are valid and gfxstream will have been
         // initialized if there are Context instances.
         let ret = unsafe {
             pipe_virgl_renderer_submit_cmd(
@@ -241,6 +244,11 @@ impl RutabagaContext for GfxstreamContext {
     }
 
     fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
+        if fence.ring_idx as u32 == 1 {
+            self.fence_handler.call(fence);
+            return Ok(());
+        }
+
         // Safe becase only integers are given to gfxstream, not memory.
         let ret = unsafe {
             stream_renderer_context_create_fence(fence.fence_id, fence.ctx_id, fence.ring_idx)
@@ -340,7 +348,7 @@ impl Gfxstream {
 
         // Safe because the handle was just returned by a successful gfxstream call so it must be
         // valid and owned by us.
-        let raw_descriptor = stream_handle.os_handle.try_into()?;
+        let raw_descriptor = stream_handle.os_handle as RawDescriptor;
         let handle = unsafe { SafeDescriptor::from_raw_descriptor(raw_descriptor) };
 
         Ok(Arc::new(RutabagaHandle {
@@ -360,12 +368,27 @@ impl Drop for Gfxstream {
 }
 
 impl RutabagaComponent for Gfxstream {
-    fn get_capset_info(&self, _capset_id: u32) -> (u32, u32) {
-        (1, 0)
+    fn get_capset_info(&self, capset_id: u32) -> (u32, u32) {
+        let mut version = 0;
+        let mut size = 0;
+        // Safe because gfxstream is initialized by now and properly size stack variables are
+        // used for the pointers.
+        unsafe {
+            pipe_virgl_renderer_get_cap_set(capset_id, &mut version, &mut size);
+        }
+        (version, size)
     }
 
-    fn get_capset(&self, _capset_id: u32, _version: u32) -> Vec<u8> {
-        Vec::new()
+    fn get_capset(&self, capset_id: u32, version: u32) -> Vec<u8> {
+        let (_, max_size) = self.get_capset_info(capset_id);
+        let mut buf = vec![0u8; max_size as usize];
+        // Safe because gfxstream is initialized by now and the given buffer is sized properly
+        // for the given cap id/version.
+        unsafe {
+            pipe_virgl_renderer_fill_caps(capset_id, version, buf.as_mut_ptr() as *mut c_void);
+        }
+
+        buf
     }
 
     fn create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
@@ -392,7 +415,7 @@ impl RutabagaComponent for Gfxstream {
             flags: resource_create_3d.flags,
         };
 
-        // Safe because virglrenderer is initialized by now, and the return value is checked before
+        // Safe because gfxstream is initialized by now, and the return value is checked before
         // returning a new resource. The backing buffers are not supplied with this call.
         let ret = unsafe { pipe_virgl_renderer_resource_create(&mut args, null_mut(), 0) };
         ret_to_res(ret)?;
@@ -408,7 +431,7 @@ impl RutabagaComponent for Gfxstream {
             info_3d: None,
             vulkan_info: None,
             backing_iovecs: None,
-            import_mask: 0,
+            component_mask: 1 << (RutabagaComponentType::Gfxstream as u8),
         })
     }
 
@@ -594,7 +617,7 @@ impl RutabagaComponent for Gfxstream {
             info_3d: None,
             vulkan_info: self.vulkan_info(resource_id).ok(),
             backing_iovecs: iovec_opt,
-            import_mask: 0,
+            component_mask: 1 << (RutabagaComponentType::Gfxstream as u8),
         })
     }
 
@@ -623,7 +646,7 @@ impl RutabagaComponent for Gfxstream {
         ctx_id: u32,
         context_init: u32,
         context_name: Option<&str>,
-        _fence_handler: RutabagaFenceHandler,
+        fence_handler: RutabagaFenceHandler,
     ) -> RutabagaResult<Box<dyn RutabagaContext>> {
         let mut name: &str = "gpu_renderer";
         if let Some(name_string) = context_name.filter(|s| s.len() > 0) {
@@ -641,6 +664,9 @@ impl RutabagaComponent for Gfxstream {
             )
         };
         ret_to_res(ret)?;
-        Ok(Box::new(GfxstreamContext { ctx_id }))
+        Ok(Box::new(GfxstreamContext {
+            ctx_id,
+            fence_handler,
+        }))
     }
 }

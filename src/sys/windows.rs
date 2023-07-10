@@ -264,6 +264,7 @@ fn create_block_device(cfg: &Config, disk: &DiskOption, disk_device_tube: Tube) 
         disk.read_only,
         disk.sparse,
         disk.block_size,
+        false,
         disk.id,
         Some(disk_device_tube),
         None,
@@ -436,6 +437,7 @@ fn create_balloon_device(
     let dev = virtio::Balloon::new(
         virtio::base_features(cfg.protection_type),
         balloon_device_tube,
+        None,
         dynamic_mapping_device_tube,
         inflate_tube,
         init_balloon_size,
@@ -445,6 +447,7 @@ fn create_balloon_device(
             BalloonMode::Relaxed
         },
         balloon_features,
+        None,
     )
     .exit_context(Exit::BalloonDeviceNew, "failed to create balloon")?;
 
@@ -457,8 +460,11 @@ fn create_balloon_device(
 fn create_vsock_device(cfg: &Config) -> DeviceResult {
     // We only support a single guest, so we can confidently assign a default
     // CID if one isn't provided. We choose the lowest non-reserved value.
-    let dev = virtio::Vsock::new(
-        cfg.cid.unwrap_or(DEFAULT_GUEST_CID),
+    let dev = virtio::vsock::Vsock::new(
+        cfg.vsock
+            .as_ref()
+            .map(|cfg| cfg.cid)
+            .unwrap_or(DEFAULT_GUEST_CID),
         cfg.host_guid.clone(),
         virtio::base_features(cfg.protection_type),
     )
@@ -710,6 +716,10 @@ fn create_devices(
             None
         };
 
+        let (ioevent_host_tube, ioevent_device_tube) =
+            Tube::pair().context("failed to create ioevent tube")?;
+        control_tubes.push(TaggedControlTube::VmMemory(ioevent_host_tube));
+
         let dev = Box::new(
             VirtioPciDevice::new(
                 mem.clone(),
@@ -717,6 +727,7 @@ fn create_devices(
                 msi_device_tube,
                 cfg.disable_virtio_intx,
                 shared_memory_tube,
+                ioevent_device_tube,
             )
             .exit_context(Exit::VirtioPciDev, "failed to create virtio pci dev")?,
         ) as Box<dyn BusDeviceObj>;
@@ -985,13 +996,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             return Err(anyhow!("Failed to start devices thread: {}", e));
         }
     };
-    if let Some(path) = restore_path {
-        if let Err(e) =
-            device_ctrl_tube.send(&DeviceControlCommand::RestoreDevices { restore_path: path })
-        {
-            error!("fail to send command to devices control socket: {}", e);
-        };
-    }
 
     let vcpus: Vec<Option<_>> = match guest_os.vcpus.take() {
         Some(vec) => vec.into_iter().map(|vcpu| Some(vcpu)).collect(),
@@ -1030,6 +1034,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         tsc_sync_mitigations,
         force_calibrated_tsc_leaf,
     )?;
+
+    // Restore VM (if applicable).
+    if let Some(path) = restore_path {
+        // TODO(b/273992211): Port the unix --restore code to Windows.
+        todo!();
+    }
+
     let mut exit_state = ExitState::Stop;
 
     'poll: loop {
@@ -1651,7 +1662,7 @@ fn create_guest_memory(
         Exit::GuestMemoryLayout,
         "failed to create guest memory layout",
     )?;
-    GuestMemory::new(&guest_mem_layout)
+    GuestMemory::new_with_options(&guest_mem_layout)
         .exit_context(Exit::CreateGuestMemory, "failed to create guest memory")
 }
 

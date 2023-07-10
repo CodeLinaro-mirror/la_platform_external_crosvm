@@ -69,6 +69,8 @@ use vm_memory::GuestAddress;
 #[cfg(all(target_arch = "aarch64", feature = "gdb"))]
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use vm_memory::MemoryRegionOptions;
+use vm_memory::MemoryRegionPurpose;
 
 mod fdt;
 
@@ -253,6 +255,8 @@ pub enum Error {
     InitPvtimeError(base::Error),
     #[error("initrd could not be loaded: {0}")]
     InitrdLoadFailure(arch::LoadImageError),
+    #[error("failed to initialize virtual machine {0}")]
+    InitVmError(base::Error),
     #[error("kernel could not be loaded: {0}")]
     KernelLoadFailure(kernel_loader::Error),
     #[error("error loading Kernel from Elf image: {0}")]
@@ -326,21 +330,29 @@ impl arch::LinuxArch for AArch64 {
     fn guest_memory_layout(
         components: &VmComponents,
         hypervisor: &impl Hypervisor,
-    ) -> std::result::Result<Vec<(GuestAddress, u64)>, Self::Error> {
-        let mut memory_regions =
-            vec![(GuestAddress(AARCH64_PHYS_MEM_START), components.memory_size)];
+    ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error> {
+        let mut memory_regions = vec![(
+            GuestAddress(AARCH64_PHYS_MEM_START),
+            components.memory_size,
+            Default::default(),
+        )];
 
         // Allocate memory for the pVM firmware.
         if components.hv_cfg.protection_type.runs_firmware() {
             memory_regions.push((
                 GuestAddress(AARCH64_PROTECTED_VM_FW_START),
                 AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+                MemoryRegionOptions::new().purpose(MemoryRegionPurpose::ProtectedFirmwareRegion),
             ));
         }
 
         if let Some(size) = components.swiotlb {
             if let Some(addr) = get_swiotlb_addr(components.memory_size, hypervisor) {
-                memory_regions.push((addr, size));
+                memory_regions.push((
+                    addr,
+                    size,
+                    MemoryRegionOptions::new().purpose(MemoryRegionPurpose::StaticSwiotlbRegion),
+                ));
             }
         }
 
@@ -438,12 +450,20 @@ impl arch::LinuxArch for AArch64 {
                 .map_err(Error::CreateVcpu)?
                 .downcast::<Vcpu>()
                 .map_err(|_| Error::DowncastVcpu)?;
-            let per_vcpu_init = Self::vcpu_init(
-                vcpu_id,
-                &payload,
-                fdt_offset,
-                components.hv_cfg.protection_type,
-            );
+            let per_vcpu_init = if vm
+                .get_hypervisor()
+                .check_capability(HypervisorCap::HypervisorInitializedBootContext)
+            {
+                // No registers are initialized: VcpuInitAArch64.regs is an empty BTreeMap
+                Default::default()
+            } else {
+                Self::vcpu_init(
+                    vcpu_id,
+                    &payload,
+                    fdt_offset,
+                    components.hv_cfg.protection_type,
+                )
+            };
             has_pvtime &= vcpu.has_pvtime_support();
             vcpus.push(vcpu);
             vcpu_ids.push(vcpu_id);
@@ -680,8 +700,16 @@ impl arch::LinuxArch for AArch64 {
             bat_mmio_base_and_irq,
             vmwdt_cfg,
             dump_device_tree_blob,
+            &|writer, phandles| vm.create_fdt(writer, phandles),
         )
         .map_err(Error::CreateFdt)?;
+
+        vm.init_arch(
+            payload.entry(),
+            fdt_offset,
+            AARCH64_FDT_MAX_SIZE.try_into().unwrap(),
+        )
+        .map_err(Error::InitVmError)?;
 
         Ok(RunnableLinuxVm {
             vm,
@@ -707,6 +735,7 @@ impl arch::LinuxArch for AArch64 {
             platform_devices,
             hotplug_bus: BTreeMap::new(),
             devices_thread: None,
+            vm_request_tube: None,
         })
     }
 

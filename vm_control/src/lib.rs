@@ -42,12 +42,17 @@ pub use balloon_control::BalloonStats;
 use balloon_control::BalloonTubeCommand;
 #[cfg(feature = "balloon")]
 use balloon_control::BalloonTubeResult;
+pub use balloon_control::BalloonWSS;
+pub use balloon_control::WSSBucket;
 use base::error;
+use base::info;
+use base::warn;
 use base::with_as_descriptor;
 use base::AsRawDescriptor;
 use base::Error as SysError;
 use base::Event;
 use base::ExternalMapping;
+use base::IntoRawDescriptor;
 use base::MappedRegion;
 use base::MemoryMappingBuilder;
 use base::MmapError;
@@ -61,6 +66,7 @@ use hypervisor::IoEventAddress;
 use hypervisor::IrqRoute;
 use hypervisor::IrqSource;
 pub use hypervisor::MemSlot;
+use hypervisor::VcpuSnapshot;
 use hypervisor::Vm;
 use libc::EINVAL;
 use libc::EIO;
@@ -71,8 +77,11 @@ use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
 use rutabaga_gfx::DeviceId;
+use rutabaga_gfx::RutabagaDescriptor;
+use rutabaga_gfx::RutabagaFromRawDescriptor;
 use rutabaga_gfx::RutabagaGralloc;
 use rutabaga_gfx::RutabagaHandle;
+use rutabaga_gfx::RutabagaMappedRegion;
 use rutabaga_gfx::VulkanInfo;
 use serde::Deserialize;
 use serde::Serialize;
@@ -111,13 +120,17 @@ pub enum VcpuControl {
     Debug(VcpuDebug),
     RunState(VmRunMode),
     MakeRT,
-    GetStates,
+    // Request the current state of the vCPU. The result is sent back over the included channel.
+    GetStates(mpsc::Sender<VmRunMode>),
+    Snapshot(mpsc::Sender<anyhow::Result<VcpuSnapshot>>),
+    Restore(mpsc::Sender<anyhow::Result<()>>, Box<VcpuSnapshot>),
 }
 
 /// Mode of execution for the VM.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub enum VmRunMode {
     /// The default run mode indicating the VCPUs are running.
+    #[default]
     Running,
     /// Indicates that the VCPUs are suspending execution until the `Running` mode is set.
     Suspending,
@@ -140,12 +153,6 @@ impl Display for VmRunMode {
     }
 }
 
-impl Default for VmRunMode {
-    fn default() -> Self {
-        VmRunMode::Running
-    }
-}
-
 // Trait for devices that get notification on specific GPE trigger
 pub trait GpeNotify: Send {
     fn notify(&mut self) {}
@@ -159,6 +166,7 @@ pub trait PmeNotify: Send {
 pub trait PmResource {
     fn pwrbtn_evt(&mut self) {}
     fn slpbtn_evt(&mut self) {}
+    fn rtc_evt(&mut self) {}
     fn gpe_evt(&mut self, _gpe: u32) {}
     fn pme_evt(&mut self, _requester_id: u16) {}
     fn register_gpe_notify_dev(&mut self, _gpe: u32, _notify_dev: Arc<Mutex<dyn GpeNotify>>) {}
@@ -180,6 +188,7 @@ pub enum BalloonControlCommand {
         num_bytes: u64,
     },
     Stats,
+    WorkingSetSize,
 }
 
 // BalloonControlResult holds results for BalloonControlCommand defined above.
@@ -188,6 +197,9 @@ pub enum BalloonControlResult {
     Stats {
         stats: BalloonStats,
         balloon_actual: u64,
+    },
+    WorkingSetSize {
+        wss: BalloonWSS,
     },
 }
 
@@ -279,37 +291,40 @@ pub enum SnapshotCommand {
     Take { snapshot_path: PathBuf },
 }
 
-/// Response for [SnapshotCommand]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum SnapshotControlResult {
-    /// The request is accepted successfully.
-    Ok,
-    /// The command fails.
-    Failed(String),
-    /// Request VM shut down in case of major failures.
-    Shutdown,
-}
 /// Commands for restore feature
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RestoreCommand {
     Apply { restore_path: PathBuf },
 }
 
-/// Response for [RestoreCommand]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum RestoreControlResult {
-    /// The request is accepted successfully.
-    Ok,
-    /// The command fails.
-    Failed(String),
-}
-
 /// Commands for actions on devices and the devices control thread.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DeviceControlCommand {
+    SleepDevices,
+    WakeDevices,
     SnapshotDevices { snapshot_path: PathBuf },
     RestoreDevices { restore_path: PathBuf },
     Exit,
+}
+
+/// Commands to control the IRQ handler thread.
+#[derive(Serialize, Deserialize)]
+pub enum IrqHandlerRequest {
+    /// No response is sent for this command.
+    AddIrqControlTubes(Vec<Tube>),
+    WakeAndNotifyIteration,
+    /// No response is sent for this command.
+    Exit,
+}
+
+const EXPECTED_MAX_IRQ_FLUSH_ITERATIONS: usize = 100;
+
+/// Response for [IrqHandlerRequest].
+#[derive(Serialize, Deserialize, Debug)]
+pub enum IrqHandlerResponse {
+    /// Specifies the number of tokens serviced in the requested iteration
+    /// (less the token for the `WakeAndNotifyIteration` request).
+    HandlerIterationComplete(usize),
 }
 
 /// Source of a `VmMemoryRequest::RegisterMemory` mapping.
@@ -337,6 +352,32 @@ pub enum VmMemorySource {
     },
     /// Register the current rutabaga external mapping.
     ExternalMapping { ptr: u64, size: u64 },
+}
+
+// The following are wrappers to avoid base dependencies in the rutabaga crate
+fn to_rutabaga_desciptor(s: SafeDescriptor) -> RutabagaDescriptor {
+    // Safe because we own the SafeDescriptor at this point.
+    unsafe { RutabagaDescriptor::from_raw_descriptor(s.into_raw_descriptor()) }
+}
+
+struct RutabagaMemoryRegion {
+    region: Box<dyn RutabagaMappedRegion>,
+}
+
+impl RutabagaMemoryRegion {
+    pub fn new(region: Box<dyn RutabagaMappedRegion>) -> RutabagaMemoryRegion {
+        RutabagaMemoryRegion { region }
+    }
+}
+
+unsafe impl MappedRegion for RutabagaMemoryRegion {
+    fn as_ptr(&self) -> *mut u8 {
+        self.region.as_ptr()
+    }
+
+    fn size(&self) -> usize {
+        self.region.size()
+    }
 }
 
 impl VmMemorySource {
@@ -369,7 +410,7 @@ impl VmMemorySource {
             } => {
                 let mapped_region = match gralloc.import_and_map(
                     RutabagaHandle {
-                        os_handle: descriptor,
+                        os_handle: to_rutabaga_desciptor(descriptor),
                         handle_type,
                     },
                     VulkanInfo {
@@ -378,7 +419,11 @@ impl VmMemorySource {
                     },
                     size,
                 ) {
-                    Ok(mapped_region) => mapped_region,
+                    Ok(mapped_region) => {
+                        let mapped_region: Box<dyn MappedRegion> =
+                            Box::new(RutabagaMemoryRegion::new(mapped_region));
+                        mapped_region
+                    }
                     Err(e) => {
                         error!("gralloc failed to import and map: {}", e);
                         return Err(SysError::new(EINVAL));
@@ -421,6 +466,15 @@ impl VmMemoryDestination {
     }
 }
 
+/// Request to register or unregister an ioevent.
+#[derive(Serialize, Deserialize)]
+pub struct IoEventUpdateRequest {
+    pub event: Event,
+    pub addr: u64,
+    pub datamatch: Datamatch,
+    pub register: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum VmMemoryRequest {
     RegisterMemory {
@@ -443,14 +497,16 @@ pub enum VmMemoryRequest {
     },
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
     UnregisterMemory(MemSlot),
-    /// Register an ioeventfd
-    IoEvent {
+    /// Register an ioeventfd by looking up using Alloc info.
+    IoEventWithAlloc {
         evt: Event,
         allocation: Alloc,
         offset: u64,
         datamatch: Datamatch,
         register: bool,
     },
+    /// Register an eventfd with raw guest memory address.
+    IoEventRaw(IoEventUpdateRequest),
 }
 
 /// Struct for managing `VmMemoryRequest`s IOMMU related state.
@@ -576,7 +632,7 @@ impl VmMemoryRequest {
                 Ok(_) => VmMemoryResponse::Ok,
                 Err(e) => VmMemoryResponse::Err(e),
             },
-            IoEvent {
+            IoEventWithAlloc {
                 evt,
                 allocation,
                 offset,
@@ -610,6 +666,25 @@ impl VmMemoryRequest {
                     Err(e) => VmMemoryResponse::Err(e),
                 }
             }
+            IoEventRaw(request) => {
+                let res = if request.register {
+                    vm.register_ioevent(
+                        &request.event,
+                        IoEventAddress::Mmio(request.addr),
+                        request.datamatch,
+                    )
+                } else {
+                    vm.unregister_ioevent(
+                        &request.event,
+                        IoEventAddress::Mmio(request.addr),
+                        request.datamatch,
+                    )
+                };
+                match res {
+                    Ok(_) => VmMemoryResponse::Ok,
+                    Err(e) => VmMemoryResponse::Err(e),
+                }
+            }
         }
     }
 }
@@ -631,6 +706,17 @@ pub enum VmIrqRequest {
     /// Allocate one gsi, and associate gsi to irqfd with register_irqfd()
     AllocateOneMsi {
         irqfd: Event,
+        device_id: u32,
+        queue_id: usize,
+        device_name: String,
+    },
+    /// Allocate a specific gsi to irqfd with register_irqfd(). This must only
+    /// be used when it is known that the gsi is free. Only the snapshot
+    /// subsystem can make this guarantee, and use of this request by any other
+    /// caller is strongly discouraged.
+    AllocateOneMsiAtGsi {
+        irqfd: Event,
+        gsi: u32,
         device_id: u32,
         queue_id: usize,
         device_name: String,
@@ -693,6 +779,24 @@ impl VmIrqRequest {
                     VmIrqResponse::Err(SysError::new(EINVAL))
                 }
             }
+            AllocateOneMsiAtGsi {
+                ref irqfd,
+                gsi,
+                device_id,
+                queue_id,
+                ref device_name,
+            } => {
+                match set_up_irq(IrqSetup::Event(
+                    gsi,
+                    irqfd,
+                    device_id,
+                    queue_id,
+                    device_name.clone(),
+                )) {
+                    Ok(_) => VmIrqResponse::Ok,
+                    Err(e) => VmIrqResponse::Err(e),
+                }
+            }
             AddMsiRoute {
                 gsi,
                 msi_address,
@@ -753,16 +857,11 @@ impl Display for BatControlResult {
     }
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum BatteryType {
+    #[default]
     Goldfish,
-}
-
-impl Default for BatteryType {
-    fn default() -> Self {
-        BatteryType::Goldfish
-    }
 }
 
 impl FromStr for BatteryType {
@@ -957,6 +1056,7 @@ pub enum PvClockCommandResponse {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SwapCommand {
     Enable,
+    Trim,
     SwapOut,
     Disable,
     Status,
@@ -983,6 +1083,8 @@ pub enum VmRequest {
     Powerbtn,
     /// Trigger a sleep button event in the guest.
     Sleepbtn,
+    /// Trigger a RTC interrupt in the guest.
+    Rtc,
     /// Suspend the VM's VCPUs until resume.
     Suspend,
     /// Swap the memory content into files on a disk
@@ -1019,6 +1121,27 @@ pub enum VmRequest {
     Snapshot(SnapshotCommand),
     /// Command to Restore devices
     Restore(RestoreCommand),
+    /// Register for event notification
+    RegisterListener {
+        socket_addr: String,
+        event: RegisteredEvent,
+    },
+    /// Unregister for notifications for event
+    UnregisterListener {
+        socket_addr: String,
+        event: RegisteredEvent,
+    },
+    /// Unregister for all event notification
+    Unregister { socket_addr: String },
+}
+
+/// NOTE: when making any changes to this enum please also update
+/// RegisteredEventFfi in crosvm_control/src/lib.rs
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub enum RegisteredEvent {
+    VirtioBalloonWssReport,
+    VirtioBalloonResize,
+    VirtioBalloonOOMDeflation,
 }
 
 pub fn handle_disk_command(command: &DiskControlCommand, disk_host_tube: &Tube) -> VmResponse {
@@ -1061,18 +1184,15 @@ fn map_descriptor(
 
 // Get vCPU state. vCPUs are expected to all hold the same state.
 // In this function, there may be a time where vCPUs are not
-fn get_vcpu_state(
-    kick_vcpus: impl Fn(VcpuControl),
-    state_from_vcpu_channel: &mpsc::Receiver<VmRunMode>,
-    vcpu_num: usize,
-) -> anyhow::Result<VmRunMode> {
-    kick_vcpus(VcpuControl::GetStates);
+fn get_vcpu_state(kick_vcpus: impl Fn(VcpuControl), vcpu_num: usize) -> anyhow::Result<VmRunMode> {
+    let (send_chan, recv_chan) = mpsc::channel();
+    kick_vcpus(VcpuControl::GetStates(send_chan));
     if vcpu_num == 0 {
         bail!("vcpu_num is zero");
     }
     let mut current_mode_vec: Vec<VmRunMode> = Vec::new();
     for _ in 0..vcpu_num {
-        match state_from_vcpu_channel.recv() {
+        match recv_chan.recv() {
             Ok(state) => current_mode_vec.push(state),
             Err(e) => {
                 bail!("Failed to get vCPU state: {}", e);
@@ -1090,30 +1210,46 @@ fn get_vcpu_state(
     Ok(first_state)
 }
 
-struct VcpuSuspendGuard<'a> {
+/// A guard to guarantee that all the vCPUs are suspended during the scope.
+///
+/// When this guard is dropped, it rolls back the state of CPUs.
+pub struct VcpuSuspendGuard<'a> {
     saved_run_mode: VmRunMode,
     kick_vcpus: &'a dyn Fn(VcpuControl),
 }
 
 impl<'a> VcpuSuspendGuard<'a> {
-    fn new(
-        kick_vcpus: &'a impl Fn(VcpuControl),
-        state_from_vcpu_channel: &mpsc::Receiver<VmRunMode>,
-        vcpu_num: usize,
-    ) -> anyhow::Result<Self> {
+    /// Check the all vCPU state and suspend the vCPUs if they are running.
+    ///
+    /// This returns [VcpuSuspendGuard] to rollback the vcpu state.
+    ///
+    /// # Arguments
+    ///
+    /// * `kick_vcpus` - A funtion to send [VcpuControl] message to all the vCPUs and interrupt
+    ///   them.
+    /// * `vcpu_num` - The number of vCPUs.
+    pub fn new(kick_vcpus: &'a impl Fn(VcpuControl), vcpu_num: usize) -> anyhow::Result<Self> {
         // get initial vcpu state
-        let saved_run_mode = get_vcpu_state(kick_vcpus, state_from_vcpu_channel, vcpu_num)?;
-        if saved_run_mode != VmRunMode::Suspending {
-            kick_vcpus(VcpuControl::RunState(VmRunMode::Suspending));
-            // Blocking call, waiting for response to ensure vCPU state was updated.
-            // In case of failure, where a vCPU still has the state running, start up vcpus and
-            // abort operation.
-            let current_mode = get_vcpu_state(kick_vcpus, state_from_vcpu_channel, vcpu_num)?;
-            if current_mode != VmRunMode::Suspending {
-                kick_vcpus(VcpuControl::RunState(saved_run_mode));
-                bail!("vCPUs failed to all suspend. Kicking back all vCPUs to their previous state: {saved_run_mode}");
+        let saved_run_mode = get_vcpu_state(kick_vcpus, vcpu_num)?;
+        match saved_run_mode {
+            VmRunMode::Running => {
+                kick_vcpus(VcpuControl::RunState(VmRunMode::Suspending));
+                // Blocking call, waiting for response to ensure vCPU state was updated.
+                // In case of failure, where a vCPU still has the state running, start up vcpus and
+                // abort operation.
+                let current_mode = get_vcpu_state(kick_vcpus, vcpu_num)?;
+                if current_mode != VmRunMode::Suspending {
+                    kick_vcpus(VcpuControl::RunState(saved_run_mode));
+                    bail!("vCPUs failed to all suspend. Kicking back all vCPUs to their previous state: {saved_run_mode}");
+                }
             }
-        }
+            VmRunMode::Suspending => {
+                // do nothing. keep the state suspending.
+            }
+            other => {
+                bail!("vcpus are not in running/suspending state, but {}", other);
+            }
+        };
         Ok(Self {
             saved_run_mode,
             kick_vcpus,
@@ -1129,6 +1265,47 @@ impl Drop for VcpuSuspendGuard<'_> {
     }
 }
 
+/// A guard to guarantee that all devices are sleeping during its scope.
+///
+/// When this guard is dropped, it wakes the devices.
+pub struct DeviceSleepGuard<'a> {
+    device_control_tube: &'a Tube,
+}
+
+impl<'a> DeviceSleepGuard<'a> {
+    fn new(device_control_tube: &'a Tube) -> anyhow::Result<Self> {
+        device_control_tube
+            .send(&DeviceControlCommand::SleepDevices)
+            .context("send command to devices control socket")?;
+        match device_control_tube
+            .recv()
+            .context("receive from devices control socket")?
+        {
+            VmResponse::Ok => (),
+            resp => bail!("device sleep failed: {}", resp),
+        }
+        Ok(Self {
+            device_control_tube,
+        })
+    }
+}
+
+impl Drop for DeviceSleepGuard<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self
+            .device_control_tube
+            .send(&DeviceControlCommand::WakeDevices)
+        {
+            panic!("failed to request device wake after snapshot: {}", e);
+        }
+        match self.device_control_tube.recv() {
+            Ok(VmResponse::Ok) => (),
+            Ok(resp) => panic!("unexpected response to device wake request: {}", resp),
+            Err(e) => panic!("failed to get reply for device wake request: {}", e),
+        }
+    }
+}
+
 impl VmRequest {
     /// Executes this request on the given Vm and other mutable state.
     ///
@@ -1139,18 +1316,21 @@ impl VmRequest {
         &self,
         run_mode: &mut Option<VmRunMode>,
         #[cfg(feature = "balloon")] balloon_host_tube: Option<&Tube>,
+        #[cfg(feature = "balloon")] balloon_wss_host_tube: Option<&Tube>,
         #[cfg(feature = "balloon")] balloon_stats_id: &mut u64,
+        #[cfg(feature = "balloon")] balloon_wss_id: &mut u64,
         disk_host_tubes: &[Tube],
         pm: &mut Option<Arc<Mutex<dyn PmResource + Send>>>,
         #[cfg(feature = "gpu")] gpu_control_tube: &Tube,
         usb_control_tube: Option<&Tube>,
         bat_control: &mut Option<BatControl>,
         kick_vcpus: impl Fn(VcpuControl),
+        kick_vcpu: impl Fn(VcpuControl, usize),
         force_s2idle: bool,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
         device_control_tube: &Tube,
-        state_from_vcpu_channel: &mpsc::Receiver<VmRunMode>,
         vcpu_size: usize,
+        irq_handler_control: &Tube,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1175,6 +1355,15 @@ impl VmRequest {
                     VmResponse::Err(SysError::new(ENOTSUP))
                 }
             }
+            VmRequest::Rtc => {
+                if let Some(pm) = pm {
+                    pm.lock().rtc_evt();
+                    VmResponse::Ok
+                } else {
+                    error!("{:#?} not supported", *self);
+                    VmResponse::Err(SysError::new(ENOTSUP))
+                }
+            }
             VmRequest::Suspend => {
                 *run_mode = Some(VmRunMode::Suspending);
                 VmResponse::Ok
@@ -1182,10 +1371,43 @@ impl VmRequest {
             VmRequest::Swap(SwapCommand::Enable) => {
                 #[cfg(feature = "swap")]
                 if let Some(swap_controller) = swap_controller {
+                    // Suspend all vcpus and devices while vmm-swap is enabling (move the guest
+                    // memory contents to the staging memory) to guarantee no processes other than
+                    // the swap monitor process access the guest memory.
+                    let _vcpu_guard = match VcpuSuspendGuard::new(&kick_vcpus, vcpu_size) {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            error!("failed to suspend vcpus: {:?}", e);
+                            return VmResponse::Err(SysError::new(EINVAL));
+                        }
+                    };
+                    // TODO(b/253386409): Use `devices::Suspendable::sleep()` instead of sending
+                    // `SIGSTOP` signal.
+                    let _devices_guard = match swap_controller.suspend_devices() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            error!("failed to suspend devices: {:?}", e);
+                            return VmResponse::Err(SysError::new(EINVAL));
+                        }
+                    };
+
                     return match swap_controller.enable() {
                         Ok(()) => VmResponse::Ok,
                         Err(e) => {
                             error!("swap enable failed: {}", e);
+                            VmResponse::Err(SysError::new(EINVAL))
+                        }
+                    };
+                }
+                VmResponse::Err(SysError::new(ENOTSUP))
+            }
+            VmRequest::Swap(SwapCommand::Trim) => {
+                #[cfg(feature = "swap")]
+                if let Some(swap_controller) = swap_controller {
+                    return match swap_controller.trim() {
+                        Ok(()) => VmResponse::Ok,
+                        Err(e) => {
+                            error!("swap trim failed: {}", e);
                             VmResponse::Err(SysError::new(EINVAL))
                         }
                     };
@@ -1318,11 +1540,62 @@ impl VmRequest {
                                         };
                                     }
                                     Err(e) => {
-                                        error!("balloon socket recv failed: {}", e);
+                                        error!("balloon socket recv for stats failed: {}", e);
                                         break VmResponse::Err(SysError::last());
                                     }
                                     Ok(BalloonTubeResult::Adjusted { .. }) => {
                                         unreachable!("unexpected adjusted response")
+                                    }
+                                    Ok(BalloonTubeResult::WorkingSetSize { .. }) => {
+                                        unreachable!("unexpected wss response")
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => VmResponse::Err(SysError::last()),
+                    }
+                } else {
+                    VmResponse::Err(SysError::new(ENOTSUP))
+                }
+            }
+            #[cfg(feature = "balloon")]
+            VmRequest::BalloonCommand(BalloonControlCommand::WorkingSetSize) => {
+                if let Some(balloon_wss_host_tube) = balloon_wss_host_tube {
+                    // NB: There are a few reasons stale balloon wss could be left
+                    // in balloon_wss_host_tube:
+                    //  - the send succeeds, but the recv fails because the device
+                    //      is not ready yet. So when the device is ready, there are
+                    //      extra ess requests queued.
+                    //  - the send succeed, but the recv times out. When the device
+                    //      does return the stats, there will be no consumer.
+                    //
+                    // To guard against this, add an `id` to the wss request. If
+                    // the id returned to us doesn't match, we keep trying to read
+                    // until it does.
+                    *balloon_wss_id = (*balloon_wss_id).wrapping_add(1);
+                    let sent_id = *balloon_wss_id;
+                    match balloon_wss_host_tube
+                        .send(&BalloonTubeCommand::WorkingSetSize { id: sent_id })
+                    {
+                        Ok(_) => {
+                            loop {
+                                match balloon_wss_host_tube.recv() {
+                                    Ok(BalloonTubeResult::WorkingSetSize { wss, id }) => {
+                                        if sent_id != id {
+                                            // Keep trying to get fresh stats.
+                                            continue;
+                                        }
+                                        break VmResponse::BalloonWSS { wss };
+                                    }
+                                    Err(e) => {
+                                        error!("balloon socket recv for wss failed: {}", e);
+                                        break VmResponse::Err(SysError::last());
+                                    }
+                                    Ok(BalloonTubeResult::Adjusted { .. }) => {
+                                        unreachable!("unexpected adjusted response")
+                                    }
+                                    Ok(BalloonTubeResult::Stats { .. }) => {
+                                        unreachable!("unexpected stats response")
                                     }
                                 }
                             }
@@ -1405,9 +1678,70 @@ impl VmRequest {
             }
             VmRequest::HotPlugCommand { device: _, add: _ } => VmResponse::Ok,
             VmRequest::Snapshot(SnapshotCommand::Take { ref snapshot_path }) => {
-                let f = || {
-                    let _guard =
-                        VcpuSuspendGuard::new(&kick_vcpus, state_from_vcpu_channel, vcpu_size)?;
+                let f = || -> anyhow::Result<VmResponse> {
+                    let _vcpu_guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
+                    let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
+
+                    // We want to flush all pending IRQs to the LAPICs. There are two cases:
+                    //
+                    // MSIs: these are directly delivered to the LAPIC. We must verify the handler
+                    // thread cycles once to deliver these interrupts.
+                    //
+                    // Legacy interrupts: in the case of a split IRQ chip, these interrupts may
+                    // flow through the userspace IOAPIC. If the hypervisor does not support
+                    // irqfds (e.g. WHPX), a single iteration will only flush the IRQ to the
+                    // IOAPIC. The underlying MSI will be asserted at this point, but if the
+                    // IRQ handler doesn't run another iteration, it won't be delivered to the
+                    // LAPIC. This is why we cycle the handler thread twice (doing so ensures we
+                    // process the underlying MSI).
+                    //
+                    // We can handle both of these cases by iterating until there are no tokens
+                    // serviced on the requested iteration. Note that in the legacy case, this
+                    // ensures at least two iterations.
+                    //
+                    // Note: within CrosVM, *all* interrupts are eventually converted into the
+                    // same mechanicism that MSIs use. This is why we say "underlying" MSI for
+                    // a legacy IRQ.
+                    let mut flush_attempts = 0;
+                    loop {
+                        irq_handler_control
+                            .send(&IrqHandlerRequest::WakeAndNotifyIteration)
+                            .context("failed to send flush command to IRQ handler thread")?;
+                        let resp = irq_handler_control
+                            .recv()
+                            .context("failed to recv flush response from IRQ handler thread")?;
+                        match resp {
+                            IrqHandlerResponse::HandlerIterationComplete(tokens_serviced) => {
+                                if tokens_serviced == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                        flush_attempts += 1;
+                        if flush_attempts > EXPECTED_MAX_IRQ_FLUSH_ITERATIONS {
+                            warn!("flushing IRQs for snapshot may be stalled after iteration {}, expected <= {} iterations", flush_attempts, EXPECTED_MAX_IRQ_FLUSH_ITERATIONS);
+                        }
+                    }
+                    info!("flushed IRQs in {} iterations", flush_attempts);
+                    let vcpu_path = snapshot_path.with_extension("vcpu");
+                    let cpu_file = File::create(&vcpu_path)
+                        .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
+                    let (send_chan, recv_chan) = mpsc::channel();
+                    kick_vcpus(VcpuControl::Snapshot(send_chan));
+                    // Validate all Vcpus snapshot successfully
+                    let mut cpu_vec = Vec::with_capacity(vcpu_size);
+                    for _ in 0..vcpu_size {
+                        match recv_chan
+                            .recv()
+                            .context("Failed to snapshot Vcpu, aborting snapshot")?
+                        {
+                            Ok(snap) => {
+                                cpu_vec.push(snap);
+                            }
+                            Err(e) => bail!("Failed to snapshot Vcpu, aborting snapshot: {}", e),
+                        }
+                    }
+                    serde_json::to_writer(cpu_file, &cpu_vec).expect("Failed to write Vcpu state");
                     device_control_tube
                         .send(&DeviceControlCommand::SnapshotDevices {
                             snapshot_path: snapshot_path.clone(),
@@ -1418,7 +1752,7 @@ impl VmRequest {
                         .context("receive from devices control socket")
                 };
                 match f() {
-                    Ok(res) => VmResponse::SnapshotResponse(res),
+                    Ok(r) => r,
                     Err(e) => {
                         error!("failed to handle snapshot: {:?}", e);
                         VmResponse::Err(SysError::new(EIO))
@@ -1426,27 +1760,79 @@ impl VmRequest {
                 }
             }
             VmRequest::Restore(RestoreCommand::Apply { ref restore_path }) => {
-                let f = || {
-                    let _guard =
-                        VcpuSuspendGuard::new(&kick_vcpus, state_from_vcpu_channel, vcpu_size)?;
-                    device_control_tube
-                        .send(&DeviceControlCommand::RestoreDevices {
-                            restore_path: restore_path.clone(),
-                        })
-                        .context("send command to devices control socket")?;
-                    device_control_tube
-                        .recv()
-                        .context("receive from devices control socket")
-                };
-                match f() {
-                    Ok(res) => VmResponse::RestoreResponse(res),
+                match do_restore(
+                    restore_path.clone(),
+                    kick_vcpus,
+                    kick_vcpu,
+                    device_control_tube,
+                    vcpu_size,
+                ) {
+                    Ok(()) => VmResponse::Ok,
                     Err(e) => {
-                        error!("failed to handle snapshot: {:?}", e);
+                        error!("failed to handle restore: {:?}", e);
                         VmResponse::Err(SysError::new(EIO))
                     }
                 }
             }
+            VmRequest::RegisterListener {
+                socket_addr: _,
+                event: _,
+            } => VmResponse::Ok,
+            VmRequest::UnregisterListener {
+                socket_addr: _,
+                event: _,
+            } => VmResponse::Ok,
+            VmRequest::Unregister { socket_addr: _ } => VmResponse::Ok,
         }
+    }
+}
+
+/// Restore the VM to the snapshot at `restore_path`.
+///
+/// Same as `VmRequest::execute` with a `VmRequest::Restore`. Exposed as a separate function
+/// because not all the `VmRequest::execute` arguments are available in the "cold restore" flow.
+pub fn do_restore(
+    restore_path: PathBuf,
+    kick_vcpus: impl Fn(VcpuControl),
+    kick_vcpu: impl Fn(VcpuControl, usize),
+    device_control_tube: &Tube,
+    vcpu_size: usize,
+) -> anyhow::Result<()> {
+    let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
+    let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
+    let vcpu_path = restore_path.with_extension("vcpu");
+    let cpu_file = File::open(&vcpu_path)
+        .with_context(|| format!("failed to open path {}", vcpu_path.display()))?;
+    let vcpu_snapshots: Vec<VcpuSnapshot> = serde_json::from_reader(cpu_file)?;
+    if vcpu_snapshots.len() != vcpu_size {
+        bail!(
+            "bad cpu count in snapshot: expected={} got={}",
+            vcpu_size,
+            vcpu_snapshots.len()
+        );
+    }
+    let (send_chan, recv_chan) = mpsc::channel();
+    for vcpu_snap in vcpu_snapshots {
+        let vcpu_id = vcpu_snap.vcpu_id;
+        kick_vcpu(
+            VcpuControl::Restore(send_chan.clone(), Box::new(vcpu_snap)),
+            vcpu_id,
+        );
+    }
+    for _ in 0..vcpu_size {
+        if let Err(e) = recv_chan.recv() {
+            bail!("Failed to restore vcpu: {}", e);
+        }
+    }
+    device_control_tube
+        .send(&DeviceControlCommand::RestoreDevices { restore_path })
+        .context("send command to devices control socket")?;
+    let resp = device_control_tube
+        .recv()
+        .context("receive from devices control socket")?;
+    match resp {
+        VmResponse::Ok => Ok(()),
+        _ => bail!("unexpected RestoreDevices response: {resp}"),
     }
 }
 
@@ -1454,11 +1840,14 @@ impl VmRequest {
 ///
 /// Success is usually indicated `VmResponse::Ok` unless there is data associated with the response.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[must_use]
 pub enum VmResponse {
     /// Indicates the request was executed successfully.
     Ok,
     /// Indicates the request encountered some error during execution.
     Err(SysError),
+    /// Indicates the request encountered some error during execution.
+    ErrString(String),
     /// The request to register memory into guest address space was successfully done at page frame
     /// number `pfn` and memory slot number `slot`.
     RegisterMemory { pfn: u64, slot: u32 },
@@ -1467,6 +1856,8 @@ pub enum VmResponse {
         stats: BalloonStats,
         balloon_actual: u64,
     },
+    /// Results of balloon WSS-R command
+    BalloonWSS { wss: BalloonWSS },
     /// Results of usb control commands.
     UsbResponse(UsbControlResult),
     #[cfg(feature = "gpu")]
@@ -1476,10 +1867,6 @@ pub enum VmResponse {
     BatResponse(BatControlResult),
     /// Results of swap status command.
     SwapStatus(SwapStatus),
-    /// Results of snapshot commands.
-    SnapshotResponse(SnapshotControlResult),
-    /// Results of restore commands.
-    RestoreResponse(RestoreControlResult),
 }
 
 impl Display for VmResponse {
@@ -1489,6 +1876,7 @@ impl Display for VmResponse {
         match self {
             Ok => write!(f, "ok"),
             Err(e) => write!(f, "error: {}", e),
+            ErrString(e) => write!(f, "error: {}", e),
             RegisterMemory { pfn, slot } => write!(
                 f,
                 "memory registered to page frame number {:#x} and memory slot {}",
@@ -1506,6 +1894,14 @@ impl Display for VmResponse {
                     balloon_actual
                 )
             }
+            VmResponse::BalloonWSS { wss } => {
+                write!(
+                    f,
+                    "wss: {}",
+                    serde_json::to_string_pretty(&wss)
+                        .unwrap_or_else(|_| "invalid_response".to_string())
+                )
+            }
             UsbResponse(result) => write!(f, "usb control request get result {:?}", result),
             #[cfg(feature = "gpu")]
             GpuResponse(result) => write!(f, "gpu control request result {:?}", result),
@@ -1518,8 +1914,6 @@ impl Display for VmResponse {
                         .unwrap_or_else(|_| "invalid_response".to_string()),
                 )
             }
-            SnapshotResponse(result) => write!(f, "snapshot control request result {:?}", result),
-            RestoreResponse(result) => write!(f, "restore control request result {:?}", result),
         }
     }
 }

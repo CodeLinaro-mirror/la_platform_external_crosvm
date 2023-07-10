@@ -19,7 +19,7 @@ use broker_ipc::CommonChildStartupArgs;
 use cros_async::EventAsync;
 use cros_async::Executor;
 use cros_async::IntoAsync;
-use cros_async::IoSourceExt;
+use cros_async::IoSource;
 use futures::future::AbortHandle;
 use futures::future::Abortable;
 use hypervisor::ProtectionType;
@@ -44,8 +44,10 @@ use crate::virtio::net::NetError;
 #[cfg(feature = "slirp")]
 use crate::virtio::net::MAX_BUFFER_SIZE;
 use crate::virtio::vhost::user::device::handler::sys::windows::read_from_tube_transporter;
+use crate::virtio::vhost::user::device::handler::sys::windows::run_handler;
 use crate::virtio::vhost::user::device::handler::sys::Doorbell;
 use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
+use crate::virtio::vhost::user::device::handler::VhostUserRegularOps;
 use crate::virtio::vhost::user::device::net::run_ctrl_queue;
 use crate::virtio::vhost::user::device::net::run_tx_queue;
 use crate::virtio::vhost::user::device::net::NetBackend;
@@ -81,7 +83,7 @@ where
 async fn run_rx_queue<T: TapT>(
     mut queue: virtio::Queue,
     mem: GuestMemory,
-    mut tap: Box<dyn IoSourceExt<T>>,
+    mut tap: IoSource<T>,
     call_evt: Doorbell,
     kick_evt: EventAsync,
     read_notifier: EventAsync,
@@ -90,9 +92,15 @@ async fn run_rx_queue<T: TapT>(
     let mut rx_buf = [0u8; MAX_BUFFER_SIZE];
     let mut rx_count = 0;
     let mut deferred_rx = false;
-    tap.as_source_mut()
-        .read_overlapped(&mut rx_buf, &mut overlapped_wrapper)
-        .expect("read_overlapped failed");
+
+    // SAFETY: safe because rx_buf & overlapped_wrapper live until the
+    // overlapped operation completes and are not used in any other operations
+    // until that time.
+    unsafe {
+        tap.as_source_mut()
+            .read_overlapped(&mut rx_buf, &mut overlapped_wrapper)
+            .expect("read_overlapped failed")
+    };
     loop {
         // If we already have a packet from deferred RX, we don't need to wait for the slirp device.
         if !deferred_rx {
@@ -273,7 +281,7 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
         .unwrap(),
     );
 
-    let handler = DeviceRequestHandler::new(dev);
+    let handler = DeviceRequestHandler::new(dev, Box::new(VhostUserRegularOps));
 
     let ex = Executor::new().context("failed to create executor")?;
 
@@ -290,7 +298,12 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
     // }
 
     info!("vhost-user net device ready, starting run loop...");
-    if let Err(e) = ex.run_until(handler.run(vhost_user_tube, exit_event, &ex)) {
+    if let Err(e) = ex.run_until(run_handler(
+        Box::new(std::sync::Mutex::new(handler)),
+        vhost_user_tube,
+        exit_event,
+        &ex,
+    )) {
         bail!("error occurred: {}", e);
     }
 

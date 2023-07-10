@@ -61,6 +61,7 @@ use vm_control::client::do_swap_status;
 use vm_control::client::do_usb_attach;
 use vm_control::client::do_usb_detach;
 use vm_control::client::do_usb_list;
+#[cfg(feature = "balloon")]
 use vm_control::client::handle_request;
 use vm_control::client::vms_request;
 #[cfg(feature = "gpu")]
@@ -180,6 +181,7 @@ fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
     use cmdline::SwapSubcommands::*;
     let (req, path) = match &cmd.nested {
         Enable(params) => (VmRequest::Swap(SwapCommand::Enable), &params.socket_path),
+        Trim(params) => (VmRequest::Swap(SwapCommand::Trim), &params.socket_path),
         SwapOut(params) => (VmRequest::Swap(SwapCommand::SwapOut), &params.socket_path),
         Disable(params) => (VmRequest::Swap(SwapCommand::Disable), &params.socket_path),
         Status(params) => (VmRequest::Swap(SwapCommand::Status), &params.socket_path),
@@ -272,7 +274,7 @@ fn modify_vfio(cmd: cmdline::VfioCrosvmCommand) -> std::result::Result<(), ()> {
         return Err(());
     }
 
-    handle_request(&request, socket_path)?;
+    vms_request(&request, socket_path)?;
     Ok(())
 }
 

@@ -39,12 +39,15 @@ use devices::virtio::device_constants::video::VideoDeviceConfig;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vhost::user::device;
+use devices::virtio::vsock::VsockConfig;
 #[cfg(feature = "gpu")]
 use devices::virtio::GpuDisplayParameters;
 #[cfg(feature = "gpu")]
 use devices::virtio::GpuParameters;
 #[cfg(unix)]
 use devices::virtio::NetParameters;
+#[cfg(unix)]
+use devices::virtio::NetParametersMode;
 #[cfg(feature = "audio")]
 use devices::Ac97Parameters;
 use devices::PflashParameters;
@@ -301,7 +304,7 @@ pub struct SuspendCommand {
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "enable")]
-/// Enable swap of a VM
+/// Enable vmm-swap of a VM. The guest memory is moved to staging memory
 pub struct SwapEnableCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
@@ -309,8 +312,17 @@ pub struct SwapEnableCommand {
 }
 
 #[derive(FromArgs)]
+#[argh(subcommand, name = "trim")]
+/// Trim pages in the staging memory
+pub struct SwapTrimCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
 #[argh(subcommand, name = "out")]
-/// Enable swap of a VM
+/// Swap out staging memory to swap file
 pub struct SwapOutCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
@@ -319,7 +331,7 @@ pub struct SwapOutCommand {
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "disable")]
-/// Disable swap of a VM
+/// Disable vmm-swap of a VM
 pub struct SwapDisableCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
@@ -328,15 +340,16 @@ pub struct SwapDisableCommand {
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "status")]
-/// Get swap status of a VM
+/// Get vmm-swap status of a VM
 pub struct SwapStatusCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
 }
 
+/// Vmm-swap commands
 #[derive(FromArgs)]
-#[argh(subcommand, name = "swap", description = "vmm-swap related commands")]
+#[argh(subcommand, name = "swap")]
 pub struct SwapCommand {
     #[argh(subcommand)]
     pub nested: SwapSubcommands,
@@ -344,9 +357,9 @@ pub struct SwapCommand {
 
 #[derive(FromArgs)]
 #[argh(subcommand)]
-/// Swap related operations
 pub enum SwapSubcommands {
     Enable(SwapEnableCommand),
+    Trim(SwapTrimCommand),
     SwapOut(SwapOutCommand),
     Disable(SwapDisableCommand),
     Status(SwapStatusCommand),
@@ -809,6 +822,12 @@ pub struct RunCommand {
     /// enable page reporting in balloon.
     pub balloon_page_reporting: bool,
 
+    #[argh(switch)]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_false)]
+    /// enable working set size reporting in balloon.
+    pub balloon_wss_reporting: bool,
+
     #[argh(option)]
     /// comma separated key=value pairs for setting up battery
     /// device
@@ -848,6 +867,10 @@ pub struct RunCommand {
     ///     async-executor=epoll|uring - set the async executor kind
     ///         to simulate the block device with. This takes
     ///         precedence over the global --async-executor option.
+    ///     multiple-workers=BOOL - (Experimental) run multiple
+    ///         worker threads in parallel. this option is not
+    ///         effective for vhost-user blk device.
+    ///         (default: false)
     block: Vec<DiskOptionWithId>,
 
     /// ratelimit enforced on detected bus locks in guest.
@@ -880,7 +903,7 @@ pub struct RunCommand {
     cfg: Option<Box<Self>>,
 
     #[argh(option, arg_name = "CID")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `vsock` instead.
     #[merge(strategy = overwrite_option)]
     /// context ID for virtual sockets.
     pub cid: Option<u64>,
@@ -1189,6 +1212,13 @@ pub struct RunCommand {
     ///        Deprecated - use `dpi` instead.
     pub gpu: Vec<FixedGpuParameters>,
 
+    #[cfg(all(unix, feature = "gpu"))]
+    #[argh(option, arg_name = "PATH")]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// move all vGPU threads to this Cgroup (default: nothing moves)
+    pub gpu_cgroup_path: Option<PathBuf>,
+
     #[cfg(feature = "gpu")]
     #[argh(option)]
     #[serde(skip)] // TODO(b/255223604). Deprecated - use `gpu` instead.
@@ -1212,6 +1242,13 @@ pub struct RunCommand {
     ///     foz-db-list-path=PATH - The path to GPU foz db list
     ///         file for dynamically loading RO caches.
     pub gpu_render_server: Option<GpuRenderServerParameters>,
+
+    #[cfg(all(unix, feature = "gpu"))]
+    #[argh(option, arg_name = "PATH")]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// move all vGPU server threads to this Cgroup (default: nothing moves)
+    pub gpu_server_cgroup_path: Option<PathBuf>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -1241,7 +1278,6 @@ pub struct RunCommand {
 
     /// hypervisor backend
     #[argh(option)]
-    #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     pub hypervisor: Option<HypervisorKind>,
 
@@ -1289,7 +1325,7 @@ pub struct RunCommand {
 
     #[cfg(unix)]
     #[argh(option, arg_name = "PATH")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `hypervisor` instead.
     #[merge(strategy = overwrite_option)]
     /// path to the KVM device. (default /dev/kvm)
     pub kvm_device: Option<PathBuf>,
@@ -1357,7 +1393,7 @@ pub struct RunCommand {
     #[cfg(unix)]
     #[argh(
         option,
-        arg_name = "(tap-name=TAP_NAME,mac=MAC_ADDRESS|tap-fd=TAP_FD,mac=MAC_ADDRESS|host-ip=IP,netmask=NETMASK,mac=MAC_ADDRESS),vhost-net=VHOST_NET"
+        arg_name = "(tap-name=TAP_NAME,mac=MAC_ADDRESS|tap-fd=TAP_FD,mac=MAC_ADDRESS|host-ip=IP,netmask=NETMASK,mac=MAC_ADDRESS),vhost-net=VHOST_NET,vq-pairs=N"
     )]
     #[serde(default)]
     #[merge(strategy = append)]
@@ -1385,6 +1421,8 @@ pub struct RunCommand {
     /// AND
     ///   vhost-net=BOOL  - whether enable vhost_net or not.
     ///                       Default: false.  [Optional]
+    ///   vq-pairs=N      - number of rx/tx queue pairs.
+    ///                       Default: 1.      [Optional]
     ///
     /// Either one tap_name, one tap_fd or a triplet of host_ip,
     /// netmask and mac must be specified.
@@ -1392,7 +1430,7 @@ pub struct RunCommand {
 
     #[cfg(unix)]
     #[argh(option, arg_name = "N")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `net` instead.
     #[merge(strategy = overwrite_option)]
     /// virtio net virtual queue pairs. (default: 1)
     pub net_vq_pairs: Option<u16>,
@@ -1881,7 +1919,8 @@ pub struct RunCommand {
     #[argh(option, long = "swap", arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// path to create the swap files from. The PATH should be a directory.
+    /// enable vmm-swap via an unnamed temporary file on the filesystem which contains the specified
+    /// directory.
     pub swap_dir: Option<PathBuf>,
 
     #[argh(option, arg_name = "N")]
@@ -2004,8 +2043,9 @@ pub struct RunCommand {
     /// path to sysfs of platform pass through
     pub vfio_platform: Vec<VfioOption>,
 
+    #[cfg(unix)]
     #[argh(switch)]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `net` instead.
     #[merge(strategy = overwrite_false)]
     /// use vhost for networking
     pub vhost_net: bool,
@@ -2079,14 +2119,14 @@ pub struct RunCommand {
 
     #[cfg(unix)]
     #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `vsock` instead.
     #[merge(strategy = overwrite_option)]
     /// path to the vhost-vsock device. (default /dev/vhost-vsock)
     pub vhost_vsock_device: Option<PathBuf>,
 
     #[cfg(unix)]
     #[argh(option, arg_name = "FD")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `vsock` instead.
     #[merge(strategy = overwrite_option)]
     /// open FD to the vhost-vsock device, mutually exclusive with vhost-vsock-device
     pub vhost_vsock_fd: Option<RawDescriptor>,
@@ -2120,12 +2160,16 @@ pub struct RunCommand {
     /// Possible key values:
     ///     capture=(false,true) - Disable/enable audio capture.
     ///         Default is false.
-    ///     backend=(null,[cras]) - Which backend to use for
+    ///     backend=(null,file,[cras]) - Which backend to use for
     ///         virtio-snd.
     ///     client_type=(crosvm,arcvm,borealis) - Set specific
     ///         client type for cras backend. Default is crosvm.
     ///     socket_type=(legacy,unified) Set specific socket type
     ///         for cras backend. Default is unified.
+    ///     playback_path=STR - Set directory of output streams
+    ///         for file backend.
+    ///     playback_size=INT - Set size of the output streams
+    ///         from file backend.
     ///     num_output_devices=INT - Set number of output PCM
     ///         devices.
     ///     num_input_devices=INT - Set number of input PCM devices.
@@ -2134,6 +2178,16 @@ pub struct RunCommand {
     ///     num_input_streams=INT - Set number of input PCM streams
     ///         per device.
     pub virtio_snd: Vec<SndParameters>,
+
+    #[argh(option, arg_name = "cid=CID[,device=VHOST_DEVICE]")]
+    #[serde(default)]
+    #[merge(strategy = overwrite_option)]
+    /// add a vsock device. Since a guest can only have one CID,
+    /// this option can only be specified once.
+    ///     cid=CID - CID to use for the device.
+    ///     device=VHOST_DEVICE - path to the vhost-vsock device to
+    ///         use (Linux only). Defaults to /dev/vhost-vsock.
+    pub vsock: Option<VsockConfig>,
 
     #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
     #[argh(switch)]
@@ -2217,7 +2271,15 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(unix)]
         if let Some(p) = cmd.kvm_device {
-            cfg.kvm_device_path = p;
+            log::warn!(
+                "`--kvm-device <PATH>` is deprecated; use `--hypervisor kvm[device=<PATH>]` instead"
+            );
+
+            if cmd.hypervisor.is_some() {
+                return Err("cannot specify both --hypervisor and --kvm-device".to_string());
+            }
+
+            cfg.hypervisor = Some(crate::crosvm::config::HypervisorKind::Kvm { device: Some(p) });
         }
 
         #[cfg(unix)]
@@ -2302,9 +2364,13 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(target_arch = "aarch64")]
         {
-            if cmd.mte && !(cmd.pmem_device.is_empty() && cmd.rw_pmem_device.is_empty()) {
+            if cmd.mte
+                && !(cmd.pmem_device.is_empty()
+                    && cmd.pstore.is_none()
+                    && cmd.rw_pmem_device.is_empty())
+            {
                 return Err(
-                    "--mte cannot be specified together with --pmem-device or --rw-pmem-device"
+                    "--mte cannot be specified together with --pmem-device, --pstore or --rw-pmem-device"
                         .to_string(),
                 );
             }
@@ -2314,7 +2380,11 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.hugepages = cmd.hugepages;
 
-        cfg.hypervisor = cmd.hypervisor;
+        // `cfg.hypervisor` may have been set by the deprecated `--kvm-device` option above.
+        // TODO(b/274817652): remove this workaround when `--kvm-device` is removed.
+        if cfg.hypervisor.is_none() {
+            cfg.hypervisor = cmd.hypervisor;
+        }
 
         #[cfg(unix)]
         {
@@ -2508,7 +2578,34 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.balloon_control = cmd.balloon_control;
 
-        cfg.cid = cmd.cid;
+        cfg.vsock = cmd.vsock;
+
+        // Legacy vsock options.
+        if let Some(cid) = cmd.cid {
+            if cfg.vsock.is_some() {
+                return Err(
+                    "`cid` and `vsock` cannot be specified together. Use `vsock` only.".to_string(),
+                );
+            }
+
+            let legacy_vsock_config = VsockConfig::new(
+                cid,
+                #[cfg(unix)]
+                match (cmd.vhost_vsock_device, cmd.vhost_vsock_fd) {
+                    (Some(_), Some(_)) => {
+                        return Err(
+                            "Only one of vhost-vsock-device vhost-vsock-fd has to be specified"
+                                .to_string(),
+                        )
+                    }
+                    (Some(path), None) => Some(path),
+                    (None, Some(fd)) => Some(PathBuf::from(format!("/proc/self/fd/{}", fd))),
+                    (None, None) => None,
+                },
+            );
+
+            cfg.vsock = Some(legacy_vsock_config);
+        }
 
         #[cfg(feature = "plugin")]
         {
@@ -2558,8 +2655,6 @@ impl TryFrom<RunCommand> for super::config::Config {
                 }
             }
         }
-
-        cfg.vhost_net = cmd.vhost_net;
 
         #[cfg(feature = "tpm")]
         {
@@ -2612,6 +2707,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.rng = !cmd.no_rng;
         cfg.balloon = !cmd.no_balloon;
         cfg.balloon_page_reporting = cmd.balloon_page_reporting;
+        cfg.balloon_wss_reporting = cmd.balloon_wss_reporting;
         #[cfg(feature = "audio")]
         {
             cfg.virtio_snds = cmd.virtio_snd;
@@ -2641,31 +2737,92 @@ impl TryFrom<RunCommand> for super::config::Config {
                     ));
                 }
             }
+
+            #[cfg(unix)]
+            {
+                cfg.gpu_cgroup_path = cmd.gpu_cgroup_path;
+                cfg.gpu_server_cgroup_path = cmd.gpu_server_cgroup_path;
+            }
         }
 
         #[cfg(unix)]
         {
-            if cmd.vhost_vsock_device.is_some() && cmd.vhost_vsock_fd.is_some() {
-                return Err(
-                    "Only one of vhost-vsock-device vhost-vsock-fd has to be specified".to_string(),
-                );
-            }
-
-            cfg.vhost_vsock_device = cmd.vhost_vsock_device;
-
-            if let Some(fd) = cmd.vhost_vsock_fd {
-                cfg.vhost_vsock_device = Some(PathBuf::from(format!("/proc/self/fd/{}", fd)));
-            }
-
             cfg.shared_dirs = cmd.shared_dir;
 
             cfg.net = cmd.net;
-            cfg.host_ip = cmd.host_ip;
-            cfg.netmask = cmd.netmask;
-            cfg.mac_address = cmd.mac_address;
 
-            cfg.tap_name = cmd.tap_name;
-            cfg.tap_fd = cmd.tap_fd;
+            let vhost_net_msg = match cmd.vhost_net {
+                true => ",vhost-net=true",
+                false => "",
+            };
+            let vq_pairs_msg = match cmd.net_vq_pairs {
+                Some(n) => format!(",vq-pairs={}", n),
+                None => "".to_string(),
+            };
+
+            for tap_name in cmd.tap_name {
+                log::warn!(
+                    "`--tap-name` is deprecated; please use \
+                    `--net tap-name={tap_name}{vhost_net_msg}{vq_pairs_msg}`"
+                );
+                cfg.net.push(NetParameters {
+                    mode: NetParametersMode::TapName {
+                        tap_name,
+                        mac: None,
+                    },
+                    vhost_net: cmd.vhost_net,
+                    vq_pairs: cmd.net_vq_pairs,
+                });
+            }
+
+            for tap_fd in cmd.tap_fd {
+                log::warn!(
+                    "`--tap-fd` is deprecated; please use \
+                    `--net tap-fd={tap_fd}{vhost_net_msg}{vq_pairs_msg}`"
+                );
+                cfg.net.push(NetParameters {
+                    mode: NetParametersMode::TapFd { tap_fd, mac: None },
+                    vhost_net: cmd.vhost_net,
+                    vq_pairs: cmd.net_vq_pairs,
+                });
+            }
+
+            if cmd.host_ip.is_some() || cmd.netmask.is_some() || cmd.mac_address.is_some() {
+                let host_ip = match cmd.host_ip {
+                    Some(host_ip) => host_ip,
+                    None => return Err("`host-ip` missing from network config".to_string()),
+                };
+                let netmask = match cmd.netmask {
+                    Some(netmask) => netmask,
+                    None => return Err("`netmask` missing from network config".to_string()),
+                };
+                let mac = match cmd.mac_address {
+                    Some(mac) => mac,
+                    None => return Err("`mac` missing from network config".to_string()),
+                };
+
+                if !cmd.vhost_user_net.is_empty() {
+                    return Err(
+                        "vhost-user-net cannot be used with any of --host-ip, --netmask or --mac"
+                            .to_string(),
+                    );
+                }
+
+                log::warn!(
+                    "`--host-ip`, `--netmask`, and `--mac` are deprecated; please use \
+                    `--net host-ip={host_ip},netmask={netmask},mac={mac}{vhost_net_msg}{vq_pairs_msg}`"
+                );
+
+                cfg.net.push(NetParameters {
+                    mode: NetParametersMode::RawConfig {
+                        host_ip,
+                        netmask,
+                        mac,
+                    },
+                    vhost_net: cmd.vhost_net,
+                    vq_pairs: cmd.net_vq_pairs,
+                });
+            }
 
             cfg.coiommu_param = cmd.coiommu;
 
@@ -2691,8 +2848,6 @@ impl TryFrom<RunCommand> for super::config::Config {
                     .get_or_insert_with(Default::default)
                     .pivot_root = p;
             }
-
-            cfg.net_vq_pairs = cmd.net_vq_pairs;
         }
 
         let protection_flags = [

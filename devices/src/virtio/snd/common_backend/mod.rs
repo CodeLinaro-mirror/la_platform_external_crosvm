@@ -6,6 +6,7 @@
 
 use std::io;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -13,6 +14,8 @@ use audio_streams::BoxError;
 use base::debug;
 use base::error;
 use base::warn;
+use base::AsRawDescriptor;
+use base::Descriptor;
 use base::Error as SysError;
 use base::Event;
 use base::RawDescriptor;
@@ -41,7 +44,10 @@ use crate::virtio::copy_config;
 use crate::virtio::device_constants::snd::virtio_snd_config;
 use crate::virtio::snd::common_backend::async_funcs::*;
 use crate::virtio::snd::common_backend::stream_info::StreamInfo;
+use crate::virtio::snd::common_backend::stream_info::StreamInfoBuilder;
 use crate::virtio::snd::constants::*;
+use crate::virtio::snd::file_backend::create_file_stream_source_generators;
+use crate::virtio::snd::file_backend::Error as FileError;
 use crate::virtio::snd::layout::*;
 use crate::virtio::snd::null_backend::create_null_stream_source_generators;
 use crate::virtio::snd::parameters::Parameters;
@@ -83,6 +89,8 @@ pub enum Error {
     /// Creating WaitContext failed.
     #[error("Failed to create wait context: {0}")]
     CreateWaitContext(SysError),
+    #[error("Failed to create file stream source generator")]
+    CreateFileStreamSourceGenerator(FileError),
     /// Cloning kill event failed.
     #[error("Failed to clone kill event: {0}")]
     CloneKillEvent(SysError),
@@ -157,14 +165,18 @@ pub enum WorkerStatus {
 // Stores constant data
 #[derive(Clone)]
 pub struct SndData {
-    jack_info: Vec<virtio_snd_jack_info>,
-    pcm_info: Vec<virtio_snd_pcm_info>,
-    chmap_info: Vec<virtio_snd_chmap_info>,
+    pub(crate) jack_info: Vec<virtio_snd_jack_info>,
+    pub(crate) pcm_info: Vec<virtio_snd_pcm_info>,
+    pub(crate) chmap_info: Vec<virtio_snd_chmap_info>,
 }
 
 impl SndData {
     pub fn pcm_info_len(&self) -> usize {
         self.pcm_info.len()
+    }
+
+    pub fn pcm_info_iter(&self) -> std::slice::Iter<'_, virtio_snd_pcm_info> {
+        self.pcm_info.iter()
     }
 }
 
@@ -191,41 +203,72 @@ pub struct PcmResponse {
 pub struct VirtioSnd {
     cfg: virtio_snd_config,
     snd_data: SndData,
+    stream_info_builders: Vec<StreamInfoBuilder>,
     avail_features: u64,
     acked_features: u64,
     queue_sizes: Box<[u16]>,
     worker_thread: Option<WorkerThread<()>>,
-    params: Parameters,
+    keep_rds: Vec<Descriptor>,
 }
 
 impl VirtioSnd {
     pub fn new(base_features: u64, params: Parameters) -> Result<VirtioSnd, Error> {
+        let params = resize_parameters_pcm_device_config(params);
         let cfg = hardcoded_virtio_snd_config(&params);
         let snd_data = hardcoded_snd_data(&params);
         let avail_features = base_features;
+        let mut keep_rds: Vec<RawDescriptor> = Vec::new();
+
+        let stream_info_builders = create_stream_info_builders(&params, &snd_data, &mut keep_rds)?;
 
         Ok(VirtioSnd {
             cfg,
             snd_data,
+            stream_info_builders,
             avail_features,
             acked_features: 0,
             queue_sizes: vec![MAX_VRING_LEN; MAX_QUEUE_NUM].into_boxed_slice(),
             worker_thread: None,
-            params,
+            keep_rds: keep_rds.iter().map(|rd| Descriptor(*rd)).collect(),
         })
     }
 }
 
-pub(crate) fn create_stream_source_generators(
+fn create_stream_source_generators(
     params: &Parameters,
     snd_data: &SndData,
-) -> Vec<SysAudioStreamSourceGenerator> {
-    match params.backend {
+    keep_rds: &mut Vec<RawDescriptor>,
+) -> Result<Vec<SysAudioStreamSourceGenerator>, Error> {
+    let generators = match params.backend {
         StreamSourceBackend::NULL => create_null_stream_source_generators(snd_data),
+        StreamSourceBackend::FILE => {
+            create_file_stream_source_generators(params, snd_data, keep_rds)
+                .map_err(Error::CreateFileStreamSourceGenerator)?
+        }
         StreamSourceBackend::Sys(backend) => {
             sys_create_stream_source_generators(backend, params, snd_data)
         }
-    }
+    };
+    Ok(generators)
+}
+
+/// Creates [`StreamInfoBuilder`]s by calling [`create_stream_source_generators()`] then zip
+/// them with [`crate::virtio::snd::parameters::PCMDeviceParameters`] from the params to set
+/// the parameters on each [`StreamInfoBuilder`] (e.g. effects).
+pub(crate) fn create_stream_info_builders(
+    params: &Parameters,
+    snd_data: &SndData,
+    keep_rds: &mut Vec<RawDescriptor>,
+) -> Result<Vec<StreamInfoBuilder>, Error> {
+    Ok(create_stream_source_generators(params, snd_data, keep_rds)?
+        .into_iter()
+        .map(Arc::new)
+        .zip(snd_data.pcm_info_iter())
+        .map(|(generator, pcm_info)| {
+            let device_params = params.get_device_params(pcm_info).unwrap_or_default();
+            StreamInfo::builder(generator).effects(device_params.effects.unwrap_or_default())
+        })
+        .collect())
 }
 
 // To be used with hardcoded_snd_data
@@ -333,9 +376,30 @@ pub fn hardcoded_snd_data(params: &Parameters) -> SndData {
     }
 }
 
+fn resize_parameters_pcm_device_config(mut params: Parameters) -> Parameters {
+    if params.output_device_config.len() > params.num_output_devices as usize {
+        warn!("Truncating output device config due to length > number of output devices");
+    }
+    params
+        .output_device_config
+        .resize_with(params.num_output_devices as usize, Default::default);
+
+    if params.input_device_config.len() > params.num_input_devices as usize {
+        warn!("Truncating input device config due to length > number of input devices");
+    }
+    params
+        .input_device_config
+        .resize_with(params.num_input_devices as usize, Default::default);
+
+    params
+}
+
 impl VirtioDevice for VirtioSnd {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
-        Vec::new()
+        self.keep_rds
+            .iter()
+            .map(|descr| descr.as_raw_descriptor())
+            .collect()
     }
 
     fn device_type(&self) -> DeviceType {
@@ -381,7 +445,7 @@ impl VirtioDevice for VirtioSnd {
         }
 
         let snd_data = self.snd_data.clone();
-        let stream_source_generators = create_stream_source_generators(&self.params, &snd_data);
+        let stream_info_builders = self.stream_info_builders.to_vec();
 
         self.worker_thread = Some(WorkerThread::start("v_snd_common", move |kill_evt| {
             set_audio_thread_priority();
@@ -391,7 +455,7 @@ impl VirtioDevice for VirtioSnd {
                 guest_mem,
                 snd_data,
                 kill_evt,
-                stream_source_generators,
+                stream_info_builders,
             ) {
                 error!("{}", err_string);
             }
@@ -423,20 +487,21 @@ fn run_worker(
     mem: GuestMemory,
     snd_data: SndData,
     kill_evt: Event,
-    stream_source_generators: Vec<SysAudioStreamSourceGenerator>,
+    stream_info_builders: Vec<StreamInfoBuilder>,
 ) -> Result<(), String> {
     let ex = Executor::new().expect("Failed to create an executor");
 
-    if snd_data.pcm_info_len() != stream_source_generators.len() {
+    if snd_data.pcm_info_len() != stream_info_builders.len() {
         error!(
             "snd: expected {} streams, got {}",
             snd_data.pcm_info_len(),
-            stream_source_generators.len(),
+            stream_info_builders.len(),
         );
     }
-    let streams = stream_source_generators
+    let streams = stream_info_builders
         .into_iter()
-        .map(|generator| AsyncMutex::new(StreamInfo::new(generator)))
+        .map(StreamInfoBuilder::build)
+        .map(AsyncMutex::new)
         .collect();
     let streams = Rc::new(AsyncMutex::new(streams));
 
@@ -722,4 +787,149 @@ fn reset_streams(
     };
 
     ex.run_until(reset)
+}
+
+#[cfg(test)]
+#[allow(clippy::needless_update)]
+mod tests {
+    use audio_streams::StreamEffect;
+
+    use super::*;
+    use crate::virtio::snd::parameters::PCMDeviceParameters;
+
+    #[test]
+    fn test_virtio_snd_new() {
+        let params = Parameters {
+            num_output_devices: 3,
+            num_input_devices: 2,
+            num_output_streams: 3,
+            num_input_streams: 2,
+            output_device_config: vec![PCMDeviceParameters {
+                effects: Some(vec![StreamEffect::EchoCancellation]),
+                ..PCMDeviceParameters::default()
+            }],
+            input_device_config: vec![PCMDeviceParameters {
+                effects: Some(vec![StreamEffect::EchoCancellation]),
+                ..PCMDeviceParameters::default()
+            }],
+            ..Default::default()
+        };
+
+        let res = VirtioSnd::new(123, params).unwrap();
+
+        // Default values
+        assert_eq!(res.snd_data.jack_info.len(), 0);
+        assert_eq!(res.acked_features, 0);
+        assert_eq!(res.worker_thread.is_none(), true);
+
+        assert_eq!(res.avail_features, 123); // avail_features must be equal to the input
+        assert_eq!(res.cfg.jacks.to_native(), 0);
+        assert_eq!(res.cfg.streams.to_native(), 13); // (Output = 3*3) + (Input = 2*2)
+        assert_eq!(res.cfg.chmaps.to_native(), 11); // (Output = 3*3) + (Input = 2*1)
+
+        // Check snd_data.pcm_info
+        assert_eq!(res.snd_data.pcm_info.len(), 13);
+        // Check hda_fn_nid (PCM Device number)
+        let expected_hda_fn_nid = vec![0, 0, 0, 1, 1, 1, 2, 2, 2, 0, 0, 1, 1];
+        for (i, pcm_info) in res.snd_data.pcm_info.iter().enumerate() {
+            assert_eq!(
+                pcm_info.hdr.hda_fn_nid.to_native(),
+                expected_hda_fn_nid[i],
+                "pcm_info index {} incorrect hda_fn_nid",
+                i
+            );
+        }
+        // First 9 devices must be OUTPUT
+        for i in 0..9 {
+            assert_eq!(
+                res.snd_data.pcm_info[i].direction, VIRTIO_SND_D_OUTPUT,
+                "pcm_info index {} incorrect direction",
+                i
+            );
+        }
+        // Next 4 devices must be INPUT
+        for i in 9..13 {
+            assert_eq!(
+                res.snd_data.pcm_info[i].direction, VIRTIO_SND_D_INPUT,
+                "pcm_info index {} incorrect direction",
+                i
+            );
+        }
+
+        // Check snd_data.chmap_info
+        assert_eq!(res.snd_data.chmap_info.len(), 11);
+        let expected_hda_fn_nid = vec![0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 2];
+        // Check hda_fn_nid (PCM Device number)
+        for (i, chmap_info) in res.snd_data.chmap_info.iter().enumerate() {
+            assert_eq!(
+                chmap_info.hdr.hda_fn_nid.to_native(),
+                expected_hda_fn_nid[i],
+                "chmap_info index {} incorrect hda_fn_nid",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_resize_parameters_pcm_device_config_truncate() {
+        // If pcm_device_config is larger than number of devices, it will be truncated
+        let params = Parameters {
+            num_output_devices: 1,
+            num_input_devices: 1,
+            output_device_config: vec![PCMDeviceParameters::default(); 3],
+            input_device_config: vec![PCMDeviceParameters::default(); 3],
+            ..Parameters::default()
+        };
+        let params = resize_parameters_pcm_device_config(params);
+        assert_eq!(params.output_device_config.len(), 1);
+        assert_eq!(params.input_device_config.len(), 1);
+    }
+
+    #[test]
+    fn test_resize_parameters_pcm_device_config_extend() {
+        let params = Parameters {
+            num_output_devices: 3,
+            num_input_devices: 2,
+            num_output_streams: 3,
+            num_input_streams: 2,
+            output_device_config: vec![PCMDeviceParameters {
+                effects: Some(vec![StreamEffect::EchoCancellation]),
+                ..PCMDeviceParameters::default()
+            }],
+            input_device_config: vec![PCMDeviceParameters {
+                effects: Some(vec![StreamEffect::EchoCancellation]),
+                ..PCMDeviceParameters::default()
+            }],
+            ..Default::default()
+        };
+
+        let params = resize_parameters_pcm_device_config(params);
+
+        // Check output_device_config correctly extended
+        assert_eq!(
+            params.output_device_config,
+            vec![
+                PCMDeviceParameters {
+                    // Keep from the parameters
+                    effects: Some(vec![StreamEffect::EchoCancellation]),
+                    ..PCMDeviceParameters::default()
+                },
+                PCMDeviceParameters::default(), // Extended with default
+                PCMDeviceParameters::default(), // Extended with default
+            ]
+        );
+
+        // Check input_device_config correctly extended
+        assert_eq!(
+            params.input_device_config,
+            vec![
+                PCMDeviceParameters {
+                    // Keep from the parameters
+                    effects: Some(vec![StreamEffect::EchoCancellation]),
+                    ..PCMDeviceParameters::default()
+                },
+                PCMDeviceParameters::default(), // Extended with default
+            ]
+        );
+    }
 }

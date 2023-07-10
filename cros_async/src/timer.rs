@@ -11,11 +11,11 @@ use crate::AsyncResult;
 use crate::Error;
 use crate::Executor;
 use crate::IntoAsync;
-use crate::IoSourceExt;
+use crate::IoSource;
 
 /// An async version of base::Timer.
 pub struct TimerAsync {
-    pub(crate) io_source: Box<dyn IoSourceExt<Timer>>,
+    pub(crate) io_source: IoSource<Timer>,
 }
 
 impl TimerAsync {
@@ -49,6 +49,11 @@ impl TimerAsync {
     /// the timer will expire just once.  Cancels any existing duration and repeating interval.
     pub fn reset(&mut self, dur: Duration, interval: Option<Duration>) -> SysResult<()> {
         self.io_source.as_source_mut().reset(dur, interval)
+    }
+
+    /// Disarms the timer.
+    pub fn clear(&mut self) -> SysResult<()> {
+        self.io_source.as_source_mut().clear()
     }
 }
 

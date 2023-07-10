@@ -4,8 +4,16 @@ version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
+# The process tests will use fork, which requires a custom test harness to enforce single threaded
+# execution.
+[[test]]
+name = "process"
+path = "tests/process.rs"
+harness = false
+
 [features]
 chromeos = []
+seccomp_trace = []
 
 [dependencies]
 audio_streams = { path = "../common/audio_streams" } # provided by ebuild
@@ -25,8 +33,11 @@ serde_json = "*"
 smallvec = "1.6.1"
 tempfile = "3"
 thiserror = "1.0.20"
-uuid = { version = "0.8.2", features = ["v4"] }
+uuid = { version = "1", features = ["v4"] }
 zerocopy = "*"
+
+[dev-dependencies]
+libtest-mimic = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 minijail = "*"

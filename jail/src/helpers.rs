@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #![deny(missing_docs)]
+#![allow(dead_code)]
 
 use std::path::Path;
 use std::str;
@@ -10,20 +11,27 @@ use std::str;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(feature = "seccomp_trace")]
+use base::debug;
 use base::getegid;
 use base::geteuid;
+#[cfg(feature = "seccomp_trace")]
+use base::warn;
 use libc::c_ulong;
 use minijail::Minijail;
+#[cfg(not(feature = "seccomp_trace"))]
 use once_cell::sync::Lazy;
+#[cfg(feature = "seccomp_trace")]
+use static_assertions::assert_eq_size;
+#[cfg(feature = "seccomp_trace")]
+use zerocopy::AsBytes;
 
 use crate::config::JailConfig;
 
 // ANDROID: b/246968493
-static EMBEDDED_BPFS: Lazy<std::collections::HashMap<&str, Vec<u8>>> = Lazy::new(|| {
-    {
-        std::collections::HashMap::<&str, Vec<u8>>::new()
-    }
-});
+#[cfg(not(feature = "seccomp_trace"))]
+static EMBEDDED_BPFS: Lazy<std::collections::HashMap<&str, Vec<u8>>> =
+    Lazy::new(|| std::collections::HashMap::<&str, Vec<u8>>::new());
 
 /// Most devices don't need to open many fds.
 pub const MAX_OPEN_FILES_DEFAULT: u64 = 1024;
@@ -189,6 +197,44 @@ pub fn create_sandbox_minijail(
     // Don't allow the device to gain new privileges.
     jail.no_new_privs();
 
+    #[cfg(feature = "seccomp_trace")]
+    {
+        #[repr(C)]
+        #[derive(AsBytes)]
+        struct sock_filter {
+            /* Filter block */
+            code: u16, /* Actual filter code */
+            jt: u8,    /* Jump true */
+            jf: u8,    /* Jump false */
+            k: u32,    /* Generic multiuse field */
+        }
+
+        // BPF constant is defined in https://elixir.bootlin.com/linux/latest/source/include/uapi/linux/bpf_common.h
+        // BPF parser/assembler is defined in https://elixir.bootlin.com/linux/v4.9/source/tools/net/bpf_exp.y
+        const SECCOMP_RET_TRACE: u32 = 0x7ff00000;
+        const SECCOMP_RET_LOG: u32 = 0x7ffc0000;
+        const BPF_RET: u16 = 0x06;
+        const BPF_K: u16 = 0x00;
+
+        // return SECCOMP_RET_LOG for all syscalls
+        const FILTER_RET_LOG_BLOCK: sock_filter = sock_filter {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_LOG,
+        };
+
+        warn!("The running crosvm is compiled with seccomp_trace feature, and is striclty used for debugging purpose only. DO NOT USE IN PRODUCTION!!!");
+        debug!(
+            "seccomp_trace {{\"event\": \"minijail_create\", \"name\": \"{}\", \"jail_addr\": \"0x{:x}\"}}",
+            config.seccomp_policy_name,
+            read_jail_addr(&jail),
+        );
+        jail.parse_seccomp_bytes(FILTER_RET_LOG_BLOCK.as_bytes())
+            .unwrap();
+    }
+
+    #[cfg(not(feature = "seccomp_trace"))]
     if let Some(seccomp_policy_dir) = config.seccomp_policy_dir {
         let seccomp_policy_path = seccomp_policy_dir.join(config.seccomp_policy_name);
         // By default we'll prioritize using the pre-compiled .bpf over the .policy file (the .bpf
@@ -239,6 +285,7 @@ pub fn create_sandbox_minijail(
             )
         })?;
     }
+
     jail.use_seccomp_filter();
     // Don't do init setup.
     jail.run_as_init();
@@ -273,6 +320,15 @@ pub fn create_gpu_minijail(root: &Path, config: &SandboxConfig) -> Result<Minija
     // Device nodes required for DRM.
     let sys_dev_char_path = Path::new("/sys/dev/char");
     jail.mount_bind(sys_dev_char_path, sys_dev_char_path, false)?;
+
+    // Necessary for CGROUP control of the vGPU threads
+    // This is not necessary UNLESS one wants to make use
+    // of the gpu cgroup command line options.
+    let sys_cpuset_path = Path::new("/sys/fs/cgroup/cpuset");
+    if sys_cpuset_path.exists() {
+        jail.mount_bind(sys_cpuset_path, sys_cpuset_path, true)?;
+    }
+
     let sys_devices_path = Path::new("/sys/devices");
     jail.mount_bind(sys_devices_path, sys_devices_path, false)?;
 
@@ -351,6 +407,15 @@ pub fn mount_proc(jail: &mut Minijail) -> Result<()> {
         (libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY) as usize,
     )?;
     Ok(())
+}
+
+/// Read minijail internal struct address for uniquely identifying and tracking jail's lifetime
+#[cfg(feature = "seccomp_trace")]
+pub fn read_jail_addr(jail: &Minijail) -> usize {
+    // We can only hope minijail's rust object will always only contain a pointer to C jail struct
+    assert_eq_size!(Minijail, usize);
+    // Safe because it's only doing a read within bound checked by static assert
+    unsafe { *(jail as *const Minijail as *const usize) }
 }
 
 /// Set the uid/gid for the jailed process and give a basic id map. This is

@@ -48,7 +48,6 @@ use base::Tube;
 use base::TubeError;
 use base::WaitContext;
 use base::WorkerThread;
-use data_model::DataInit;
 use hypervisor::Datamatch;
 use resources::Alloc;
 use resources::AllocOptions;
@@ -123,17 +122,12 @@ enum Error {
 const UNPIN_DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 const UNPIN_GEN_DEFAULT_THRES: u64 = 10;
 /// Holds the coiommu unpin policy
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CoIommuUnpinPolicy {
+    #[default]
     Off,
     Lru,
-}
-
-impl Default for CoIommuUnpinPolicy {
-    fn default() -> Self {
-        CoIommuUnpinPolicy::Off
-    }
 }
 
 impl fmt::Display for CoIommuUnpinPolicy {
@@ -283,8 +277,6 @@ struct PinPageInfo {
     pad: [u16; 3],
     nr_pages: u64,
 }
-// Safe because the PinPageInfo structure is raw data
-unsafe impl DataInit for PinPageInfo {}
 
 const COIOMMU_UPPER_LEVEL_STRIDE: u64 = 9;
 const COIOMMU_UPPER_LEVEL_MASK: u64 = (1 << COIOMMU_UPPER_LEVEL_STRIDE) - 1;

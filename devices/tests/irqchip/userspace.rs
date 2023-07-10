@@ -51,9 +51,11 @@ use hypervisor::Regs;
 use hypervisor::Sregs;
 use hypervisor::TriggerMode;
 use hypervisor::Vcpu;
+use hypervisor::VcpuEvents;
 use hypervisor::VcpuExit;
 use hypervisor::VcpuRunHandle;
 use hypervisor::VcpuX86_64;
+use hypervisor::Xsave;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
@@ -739,6 +741,18 @@ impl VcpuX86_64 for FakeVcpu {
     fn set_fpu(&self, _fpu: &Fpu) -> Result<()> {
         unimplemented!()
     }
+    fn get_xsave(&self) -> Result<Xsave> {
+        unimplemented!()
+    }
+    fn set_xsave(&self, _xsave: &Xsave) -> Result<()> {
+        unimplemented!()
+    }
+    fn get_vcpu_events(&self) -> Result<VcpuEvents> {
+        unimplemented!()
+    }
+    fn set_vcpu_events(&self, _vcpu_events: &VcpuEvents) -> Result<()> {
+        unimplemented!()
+    }
     fn get_debugregs(&self) -> Result<DebugRegs> {
         unimplemented!()
     }
@@ -752,6 +766,9 @@ impl VcpuX86_64 for FakeVcpu {
         unimplemented!()
     }
     fn get_msrs(&self, _msrs: &mut Vec<Register>) -> Result<()> {
+        unimplemented!()
+    }
+    fn get_all_msrs(&self) -> Result<Vec<Register>> {
         unimplemented!()
     }
     fn set_msrs(&self, _msrs: &[Register]) -> Result<()> {

@@ -7,18 +7,19 @@
 use std::collections::BTreeMap as Map;
 use std::sync::Arc;
 
-use crate::base_internal::SafeDescriptor;
 use data_model::VolatileSlice;
 
-#[cfg(not(target_os = "fuchsia"))]
 use crate::cross_domain::CrossDomain;
-
 #[cfg(feature = "gfxstream")]
 use crate::gfxstream::Gfxstream;
 use crate::rutabaga_2d::Rutabaga2D;
+use crate::rutabaga_os::SafeDescriptor;
 use crate::rutabaga_utils::*;
 #[cfg(feature = "virgl_renderer")]
 use crate::virgl_renderer::VirglRenderer;
+
+const RUTABAGA_DEFAULT_WIDTH: u32 = 1280;
+const RUTABAGA_DEFAULT_HEIGHT: u32 = 1024;
 
 /// Information required for 2D functionality.
 pub struct Rutabaga2DInfo {
@@ -41,7 +42,7 @@ pub struct RutabagaResource {
     pub backing_iovecs: Option<Vec<RutabagaIovec>>,
 
     /// Bitmask of components that have already imported this resource
-    pub import_mask: u32,
+    pub component_mask: u8,
 }
 
 /// A RutabagaComponent is a building block of the Virtual Graphics Interface (VGI).  Each component
@@ -101,7 +102,7 @@ pub trait RutabagaComponent {
             info_3d: None,
             vulkan_info: None,
             backing_iovecs: None,
-            import_mask: 0,
+            component_mask: 0,
         })
     }
 
@@ -262,21 +263,21 @@ const RUTABAGA_CAPSETS: [RutabagaCapsetInfo; 6] = [
     },
 ];
 
-pub fn calculate_context_mask(context_names: Vec<String>) -> u64 {
-    let mut context_mask = 0;
+pub fn calculate_capset_mask(context_names: Vec<String>) -> u64 {
+    let mut capset_mask = 0;
     context_names.into_iter().for_each(|name| {
         if let Some(capset) = RUTABAGA_CAPSETS.iter().find(|capset| capset.name == name) {
-            context_mask |= 1 << capset.capset_id;
+            capset_mask |= 1 << capset.capset_id;
         };
     });
 
-    context_mask
+    capset_mask
 }
 
-pub fn calculate_context_types(context_mask: u64) -> Vec<String> {
+pub fn calculate_capset_names(capset_mask: u64) -> Vec<String> {
     RUTABAGA_CAPSETS
         .iter()
-        .filter(|capset| context_mask & (1 << capset.capset_id) != 0)
+        .filter(|capset| capset_mask & (1 << capset.capset_id) != 0)
         .map(|capset| capset.name.to_string())
         .collect()
 }
@@ -348,6 +349,11 @@ impl Rutabaga {
             .ok_or(RutabagaError::InvalidComponent)?;
 
         Ok(component.get_capset(capset_id, version))
+    }
+
+    /// Gets the number of capsets
+    pub fn get_num_capsets(&self) -> u32 {
+        self.capset_info.len() as u32
     }
 
     /// Forces context zero for the default rutabaga component.
@@ -762,43 +768,43 @@ impl Rutabaga {
 
 /// Rutabaga Builder, following the Rust builder pattern.
 pub struct RutabagaBuilder {
-    display_width: Option<u32>,
-    display_height: Option<u32>,
+    display_width: u32,
+    display_height: u32,
     default_component: RutabagaComponentType,
     gfxstream_flags: GfxstreamFlags,
     virglrenderer_flags: VirglRendererFlags,
-    context_mask: u64,
+    capset_mask: u64,
     channels: Option<Vec<RutabagaChannel>>,
 }
 
 impl RutabagaBuilder {
     /// Create new a RutabagaBuilder.
-    pub fn new(default_component: RutabagaComponentType, context_mask: u64) -> RutabagaBuilder {
+    pub fn new(default_component: RutabagaComponentType, capset_mask: u64) -> RutabagaBuilder {
         let virglrenderer_flags = VirglRendererFlags::new()
             .use_thread_sync(true)
             .use_async_fence_cb(true);
         let gfxstream_flags = GfxstreamFlags::new().use_async_fence_cb(true);
 
         RutabagaBuilder {
-            display_width: None,
-            display_height: None,
+            display_width: RUTABAGA_DEFAULT_WIDTH,
+            display_height: RUTABAGA_DEFAULT_HEIGHT,
             default_component,
             gfxstream_flags,
             virglrenderer_flags,
-            context_mask,
+            capset_mask,
             channels: None,
         }
     }
 
     /// Set display width for the RutabagaBuilder
     pub fn set_display_width(mut self, display_width: u32) -> RutabagaBuilder {
-        self.display_width = Some(display_width);
+        self.display_width = display_width;
         self
     }
 
     /// Set display height for the RutabagaBuilder
     pub fn set_display_height(mut self, display_height: u32) -> RutabagaBuilder {
-        self.display_height = Some(display_height);
+        self.display_height = display_height;
         self
     }
 
@@ -891,7 +897,7 @@ impl RutabagaBuilder {
     pub fn build(
         mut self,
         fence_handler: RutabagaFenceHandler,
-        #[cfg(feature = "virgl_renderer_next")] render_server_fd: Option<SafeDescriptor>,
+        #[allow(unused_variables)] rutabaga_server_descriptor: Option<SafeDescriptor>,
     ) -> RutabagaResult<Rutabaga> {
         let mut rutabaga_components: Map<RutabagaComponentType, Box<dyn RutabagaComponent>> =
             Default::default();
@@ -900,14 +906,14 @@ impl RutabagaBuilder {
         let mut rutabaga_capsets: Vec<RutabagaCapsetInfo> = Default::default();
 
         let capset_enabled =
-            |capset_id: u32| -> bool { (self.context_mask & (1 << capset_id)) != 0 };
+            |capset_id: u32| -> bool { (self.capset_mask & (1 << capset_id)) != 0 };
 
         let mut push_capset = |capset_id: u32| {
             if let Some(capset) = RUTABAGA_CAPSETS
                 .iter()
                 .find(|capset| capset_id == capset.capset_id)
             {
-                if self.context_mask != 0 {
+                if self.capset_mask != 0 {
                     if capset_enabled(capset.capset_id) {
                         rutabaga_capsets.push(*capset);
                     }
@@ -919,7 +925,7 @@ impl RutabagaBuilder {
             };
         };
 
-        if self.context_mask != 0 {
+        if self.capset_mask != 0 {
             let supports_gfxstream = capset_enabled(RUTABAGA_CAPSET_GFXSTREAM);
             let supports_virglrenderer = capset_enabled(RUTABAGA_CAPSET_VIRGL2)
                 | capset_enabled(RUTABAGA_CAPSET_VENUS)
@@ -961,12 +967,12 @@ impl RutabagaBuilder {
             #[cfg(feature = "virgl_renderer")]
             if self.default_component == RutabagaComponentType::VirglRenderer {
                 #[cfg(not(feature = "virgl_renderer_next"))]
-                let render_server_fd = None;
+                let rutabaga_server_descriptor = None;
 
                 let virgl = VirglRenderer::init(
                     self.virglrenderer_flags,
                     fence_handler.clone(),
-                    render_server_fd,
+                    rutabaga_server_descriptor,
                 )?;
                 rutabaga_components.insert(RutabagaComponentType::VirglRenderer, virgl);
 
@@ -978,18 +984,9 @@ impl RutabagaBuilder {
 
             #[cfg(feature = "gfxstream")]
             if self.default_component == RutabagaComponentType::Gfxstream {
-                let display_width = self
-                    .display_width
-                    .ok_or(RutabagaError::InvalidRutabagaBuild("missing display width"))?;
-                let display_height =
-                    self.display_height
-                        .ok_or(RutabagaError::InvalidRutabagaBuild(
-                            "missing display height",
-                        ))?;
-
                 let gfxstream = Gfxstream::init(
-                    display_width,
-                    display_height,
+                    self.display_width,
+                    self.display_height,
                     self.gfxstream_flags,
                     fence_handler.clone(),
                 )?;
@@ -999,13 +996,9 @@ impl RutabagaBuilder {
                 push_capset(RUTABAGA_CAPSET_GFXSTREAM);
             }
 
-            cfg_if::cfg_if! {
-                   if #[cfg(not(target_os = "fuchsia"))] {
-                      let cross_domain = CrossDomain::init(self.channels)?;
-                      rutabaga_components.insert(RutabagaComponentType::CrossDomain, cross_domain);
-                      push_capset(RUTABAGA_CAPSET_CROSS_DOMAIN);
-                   }
-            }
+            let cross_domain = CrossDomain::init(self.channels)?;
+            rutabaga_components.insert(RutabagaComponentType::CrossDomain, cross_domain);
+            push_capset(RUTABAGA_CAPSET_CROSS_DOMAIN);
         }
 
         Ok(Rutabaga {

@@ -8,6 +8,8 @@
     // we can remove a some patch files and enable "composite-disk" here.
     // "composite-disk",
     "gdb",
+    "geniezone",
+    "gunyah",
     "qcow",
     "usb",
     // TODO: Enable these in the root crate instead. May be difficult because of host-vs-device
@@ -52,6 +54,7 @@
     "libfuse": "libfuse_rust",
     "liblog": "liblog_rust",
     "libminijail": "libminijail_rust",
+    "libprotobuf": "libprotobuf_deprecated",
     "libsync": "libsync_rust",
     "libx86_64": "libx86_64_rust"
   },
@@ -104,26 +107,66 @@
     "wire_format_derive_test_wire_format_derive"
   ],
   "module_visibility": {
-    "crosvm": ["//visibility:public"],
-    "libbase_rust": ["//packages/modules/Virtualization/virtualizationmanager"],
+    "crosvm": [
+      "//visibility:public"
+    ],
+    "libaarch64": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libbase_rust": [
+      "//packages/modules/Virtualization/virtualizationmanager",
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
     "libdata_model": [
       "//external/libchromeos-rs",
       "//packages/modules/Virtualization/apkdmverity",
       "//packages/modules/Virtualization/libs/devicemapper"
     ],
-    "libdisk": ["//packages/modules/Virtualization/virtualizationmanager"],
+    "libdevices": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libdisk": [
+      "//packages/modules/Virtualization/virtualizationmanager",
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
     "libfuse_rust": [
         "//packages/modules/Virtualization/authfs",
         "//packages/modules/Virtualization/zipfuse"
     ],
-    "libvm_control": ["//packages/modules/Virtualization/virtualizationmanager"]
+    "libhypervisor": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libsync_rust": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ],
+    "libvm_control": [
+      "//packages/modules/Virtualization/virtualizationmanager"
+    ],
+    "libvm_memory": [
+      // For QCOM's crosvm fork.
+      "//vendor:__subpackages__"
+    ]
   },
   "package": {
     "aarch64": {
       "add_module_block": "aarch64/cargo2android_arch.bp"
     },
     "base": {
-      "patch": "base/patches/Android.bp.patch"
+      "patch": "base/patches/Android.bp.patch",
+      "dep_blocklist": [
+        // "libtest_mimic" is needed for "base_test_tests_process" which is
+        // currently ignored by cargo_embargo because it is a "harness-less"
+        // test. cargo_embargo incorrectly thinks the dependency is needed for
+        // other tests in the "process" package, so we need to manually block
+        // it here.
+        "liblibtest_mimic"
+      ]
     },
     "base_event_token_derive": {
       // TODO: This is a proc macro crate. Should disable device tests by default for them.
@@ -144,9 +187,17 @@
       ],
       "patch": "patches/Android.bp.patch"
     },
+    "crosvm_control": {
+      "patch": "crosvm_control/cargo2android.bp.patch"
+    },
     "devices": {
       "no_presubmit": true,
-      "add_module_block": "devices/cargo2android_libs.bp.patch"
+      "add_module_block": "devices/cargo2android_libs.bp.patch",
+      "dep_blocklist": [
+        // See the comment for base's "dep_blocklist" above (in this case
+        // "devices_test_tests_passthroughfs_main" is the culprit).
+        "liblibtest_mimic"
+      ]
     },
     "disk": {
       "patch": "disk/patches/Android.bp.patch"

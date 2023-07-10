@@ -40,7 +40,8 @@ use devices::virtio::vfio_wrapper::VfioWrapper;
 use devices::virtio::vhost::user::proxy::VirtioVhostUser;
 use devices::virtio::vhost::user::vmm::VhostUserVirtioDevice;
 use devices::virtio::vhost::user::VhostUserDevice;
-use devices::virtio::vhost::vsock::VhostVsockConfig;
+use devices::virtio::vhost::user::VhostUserVsockDevice;
+use devices::virtio::vsock::VsockConfig;
 #[cfg(feature = "balloon")]
 use devices::virtio::BalloonMode;
 use devices::virtio::Console;
@@ -230,6 +231,7 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
                 self.disk.read_only,
                 self.disk.sparse,
                 self.disk.block_size,
+                self.disk.multiple_workers,
                 self.disk.id,
                 self.device_tube,
                 None,
@@ -253,6 +255,7 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
                 disk.read_only,
                 disk.sparse,
                 disk.block_size,
+                false,
                 disk.id,
                 self.device_tube,
                 None,
@@ -436,7 +439,7 @@ pub fn create_virtio_snd_device(
     use virtio::snd::parameters::StreamSourceBackend as Backend;
 
     let policy = match backend {
-        Backend::NULL => "snd_null_device",
+        Backend::NULL | Backend::FILE => "snd_null_device",
         #[cfg(feature = "audio_cras")]
         Backend::Sys(virtio::snd::sys::StreamSourceBackend::CRAS) => "snd_cras_device",
         #[cfg(not(feature = "audio_cras"))]
@@ -702,17 +705,21 @@ pub fn create_balloon_device(
     jail_config: &Option<JailConfig>,
     mode: BalloonMode,
     tube: Tube,
+    wss_tube: Option<Tube>,
     inflate_tube: Option<Tube>,
     init_balloon_size: u64,
     enabled_features: u64,
+    registered_evt_q: Option<SendTube>,
 ) -> DeviceResult {
     let dev = virtio::Balloon::new(
         virtio::base_features(protection_type),
         tube,
+        wss_tube,
         inflate_tube,
         init_balloon_size,
         mode,
         enabled_features,
+        registered_evt_q,
     )
     .context("failed to create balloon")?;
 
@@ -1047,20 +1054,31 @@ pub fn create_vhost_user_video_device(
     })
 }
 
-pub fn create_vhost_vsock_device(
-    protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
-    vhost_config: &VhostVsockConfig,
-) -> DeviceResult {
-    let features = virtio::base_features(protection_type);
+impl VirtioDeviceBuilder for &VsockConfig {
+    const NAME: &'static str = "vhost_vsock";
 
-    let dev = virtio::vhost::Vsock::new(features, vhost_config)
-        .context("failed to set up virtual socket device")?;
+    fn create_virtio_device(
+        self,
+        protection_type: ProtectionType,
+    ) -> anyhow::Result<Box<dyn VirtioDevice>> {
+        let features = virtio::base_features(protection_type);
 
-    Ok(VirtioDeviceStub {
-        dev: Box::new(dev),
-        jail: simple_jail(jail_config, "vhost_vsock_device")?,
-    })
+        let dev = virtio::vhost::Vsock::new(features, self)
+            .context("failed to set up virtual socket device")?;
+
+        Ok(Box::new(dev))
+    }
+
+    fn create_vhost_user_device(
+        self,
+        keep_rds: &mut Vec<RawDescriptor>,
+    ) -> anyhow::Result<Box<dyn VhostUserDevice>> {
+        let vsock_device = VhostUserVsockDevice::new(self.cid, &self.vhost_device)?;
+
+        keep_rds.push(vsock_device.as_raw_descriptor());
+
+        Ok(Box::new(vsock_device))
+    }
 }
 
 pub fn create_fs_device(

@@ -11,6 +11,8 @@ use hypervisor::IrqRoute;
 use hypervisor::MPState;
 use hypervisor::Vcpu;
 use resources::SystemAllocator;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::pci::CrosvmDeviceId;
 use crate::pci::PciId;
@@ -34,6 +36,13 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
+    if #[cfg(all(unix, any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))] {
+        mod gunyah;
+        pub use self::gunyah::GunyahIrqChip;
+    }
+}
+
+cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
         mod x86_64;
         pub use x86_64::*;
@@ -51,6 +60,13 @@ cfg_if::cfg_if! {
     }
 }
 
+#[cfg(any(target_arch = "aarch64"))]
+#[cfg(feature = "geniezone")]
+mod geniezone;
+#[cfg(any(target_arch = "aarch64"))]
+#[cfg(feature = "geniezone")]
+pub use self::geniezone::GeniezoneKernelIrqChip;
+
 pub type IrqEventIndex = usize;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -61,7 +77,7 @@ struct IrqEvent {
     source: IrqEventSource,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceId {
     /// PCI Device, use its PciId directly.
     PciDeviceId(PciId),
@@ -107,7 +123,7 @@ impl From<DeviceId> for u32 {
 }
 
 /// Identification information about the source of an IrqEvent
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IrqEventSource {
     pub device_id: DeviceId,
     pub queue_id: usize,
