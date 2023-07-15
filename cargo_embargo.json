@@ -232,6 +232,9 @@
       "add_toplevel_block": "protos/cargo2android_protobuf.bp",
       "patch": "protos/patches/Android.bp.patch"
     },
+    "riscv64": {
+      "patch": "riscv64/patches/Android.bp.patch"
+    },
     "rutabaga_gfx": {
       "patch": "rutabaga_gfx/patches/Android.bp.patch"
     },
