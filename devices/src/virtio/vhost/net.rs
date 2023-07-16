@@ -105,7 +105,71 @@ where
             response_tube: Some(response_tube),
         })
     }
+
+    pub fn new_with_name(
+        vhost_net_device_path: &Path,
+        base_features: u64,
+        ip_addr: Ipv4Addr,
+        netmask: Ipv4Addr,
+        mac_addr: MacAddress,
+        name: &[u8]
+    ) -> Result<Net<T, U>> {
+        let kill_evt = Event::new().map_err(Error::CreateKillEvent)?;
+
+        let tap: T = T::new_with_name(name,true, false).map_err(Error::TapOpen)?;
+        tap.set_ip_addr(ip_addr).map_err(Error::TapSetIp)?;
+        tap.set_netmask(netmask).map_err(Error::TapSetNetmask)?;
+        tap.set_mac_address(mac_addr)
+            .map_err(Error::TapSetMacAddress)?;
+
+        // Set offload flags to match the virtio features below.
+        tap.set_offload(
+            net_sys::TUN_F_CSUM | net_sys::TUN_F_UFO | net_sys::TUN_F_TSO4 | net_sys::TUN_F_TSO6,
+        )
+        .map_err(Error::TapSetOffload)?;
+
+        // We declare VIRTIO_NET_F_MRG_RXBUF, so set the vnet hdr size to match.
+        let vnet_hdr_size = mem::size_of::<virtio_net::virtio_net_hdr_mrg_rxbuf>() as i32;
+        tap.set_vnet_hdr_size(vnet_hdr_size)
+            .map_err(Error::TapSetVnetHdrSize)?;
+
+        tap.enable().map_err(Error::TapEnable)?;
+        let vhost_net_handle = U::new(vhost_net_device_path).map_err(Error::VhostOpen)?;
+
+        let avail_features = base_features
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
+            | 1 << virtio_net::VIRTIO_NET_F_CSUM
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_UFO
+            | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_HOST_UFO
+            | 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF
+            | 1 << virtio_sys::vhost::VIRTIO_RING_F_INDIRECT_DESC
+            | 1 << virtio_sys::vhost::VIRTIO_RING_F_EVENT_IDX
+            | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY;
+
+        let mut vhost_interrupt = Vec::new();
+        for _ in 0..NUM_QUEUES {
+            vhost_interrupt.push(Event::new().map_err(Error::VhostIrqCreate)?);
+        }
+
+        let (request_tube, response_tube) = Tube::pair().map_err(Error::CreateTube)?;
+
+        Ok(Net {
+            workers_kill_evt: Some(kill_evt.try_clone().map_err(Error::CloneKillEvent)?),
+            kill_evt,
+            worker_thread: None,
+            tap: Some(tap),
+            vhost_net_handle: Some(vhost_net_handle),
+            vhost_interrupt: Some(vhost_interrupt),
+            avail_features,
+            acked_features: 0u64,
+            request_tube,
+            response_tube: Some(response_tube),
+        })
+    }
 }
+
 
 impl<T, U> Drop for Net<T, U>
 where

@@ -2,12 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// Changes from Qualcomm Innovation Center are provided under the following license:
+// Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+
 #[cfg(unix)]
 pub mod net;
+#[cfg(unix)]
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+mod scmi;
 mod vsock;
 
 #[cfg(unix)]
 pub use crate::net::{Net, NetT};
+#[cfg(unix)]
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+pub use crate::scmi::Scmi;
 pub use crate::vsock::Vsock;
 
 use std::alloc::Layout;

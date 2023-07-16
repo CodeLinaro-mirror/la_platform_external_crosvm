@@ -2,12 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// Changes from Qualcomm Innovation Center are provided under the following license:
+// Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+
 //! Implements virtio devices, queues, and transport mechanisms.
 
 mod async_utils;
 mod balloon;
 mod descriptor_utils;
-mod input;
 mod interrupt;
 mod iommu;
 mod p9;
@@ -28,6 +31,7 @@ pub mod console;
 pub mod fs;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod input;
 pub mod net;
 pub mod resource_bridge;
 #[cfg(feature = "audio")]
@@ -94,6 +98,7 @@ const TYPE_PMEM: u32 = 27;
 const TYPE_MAC80211_HWSIM: u32 = 29;
 const TYPE_VIDEO_ENC: u32 = 30;
 const TYPE_VIDEO_DEC: u32 = 31;
+const TYPE_SCMI: u32 = 32;
 // Additional types invented by crosvm
 const MAX_VIRTIO_DEVICE_ID: u32 = 63;
 const TYPE_WL: u32 = MAX_VIRTIO_DEVICE_ID;
