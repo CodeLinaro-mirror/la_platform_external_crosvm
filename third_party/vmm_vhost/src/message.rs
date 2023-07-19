@@ -6,6 +6,7 @@
 //! For message definition, please refer to the [vhost-user spec](https://github.com/qemu/qemu/blob/f7526eece29cd2e36a63b6703508b24453095eb8/docs/interop/vhost-user.txt).
 
 #![allow(dead_code)]
+#![allow(deprecated)]
 #![allow(non_camel_case_types)]
 #![allow(clippy::upper_case_acronyms)]
 
@@ -449,13 +450,11 @@ bitflags! {
 
 /// A generic message to encapsulate a 64-bit value.
 #[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserU64 {
     /// The encapsulated 64-bit common value.
     pub value: u64,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserU64 {}
 
 impl VhostUserU64 {
     /// Create a new instance.
@@ -466,55 +465,57 @@ impl VhostUserU64 {
 
 impl VhostUserMsgValidator for VhostUserU64 {}
 
-#[derive(Default, Clone, Copy)]
 /// An empty message.
+#[repr(C)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserEmptyMsg;
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserEmptyMsg {}
 
 impl VhostUserMsgValidator for VhostUserEmptyMsg {}
 
 /// A generic message to encapsulate a success or failure.
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+/// use i8 instead of bool to allow FromBytes to be derived.
+/// type layout is same for all supported architectures.
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserSuccess {
     /// True if request was successful.
-    pub success: bool,
+    bool_store: i8,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserSuccess {}
 
 impl VhostUserSuccess {
     /// Create a new instance.
     pub fn new(success: bool) -> Self {
-        VhostUserSuccess { success }
+        VhostUserSuccess {
+            bool_store: success.into(),
+        }
+    }
+
+    /// Convert i8 storage back to bool
+    #[inline(always)]
+    pub fn success(&self) -> bool {
+        self.bool_store != 0
     }
 }
 
 impl VhostUserMsgValidator for VhostUserSuccess {}
 
 /// A generic message for empty message.
-#[derive(Default, Clone, Copy)]
+/// ZST in repr(C) has same type layout as repr(rust)
+#[repr(C)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserEmptyMessage;
-
-// Safe because it has no data
-unsafe impl DataInit for VhostUserEmptyMessage {}
 
 impl VhostUserMsgValidator for VhostUserEmptyMessage {}
 
 /// Memory region descriptor for the SET_MEM_TABLE request.
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserMemory {
     /// Number of memory regions in the payload.
     pub num_regions: u32,
     /// Padding for alignment.
     pub padding1: u32,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserMemory {}
 
 impl VhostUserMemory {
     /// Create a new instance.
@@ -540,7 +541,7 @@ impl VhostUserMsgValidator for VhostUserMemory {
 
 /// Memory region descriptors as payload for the SET_MEM_TABLE request.
 #[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserMemoryRegion {
     /// Guest physical address of the memory region.
     pub guest_phys_addr: u64,
@@ -551,8 +552,6 @@ pub struct VhostUserMemoryRegion {
     /// Offset where region starts in the mapped memory.
     pub mmap_offset: u64,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserMemoryRegion {}
 
 impl VhostUserMemoryRegion {
     /// Create a new instance.
@@ -585,7 +584,7 @@ pub type VhostUserMemoryPayload = Vec<VhostUserMemoryRegion>;
 /// Single memory region descriptor as payload for ADD_MEM_REG and REM_MEM_REG
 /// requests.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserSingleMemoryRegion {
     /// Padding for correct alignment
     padding: u64,
@@ -598,8 +597,6 @@ pub struct VhostUserSingleMemoryRegion {
     /// Offset where region starts in the mapped memory.
     pub mmap_offset: u64,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserSingleMemoryRegion {}
 
 impl VhostUserSingleMemoryRegion {
     /// Create a new instance.
@@ -629,16 +626,13 @@ impl VhostUserMsgValidator for VhostUserSingleMemoryRegion {
 
 /// Vring state descriptor.
 #[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserVringState {
     /// Vring index.
     pub index: u32,
     /// A common 32bit value to encapsulate vring state etc.
     pub num: u32,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserVringState {}
 
 impl VhostUserVringState {
     /// Create a new instance.
@@ -662,8 +656,8 @@ bitflags! {
 }
 
 /// Vring address descriptor.
-#[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserVringAddr {
     /// Vring index.
     pub index: u32,
@@ -678,9 +672,6 @@ pub struct VhostUserVringAddr {
     /// Guest address for logging.
     pub log: u64,
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserVringAddr {}
 
 impl VhostUserVringAddr {
     /// Create a new instance.
@@ -747,7 +738,7 @@ bitflags! {
 
 /// Message to read/write device configuration space.
 #[repr(packed)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserConfig {
     /// Offset of virtio device's configuration space.
     pub offset: u32,
@@ -756,8 +747,6 @@ pub struct VhostUserConfig {
     /// Flags for the device configuration operation.
     pub flags: u32,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserConfig {}
 
 impl VhostUserConfig {
     /// Create a new instance.
@@ -791,8 +780,11 @@ pub type VhostUserConfigPayload = Vec<u8>;
 
 /// Single memory region descriptor as payload for ADD_MEM_REG and REM_MEM_REG
 /// requests.
+/// This struct is defined by qemu and compiles with arch-dependent padding.
+/// Interestingly, all our supported archs (arm, aarch64, x86_64) has same
+/// data layout for this type.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, AsBytes, FromBytes)]
 pub struct VhostUserInflight {
     /// Size of the area to track inflight I/O.
     pub mmap_size: u64,
@@ -802,10 +794,9 @@ pub struct VhostUserInflight {
     pub num_queues: u16,
     /// Size of virtqueues.
     pub queue_size: u16,
+    /// implicit padding on 64-bit platforms
+    pub _padding: [u8; 4],
 }
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserInflight {}
 
 impl VhostUserInflight {
     /// Create a new instance.
@@ -815,6 +806,7 @@ impl VhostUserInflight {
             mmap_offset,
             num_queues,
             queue_size,
+            ..Default::default()
         }
     }
 }
@@ -854,12 +846,14 @@ pub struct VhostUserIotlb {
 }
 */
 
+/// Flags for virtio-fs slave messages.
+#[repr(transparent)]
+#[derive(AsBytes, FromBytes, Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct VhostUserFSSlaveMsgFlags(u64);
+
 // Bit mask for flags in virtio-fs slave messages
 bitflags! {
-    /// Flags for virtio-fs slave messages.
-    #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    #[repr(transparent)]
-    pub struct VhostUserFSSlaveMsgFlags: u64 {
+    impl VhostUserFSSlaveMsgFlags: u64 {
         /// Empty permission.
         const EMPTY = 0x0;
         /// Read permission.
@@ -874,7 +868,7 @@ pub const VHOST_USER_FS_SLAVE_ENTRIES: usize = 8;
 
 /// Slave request message to update the MMIO window.
 #[repr(packed)]
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, AsBytes, FromBytes)]
 pub struct VhostUserFSSlaveMsg {
     /// File offset.
     pub fd_offset: [u64; VHOST_USER_FS_SLAVE_ENTRIES],
@@ -885,8 +879,6 @@ pub struct VhostUserFSSlaveMsg {
     /// Flags for the mmap operation
     pub flags: [VhostUserFSSlaveMsgFlags; VHOST_USER_FS_SLAVE_ENTRIES],
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserFSSlaveMsg {}
 
 impl VhostUserMsgValidator for VhostUserFSSlaveMsg {
     fn is_valid(&self) -> bool {
@@ -902,11 +894,13 @@ impl VhostUserMsgValidator for VhostUserFSSlaveMsg {
     }
 }
 
+/// Flags for SHMEM_MAP messages.
+#[repr(transparent)]
+#[derive(AsBytes, FromBytes, Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct VhostUserShmemMapMsgFlags(u8);
+
 bitflags! {
-    /// Flags for SHMEM_MAP messages.
-    #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    #[repr(transparent)]
-    pub struct VhostUserShmemMapMsgFlags: u8 {
+    impl VhostUserShmemMapMsgFlags: u8 {
         /// Empty permission.
         const EMPTY = 0x0;
         /// Read permission.
@@ -940,7 +934,7 @@ impl From<VhostUserShmemMapMsgFlags> for Protection {
 
 /// Slave request message to map a file into a shared memory region.
 #[repr(C, packed)]
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, AsBytes, FromBytes)]
 pub struct VhostUserShmemMapMsg {
     /// Flags for the mmap operation
     pub flags: VhostUserShmemMapMsgFlags,
@@ -954,8 +948,6 @@ pub struct VhostUserShmemMapMsg {
     /// Size of region to map.
     pub len: u64,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserShmemMapMsg {}
 
 impl VhostUserMsgValidator for VhostUserShmemMapMsg {
     fn is_valid(&self) -> bool {
@@ -987,7 +979,7 @@ impl VhostUserShmemMapMsg {
 
 /// Slave request message to map GPU memory into a shared memory region.
 #[repr(C, packed)]
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, AsBytes, FromBytes)]
 pub struct VhostUserGpuMapMsg {
     /// Shared memory region id.
     pub shmid: u8,
@@ -1005,8 +997,6 @@ pub struct VhostUserGpuMapMsg {
     /// Driver UUID
     pub driver_uuid: [u8; 16],
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserGpuMapMsg {}
 
 impl VhostUserMsgValidator for VhostUserGpuMapMsg {
     fn is_valid(&self) -> bool {
@@ -1040,7 +1030,7 @@ impl VhostUserGpuMapMsg {
 
 /// Slave request message to unmap part of a shared memory region.
 #[repr(C, packed)]
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, FromBytes, AsBytes)]
 pub struct VhostUserShmemUnmapMsg {
     /// Shared memory region id.
     pub shmid: u8,
@@ -1050,8 +1040,6 @@ pub struct VhostUserShmemUnmapMsg {
     /// Size of region to unmap.
     pub len: u64,
 }
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for VhostUserShmemUnmapMsg {}
 
 impl VhostUserMsgValidator for VhostUserShmemUnmapMsg {
     fn is_valid(&self) -> bool {
@@ -1417,7 +1405,6 @@ mod tests {
     #[test]
     fn test_vhost_user_state_from_config() {
         let config = VringConfigData {
-            queue_max_size: 256,
             queue_size: 128,
             flags: VhostUserVringAddrFlags::VHOST_VRING_F_LOG.bits(),
             desc_table_addr: 0x1000,

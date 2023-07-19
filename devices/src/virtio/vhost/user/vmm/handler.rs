@@ -39,7 +39,6 @@ use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
-use crate::virtio::SignalableInterrupt;
 
 type BackendReqHandler = MasterReqHandler<Mutex<BackendReqHandlerImpl>>;
 
@@ -218,7 +217,6 @@ impl VhostUserHandler {
             .map_err(Error::SetVringNum)?;
 
         let config_data = VringConfigData {
-            queue_max_size: queue.max_size(),
             queue_size: queue.size(),
             flags: 0u32,
             desc_table_addr: mem

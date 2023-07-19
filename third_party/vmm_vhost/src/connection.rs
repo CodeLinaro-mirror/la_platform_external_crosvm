@@ -3,6 +3,8 @@
 
 //! Common data structures for listener and endpoint.
 
+#![allow(deprecated)]
+
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
         pub mod socket;
@@ -24,6 +26,8 @@ use std::path::Path;
 
 use base::RawDescriptor;
 use data_model::DataInit;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::connection::Req;
 use crate::message::*;
@@ -200,7 +204,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     /// * - OversizedMsg: message size is too big.
     /// * - PartialMessage: received a partial message.
     /// * - backend specific errors
-    fn send_message<T: Sized + DataInit>(
+    fn send_message<T: Sized + AsBytes>(
         &mut self,
         hdr: &VhostUserMsgHeader<R>,
         body: &T,
@@ -209,7 +213,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
         // We send the header and the body separately here. This is necessary on Windows. Otherwise
         // the recv side cannot read the header independently (the transport is message oriented).
         let mut bytes = self.send_iovec_all(&mut [hdr.as_slice()], fds)?;
-        bytes += self.send_iovec_all(&mut [body.as_slice()], None)?;
+        bytes += self.send_iovec_all(&mut [body.as_bytes()], None)?;
         if bytes != mem::size_of::<VhostUserMsgHeader<R>>() + mem::size_of::<T>() {
             return Err(Error::PartialMessage);
         }
@@ -225,7 +229,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     /// * - PartialMessage: received a partial message.
     /// * - IncorrectFds: wrong number of attached fds.
     /// * - backend specific errors
-    fn send_message_with_payload<T: Sized + DataInit>(
+    fn send_message_with_payload<T: Sized + AsBytes>(
         &mut self,
         hdr: &VhostUserMsgHeader<R>,
         body: &T,
@@ -246,7 +250,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
         // We send the header and the body separately here. This is necessary on Windows. Otherwise
         // the recv side cannot read the header independently (the transport is message oriented).
         let mut len = self.send_iovec_all(&mut [hdr.as_slice()], fds)?;
-        len += self.send_iovec_all(&mut [body.as_slice(), payload], None)?;
+        len += self.send_iovec_all(&mut [body.as_bytes(), payload], None)?;
 
         if len != total {
             return Err(Error::PartialMessage);
@@ -356,12 +360,12 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     /// * - PartialMessage: received a partial message.
     /// * - InvalidMessage: received a invalid message.
     /// * - backend specific errors
-    fn recv_body<T: Sized + DataInit + Default + VhostUserMsgValidator>(
+    fn recv_body<T: Sized + AsBytes + FromBytes + Default + VhostUserMsgValidator>(
         &mut self,
     ) -> Result<(VhostUserMsgHeader<R>, T, Option<Vec<File>>)> {
         let mut hdr = VhostUserMsgHeader::default();
         let mut body: T = Default::default();
-        let mut slices = [hdr.as_mut_slice(), body.as_mut_slice()];
+        let mut slices = [hdr.as_mut_slice(), body.as_bytes_mut()];
         let (bytes, files) = self.recv_into_bufs_all(&mut slices)?;
 
         let total = mem::size_of::<VhostUserMsgHeader<R>>() + mem::size_of::<T>();
@@ -414,7 +418,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     /// * - InvalidMessage: received a invalid message.
     /// * - backend specific errors
     #[cfg_attr(feature = "cargo-clippy", allow(clippy::type_complexity))]
-    fn recv_payload_into_buf<T: Sized + DataInit + Default + VhostUserMsgValidator>(
+    fn recv_payload_into_buf<T: Sized + AsBytes + FromBytes + Default + VhostUserMsgValidator>(
         &mut self,
     ) -> Result<(VhostUserMsgHeader<R>, T, Vec<u8>, Option<Vec<File>>)> {
         let mut hdr = VhostUserMsgHeader::default();
@@ -430,7 +434,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
 
         let payload_size = hdr.get_size() as usize - mem::size_of::<T>();
         let mut buf: Vec<u8> = vec![0; payload_size];
-        let mut slices = [body.as_mut_slice(), buf.as_mut_slice()];
+        let mut slices = [body.as_bytes_mut(), buf.as_mut_slice()];
         let (bytes, more_files) = self.recv_into_bufs_all(&mut slices)?;
         if bytes < hdr.get_size() as usize {
             return Err(Error::PartialMessage);

@@ -69,13 +69,13 @@ pub use self::gpu::GpuParameters;
 pub use self::gpu::GpuWsi;
 pub use self::interrupt::Interrupt;
 pub use self::interrupt::InterruptSnapshot;
-pub use self::interrupt::SignalableInterrupt;
 pub use self::iommu::ipc_memory_mapper;
 pub use self::iommu::memory_mapper;
 pub use self::iommu::memory_util;
 pub use self::iommu::Iommu;
 pub use self::iommu::IommuError;
 pub use self::queue::Queue;
+pub use self::queue::QueueConfig;
 pub use self::queue::QueueType;
 pub use self::rng::Rng;
 #[cfg(any(feature = "tpm", feature = "vtpm"))]
@@ -278,4 +278,19 @@ pub(crate) fn create_stop_oneshot(tx_vec: &mut Vec<oneshot::Sender<()>>) -> ones
     let (stop_tx, stop_rx) = futures::channel::oneshot::channel();
     tx_vec.push(stop_tx);
     stop_rx
+}
+
+/// When we request to stop the worker, this represents the terminal state
+/// for the thread (if it exists).
+pub(crate) enum StoppedWorker<Q> {
+    /// Worker stopped successfully & returned its queues.
+    WithQueues(Box<Q>),
+
+    /// Worker wasn't running when the stop was requested.
+    AlreadyStopped,
+
+    /// Worker was running but did not successfully return its queues. Something
+    /// has gone wrong (and will be in the error log). In the case of a device
+    /// reset this is fine since the next activation will replace the queues.
+    MissingQueues,
 }
