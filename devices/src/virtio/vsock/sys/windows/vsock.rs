@@ -50,6 +50,8 @@ use futures::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
 use remain::sorted;
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error as ThisError;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
@@ -142,6 +144,14 @@ pub struct Vsock {
     host_guid: Option<String>,
     features: u64,
     worker_thread: Option<WorkerThread<Option<PausedQueues>>>,
+}
+
+/// Snapshotted state of Vsock. These fields are serialized in order to validate they haven't
+/// changed when this device is restored.
+#[derive(Serialize, Deserialize)]
+struct VsockSnapshot {
+    guest_cid: u64,
+    features: u64,
 }
 
 impl Vsock {
@@ -241,7 +251,7 @@ impl VirtioDevice for Vsock {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
             return Err(anyhow!(
@@ -252,9 +262,9 @@ impl VirtioDevice for Vsock {
         }
 
         let vsock_queues = VsockQueues {
-            rx: queues.remove(0),
-            tx: queues.remove(0),
-            event: queues.remove(0),
+            rx: queues.remove(&0).unwrap(),
+            tx: queues.remove(&1).unwrap(),
+            event: queues.remove(&2).unwrap(),
         };
 
         self.start_worker(mem, interrupt, vsock_queues)
@@ -286,6 +296,33 @@ impl VirtioDevice for Vsock {
                     .expect("Failed to convert queue BTreeMap to VsockQueues"),
             )?;
         }
+        Ok(())
+    }
+
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        serde_json::to_value(VsockSnapshot {
+            guest_cid: self.guest_cid,
+            features: self.features,
+        })
+        .context("failed to serialize vsock snapshot")
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let vsock_snapshot: VsockSnapshot =
+            serde_json::from_value(data).context("error deserializing vsock snapshot")?;
+        anyhow::ensure!(
+            self.guest_cid == vsock_snapshot.guest_cid,
+            "expected guest_cid to match, but they did not. Live: {}, snapshot: {}",
+            self.guest_cid,
+            vsock_snapshot.guest_cid
+        );
+        anyhow::ensure!(
+            self.features == vsock_snapshot.features,
+            "expected features to match, but they did not. Live: {}, snapshot: {}",
+            self.features,
+            vsock_snapshot.features
+        );
+
         Ok(())
     }
 }

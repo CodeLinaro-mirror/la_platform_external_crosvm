@@ -49,6 +49,7 @@ use vm_control::VmRequest;
 use vm_control::VmResponse;
 
 use crate::pci::acpi::DeviceVcfgRegister;
+use crate::pci::acpi::DsmMethod;
 use crate::pci::acpi::PowerResourceMethod;
 use crate::pci::acpi::SHM_OFFSET;
 use crate::pci::msi::MsiConfig;
@@ -84,6 +85,8 @@ use crate::pci::PciCapabilityID;
 use crate::pci::PciClassCode;
 use crate::pci::PciId;
 use crate::pci::PciInterruptPin;
+use crate::pci::PCI_VCFG_DSM;
+use crate::pci::PCI_VCFG_PM;
 use crate::pci::PCI_VENDOR_ID_INTEL;
 use crate::vfio::VfioDevice;
 use crate::vfio::VfioError;
@@ -2086,16 +2089,16 @@ impl PciDevice for VfioPciDevice {
 
     fn read_virtual_config_register(&self, reg_idx: usize) -> u32 {
         warn!(
-            "{} read unsupported register {}",
+            "{} read unsupported vcfg register {}",
             self.debug_label(),
             reg_idx
         );
-        0
+        0xFFFF_FFFF
     }
 
     fn write_virtual_config_register(&mut self, reg_idx: usize, value: u32) {
         match reg_idx {
-            0 => {
+            PCI_VCFG_PM => {
                 match value {
                     0 => {
                         if let Some(pm_evt) =
@@ -2113,8 +2116,31 @@ impl PciDevice for VfioPciDevice {
                     }
                 };
             }
+            PCI_VCFG_DSM => {
+                if let Some(shm) = &self.vcfg_shm_mmap {
+                    let mut args = [0u8; 4096];
+                    if let Err(e) = shm.read_slice(&mut args, 0) {
+                        error!("failed to read DSM Args: {}", e);
+                        return;
+                    }
+                    let res = match self.device.acpi_dsm(&args) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!("failed to call DSM: {}", e);
+                            return;
+                        }
+                    };
+                    if let Err(e) = shm.write_slice(&res, 0) {
+                        error!("failed to write DSM result: {}", e);
+                        return;
+                    }
+                    if let Err(e) = shm.msync() {
+                        error!("failed to msync: {}", e)
+                    }
+                }
+            }
             _ => warn!(
-                "{} write unsupported register {}",
+                "{} write unsupported vcfg register {}",
                 self.debug_label(),
                 reg_idx
             ),
@@ -2230,6 +2256,15 @@ impl PciDevice for VfioPciDevice {
                 // host would always think it is in active state, so its parent PCIe
                 // switch couldn't enter into suspend state.
                 PowerResourceMethod {}.to_aml_bytes(&mut amls);
+                // TODO: WIP: Ideally, we should generate DSM only if the physical
+                // device has a _DSM; however, such information is not provided by
+                // Linux. As a temporary workaround, we chech whether there is an
+                // associated ACPI companion device node and skip generating guest
+                // _DSM if there is none.
+                let acpi_path = self.sysfs_path.join("firmware_node/path");
+                if acpi_path.exists() {
+                    DsmMethod {}.to_aml_bytes(&mut amls);
+                }
             }
         }
 

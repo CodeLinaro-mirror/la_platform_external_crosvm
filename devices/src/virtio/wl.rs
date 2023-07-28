@@ -30,8 +30,8 @@
 
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
-use std::collections::BTreeMap as Map;
-use std::collections::BTreeSet as Set;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::convert::From;
 use std::error::Error as StdError;
@@ -422,7 +422,7 @@ struct VmRequesterState {
     address_allocator: AddressAllocator,
 
     // Map of existing mappings in the shm address space
-    allocs: Map<u64 /* offset */, Alloc>,
+    allocs: BTreeMap<u64 /* offset */, Alloc>,
 
     // The id for the next shmem allocation
     next_alloc: usize,
@@ -456,7 +456,7 @@ impl VmRequester {
                     None,
                 )
                 .expect("failed to create allocator"),
-                allocs: Map::new(),
+                allocs: BTreeMap::new(),
                 next_alloc: 0,
             })),
         }
@@ -1057,12 +1057,12 @@ enum WlRecv {
 }
 
 pub struct WlState {
-    wayland_paths: Map<String, PathBuf>,
+    wayland_paths: BTreeMap<String, PathBuf>,
     vm: VmRequester,
     resource_bridge: Option<Tube>,
     use_transition_flags: bool,
     wait_ctx: WaitContext<u32>,
-    vfds: Map<u32, WlVfd>,
+    vfds: BTreeMap<u32, WlVfd>,
     next_vfd_id: u32,
     in_file_queue: Vec<File>,
     in_queue: VecDeque<(u32 /* vfd_id */, WlRecv)>,
@@ -1077,7 +1077,7 @@ pub struct WlState {
 impl WlState {
     /// Create a new `WlState` instance for running a virtio-wl device.
     pub fn new(
-        wayland_paths: Map<String, PathBuf>,
+        wayland_paths: BTreeMap<String, PathBuf>,
         mapper: Box<dyn SharedMemoryMapper>,
         use_transition_flags: bool,
         use_send_vfd_v2: bool,
@@ -1095,7 +1095,7 @@ impl WlState {
             resource_bridge,
             wait_ctx: WaitContext::new().expect("failed to create WaitContext"),
             use_transition_flags,
-            vfds: Map::new(),
+            vfds: BTreeMap::new(),
             next_vfd_id: NEXT_VFD_ID_BASE,
             in_file_queue: Vec::new(),
             in_queue: VecDeque::new(),
@@ -1282,7 +1282,7 @@ impl WlState {
     }
 
     fn close(&mut self, vfd_id: u32) -> WlResult<WlResp> {
-        let mut to_delete = Set::new();
+        let mut to_delete = BTreeSet::new();
         for (dest_vfd_id, q) in &self.in_queue {
             if *dest_vfd_id == vfd_id {
                 if let WlRecv::Vfd { id } = q {
@@ -1788,7 +1788,7 @@ impl Worker {
         interrupt: Interrupt,
         in_queue: (Queue, Event),
         out_queue: (Queue, Event),
-        wayland_paths: Map<String, PathBuf>,
+        wayland_paths: BTreeMap<String, PathBuf>,
         mapper: Box<dyn SharedMemoryMapper>,
         use_transition_flags: bool,
         use_send_vfd_v2: bool,
@@ -1915,7 +1915,7 @@ impl Worker {
 
 pub struct Wl {
     worker_thread: Option<WorkerThread<anyhow::Result<Vec<Queue>>>>,
-    wayland_paths: Map<String, PathBuf>,
+    wayland_paths: BTreeMap<String, PathBuf>,
     mapper: Option<Box<dyn SharedMemoryMapper>>,
     resource_bridge: Option<Tube>,
     use_transition_flags: bool,
@@ -1930,7 +1930,7 @@ pub struct Wl {
 impl Wl {
     pub fn new(
         base_features: u64,
-        wayland_paths: Map<String, PathBuf>,
+        wayland_paths: BTreeMap<String, PathBuf>,
         resource_bridge: Option<Tube>,
     ) -> Result<Wl> {
         Ok(Wl {
@@ -2007,7 +2007,7 @@ impl VirtioDevice for Wl {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
             return Err(anyhow!(
@@ -2038,8 +2038,8 @@ impl VirtioDevice for Wl {
             Worker::new(
                 mem,
                 interrupt,
-                queues.remove(0),
-                queues.remove(0),
+                queues.pop_first().unwrap().1,
+                queues.pop_first().unwrap().1,
                 wayland_paths,
                 mapper,
                 use_transition_flags,
@@ -2070,11 +2070,27 @@ impl VirtioDevice for Wl {
         self.mapper = Some(mapper);
     }
 
-    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         if let Some(worker_thread) = self.worker_thread.take() {
             let queues = worker_thread.stop()?;
-            return Ok(Some(Map::from_iter(queues.into_iter().enumerate())));
+            return Ok(Some(BTreeMap::from_iter(queues.into_iter().enumerate())));
         }
         Ok(None)
+    }
+
+    fn virtio_wake(
+        &mut self,
+        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        match device_state {
+            None => Ok(()),
+            Some((mem, interrupt, queues)) => {
+                // TODO: activate is just what we want at the moment, but we should probably move
+                // it into a "start workers" function to make it obvious that it isn't strictly
+                // used for activate events.
+                self.activate(mem, interrupt, queues)?;
+                Ok(())
+            }
+        }
     }
 }

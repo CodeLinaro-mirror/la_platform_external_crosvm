@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::collections::BTreeMap as Map;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -25,6 +25,7 @@ use crate::pci::{MsixConfig, MsixStatus};
 use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
 use crate::virtio::queue::QueueConfig;
 use crate::virtio::queue::QueueType;
+use virtio_sys::virtio_config::VIRTIO_F_RING_PACKED;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VirtioTransportType {
@@ -119,7 +120,7 @@ pub trait VirtioDevice: Send {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<(Queue, Event)>,
+        queues: BTreeMap<usize, (Queue, Event)>,
     ) -> Result<()>;
 
     /// Optionally deactivates this device. If the reset method is
@@ -212,7 +213,7 @@ pub trait VirtioDevice: Send {
     ///
     /// Unlike `Suspendable::sleep`, this is not idempotent. Attempting to sleep while already
     /// asleep is an error.
-    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         anyhow::bail!("virtio_sleep not implemented for {}", self.debug_label());
     }
 
@@ -224,7 +225,7 @@ pub trait VirtioDevice: Send {
     /// is an error.
     fn virtio_wake(
         &mut self,
-        _queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+        _queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
     ) -> anyhow::Result<()> {
         anyhow::bail!("virtio_wake not implemented for {}", self.debug_label());
     }
@@ -264,8 +265,12 @@ pub trait VirtioDevice: Send {
         );
     }
 
-    /// Returns the queue type to use for this device based on the negotiated virtio features
+    /// Returns the queue type to use for this device based on the negotiated virtio features.
+    /// Used for queue's restore from snapshot
     fn queue_type(&self) -> QueueType {
+        if ((self.features() >> VIRTIO_F_RING_PACKED) & 1) != 0 {
+            return QueueType::Packed;
+        }
         QueueType::Split
     }
 }

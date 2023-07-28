@@ -16,7 +16,7 @@ rust_proc_macro {
     crate_name: "wire_format_derive",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["wire_format_derive.rs"],
+    srcs: ["src/lib.rs"],
     edition: "2015",
     rustlibs: [
         "libproc_macro2",

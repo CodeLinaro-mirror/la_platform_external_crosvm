@@ -19,6 +19,7 @@ mod debugcon;
 pub mod direct_io;
 #[cfg(feature = "direct")]
 pub mod direct_irq;
+mod fw_cfg;
 mod i8042;
 mod irq_event;
 pub mod irqchip;
@@ -76,8 +77,8 @@ pub use self::bus::BusRange;
 pub use self::bus::BusResumeDevice;
 pub use self::bus::BusType;
 pub use self::bus::Error as BusError;
-pub use self::bus::HostHotPlugKey;
 pub use self::bus::HotPlugBus;
+pub use self::bus::HotPlugKey;
 #[cfg(feature = "stats")]
 pub use self::bus_stats::BusStatistics;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -90,6 +91,8 @@ pub use self::direct_io::DirectMmio;
 pub use self::direct_irq::DirectIrq;
 #[cfg(feature = "direct")]
 pub use self::direct_irq::DirectIrqError;
+pub use self::fw_cfg::FwCfgDevice;
+pub use self::fw_cfg::FwCfgParameters;
 pub use self::i8042::I8042Device;
 pub use self::irq_event::IrqEdgeEvent;
 pub use self::irq_event::IrqLevelEvent;
@@ -102,8 +105,16 @@ pub use self::pci::Ac97Dev;
 pub use self::pci::Ac97Parameters;
 pub use self::pci::BarRange;
 pub use self::pci::CrosvmDeviceId;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci::HotPluggable;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci::IntxParameter;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci::NetResourceCarrier;
 pub use self::pci::PciAddress;
 pub use self::pci::PciAddressError;
+pub use self::pci::PciBarConfiguration;
+pub use self::pci::PciBarIndex;
 pub use self::pci::PciBus;
 pub use self::pci::PciClassCode;
 pub use self::pci::PciConfigIo;
@@ -115,6 +126,9 @@ pub use self::pci::PciRoot;
 pub use self::pci::PciRootCommand;
 pub use self::pci::PciVirtualConfigMmio;
 pub use self::pci::PreferredIrq;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci::ResourceCarrier;
+
 pub use self::pci::StubPciDevice;
 pub use self::pci::StubPciParameters;
 pub use self::pflash::Pflash;
@@ -158,6 +172,7 @@ cfg_if::cfg_if! {
         pub use self::platform::VfioPlatformDevice;
         pub use self::ac_adapter::AcAdapter;
         pub use self::pmc_virt::VirtualPmc;
+        pub use self::proxy::ChildProcIntf;
         pub use self::proxy::Error as ProxyError;
         pub use self::proxy::ProxyDevice;
         #[cfg(feature = "usb")]

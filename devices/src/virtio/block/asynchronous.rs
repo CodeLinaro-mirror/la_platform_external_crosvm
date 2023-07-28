@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap as Map;
+use std::collections::BTreeMap;
 
 use std::io;
 use std::io::Write;
@@ -969,7 +969,7 @@ impl VirtioDevice for BlockAsync {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<(Queue, Event)>,
+        queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         assert!(self.num_activated_queues.is_none());
         self.num_activated_queues = Some(queues.len());
@@ -988,9 +988,9 @@ impl VirtioDevice for BlockAsync {
             // 1 queue per 1 worker
             queues
                 .into_iter()
-                .map(|queue| {
+                .map(|entry| {
                     Ok((
-                        vec![queue],
+                        BTreeMap::from([entry]),
                         disk_image
                             .try_clone()
                             .context("Failed to clone a disk image")?,
@@ -1015,7 +1015,7 @@ impl VirtioDevice for BlockAsync {
 
             let (worker_tx, worker_rx) = mpsc::unbounded();
             // Add commands to start all the queues before starting the worker.
-            for (index, (queue, event)) in queues.into_iter().enumerate() {
+            for (index, (queue, event)) in queues.into_iter() {
                 worker_tx
                     .unbounded_send(WorkerCmd::StartQueue {
                         index,
@@ -1100,13 +1100,13 @@ impl VirtioDevice for BlockAsync {
         success
     }
 
-    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         let num_activated_queues = match self.num_activated_queues {
             Some(x) => x,
             None => return Ok(None), // Not activated.
         };
         // Reclaim the queues from workers.
-        let mut queues = Map::new();
+        let mut queues = BTreeMap::new();
         for index in 0..num_activated_queues {
             let worker_index = if self.worker_per_queue { index } else { 0 };
             let worker_tx = &self.worker_threads[worker_index].1;
@@ -1135,26 +1135,14 @@ impl VirtioDevice for BlockAsync {
 
     fn virtio_wake(
         &mut self,
-        queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
     ) -> anyhow::Result<()> {
         if let Some((mem, interrupt, queues)) = queues_state {
             // TODO: activate is just what we want at the moment, but we should probably move
             // it into a "start workers" function to make it obvious that it isn't strictly
             // used for activate events.
             self.num_activated_queues = None;
-
-            let mut queues_vec: Vec<Option<(Queue, Event)>> = Vec::with_capacity(queues.len());
-            queues_vec.resize_with(queues.len(), || None);
-            for (index, queue_and_event) in queues.into_iter() {
-                queues_vec[index] = Some(queue_and_event)
-            }
-            assert!(
-                !queues_vec.iter().any(|item| item.is_none()),
-                "block queue numbers must be contiguous."
-            );
-            let queues_vec = queues_vec.into_iter().flatten().collect();
-
-            self.activate(mem, interrupt, queues_vec)?;
+            self.activate(mem, interrupt, queues)?;
         }
         Ok(())
     }
@@ -1650,7 +1638,7 @@ mod tests {
         b.activate(
             mem.clone(),
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            vec![(q0, e0), (q1, e1)],
+            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
         )
         .expect("activate should succeed");
         // assert resources are consumed
@@ -1689,7 +1677,7 @@ mod tests {
         b.activate(
             mem,
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            vec![(q0, e0), (q1, e1)],
+            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
         )
         .expect("re-activate should succeed");
     }
@@ -1758,8 +1746,12 @@ mod tests {
         let e1 = Event::new().unwrap();
 
         let interrupt = Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR);
-        b.activate(mem, interrupt.clone(), vec![(q0, e0), (q1, e1)])
-            .expect("activate should succeed");
+        b.activate(
+            mem,
+            interrupt.clone(),
+            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
+        )
+        .expect("activate should succeed");
 
         // assert the original size first
         assert_eq!(
@@ -1866,7 +1858,7 @@ mod tests {
         b.activate(
             mem.clone(),
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            vec![(q0, e0), (q1, e1)],
+            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
         )
         .expect("activate should succeed");
 
@@ -1894,7 +1886,7 @@ mod tests {
         b.activate(
             mem,
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            vec![(q0, e0), (q1, e1)],
+            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
         )
         .expect("activate should succeed");
 
