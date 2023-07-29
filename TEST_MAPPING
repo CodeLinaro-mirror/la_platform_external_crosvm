@@ -7,7 +7,7 @@
     {"name": "acpi_tables_test_src_lib"},
     {"name": "arch_test_src_lib"},
     {"name": "audio_streams_test_src_audio_streams"},
-    {"name": "base_event_token_derive_test_event_token_derive"},
+    {"name": "base_event_token_derive_test_src_lib"},
     // {"name": "base_test_src_lib"},
     {"name": "base_test_tests_tube"},
     // {"name": "base_test_tests_unix_main"},
