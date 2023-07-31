@@ -381,6 +381,9 @@ impl<T: Req> VhostUserMsgValidator for VhostUserMsgHeader<T> {
     }
 }
 
+/// Virtio feature flag for the vhost-user protocol features.
+pub const VHOST_USER_F_PROTOCOL_FEATURES: u32 = 30;
+
 // Bit mask for transport specific flags in VirtIO feature set defined by vhost-user.
 bitflags! {
     /// Transport specific flags in VirtIO feature set defined by vhost-user.
