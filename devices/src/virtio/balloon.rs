@@ -770,9 +770,14 @@ async fn handle_command_tube(
     state: Arc<AsyncRwLock<BalloonState>>,
     mut stats_tx: mpsc::Sender<()>,
     mut wss_op_tx: mpsc::Sender<WSSOp>,
+    mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     loop {
-        match command_tube.next().await {
+        let cmd_res = select_biased! {
+            res = command_tube.next().fuse() => res,
+            _ = stop_rx => return Ok(())
+        };
+        match cmd_res {
             Ok(command) => match command {
                 BalloonTubeCommand::Adjust {
                     num_bytes,
@@ -818,6 +823,17 @@ async fn handle_command_tube(
                     }
                 }
             },
+            #[cfg(windows)]
+            Err(base::TubeError::Recv(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // On Windows, async IO tasks like the next/recv above are cancelled as the VM is
+                // shutting down. For the sake of consistency with unix, we can't *just* return
+                // here; instead, we wait for the stop request to arrive, *and then* return.
+                //
+                // The real fix is to get rid of the global unblock pool, since then we won't
+                // cancel the tasks early (b/196911556).
+                let _ = stop_rx.await;
+                return Ok(());
+            }
             Err(e) => {
                 return Err(BalloonError::ReceivingCommand(e));
             }
@@ -1098,12 +1114,14 @@ fn run_worker(
         pin_mut!(wss_op);
 
         // Future to handle command messages that resize the balloon.
+        let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
         let command = handle_command_tube(
             &command_tube,
             interrupt.clone(),
             state.clone(),
             stats_tx,
             wss_op_tx,
+            stop_rx,
         );
         pin_mut!(command);
 

@@ -66,10 +66,17 @@ struct rutabaga_test {
     struct iovec *channel_iovecs;
 };
 
-static void rutabaga_test_write_fence(uint64_t user_data, struct rutabaga_fence fence_data)
+static void rutabaga_test_write_fence(uint64_t user_data, const struct rutabaga_fence *fence)
 {
     struct rutabaga_test *test = (void *)(uintptr_t)user_data;
-    test->value = fence_data.fence_id;
+    test->value = fence->fence_id;
+}
+
+static void rutabaga_test_debug_cb(uint64_t user_data, const struct rutabaga_debug *debug)
+{
+    if (debug->message) {
+        printf("The debug message is %s\n", debug->message);
+    }
 }
 
 static int test_capset_mask_calculation(void)
@@ -119,6 +126,7 @@ static int test_rutabaga_init(struct rutabaga_test *test, uint64_t capset_mask)
     struct rutabaga_channels channels = { 0 };
 
     builder.fence_cb = rutabaga_test_write_fence;
+    builder.debug_cb = rutabaga_test_debug_cb;
     builder.capset_mask = capset_mask;
     builder.wsi = RUTABAGA_WSI_SURFACELESS;
     if (capset_mask & (1 << RUTABAGA_CAPSET_CROSS_DOMAIN)) {

@@ -13,6 +13,8 @@ pub(crate) mod gpu;
 pub(crate) mod jail_warden;
 #[cfg(feature = "pci-hotplug")]
 pub(crate) mod pci_hotplug_helpers;
+#[cfg(feature = "pci-hotplug")]
+pub(crate) mod pci_hotplug_manager;
 mod vcpu;
 
 use std::cmp::max;
@@ -32,6 +34,7 @@ use std::io::prelude::*;
 use std::io::stdin;
 use std::iter;
 use std::mem;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::ops::RangeInclusive;
 use std::os::unix::prelude::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
@@ -86,6 +89,10 @@ use devices::virtio::vhost::user::VhostUserListenerTrait;
 use devices::virtio::BalloonFeatures;
 #[cfg(feature = "balloon")]
 use devices::virtio::BalloonMode;
+#[cfg(feature = "pci-hotplug")]
+use devices::virtio::NetParameters;
+#[cfg(feature = "pci-hotplug")]
+use devices::virtio::NetParametersMode;
 use devices::virtio::VirtioTransportType;
 #[cfg(feature = "audio")]
 use devices::Ac97Dev;
@@ -107,6 +114,8 @@ use devices::IrqEventSource;
 use devices::KvmKernelIrqChip;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::KvmSplitIrqChip;
+#[cfg(feature = "pci-hotplug")]
+use devices::NetResourceCarrier;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use devices::PciAddress;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -126,6 +135,8 @@ use devices::PcieRootPort;
 use devices::PcieUpstreamPort;
 use devices::PvPanicCode;
 use devices::PvPanicPciDevice;
+#[cfg(feature = "pci-hotplug")]
+use devices::ResourceCarrier;
 use devices::StubPciDevice;
 use devices::VirtioMmioDevice;
 use devices::VirtioPciDevice;
@@ -155,11 +166,18 @@ use hypervisor::ProtectionType;
 use hypervisor::Vm;
 use hypervisor::VmCap;
 use jail::*;
+#[cfg(feature = "pci-hotplug")]
+use jail_warden::JailWarden;
+#[cfg(feature = "pci-hotplug")]
+use jail_warden::JailWardenImpl;
+#[cfg(feature = "pci-hotplug")]
+use jail_warden::PermissiveJailWarden;
+use libc;
 use minijail::Minijail;
+#[cfg(feature = "pci-hotplug")]
+use pci_hotplug_manager::PciHotPlugManager;
 use resources::AddressRange;
 use resources::Alloc;
-#[cfg(feature = "direct")]
-use resources::Error as ResourceError;
 use resources::SystemAllocator;
 #[cfg(target_arch = "riscv64")]
 use riscv64::Riscv64 as Arch;
@@ -183,8 +201,6 @@ use x86_64::X8664arch as Arch;
 use crate::crosvm::config::Config;
 use crate::crosvm::config::Executable;
 use crate::crosvm::config::FileBackedMappingParameters;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use crate::crosvm::config::HostPcieRootPortParameters;
 use crate::crosvm::config::HypervisorKind;
 use crate::crosvm::config::IrqChipKind;
 #[cfg(feature = "gdb")]
@@ -203,6 +219,12 @@ const KVM_PATH: &str = "/dev/kvm";
 const GENIEZONE_PATH: &str = "/dev/gzvm";
 #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
 static GUNYAH_PATH: &str = "/dev/gunyah";
+
+#[cfg(all(
+    feature = "pci-hotplug",
+    not(any(target_arch = "x86_64", target_arch = "x86"))
+))]
+compile_error!("pci-hotplug is only supported on x86 and x86-64 architecture");
 
 fn create_virtio_devices(
     cfg: &Config,
@@ -708,8 +730,6 @@ fn create_devices(
                 vfio_dev.guest_address,
                 Some(&mut coiommu_attached_endpoints),
                 vfio_dev.iommu,
-                #[cfg(feature = "direct")]
-                vfio_dev.intel_lpss,
             )?;
             match dev {
                 VfioDeviceVariant::Pci(vfio_pci_device) => {
@@ -955,55 +975,80 @@ fn create_file_backed_mappings(
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn create_pcie_root_port(
-    host_pcie_rp: Vec<HostPcieRootPortParameters>,
+/// Collection of devices related to PCI hotplug.
+struct HotPlugStub {
+    /// Map from bus index to hotplug bus.
+    hotplug_buses: BTreeMap<u8, Arc<Mutex<dyn HotPlugBus>>>,
+    /// Bus ranges of devices for virtio-iommu.
+    iommu_bus_ranges: Vec<RangeInclusive<u32>>,
+    /// Map from gpe index to GpeNotify devices.
+    gpe_notify_devs: BTreeMap<u32, Arc<Mutex<dyn GpeNotify>>>,
+    /// Map from bus index to GpeNotify devices.
+    pme_notify_devs: BTreeMap<u8, Arc<Mutex<dyn PmeNotify>>>,
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+impl HotPlugStub {
+    /// Constructs empty HotPlugStub.
+    fn new() -> Self {
+        Self {
+            hotplug_buses: BTreeMap::new(),
+            iommu_bus_ranges: Vec::new(),
+            gpe_notify_devs: BTreeMap::new(),
+            pme_notify_devs: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+/// Creates PCIE root port with only virtual devices.
+///
+/// user doesn't specify host pcie root port which link to this virtual pcie rp,
+/// find the empty bus and create a total virtual pcie rp
+fn create_pure_virtual_pcie_root_port(
     sys_allocator: &mut SystemAllocator,
     irq_control_tubes: &mut Vec<Tube>,
-    control_tubes: &mut Vec<TaggedControlTube>,
     devices: &mut Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>,
-    hp_vec: &mut Vec<(u8, Arc<Mutex<dyn HotPlugBus>>)>,
-    hp_endpoints_ranges: &mut Vec<RangeInclusive<u32>>,
-    // TODO(b/228627457): clippy is incorrectly warning about this Vec, which needs to be a Vec so
-    // we can push into it
-    #[allow(clippy::ptr_arg)] gpe_notify_devs: &mut Vec<(u32, Arc<Mutex<dyn GpeNotify>>)>,
-    #[allow(clippy::ptr_arg)] pme_notify_devs: &mut Vec<(u8, Arc<Mutex<dyn PmeNotify>>)>,
-) -> Result<()> {
-    if host_pcie_rp.is_empty() {
-        // user doesn't specify host pcie root port which link to this virtual pcie rp,
-        // find the empty bus and create a total virtual pcie rp
-        let mut hp_sec_bus = 0u8;
-        // Create Pcie Root Port for non-root buses, each non-root bus device will be
-        // connected behind a virtual pcie root port.
-        for i in 1..255 {
-            if sys_allocator.pci_bus_empty(i) {
-                if hp_sec_bus == 0 {
-                    hp_sec_bus = i;
-                }
-                continue;
+    hp_bus_count: u8,
+) -> Result<HotPlugStub> {
+    let mut hp_sec_buses = Vec::new();
+    let mut hp_stub = HotPlugStub::new();
+    // Create Pcie Root Port for non-root buses, each non-root bus device will be
+    // connected behind a virtual pcie root port.
+    for i in 1..255 {
+        if sys_allocator.pci_bus_empty(i) {
+            if hp_sec_buses.len() < hp_bus_count.into() {
+                hp_sec_buses.push(i);
             }
-            let pcie_root_port = Arc::new(Mutex::new(PcieRootPort::new(i, false)));
-            pme_notify_devs.push((i, pcie_root_port.clone() as Arc<Mutex<dyn PmeNotify>>));
-            let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
-            irq_control_tubes.push(msi_host_tube);
-            let pci_bridge = Box::new(PciBridge::new(pcie_root_port.clone(), msi_device_tube));
-            // no ipc is used if the root port disables hotplug
-            devices.push((pci_bridge, None));
+            continue;
         }
+        let pcie_root_port = Arc::new(Mutex::new(PcieRootPort::new(i, false)));
+        hp_stub
+            .pme_notify_devs
+            .insert(i, pcie_root_port.clone() as Arc<Mutex<dyn PmeNotify>>);
+        let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
+        irq_control_tubes.push(msi_host_tube);
+        let pci_bridge = Box::new(PciBridge::new(pcie_root_port.clone(), msi_device_tube));
+        // no ipc is used if the root port disables hotplug
+        devices.push((pci_bridge, None));
+    }
 
-        // Create Pcie Root Port for hot-plug
-        if hp_sec_bus == 0 {
-            return Err(anyhow!("no more addresses are available"));
-        }
+    // Create Pcie Root Port for hot-plug
+    if hp_sec_buses.len() < hp_bus_count.into() {
+        return Err(anyhow!("no more addresses are available"));
+    }
+
+    for hp_sec_bus in hp_sec_buses {
         let pcie_root_port = Arc::new(Mutex::new(PcieRootPort::new(hp_sec_bus, true)));
-        pme_notify_devs.push((
+        hp_stub.pme_notify_devs.insert(
             hp_sec_bus,
             pcie_root_port.clone() as Arc<Mutex<dyn PmeNotify>>,
-        ));
+        );
         let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
         irq_control_tubes.push(msi_host_tube);
         let pci_bridge = Box::new(PciBridge::new(pcie_root_port.clone(), msi_device_tube));
 
-        hp_endpoints_ranges.push(RangeInclusive::new(
+        hp_stub.iommu_bus_ranges.push(RangeInclusive::new(
             PciAddress {
                 bus: pci_bridge.get_secondary_num(),
                 dev: 0,
@@ -1019,77 +1064,11 @@ fn create_pcie_root_port(
         ));
 
         devices.push((pci_bridge, None));
-        hp_vec.push((hp_sec_bus, pcie_root_port as Arc<Mutex<dyn HotPlugBus>>));
-    } else {
-        // user specify host pcie root port which link to this virtual pcie rp,
-        // reserve the host pci BDF and create a virtual pcie RP with some attrs same as host
-        for host_pcie in host_pcie_rp.iter() {
-            let (vm_host_tube, vm_device_tube) = Tube::pair().context("failed to create tube")?;
-            let pcie_host = PcieHostPort::new(host_pcie.host_path.as_path(), vm_device_tube)?;
-            let bus_range = pcie_host.get_bus_range();
-            let mut slot_implemented = true;
-            for i in bus_range.secondary..=bus_range.subordinate {
-                // if this bus is occupied by one vfio-pci device, this vfio-pci device is
-                // connected to a pci bridge on host statically, then it should be connected
-                // to a virtual pci bridge in guest statically, this bridge won't have
-                // hotplug capability and won't use slot.
-                if !sys_allocator.pci_bus_empty(i) {
-                    slot_implemented = false;
-                    break;
-                }
-            }
-
-            let pcie_root_port = Arc::new(Mutex::new(PcieRootPort::new_from_host(
-                pcie_host,
-                slot_implemented,
-            )?));
-            control_tubes.push(TaggedControlTube::Vm(vm_host_tube));
-
-            let (msi_host_tube, msi_device_tube) = Tube::pair().context("failed to create tube")?;
-            irq_control_tubes.push(msi_host_tube);
-            let mut pci_bridge = Box::new(PciBridge::new(pcie_root_port.clone(), msi_device_tube));
-            // early reservation for host pcie root port devices.
-            let rootport_addr = pci_bridge.allocate_address(sys_allocator);
-            if rootport_addr.is_err() {
-                warn!(
-                    "address reservation failed for hot pcie root port {}",
-                    pci_bridge.debug_label()
-                );
-            }
-
-            // Only append the sub pci range of a hot-pluggable root port to virtio-iommu
-            if slot_implemented {
-                hp_endpoints_ranges.push(RangeInclusive::new(
-                    PciAddress {
-                        bus: pci_bridge.get_secondary_num(),
-                        dev: 0,
-                        func: 0,
-                    }
-                    .to_u32(),
-                    PciAddress {
-                        bus: pci_bridge.get_subordinate_num(),
-                        dev: 32,
-                        func: 8,
-                    }
-                    .to_u32(),
-                ));
-            }
-
-            devices.push((pci_bridge, None));
-            if slot_implemented {
-                if let Some(gpe) = host_pcie.hp_gpe {
-                    gpe_notify_devs
-                        .push((gpe, pcie_root_port.clone() as Arc<Mutex<dyn GpeNotify>>));
-                }
-                hp_vec.push((
-                    bus_range.secondary,
-                    pcie_root_port as Arc<Mutex<dyn HotPlugBus>>,
-                ));
-            }
-        }
+        hp_stub
+            .hotplug_buses
+            .insert(hp_sec_bus, pcie_root_port as Arc<Mutex<dyn HotPlugBus>>);
     }
-
-    Ok(())
+    Ok(hp_stub)
 }
 
 fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
@@ -1197,10 +1176,6 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         cpu_clusters: cfg.cpu_clusters.clone(),
         cpu_capacity: cfg.cpu_capacity.clone(),
         cpu_frequencies,
-        #[cfg(feature = "direct")]
-        direct_gpe: cfg.direct_gpe.clone(),
-        #[cfg(feature = "direct")]
-        direct_fixed_evts: cfg.direct_fixed_evts.clone(),
         fw_cfg_parameters: cfg.fw_cfg_parameters.clone(),
         no_smt: cfg.no_smt,
         hugepages: cfg.hugepages,
@@ -1618,6 +1593,23 @@ where
         // access to those files will not be possible.
         info!("crosvm entering multiprocess mode");
     }
+    #[cfg(all(feature = "pci-hotplug", feature = "swap"))]
+    let swap_device_helper = match &swap_controller {
+        Some(swap_controller) => Some(swap_controller.create_device_helper()?),
+        None => None,
+    };
+    // hotplug_manager must be created before vm is started since it forks jail warden process.
+    #[cfg(feature = "pci-hotplug")]
+    let mut hotplug_manager = if cfg.pci_hotplug_slots.is_some() {
+        Some(PciHotPlugManager::new(
+            vm.get_memory().clone(),
+            &cfg,
+            #[cfg(feature = "swap")]
+            swap_device_helper,
+        )?)
+    } else {
+        None
+    };
 
     #[cfg(feature = "gpu")]
     let (gpu_control_host_tube, gpu_control_device_tube) =
@@ -1792,23 +1784,6 @@ where
         }))
         .context("failed to calculate init balloon size")?;
 
-    // Reserve direct mmio range in advance.
-    #[cfg(feature = "direct")]
-    if let Some(mmio) = &cfg.direct_mmio {
-        for range in mmio.ranges.iter() {
-            AddressRange::from_start_and_size(range.base, range.len)
-                .ok_or(ResourceError::OutOfSpace)
-                .and_then(|range| sys_allocator.reserve_mmio(range))
-                .with_context(|| {
-                    format!(
-                        "failed to reserved direct mmio: {:x}-{:x}",
-                        range.base,
-                        range.base + range.len - 1,
-                    )
-                })?;
-        }
-    };
-
     let mut iommu_attached_endpoints: BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>> =
         BTreeMap::new();
     let mut iova_max_addr: Option<u64> = None;
@@ -1846,36 +1821,18 @@ where
         &reg_evt_wrtube,
     )?;
 
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    let hp_endpoints_ranges: Vec<RangeInclusive<u32>> = Vec::new();
+    #[cfg(feature = "pci-hotplug")]
+    let pci_hotplug_slots = cfg.pci_hotplug_slots;
+    #[cfg(not(feature = "pci-hotplug"))]
+    #[allow(unused_variables)]
+    let pci_hotplug_slots: Option<u8> = None;
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let mut hp_endpoints_ranges: Vec<RangeInclusive<u32>> = Vec::new();
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let mut hotplug_buses: Vec<(u8, Arc<Mutex<dyn HotPlugBus>>)> = Vec::new();
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let mut gpe_notify_devs: Vec<(u32, Arc<Mutex<dyn GpeNotify>>)> = Vec::new();
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let mut pme_notify_devs: Vec<(u8, Arc<Mutex<dyn PmeNotify>>)> = Vec::new();
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        #[cfg(feature = "direct")]
-        let rp_host = cfg.pcie_rp.clone();
-        #[cfg(not(feature = "direct"))]
-        let rp_host: Vec<HostPcieRootPortParameters> = Vec::new();
-
-        // Create Pcie Root Port
-        create_pcie_root_port(
-            rp_host,
-            &mut sys_allocator,
-            &mut irq_control_tubes,
-            &mut control_tubes,
-            &mut devices,
-            &mut hotplug_buses,
-            &mut hp_endpoints_ranges,
-            &mut gpe_notify_devs,
-            &mut pme_notify_devs,
-        )?;
-    }
+    let hp_stub = create_pure_virtual_pcie_root_port(
+        &mut sys_allocator,
+        &mut irq_control_tubes,
+        &mut devices,
+        pci_hotplug_slots.unwrap_or(1),
+    )?;
 
     arch::assign_pci_addresses(&mut devices, &mut sys_allocator)?;
 
@@ -1885,8 +1842,13 @@ where
         &mut devices,
     )?;
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let iommu_bus_ranges = hp_stub.iommu_bus_ranges;
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let iommu_bus_ranges = Vec::new();
+
     let iommu_host_tube = if !iommu_attached_endpoints.is_empty()
-        || (cfg.vfio_isolate_hotplug && !hp_endpoints_ranges.is_empty())
+        || (cfg.vfio_isolate_hotplug && !iommu_bus_ranges.is_empty())
     {
         let (iommu_host_tube, iommu_device_tube) = Tube::pair().context("failed to create tube")?;
         let iommu_dev = create_iommu_device(
@@ -1894,7 +1856,7 @@ where
             &cfg.jail_config,
             iova_max_addr.unwrap_or(u64::MAX),
             iommu_attached_endpoints,
-            hp_endpoints_ranges,
+            iommu_bus_ranges,
             translate_response_senders,
             request_rx,
             iommu_device_tube,
@@ -1951,7 +1913,6 @@ where
         None
     };
 
-    #[cfg_attr(not(feature = "direct"), allow(unused_mut))]
     let mut linux = Arch::build_vm::<V, Vcpu>(
         components,
         &vm_evt_wrtube,
@@ -1980,18 +1941,31 @@ where
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let (hp_control_tube, hp_worker_tube) = mpsc::channel();
-
+    #[cfg(all(
+        feature = "pci-hotplug",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    if let Some(hotplug_manager) = &mut hotplug_manager {
+        hotplug_manager.set_rootbus_controller(hp_control_tube.clone())?;
+    }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let hp_thread = {
-        for (bus_num, hp_bus) in hotplug_buses {
+        for (bus_num, hp_bus) in hp_stub.hotplug_buses.into_iter() {
+            #[cfg(feature = "pci-hotplug")]
+            if let Some(hotplug_manager) = &mut hotplug_manager {
+                hotplug_manager.add_port(hp_bus)?;
+            } else {
+                linux.hotplug_bus.insert(bus_num, hp_bus);
+            }
+            #[cfg(not(feature = "pci-hotplug"))]
             linux.hotplug_bus.insert(bus_num, hp_bus);
         }
 
         if let Some(pm) = &linux.pm {
-            while let Some((gpe, notify_dev)) = gpe_notify_devs.pop() {
+            for (gpe, notify_dev) in hp_stub.gpe_notify_devs.into_iter() {
                 pm.lock().register_gpe_notify_dev(gpe, notify_dev);
             }
-            while let Some((bus, notify_dev)) = pme_notify_devs.pop() {
+            for (bus, notify_dev) in hp_stub.pme_notify_devs.into_iter() {
                 pm.lock().register_pme_notify_dev(bus, notify_dev);
             }
         }
@@ -2000,34 +1974,6 @@ where
         std::thread::Builder::new()
             .name("pci_root".to_string())
             .spawn(move || start_pci_root_worker(pci_root, hp_worker_tube))?
-    };
-
-    #[cfg(feature = "direct")]
-    if let Some(pmio) = &cfg.direct_pmio {
-        let direct_io = Arc::new(
-            devices::DirectIo::new(&pmio.path, false).context("failed to open direct io device")?,
-        );
-        for range in pmio.ranges.iter() {
-            linux
-                .io_bus
-                .insert_sync(direct_io.clone(), range.base, range.len)
-                .context("Error with pmio")?;
-        }
-    };
-
-    #[cfg(feature = "direct")]
-    if let Some(mmio) = &cfg.direct_mmio {
-        let direct_mmio = Arc::new(
-            devices::DirectMmio::new(&mmio.path, false, &mmio.ranges)
-                .context("failed to open direct mmio device")?,
-        );
-
-        for range in mmio.ranges.iter() {
-            linux
-                .mmio_bus
-                .insert_sync(direct_mmio.clone(), range.base, range.len)
-                .context("Error with mmio")?;
-        }
     };
 
     let gralloc = RutabagaGralloc::new().context("failed to create gralloc")?;
@@ -2057,6 +2003,8 @@ where
         hp_control_tube,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         hp_thread,
+        #[cfg(feature = "pci-hotplug")]
+        hotplug_manager,
         #[cfg(feature = "swap")]
         swap_controller,
         #[cfg(feature = "registered_events")]
@@ -2203,8 +2151,6 @@ fn add_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
                 } else {
                     IommuDevType::NoIommu
                 },
-                #[cfg(feature = "direct")]
-                false,
             )?;
             let vfio_pci_device = match vfio_device {
                 VfioDeviceVariant::Pci(pci) => Box::new(pci),
@@ -2248,6 +2194,103 @@ fn add_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
         hp_bus.lock().hot_plug(pci_address);
     }
     Ok(())
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn add_hotplug_net<V: VmArch, Vcpu: VcpuArch>(
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    irq_control_tubes: &mut Vec<Tube>,
+    vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
+    hotplug_manager: &mut PciHotPlugManager,
+    net_param: NetParameters,
+) -> Result<u8> {
+    let (msi_host_tube, msi_device_tube) = Tube::pair().context("create tube")?;
+    irq_control_tubes.push(msi_host_tube);
+    let (ioevent_host_tube, ioevent_device_tube) = Tube::pair().context("create tube")?;
+    let ioevent_vm_memory_client = VmMemoryClient::new(ioevent_device_tube);
+    vm_memory_control_tubes.push(VmMemoryTube {
+        tube: ioevent_host_tube,
+        expose_with_viommu: false,
+    });
+    let net_carrier_device =
+        NetResourceCarrier::new(net_param, msi_device_tube, ioevent_vm_memory_client);
+    hotplug_manager.hotplug_device(
+        vec![ResourceCarrier::VirtioNet(net_carrier_device)],
+        linux,
+        sys_allocator,
+    )
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn handle_hotplug_net_command<V: VmArch, Vcpu: VcpuArch>(
+    net_cmd: NetControlCommand,
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    irq_control_tubes: &mut Vec<Tube>,
+    vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
+    hotplug_manager: &mut PciHotPlugManager,
+) -> VmResponse {
+    match net_cmd {
+        NetControlCommand::AddTap(tap_name) => handle_hotplug_net_add(
+            linux,
+            sys_allocator,
+            irq_control_tubes,
+            vm_memory_control_tubes,
+            hotplug_manager,
+            &tap_name,
+        ),
+        NetControlCommand::RemoveTap(bus) => {
+            handle_hotplug_net_remove(linux, sys_allocator, hotplug_manager, bus)
+        }
+    }
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn handle_hotplug_net_add<V: VmArch, Vcpu: VcpuArch>(
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    irq_control_tubes: &mut Vec<Tube>,
+    vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
+    hotplug_manager: &mut PciHotPlugManager,
+    tap_name: &str,
+) -> VmResponse {
+    let net_param_mode = NetParametersMode::TapName {
+        tap_name: tap_name.to_owned(),
+        mac: None,
+    };
+    let net_param = NetParameters {
+        mode: net_param_mode,
+        vhost_net: None,
+        vq_pairs: None,
+        packed_queue: false,
+    };
+    let ret = add_hotplug_net(
+        linux,
+        sys_allocator,
+        irq_control_tubes,
+        vm_memory_control_tubes,
+        hotplug_manager,
+        net_param,
+    );
+
+    match ret {
+        Ok(pci_bus) => VmResponse::PciHotPlugResponse { bus: pci_bus },
+        Err(e) => VmResponse::ErrString(format!("{:?}", e)),
+    }
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn handle_hotplug_net_remove<V: VmArch, Vcpu: VcpuArch>(
+    linux: &mut RunnableLinuxVm<V, Vcpu>,
+    sys_allocator: &mut SystemAllocator,
+    hotplug_manager: &mut PciHotPlugManager,
+    bus: u8,
+) -> VmResponse {
+    match hotplug_manager.remove_hotplug_device(bus, linux, sys_allocator) {
+        Ok(_) => VmResponse::Ok,
+        Err(e) => VmResponse::ErrString(format!("{:?}", e)),
+    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -2512,6 +2555,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         PciRootCommand,
     >,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] hp_thread: std::thread::JoinHandle<()>,
+    #[cfg(feature = "pci-hotplug")] mut hotplug_manager: Option<PciHotPlugManager>,
     #[allow(unused_mut)] // mut is required x86 only
     #[cfg(feature = "swap")]
     mut swap_controller: Option<SwapController>,
@@ -3120,7 +3164,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                     let mut suspend_requested = false;
                                     let mut run_mode_opt = None;
                                     let response = match request {
-                                        VmRequest::HotPlugCommand { device, add } => {
+                                        VmRequest::HotPlugVfioCommand { device, add } => {
                                             #[cfg(any(
                                                 target_arch = "x86",
                                                 target_arch = "x86_64"
@@ -3153,6 +3197,23 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                 // Suppress warnings.
                                                 let _ = (device, add);
                                                 VmResponse::Ok
+                                            }
+                                        }
+                                        #[cfg(feature = "pci-hotplug")]
+                                        VmRequest::HotPlugNetCommand(net_cmd) => {
+                                            if let Some(hotplug_manager) = &mut hotplug_manager {
+                                                handle_hotplug_net_command(
+                                                    net_cmd,
+                                                    &mut linux,
+                                                    &mut sys_allocator_mutex.lock(),
+                                                    &mut add_irq_control_tubes,
+                                                    &mut add_vm_memory_control_tubes,
+                                                    hotplug_manager,
+                                                )
+                                            } else {
+                                                VmResponse::ErrString(
+                                                    "PCI hotplug is not enabled.".to_owned(),
+                                                )
                                             }
                                         }
                                         #[cfg(feature = "registered_events")]
@@ -3206,7 +3267,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                         #[cfg(feature = "balloon")]
                                         VmRequest::BalloonCommand(cmd) => {
                                             if let Some(balloon_tube) = balloon_tube.as_mut() {
-                                                match balloon_tube.send_cmd(cmd, id) {
+                                                match balloon_tube.send_cmd(cmd, Some(id)) {
                                                     Some(response) => response,
                                                     None => continue,
                                                 }

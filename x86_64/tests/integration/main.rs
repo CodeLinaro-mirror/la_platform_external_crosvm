@@ -129,7 +129,7 @@ where
 
     let devices = vec![];
 
-    let (pci, pci_irqs, _pid_debug_label_map, _amls) = arch::generate_pci_root(
+    let (pci, pci_irqs, _pid_debug_label_map, _amls, _gpe_scope_amls) = arch::generate_pci_root(
         devices,
         &mut irq_chip,
         mmio_bus.clone(),
@@ -208,10 +208,6 @@ where
             .try_clone()
             .expect("unable to clone exit_evt_wrtube"),
         Default::default(),
-        #[cfg(feature = "direct")]
-        &[], // direct_gpe
-        #[cfg(feature = "direct")]
-        &[], // direct_fixed_evts
         &mut irq_chip,
         X86_64_SCI_IRQ,
         (None, None),

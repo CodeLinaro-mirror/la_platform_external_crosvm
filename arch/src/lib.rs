@@ -39,6 +39,7 @@ use devices::BusDeviceObj;
 use devices::BusError;
 use devices::BusResumeDevice;
 use devices::FwCfgParameters;
+use devices::GpeScope;
 use devices::HotPlugBus;
 use devices::IrqChip;
 use devices::IrqEventSource;
@@ -319,10 +320,6 @@ pub struct VmComponents {
     pub cpu_clusters: Vec<CpuSet>,
     pub cpu_frequencies: BTreeMap<usize, Vec<u32>>,
     pub delay_rt: bool,
-    #[cfg(feature = "direct")]
-    pub direct_fixed_evts: Vec<devices::ACPIPMFixedEvent>,
-    #[cfg(feature = "direct")]
-    pub direct_gpe: Vec<u32>,
     pub dynamic_power_coefficient: BTreeMap<usize, u32>,
     pub extra_kernel_params: Vec<String>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -961,6 +958,7 @@ pub fn generate_pci_root(
         Vec<(PciAddress, u32, PciInterruptPin)>,
         BTreeMap<u32, String>,
         BTreeMap<PciAddress, Vec<u8>>,
+        BTreeMap<PciAddress, Vec<u8>>,
     ),
     DeviceRegistrationError,
 > {
@@ -1085,6 +1083,7 @@ pub fn generate_pci_root(
     };
 
     let mut amls = BTreeMap::new();
+    let mut gpe_scope_amls = BTreeMap::new();
     for (dev_idx, dev_value) in devices {
         #[cfg(unix)]
         let (mut device, jail) = dev_value;
@@ -1117,6 +1116,7 @@ pub fn generate_pci_root(
                 );
             }
         }
+        let gpe_nr = device.set_gpe(resources);
 
         #[cfg(unix)]
         let arced_dev: Arc<Mutex<dyn BusDevice>> = if let Some(jail) = jail {
@@ -1152,9 +1152,24 @@ pub fn generate_pci_root(
                 .insert(arced_dev.clone(), range.addr, range.size)
                 .map_err(DeviceRegistrationError::MmioInsert)?;
         }
+
+        if let Some(gpe_nr) = gpe_nr {
+            if let Some(acpi_path) = root.acpi_path(&address) {
+                let mut gpe_aml = Vec::new();
+
+                GpeScope {}.cast_to_aml_bytes(
+                    &mut gpe_aml,
+                    gpe_nr,
+                    format!("\\{}", acpi_path).as_str(),
+                );
+                if !gpe_aml.is_empty() {
+                    gpe_scope_amls.insert(address, gpe_aml);
+                }
+            }
+        }
     }
 
-    Ok((root, pci_irqs, pid_labels, amls))
+    Ok((root, pci_irqs, pid_labels, amls, gpe_scope_amls))
 }
 
 /// Errors for image loading.

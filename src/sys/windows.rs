@@ -282,6 +282,7 @@ fn create_block_device(cfg: &Config, disk: &DiskOption, disk_device_tube: Tube) 
         disk.open()?,
         disk.read_only,
         disk.sparse,
+        disk.packed_queue,
         disk.block_size,
         false,
         disk.id,
@@ -883,7 +884,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                         Ok(request) => {
                             let mut run_mode_opt = None;
                             let response = match request {
-                                VmRequest::HotPlugCommand { device, add } => {
+                                VmRequest::HotPlugVfioCommand { device, add } => {
                                     // Suppress warnings.
                                     let _ = (device, add);
                                     unimplemented!("not implemented on Windows");
@@ -903,7 +904,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 #[cfg(feature = "balloon")]
                                 VmRequest::BalloonCommand(cmd) => {
                                     if let Some(balloon_tube) = balloon_tube {
-                                        balloon_tube.send_cmd(cmd, id)
+                                        balloon_tube.send_cmd(cmd, Some(id))
                                     } else {
                                         error!("balloon not enabled");
                                         None
@@ -1016,6 +1017,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             &event.token,
             ac97_host_tubes,
             anti_tamper_main_thread_tube,
+            balloon_tube,
             control_tubes,
             guest_os,
             ipc_main_loop_tube,
@@ -1219,7 +1221,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let mut balloon_tube = balloon_host_tube
         .map(|tube| -> Result<BalloonTube> {
             wait_ctx
-                .add(&tube, Token::BalloonTube)
+                .add(tube.get_read_notifier(), Token::BalloonTube)
                 .context("failed to add trigger to wait context")?;
             Ok(BalloonTube::new(tube))
         })

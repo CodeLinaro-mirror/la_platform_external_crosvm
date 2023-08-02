@@ -15,9 +15,10 @@ use std::mem::size_of;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
 use anyhow::anyhow;
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use base::error;
@@ -34,8 +35,12 @@ use base::ReadNotifier;
 use base::Tube;
 use base::WaitContext;
 use base::WorkerThread;
+use chrono::DateTime;
+use chrono::Utc;
 use data_model::Le32;
 use data_model::Le64;
+use serde::Deserialize;
+use serde::Serialize;
 use vm_control::PvClockCommand;
 use vm_control::PvClockCommandResponse;
 use vm_memory::GuestAddress;
@@ -117,6 +122,12 @@ impl PvclockSharedData {
         }
     }
 
+    /// Only the seqlock_addr is needed to re-create this struct at restore
+    /// time, so that is all our snapshot contains.
+    fn snapshot(&self) -> GuestAddress {
+        self.seqlock_addr
+    }
+
     /// Set all fields to zero.
     pub fn zero_fill(&mut self) -> Result<()> {
         // The pvclock data structure is 32 bytes long, so we write 32 bytes of 0s
@@ -194,11 +205,24 @@ impl PvclockSharedData {
 pub struct PvClock {
     tsc_frequency: u64,
     suspend_tube: Option<Tube>,
-    // The total time the vm has been suspended, this is in an Arc<AtomicU64>> because it's set
-    // by the PvClockWorker thread but read by PvClock from the mmio bus in the main thread.
+    /// The total time the vm has been suspended, this is in an `Arc<AtomicU64>>` because it's set
+    /// by the PvClockWorker thread but read by PvClock from the mmio bus in the main thread.
     total_suspend_ns: Arc<AtomicU64>,
     features: u64,
-    worker_thread: Option<WorkerThread<Tube>>,
+    worker_thread: Option<WorkerThread<WorkerReturn>>,
+    /// If the device is sleeping, a [PvClockWorkerSnapshot] that can re-create the worker
+    /// will be stored here. (We can't just store the worker itself as it contains an object
+    /// tree with references to [GuestMemory].)
+    paused_worker: Option<PvClockWorkerSnapshot>,
+}
+
+/// Snapshotted form of the [PvClock] device.
+#[derive(Serialize, Deserialize)]
+struct PvClockSnapshot {
+    tsc_frequency: u64,
+    paused_worker: Option<PvClockWorkerSnapshot>,
+    total_suspend_ns: u64,
+    features: u64,
 }
 
 impl PvClock {
@@ -212,6 +236,7 @@ impl PvClock {
                 | 1 << VIRTIO_PVCLOCK_F_INJECT_SLEEP
                 | 1 << VIRTIO_PVCLOCK_F_CLOCKSOURCE_RATING,
             worker_thread: None,
+            paused_worker: None,
         }
     }
 
@@ -222,12 +247,72 @@ impl PvClock {
             padding: 0,
         }
     }
+
+    fn start_worker(
+        &mut self,
+        interrupt: Interrupt,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
+        pvclock_worker: PvClockWorker,
+    ) -> anyhow::Result<()> {
+        if queues.len() != QUEUE_SIZES.len() {
+            return Err(anyhow!(
+                "expected {} queues, got {}",
+                QUEUE_SIZES.len(),
+                queues.len()
+            ));
+        }
+
+        let (set_pvclock_page_queue, set_pvclock_page_queue_evt) = queues.remove(&0).unwrap();
+
+        let suspend_tube = self
+            .suspend_tube
+            .take()
+            .ok_or(anyhow!("suspend tube should not be None"))?;
+
+        self.worker_thread = Some(WorkerThread::start(
+            "virtio_pvclock".to_string(),
+            move |kill_evt| {
+                run_worker(
+                    pvclock_worker,
+                    set_pvclock_page_queue_evt,
+                    set_pvclock_page_queue,
+                    suspend_tube,
+                    interrupt,
+                    kill_evt,
+                )
+            },
+        ));
+
+        Ok(())
+    }
 }
 
 /// Represents a moment in time including the TSC counter value at that time.
+#[derive(Serialize, Deserialize, Clone)]
 struct PvclockInstant {
-    time: Instant,
+    time: DateTime<Utc>,
     tsc_value: u64,
+}
+
+/// The unique data retained by [PvClockWorker] which can be used to re-create
+/// an identical worker.
+#[derive(Serialize, Deserialize, Clone)]
+struct PvClockWorkerSnapshot {
+    suspend_time: Option<PvclockInstant>,
+    total_suspend_tsc_delta: u64,
+    pvclock_shared_data_base_address: Option<GuestAddress>,
+}
+
+impl From<PvClockWorker> for PvClockWorkerSnapshot {
+    fn from(worker: PvClockWorker) -> Self {
+        PvClockWorkerSnapshot {
+            suspend_time: worker.suspend_time,
+            total_suspend_tsc_delta: worker.total_suspend_tsc_delta,
+            pvclock_shared_data_base_address: worker
+                .pvclock_shared_data
+                .map(|pvclock| pvclock.snapshot()),
+        }
+    }
 }
 
 /// Worker struct for the virtio-pvclock device.
@@ -257,6 +342,24 @@ impl PvClockWorker {
             total_suspend_ns,
             total_suspend_tsc_delta: 0,
             pvclock_shared_data: None,
+            mem,
+        }
+    }
+
+    fn from_snapshot(
+        tsc_frequency: u64,
+        total_suspend_ns: Arc<AtomicU64>,
+        snap: PvClockWorkerSnapshot,
+        mem: GuestMemory,
+    ) -> Self {
+        PvClockWorker {
+            tsc_frequency,
+            suspend_time: snap.suspend_time,
+            total_suspend_ns,
+            total_suspend_tsc_delta: snap.total_suspend_tsc_delta,
+            pvclock_shared_data: snap
+                .pvclock_shared_data_base_address
+                .map(|addr| PvclockSharedData::new(mem.clone(), addr)),
             mem,
         }
     }
@@ -291,7 +394,7 @@ impl PvClockWorker {
         // Safe because _rdtsc takes no arguments, and we trust _rdtsc to not modify any other
         // memory.
         self.suspend_time = Some(PvclockInstant {
-            time: Instant::now(),
+            time: Utc::now(),
             tsc_value: unsafe { _rdtsc() },
         });
     }
@@ -324,13 +427,28 @@ impl PvClockWorker {
         result
     }
 
+    fn get_suspended_duration(suspend_time: &PvclockInstant) -> Duration {
+        match Utc::now().signed_duration_since(suspend_time.time).to_std() {
+            Ok(duration) => duration,
+            Err(e) => {
+                error!(
+                    "pvclock found suspend time in the future (was the host \
+                    clock adjusted?). Guest boot/realtime clock may now be \
+                    incorrect. Details: {}",
+                    e
+                );
+                Duration::ZERO
+            }
+        }
+    }
+
     fn set_suspended_time(&mut self) -> Result<()> {
         let (this_suspend_duration, this_suspend_tsc_delta) =
             if let Some(suspend_time) = self.suspend_time.take() {
                 // Safe because _rdtsc takes no arguments, and we trust _rdtsc to not modify any
                 // other memory.
                 (
-                    suspend_time.time.elapsed(),
+                    Self::get_suspended_duration(&suspend_time),
                     unsafe { _rdtsc() } - suspend_time.tsc_value,
                 )
             } else {
@@ -400,6 +518,12 @@ fn pvclock_response_error_from_anyhow(error: anyhow::Error) -> base::Error {
     Error::new(libc::EFAULT)
 }
 
+struct WorkerReturn {
+    worker: PvClockWorker,
+    set_pvclock_page_queue: Queue,
+    suspend_tube: Tube,
+}
+
 // TODO(b/237300012): asyncify this device.
 fn run_worker(
     mut worker: PvClockWorker,
@@ -408,7 +532,7 @@ fn run_worker(
     suspend_tube: Tube,
     interrupt: Interrupt,
     kill_evt: Event,
-) -> Tube {
+) -> WorkerReturn {
     #[derive(EventToken)]
     enum Token {
         SetPvClockPageQueue,
@@ -429,7 +553,11 @@ fn run_worker(
         Ok(pc) => pc,
         Err(e) => {
             error!("failed creating WaitContext: {}", e);
-            return suspend_tube;
+            return WorkerReturn {
+                suspend_tube,
+                set_pvclock_page_queue,
+                worker,
+            };
         }
     };
     if let Some(resample_evt) = interrupt.get_resample_evt() {
@@ -438,7 +566,11 @@ fn run_worker(
             .is_err()
         {
             error!("failed creating WaitContext");
-            return suspend_tube;
+            return WorkerReturn {
+                suspend_tube,
+                set_pvclock_page_queue,
+                worker,
+            };
         }
     }
 
@@ -550,8 +682,11 @@ fn run_worker(
         }
     }
 
-    // return the tube to the device so a new worker could be spawned in the future
-    suspend_tube
+    WorkerReturn {
+        suspend_tube,
+        set_pvclock_page_queue,
+        worker,
+    }
 }
 
 impl VirtioDevice for PvClock {
@@ -594,49 +729,173 @@ impl VirtioDevice for PvClock {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
-        if queues.len() != QUEUE_SIZES.len() {
-            return Err(anyhow!(
-                "expected {} queues, got {}",
-                QUEUE_SIZES.len(),
-                queues.len()
-            ));
-        }
-
-        let (set_pvclock_page_queue, set_pvclock_page_queue_evt) = queues.remove(&0).unwrap();
-
-        let suspend_tube = self
-            .suspend_tube
-            .take()
-            .ok_or(anyhow!("suspend tube should not be None"))?;
         let tsc_frequency = self.tsc_frequency;
         let total_suspend_ns = self.total_suspend_ns.clone();
-
-        self.worker_thread = Some(WorkerThread::start(
-            "virtio_pvclock".to_string(),
-            move |kill_evt| {
-                let worker = PvClockWorker::new(tsc_frequency, total_suspend_ns, mem);
-                run_worker(
-                    worker,
-                    set_pvclock_page_queue_evt,
-                    set_pvclock_page_queue,
-                    suspend_tube,
-                    interrupt,
-                    kill_evt,
-                )
-            },
-        ));
-
-        Ok(())
+        let worker = PvClockWorker::new(tsc_frequency, total_suspend_ns, mem);
+        self.start_worker(interrupt, queues, worker)
     }
 
     fn reset(&mut self) -> bool {
         if let Some(worker_thread) = self.worker_thread.take() {
-            let suspend_tube = worker_thread.stop();
-            self.suspend_tube = Some(suspend_tube);
+            let worker_ret = worker_thread.stop();
+            self.suspend_tube = Some(worker_ret.suspend_tube);
             return true;
         }
         false
+    }
+
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let worker_ret = worker_thread.stop();
+            let mut queues = BTreeMap::new();
+            queues.insert(0, worker_ret.set_pvclock_page_queue);
+            self.suspend_tube = Some(worker_ret.suspend_tube);
+            self.paused_worker = Some(worker_ret.worker.into());
+            Ok(Some(queues))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn virtio_wake(
+        &mut self,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        if let Some((mem, interrupt, queues)) = queues_state {
+            let worker_snap = self
+                .paused_worker
+                .take()
+                .ok_or(anyhow!("a sleeping pvclock must have a paused worker"))?;
+            let worker = PvClockWorker::from_snapshot(
+                self.tsc_frequency,
+                self.total_suspend_ns.clone(),
+                worker_snap,
+                mem,
+            );
+            self.start_worker(interrupt, queues, worker)?;
+        }
+        Ok(())
+    }
+
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        serde_json::to_value(PvClockSnapshot {
+            features: self.features,
+            total_suspend_ns: self.total_suspend_ns.load(Ordering::SeqCst),
+            tsc_frequency: self.tsc_frequency,
+            paused_worker: self.paused_worker.clone(),
+        })
+        .context("failed to serialize PvClockSnapshot")
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let snap: PvClockSnapshot = serde_json::from_value(data).context("error deserializing")?;
+        if snap.features != self.features {
+            bail!(
+                "expected virtio_features to match, but they did not. Live: {:?}, snapshot {:?}",
+                self.features,
+                snap.features,
+            );
+        }
+        self.total_suspend_ns
+            .store(snap.total_suspend_ns, Ordering::SeqCst);
+        self.paused_worker = snap.paused_worker;
+
+        // TODO(b/291346907): we assume that the TSC frequency has NOT changed
+        // since the snapshot was made. Assuming we have not moved machines,
+        // this is a reasonable assumption. We don't verify the frequency
+        // because TSC calibration noisy.
+        self.tsc_frequency = snap.tsc_frequency;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::virtio::QueueConfig;
+    use crate::virtio::VIRTIO_MSI_NO_VECTOR;
+    use crate::IrqLevelEvent;
+
+    const TEST_QUEUE_SIZE: u16 = 2048;
+
+    fn make_interrupt() -> Interrupt {
+        Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR)
+    }
+
+    fn create_sleeping_device() -> (PvClock, GuestMemory, Tube) {
+        let mem = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let (_host_tube, device_tube) = Tube::pair().unwrap();
+        let mut pvclock_device = PvClock::new(0, 1e9 as u64, device_tube);
+
+        // The queue won't actually be used, so passing one that isn't
+        // fully configured is fine.
+        let mut fake_queue = QueueConfig::new(TEST_QUEUE_SIZE, 0);
+        fake_queue.set_ready(true);
+
+        pvclock_device
+            .activate(
+                mem.clone(),
+                make_interrupt(),
+                BTreeMap::from([(0, (fake_queue.activate().unwrap(), Event::new().unwrap()))]),
+            )
+            .expect("activate should succeed");
+
+        let queues = pvclock_device
+            .virtio_sleep()
+            .expect("sleep should succeed")
+            .expect("sleep should yield queues");
+        assert_eq!(queues.len(), 1);
+        assert_eq!(
+            queues.get(&0).expect("queue must be present").size(),
+            TEST_QUEUE_SIZE
+        );
+        assert!(pvclock_device.paused_worker.is_some());
+
+        (pvclock_device, mem, _host_tube)
+    }
+
+    fn assert_wake_successful(pvclock_device: &mut PvClock, mem: &GuestMemory) {
+        // We just create a new queue here, because it isn't actually accessed
+        // by the device in these tests.
+        let mut wake_queues = BTreeMap::new();
+        let mut fake_queue = QueueConfig::new(TEST_QUEUE_SIZE, 0);
+        fake_queue.set_ready(true);
+        wake_queues.insert(0, (fake_queue.activate().unwrap(), Event::new().unwrap()));
+        let queues_state = (mem.clone(), make_interrupt(), wake_queues);
+        pvclock_device
+            .virtio_wake(Some(queues_state))
+            .expect("wake should succeed");
+        assert!(pvclock_device.paused_worker.is_none());
+    }
+
+    #[test]
+    fn test_sleep_wake_smoke() {
+        let (mut pvclock_device, mem, _tube) = create_sleeping_device();
+        assert_wake_successful(&mut pvclock_device, &mem);
+    }
+
+    #[test]
+    fn test_save_restore() {
+        let (mut pvclock_device, mem, _tube) = create_sleeping_device();
+        let test_suspend_ns = 9999;
+
+        // Store a test value we can look for later in the test to verify
+        // we're restoring properties.
+        pvclock_device
+            .total_suspend_ns
+            .store(test_suspend_ns, Ordering::SeqCst);
+
+        let snap = pvclock_device.virtio_snapshot().unwrap();
+        pvclock_device.total_suspend_ns.store(0, Ordering::SeqCst);
+        pvclock_device.virtio_restore(snap).unwrap();
+        assert_eq!(
+            pvclock_device.total_suspend_ns.load(Ordering::SeqCst),
+            test_suspend_ns
+        );
+
+        assert_wake_successful(&mut pvclock_device, &mem);
     }
 }

@@ -15,10 +15,6 @@ mod bus_stats;
 pub mod cmos;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod debugcon;
-#[cfg(feature = "direct")]
-pub mod direct_io;
-#[cfg(feature = "direct")]
-pub mod direct_irq;
 mod fw_cfg;
 mod i8042;
 mod irq_event;
@@ -83,16 +79,12 @@ pub use self::bus::HotPlugKey;
 pub use self::bus_stats::BusStatistics;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use self::debugcon::Debugcon;
-#[cfg(feature = "direct")]
-pub use self::direct_io::DirectIo;
-#[cfg(feature = "direct")]
-pub use self::direct_io::DirectMmio;
-#[cfg(feature = "direct")]
-pub use self::direct_irq::DirectIrq;
-#[cfg(feature = "direct")]
-pub use self::direct_irq::DirectIrqError;
+pub use self::fw_cfg::Error as FwCfgError;
 pub use self::fw_cfg::FwCfgDevice;
 pub use self::fw_cfg::FwCfgParameters;
+pub use self::fw_cfg::FW_CFG_BASE_PORT;
+pub use self::fw_cfg::FW_CFG_MAX_FILE_SLOTS;
+pub use self::fw_cfg::FW_CFG_WIDTH;
 pub use self::i8042::I8042Device;
 pub use self::irq_event::IrqEdgeEvent;
 pub use self::irq_event::IrqLevelEvent;
@@ -105,6 +97,7 @@ pub use self::pci::Ac97Dev;
 pub use self::pci::Ac97Parameters;
 pub use self::pci::BarRange;
 pub use self::pci::CrosvmDeviceId;
+pub use self::pci::GpeScope;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci::HotPluggable;
 #[cfg(feature = "pci-hotplug")]
