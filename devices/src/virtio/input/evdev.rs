@@ -151,9 +151,9 @@ pub fn name<T: AsRawDescriptor>(descriptor: &T) -> Result<Vec<u8>> {
 }
 
 /// Gets the unique (serial) name of an event device (see EVIOCGUNIQ ioctl for details).
-pub fn serial_name<T: AsRawDescriptor>(descriptor: &T) -> Result<Vec<u8>> {
+pub fn serial_name<T: AsRawDescriptor>(descriptor: &T) -> Vec<u8> {
     let mut uniq = evdev_buffer::new();
-    let len = unsafe {
+    let mut len = unsafe {
         // Safe because the kernel won't write more than size of evdev_buffer and we check the
         // return value
         ioctl_with_mut_ref(
@@ -163,9 +163,10 @@ pub fn serial_name<T: AsRawDescriptor>(descriptor: &T) -> Result<Vec<u8>> {
         )
     };
     if len < 0 {
-        return Err(InputError::EvdevSerialError(errno()));
+        println!("{}", format!("{}:{}:Warning: failed to get serial name of event device. {}", file!(), line!(), len));
+        len = 0;
     }
-    Ok(uniq.buffer[0..len as usize].to_vec())
+    uniq.buffer[0..len as usize].to_vec()
 }
 
 /// Gets the properties of an event device (see EVIOCGPROP ioctl for details).
