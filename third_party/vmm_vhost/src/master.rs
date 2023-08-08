@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
+use anyhow::anyhow;
 use base::AsRawDescriptor;
 use base::Event;
 use base::RawDescriptor;
@@ -358,6 +359,47 @@ impl<E: Endpoint<MasterReq>> VhostBackend for Master<E> {
         let mut node = self.node();
         let hdr = node.send_request_header(MasterReq::WAKE, None)?;
         node.wait_for_ack(&hdr)
+    }
+
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        let mut node = self.node();
+        let hdr = node.send_request_header(MasterReq::SNAPSHOT, None)?;
+        let (success_msg, buf_reply, _) = node.recv_reply_with_payload::<VhostUserSuccess>(&hdr)?;
+        if !success_msg.success {
+            Err(VhostUserError::SnapshotError(anyhow!(
+                "Device process responded with a failure on SNAPSHOT."
+            )))
+        } else {
+            Ok(buf_reply)
+        }
+    }
+
+    fn restore(&self, data_bytes: &[u8], queue_evts: Option<Vec<Event>>) -> Result<()> {
+        let mut node = self.node();
+
+        let body = VhostUserEmptyMsg;
+
+        let queue_evt_fds: Option<Vec<RawDescriptor>> = queue_evts.as_ref().map(|queue_evts| {
+            queue_evts
+                .iter()
+                .map(|queue_evt| queue_evt.as_raw_descriptor())
+                .collect()
+        });
+
+        let hdr = node.send_request_with_payload(
+            MasterReq::RESTORE,
+            &body,
+            data_bytes,
+            queue_evt_fds.as_deref(),
+        )?;
+        let reply = node.recv_reply::<VhostUserSuccess>(&hdr)?;
+        if !reply.success {
+            Err(VhostUserError::RestoreError(anyhow!(
+                "Device process responded with a failure on RESTORE."
+            )))
+        } else {
+            Ok(())
+        }
     }
 }
 

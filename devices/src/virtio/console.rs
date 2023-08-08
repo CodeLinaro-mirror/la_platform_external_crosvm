@@ -9,6 +9,7 @@
 pub mod asynchronous;
 mod sys;
 
+use std::collections::BTreeMap as Map;
 use std::collections::VecDeque;
 use std::io;
 use std::io::Read;
@@ -16,7 +17,6 @@ use std::io::Write;
 use std::ops::DerefMut;
 use std::result;
 use std::sync::Arc;
-use std::thread;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -26,12 +26,16 @@ use base::Descriptor;
 use base::Event;
 use base::EventToken;
 use base::RawDescriptor;
+#[cfg(windows)]
+use base::ReadNotifier;
 use base::WaitContext;
 use base::WorkerThread;
 use data_model::Le16;
 use data_model::Le32;
 use hypervisor::ProtectionType;
 use remain::sorted;
+use serde::Deserialize;
+use serde::Serialize;
 use sync::Mutex;
 use thiserror::Error as ThisError;
 use vm_memory::GuestMemory;
@@ -46,7 +50,6 @@ use crate::virtio::Queue;
 use crate::virtio::Reader;
 use crate::virtio::SignalableInterrupt;
 use crate::virtio::VirtioDevice;
-use crate::Suspendable;
 
 pub(crate) const QUEUE_SIZE: u16 = 256;
 
@@ -178,68 +181,8 @@ struct Worker {
     transmit_evt: Event,
 }
 
-/// Starts a thread that reads rx and sends the input back via the returned buffer.
-///
-/// The caller should listen on `in_avail_evt` for events. When `in_avail_evt` signals that data
-/// is available, the caller should lock the returned `Mutex` and read data out of the inner
-/// `VecDeque`. The data should be removed from the beginning of the `VecDeque` as it is processed.
-///
-/// # Arguments
-///
-/// * `rx` - Data source that the reader thread will wait on to send data back to the buffer
-/// * `in_avail_evt` - Event triggered by the thread when new input is available on the buffer
-fn spawn_input_thread(
-    mut rx: crate::serial::sys::InStreamType,
-    in_avail_evt: &Event,
-) -> Option<Arc<Mutex<VecDeque<u8>>>> {
-    let buffer = Arc::new(Mutex::new(VecDeque::<u8>::new()));
-    let buffer_cloned = buffer.clone();
-
-    let thread_in_avail_evt = match in_avail_evt.try_clone() {
-        Ok(evt) => evt,
-        Err(e) => {
-            error!("failed to clone in_avail_evt: {}", e);
-            return None;
-        }
-    };
-
-    // The input thread runs in detached mode.
-    let res = thread::Builder::new()
-        .name("console_input".to_string())
-        .spawn(move || {
-            let mut rx_buf = [0u8; 1 << 12];
-            loop {
-                match rx.read(&mut rx_buf) {
-                    Ok(0) => break, // Assume the stream of input has ended.
-                    Ok(size) => {
-                        buffer.lock().extend(&rx_buf[0..size]);
-                        thread_in_avail_evt.signal().unwrap();
-                    }
-                    Err(e) => {
-                        // Being interrupted is not an error, but everything else is.
-                        if sys::is_a_fatal_input_error(&e) {
-                            error!(
-                                "failed to read for bytes to queue into console device: {}",
-                                e
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                // Depending on the platform, a short sleep is needed here (ie. Windows).
-                sys::read_delay_if_needed();
-            }
-        });
-    if let Err(e) = res {
-        error!("failed to spawn input thread: {}", e);
-        return None;
-    }
-    Some(buffer_cloned)
-}
-
 impl Worker {
-    fn run(&mut self) {
+    fn run(&mut self) -> anyhow::Result<()> {
         #[derive(EventToken)]
         enum Token {
             ReceiveQueueAvailable,
@@ -249,44 +192,26 @@ impl Worker {
             Kill,
         }
 
-        let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
+        let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
             (&self.transmit_evt, Token::TransmitQueueAvailable),
             (&self.receive_evt, Token::ReceiveQueueAvailable),
             (&self.in_avail_evt, Token::InputAvailable),
             (&self.kill_evt, Token::Kill),
-        ]) {
-            Ok(pc) => pc,
-            Err(e) => {
-                error!("failed creating WaitContext: {}", e);
-                return;
-            }
-        };
+        ])?;
         if let Some(resample_evt) = self.interrupt.get_resample_evt() {
-            if wait_ctx
-                .add(resample_evt, Token::InterruptResample)
-                .is_err()
-            {
-                error!("failed adding resample event to WaitContext.");
-                return;
-            }
+            wait_ctx.add(resample_evt, Token::InterruptResample)?;
         }
 
-        'wait: loop {
-            let events = match wait_ctx.wait() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("failed polling for events: {}", e);
-                    break;
-                }
-            };
+        let mut running = true;
+        while running {
+            let events = wait_ctx.wait()?;
 
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     Token::TransmitQueueAvailable => {
-                        if let Err(e) = self.transmit_evt.wait() {
-                            error!("failed reading transmit queue Event: {}", e);
-                            break 'wait;
-                        }
+                        self.transmit_evt
+                            .wait()
+                            .context("failed reading transmit queue Event")?;
                         process_transmit_queue(
                             &self.mem,
                             &self.interrupt,
@@ -295,52 +220,39 @@ impl Worker {
                         );
                     }
                     Token::ReceiveQueueAvailable => {
-                        if let Err(e) = self.receive_evt.wait() {
-                            error!("failed reading receive queue Event: {}", e);
-                            break 'wait;
-                        }
+                        self.receive_evt
+                            .wait()
+                            .context("failed reading receive queue Event")?;
                         if let Some(in_buf_ref) = self.input.as_ref() {
-                            match handle_input(
+                            let _ = handle_input(
                                 &self.mem,
                                 &self.interrupt,
                                 in_buf_ref.lock().deref_mut(),
                                 &self.receive_queue,
-                            ) {
-                                Ok(()) => {}
-                                // Console errors are no-ops, so just continue.
-                                Err(_) => {
-                                    continue;
-                                }
-                            }
+                            );
                         }
                     }
                     Token::InputAvailable => {
-                        if let Err(e) = self.in_avail_evt.wait() {
-                            error!("failed reading in_avail_evt: {}", e);
-                            break 'wait;
-                        }
+                        self.in_avail_evt
+                            .wait()
+                            .context("failed reading in_avail_evt")?;
                         if let Some(in_buf_ref) = self.input.as_ref() {
-                            match handle_input(
+                            let _ = handle_input(
                                 &self.mem,
                                 &self.interrupt,
                                 in_buf_ref.lock().deref_mut(),
                                 &self.receive_queue,
-                            ) {
-                                Ok(()) => {}
-                                // Console errors are no-ops, so just continue.
-                                Err(_) => {
-                                    continue;
-                                }
-                            }
+                            );
                         }
                     }
                     Token::InterruptResample => {
                         self.interrupt.interrupt_resample();
                     }
-                    Token::Kill => break 'wait,
+                    Token::Kill => running = false,
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -357,6 +269,17 @@ pub struct Console {
     input: Option<ConsoleInput>,
     output: Option<Box<dyn io::Write + Send>>,
     keep_descriptors: Vec<Descriptor>,
+    input_thread: Option<WorkerThread<()>>,
+    // input_buffer is not continuously updated. It holds the state of the buffer when a snapshot
+    // happens, or when a restore is performed. On a fresh startup, it will be empty. On a restore,
+    // it will contain whatever data was remaining in the buffer in the snapshot.
+    input_buffer: VecDeque<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConsoleSnapshot {
+    base_features: u64,
+    input_buffer: VecDeque<u8>,
 }
 
 impl Console {
@@ -373,6 +296,8 @@ impl Console {
             input,
             output,
             keep_descriptors: keep_rds.iter().map(|rd| Descriptor(*rd)).collect(),
+            input_thread: None,
+            input_buffer: VecDeque::new(),
         }
     }
 }
@@ -436,11 +361,13 @@ impl VirtioDevice for Console {
         // the main worker thread with an event for notification bridges this gap.
         let input = match self.input.take() {
             Some(ConsoleInput::FromRead(read)) => {
-                let buffer = spawn_input_thread(read, self.in_avail_evt.as_ref().unwrap());
-                if buffer.is_none() {
-                    return Err(anyhow!("failed creating input thread"));
-                };
-                buffer
+                let (buffer, thread) = sys::spawn_input_thread(
+                    read,
+                    self.in_avail_evt.as_ref().unwrap(),
+                    self.input_buffer.clone(),
+                );
+                self.input_thread = Some(thread);
+                Some(buffer)
             }
             Some(ConsoleInput::FromThread(buffer)) => Some(buffer),
             None => None,
@@ -462,7 +389,9 @@ impl VirtioDevice for Console {
                 transmit_queue: Arc::new(Mutex::new(transmit_queue)),
                 transmit_evt,
             };
-            worker.run();
+            if let Err(e) = worker.run() {
+                error!("console run failure: {:?}", e);
+            };
             worker
         }));
         Ok(())
@@ -477,6 +406,74 @@ impl VirtioDevice for Console {
         }
         false
     }
-}
 
-impl Suspendable for Console {}
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+        if let Some(worker_thread) = self.worker_thread.take() {
+            if let Some(input_thread) = self.input_thread.take() {
+                input_thread.stop();
+            }
+            let worker = worker_thread.stop();
+            if let Some(in_buf_ref) = worker.input.as_ref() {
+                self.input_buffer = in_buf_ref.lock().clone();
+            }
+            let receive_queue = match Arc::try_unwrap(worker.receive_queue) {
+                Ok(mutex) => mutex.into_inner(),
+                Err(_) => return Err(anyhow!("failed to retrieve receive queue to sleep device.")),
+            };
+            let transmit_queue = match Arc::try_unwrap(worker.transmit_queue) {
+                Ok(mutex) => mutex.into_inner(),
+                Err(_) => {
+                    return Err(anyhow!(
+                        "failed to retrieve transmit queue to sleep device."
+                    ))
+                }
+            };
+            return Ok(Some(Map::from([(0, receive_queue), (1, transmit_queue)])));
+        }
+        Ok(None)
+    }
+
+    fn virtio_wake(
+        &mut self,
+        queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        match queues_state {
+            None => Ok(()),
+            Some((mem, interrupt, mut queues)) => {
+                let queues = vec![
+                    queues.remove(&0).expect("rx queue must be present"),
+                    queues.remove(&1).expect("tx queue must be present"),
+                ];
+
+                // TODO(khei): activate is just what we want at the moment, but we should probably move
+                // it into a "start workers" function to make it obvious that it isn't strictly
+                // used for activate events.
+                self.activate(mem, interrupt, queues)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        serde_json::to_value(&ConsoleSnapshot {
+            // Snapshot base_features as a safeguard when restoring the console device. Saving this
+            // info allows us to validate that the proper config was used for the console.
+            base_features: self.base_features,
+            input_buffer: self.input_buffer.clone(),
+        })
+        .context("failed to snapshot virtio console")
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let deser: ConsoleSnapshot =
+            serde_json::from_value(data).context("failed to deserialize virtio console")?;
+        anyhow::ensure!(
+            self.base_features == deser.base_features,
+            "Virtio console incorrect base features for restore:\n Expected: {}, Actual: {}",
+            self.base_features,
+            deser.base_features,
+        );
+        self.input_buffer = deser.input_buffer;
+        Ok(())
+    }
+}

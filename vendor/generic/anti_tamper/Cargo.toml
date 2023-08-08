@@ -1,16 +1,13 @@
 [package]
-name = "crash_report"
+name = "anti_tamper"
 version = "0.1.0"
 authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+anti-tamper = []
+
 [dependencies]
-base = { path = "../base" }
-anyhow = "1.0.32"
-serde = "*"
-
-[target.'cfg(windows)'.dependencies]
-win_util = { path = "../win_util"}
-
+base = { path = "../../../base" }

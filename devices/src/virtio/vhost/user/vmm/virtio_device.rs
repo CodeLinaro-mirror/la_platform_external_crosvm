@@ -5,13 +5,17 @@
 //! VirtioDevice implementation for the VMM side of a vhost-user connection.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap as Map;
+use std::sync::Arc;
 
+use crate::pci::MsixConfig;
 use anyhow::Context;
 use base::error;
 use base::Event;
 use base::RawDescriptor;
 use base::WorkerThread;
 use serde_json::Value;
+use sync::Mutex;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserVirtioFeatures;
@@ -26,7 +30,6 @@ use crate::virtio::Queue;
 use crate::virtio::SharedMemoryMapper;
 use crate::virtio::SharedMemoryRegion;
 use crate::virtio::VirtioDevice;
-use crate::Suspendable;
 
 pub struct VhostUserVirtioDevice {
     device_type: DeviceType,
@@ -199,25 +202,93 @@ impl VirtioDevice for VhostUserVirtioDevice {
     fn expose_shmem_descriptors_with_viommu(&self) -> bool {
         self.expose_shmem_descriptors_with_viommu
     }
-}
 
-impl Suspendable for VhostUserVirtioDevice {
-    fn sleep(&mut self) -> anyhow::Result<()> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
         self.handler
             .borrow_mut()
             .sleep()
-            .context("Failed to sleep device.")
+            .context("Failed to sleep device.")?;
+
+        // Vhost user devices won't return queues on sleep, so return an empty Vec so that
+        // VirtioPciDevice can set the sleep state properly.
+        Ok(Some(Map::new()))
     }
 
-    fn wake(&mut self) -> anyhow::Result<()> {
+    fn virtio_wake(
+        &mut self,
+        // Vhost user doesn't need to pass queue_states back to the device process, since it will
+        // already have it.
+        _queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
         self.handler
             .borrow_mut()
             .wake()
             .context("Failed to wake device.")
     }
 
-    fn snapshot(&self) -> anyhow::Result<Value> {
-        // TODO(b/280608177): Snapshot devices
-        serde_json::to_value("").context("failed to serialize")
+    fn virtio_snapshot(&self) -> anyhow::Result<Value> {
+        Ok(self.handler.borrow_mut().snapshot()?)
+    }
+
+    fn virtio_restore(&mut self, _data: Value) -> anyhow::Result<()> {
+        panic!("virtio_restore should not be called for vhost-user devices.")
+    }
+
+    fn is_vhost_user(&self) -> bool {
+        true
+    }
+
+    fn vhost_user_restore(
+        &mut self,
+        data: Value,
+        queue_configs: &[Queue],
+        queue_evts: Option<Vec<Event>>,
+        interrupt: Option<Interrupt>,
+        mem: GuestMemory,
+        msix_config: &Arc<Mutex<MsixConfig>>,
+        device_activated: bool,
+    ) -> anyhow::Result<()> {
+        if device_activated {
+            let non_msix_evt = Event::new().context("Failed to create event")?;
+            queue_configs
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| q.ready())
+                .try_for_each(|(queue_index, queue)| {
+                    let msix_lock = msix_config.lock();
+                    let irqfd = msix_lock
+                        .get_irqfd(queue.vector() as usize)
+                        .unwrap_or(&non_msix_evt);
+
+                    self.handler
+                        .borrow_mut()
+                        .restore_irqfd(queue_index, irqfd)
+                        .context("Failed to restore irqfd")?;
+
+                    Ok::<(), anyhow::Error>(())
+                })?;
+
+            anyhow::ensure!(
+                self.worker_thread.is_none(),
+                "self.worker_thread is some, but that should not be possible since only cold restore \
+                is supported."
+            );
+            self.worker_thread = Some(
+                self.handler
+                    .borrow_mut()
+                    .start_worker(
+                        interrupt.expect(
+                            "Interrupt doesn't exist. This shouldn't \
+                        happen since the device is activated.",
+                        ),
+                        &format!("{}", self.device_type),
+                        mem,
+                        non_msix_evt,
+                    )
+                    .context("Failed to start worker on restore.")?,
+            );
+        }
+
+        Ok(self.handler.borrow_mut().restore(data, queue_evts)?)
     }
 }
