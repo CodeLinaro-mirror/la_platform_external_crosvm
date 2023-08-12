@@ -755,7 +755,7 @@ pub fn create_balloon_device(
     init_balloon_size: u64,
     enabled_features: u64,
     #[cfg(feature = "registered_events")] registered_evt_q: Option<SendTube>,
-    wss_num_bins: u8,
+    ws_num_bins: u8,
 ) -> DeviceResult {
     let dev = virtio::Balloon::new(
         virtio::base_features(protection_type),
@@ -766,7 +766,7 @@ pub fn create_balloon_device(
         enabled_features,
         #[cfg(feature = "registered_events")]
         registered_evt_q,
-        wss_num_bins,
+        ws_num_bins,
     )
     .context("failed to create balloon")?;
 
@@ -1019,7 +1019,7 @@ pub fn create_video_device(
             jail.mount_bind(sys_devices_path, sys_devices_path, false)?;
 
             // Required for loading dri libraries loaded by minigbm on AMD devices.
-            jail_mount_bind_if_exists(&mut jail, &["/usr/lib64"])?;
+            jail_mount_bind_if_exists(&mut jail, &["/usr/lib64", "/usr/lib"])?;
         }
 
         // Device nodes required by libchrome which establishes Mojo connection in libvda.

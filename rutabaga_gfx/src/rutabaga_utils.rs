@@ -154,9 +154,15 @@ unsafe impl Send for RutabagaDebug {}
 unsafe impl Sync for RutabagaDebug {}
 
 /// Mapped memory caching flags (see virtio_gpu spec)
+pub const RUTABAGA_MAP_CACHE_MASK: u32 = 0x0f;
 pub const RUTABAGA_MAP_CACHE_CACHED: u32 = 0x01;
 pub const RUTABAGA_MAP_CACHE_UNCACHED: u32 = 0x02;
 pub const RUTABAGA_MAP_CACHE_WC: u32 = 0x03;
+/// Access flags (not in virtio_gpu spec)
+pub const RUTABAGA_MAP_ACCESS_MASK: u32 = 0xf0;
+pub const RUTABAGA_MAP_ACCESS_READ: u32 = 0x10;
+pub const RUTABAGA_MAP_ACCESS_WRITE: u32 = 0x20;
+pub const RUTABAGA_MAP_ACCESS_RW: u32 = 0x30;
 
 /// Rutabaga capsets.
 pub const RUTABAGA_CAPSET_VIRGL: u32 = 1;
@@ -653,18 +659,19 @@ impl RutabagaHandle {
     }
 }
 
-pub struct RutabagaClosure<S> {
-    closure: Box<dyn Fn(S) + Send + Sync>,
+#[derive(Clone)]
+pub struct RutabagaHandler<S> {
+    closure: Arc<dyn Fn(S) + Send + Sync>,
 }
 
-type RutabagaHandler<S> = Arc<RutabagaClosure<S>>;
-
-impl<S> RutabagaClosure<S>
+impl<S> RutabagaHandler<S>
 where
     S: Send + Sync + Clone + 'static,
 {
-    pub fn new(closure: Box<dyn Fn(S) + Send + Sync>) -> RutabagaHandler<S> {
-        Arc::new(RutabagaClosure { closure })
+    pub fn new(closure: impl Fn(S) + Send + Sync + 'static) -> RutabagaHandler<S> {
+        RutabagaHandler {
+            closure: Arc::new(closure),
+        }
     }
 
     pub fn call(&self, data: S) {
@@ -672,14 +679,12 @@ where
     }
 }
 
-impl<S> fmt::Debug for RutabagaClosure<S> {
+impl<S> fmt::Debug for RutabagaHandler<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Closure debug").finish()
     }
 }
 
-pub type RutabagaFenceClosure = RutabagaClosure<RutabagaFence>;
 pub type RutabagaFenceHandler = RutabagaHandler<RutabagaFence>;
 
-pub type RutabagaDebugClosure = RutabagaClosure<RutabagaDebug>;
 pub type RutabagaDebugHandler = RutabagaHandler<RutabagaDebug>;

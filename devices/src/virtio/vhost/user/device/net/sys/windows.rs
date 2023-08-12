@@ -88,7 +88,6 @@ where
 
 async fn run_rx_queue<T: TapT>(
     mut queue: Queue,
-    mem: GuestMemory,
     mut tap: IoSource<T>,
     call_evt: Interrupt,
     kick_evt: EventAsync,
@@ -138,7 +137,6 @@ async fn run_rx_queue<T: TapT>(
         let needs_interrupt = process_rx(
             &call_evt,
             &mut queue,
-            &mem,
             tap.as_source_mut(),
             &mut rx_buf,
             &mut deferred_rx,
@@ -175,9 +173,8 @@ pub(in crate::virtio::vhost::user::device::net) fn start_queue<T: 'static + Into
     backend: &mut NetBackend<T>,
     idx: usize,
     queue: virtio::Queue,
-    mem: GuestMemory,
+    _mem: GuestMemory,
     doorbell: Interrupt,
-    kick_evt: Event,
 ) -> anyhow::Result<()> {
     if backend.workers.get(idx).is_some() {
         warn!("Starting new queue handler without stopping old handler");
@@ -191,6 +188,10 @@ pub(in crate::virtio::vhost::user::device::net) fn start_queue<T: 'static + Into
         // Safe because the executor is initialized in main() below.
         let ex = ex.get().expect("Executor not initialized");
 
+        let kick_evt = queue
+            .event()
+            .try_clone()
+            .context("failed to clone queue event")?;
         let kick_evt =
             EventAsync::new(kick_evt, ex).context("failed to create EventAsync for kick_evt")?;
         let tap = backend
@@ -214,7 +215,6 @@ pub(in crate::virtio::vhost::user::device::net) fn start_queue<T: 'static + Into
                 (
                     ex.spawn_local(run_rx_queue(
                         queue,
-                        mem,
                         tap,
                         doorbell,
                         kick_evt,
@@ -228,7 +228,7 @@ pub(in crate::virtio::vhost::user::device::net) fn start_queue<T: 'static + Into
             1 => {
                 let (stop_tx, stop_rx) = futures::channel::oneshot::channel();
                 (
-                    ex.spawn_local(run_tx_queue(queue, mem, tap, doorbell, kick_evt, stop_rx)),
+                    ex.spawn_local(run_tx_queue(queue, tap, doorbell, kick_evt, stop_rx)),
                     stop_tx,
                 )
             }
@@ -237,7 +237,6 @@ pub(in crate::virtio::vhost::user::device::net) fn start_queue<T: 'static + Into
                 (
                     ex.spawn_local(run_ctrl_queue(
                         queue,
-                        mem,
                         tap,
                         doorbell,
                         kick_evt,

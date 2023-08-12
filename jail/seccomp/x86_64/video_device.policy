@@ -100,7 +100,10 @@ sysinfo: 1
 prctl: arg0 == PR_SET_NAME
 
 # ANDROID(b/271625758): disabled to fix duplicate syscall error.
-# ## Rules for vmm-swap
-# userfaultfd: 1
-# # 0xc018aa3f == UFFDIO_API, 0xaa00 == USERFAULTFD_IOC_NEW
-# ioctl: arg1 == 0xc018aa3f || arg1 == 0xaa00
+## Rules for vmm-swap
+#userfaultfd: 1
+# 0xc018aa3f == UFFDIO_API, 0xaa00 == USERFAULTFD_IOC_NEW
+#ioctl: arg1 == 0xc018aa3f || arg1 == 0xaa00
+
+# Required by VAAPI backend
+access: 1

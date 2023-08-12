@@ -586,9 +586,8 @@ async fn request_queue(
     interrupt: Interrupt,
 ) -> Result<()> {
     loop {
-        let mem = state.borrow().mem.clone();
         let mut avail_desc = queue
-            .next_async(&mem, &mut queue_event)
+            .next_async(&mut queue_event)
             .await
             .map_err(IommuError::ReadAsyncDesc)?;
 
@@ -613,15 +612,15 @@ async fn request_queue(
             debug!("iommu fault resolved");
         }
 
-        queue.add_used(&mem, avail_desc, len as u32);
-        queue.trigger_interrupt(&mem, &interrupt);
+        queue.add_used(avail_desc, len as u32);
+        queue.trigger_interrupt(&interrupt);
     }
 }
 
 fn run(
     state: State,
     iommu_device_tube: Tube,
-    mut queues: BTreeMap<usize, (Queue, Event)>,
+    mut queues: BTreeMap<usize, Queue>,
     kill_evt: Event,
     interrupt: Interrupt,
     translate_response_senders: Option<BTreeMap<u32, Tube>>,
@@ -630,7 +629,11 @@ fn run(
     let state = Rc::new(RefCell::new(state));
     let ex = Executor::new().expect("Failed to create an executor");
 
-    let (req_queue, req_evt) = queues.remove(&0).unwrap();
+    let req_queue = queues.remove(&0).unwrap();
+    let req_evt = req_queue
+        .event()
+        .try_clone()
+        .expect("Failed to clone queue event");
     let req_evt = EventAsync::new(req_evt, &ex).expect("Failed to create async event for queue");
 
     let f_resample = async_utils::handle_irq_resample(&ex, interrupt.clone());
@@ -797,7 +800,7 @@ impl VirtioDevice for Iommu {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: BTreeMap<usize, (Queue, Event)>,
+        queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
             return Err(anyhow!(

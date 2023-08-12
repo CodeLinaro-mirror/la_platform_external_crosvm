@@ -26,6 +26,8 @@ use arch::CpuSet;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrConfig;
 use arch::Pstore;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use arch::SmbiosOptions;
 use arch::VcpuAffinity;
 use argh::FromArgs;
 use base::getpid;
@@ -133,7 +135,10 @@ pub enum CrossPlatformCommands {
     #[cfg(feature = "balloon")]
     BalloonStats(BalloonStatsCommand),
     #[cfg(feature = "balloon")]
-    BalloonWss(BalloonWssCommand),
+    BalloonWs(BalloonWsCommand),
+    // TODO(b/288432539): remove once concierge is migrated
+    #[cfg(feature = "balloon")]
+    BalloonWss(BalloonWsCommand),
     Battery(BatteryCommand),
     #[cfg(feature = "composite-disk")]
     CreateComposite(CreateCompositeCommand),
@@ -189,10 +194,10 @@ pub struct BalloonStatsCommand {
 }
 
 #[derive(argh::FromArgs)]
-#[argh(subcommand, name = "balloon_wss")]
-/// Prints virtio balloon working set size for a `VM_SOCKET`
-pub struct BalloonWssCommand {
-    #[argh(positional, arg_name = "VM_SOOCKET")]
+#[argh(subcommand, name = "balloon_ws")]
+/// Prints virtio balloon working set for a `VM_SOCKET`
+pub struct BalloonWsCommand {
+    #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM control socket path.
     pub socket_path: String,
 }
@@ -954,13 +959,20 @@ pub struct RunCommand {
     #[argh(option)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// set number of WSS bins to use (default = 4).
-    pub balloon_wss_num_bins: Option<u8>,
+    /// set number of WS bins to use (default = 4).
+    pub balloon_ws_num_bins: Option<u8>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// enable working set size reporting in balloon.
+    /// enable working set reporting in balloon.
+    pub balloon_ws_reporting: Option<bool>,
+
+    // TODO(b/288432539): remove once concierge is migrated
+    #[argh(switch)]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// enable working set reporting in balloon.
     pub balloon_wss_reporting: Option<bool>,
 
     #[argh(option)]
@@ -1603,7 +1615,7 @@ pub struct RunCommand {
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[argh(option, arg_name = "OEM_STRING")]
-    #[serde(skip)] // TODO(b/255223604)
+    #[serde(skip)] // Deprecated - use `smbios` instead.
     #[merge(strategy = append)]
     /// SMBIOS OEM string values to add to the DMI tables
     pub oem_strings: Vec<String>,
@@ -1997,6 +2009,20 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// Redirects slirp network packets to the supplied log file rather than the current directory as `slirp_capture_packets.pcap`
     pub slirp_capture_file: Option<String>,
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[argh(option, arg_name = "key=val,...")]
+    #[serde(default)]
+    #[merge(strategy = overwrite_option)]
+    /// SMBIOS table configuration (DMI)
+    /// The fields are key=value pairs.
+    ///  Valid keys are:
+    ///     bios-vendor=STRING - BIOS vendor name.
+    ///     bios-version=STRING - BIOS version number (free-form string).
+    ///     manufacturer=STRING - System manufacturer name.
+    ///     product-name=STRING - System product name.
+    ///     oem-strings=[...] - Free-form OEM strings (SMBIOS type 11).
+    pub smbios: Option<SmbiosOptions>,
 
     #[argh(option, short = 's', arg_name = "PATH")]
     #[merge(strategy = overwrite_option)]
@@ -2881,8 +2907,10 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.rng = !cmd.no_rng.unwrap_or_default();
         cfg.balloon = !cmd.no_balloon.unwrap_or_default();
         cfg.balloon_page_reporting = cmd.balloon_page_reporting.unwrap_or_default();
-        cfg.balloon_wss_num_bins = cmd.balloon_wss_num_bins.unwrap_or(4);
-        cfg.balloon_wss_reporting = cmd.balloon_wss_reporting.unwrap_or_default();
+        cfg.balloon_ws_num_bins = cmd.balloon_ws_num_bins.unwrap_or(4);
+        cfg.balloon_ws_reporting = cmd.balloon_ws_reporting.unwrap_or_default()
+        // TODO(b/288432539): remove once concierge is migrated
+            | cmd.balloon_wss_reporting.unwrap_or_default();
         #[cfg(feature = "audio")]
         {
             cfg.virtio_snds = cmd.virtio_snd;
@@ -3123,7 +3151,14 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.pci_low_start = cmd.pci_start;
             cfg.no_i8042 = cmd.no_i8042.unwrap_or_default();
             cfg.no_rtc = cmd.no_rtc.unwrap_or_default();
-            cfg.oem_strings = cmd.oem_strings;
+            cfg.smbios = cmd.smbios.unwrap_or_default();
+
+            if !cmd.oem_strings.is_empty() {
+                log::warn!(
+                    "`--oem-strings` is deprecated; use `--smbios oem-strings=[...]` instead."
+                );
+                cfg.smbios.oem_strings.extend_from_slice(&cmd.oem_strings);
+            }
 
             for (index, msr_config) in cmd.userspace_msr {
                 if cfg.userspace_msr.insert(index, msr_config).is_some() {

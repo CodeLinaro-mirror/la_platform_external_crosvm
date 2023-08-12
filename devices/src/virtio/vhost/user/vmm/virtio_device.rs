@@ -75,7 +75,6 @@ impl VhostUserVirtioDevice {
     /// - `connection`: connection to the device backend
     /// - `device_type`: virtio device type
     /// - `queue_sizes`: per-device queue size configuration
-    /// - `max_queues`: maximum number of queues supported by this implementation
     /// - `allow_features`: allowed virtio device features
     /// - `allow_protocol_features`: allowed vhost-user protocol features
     /// - `base_features`: base virtio device features (e.g. `VIRTIO_F_VERSION_1`)
@@ -85,7 +84,6 @@ impl VhostUserVirtioDevice {
         connection: Connection,
         device_type: DeviceType,
         queue_sizes: QueueSizes,
-        max_queues: usize,
         allow_features: u64,
         allow_protocol_features: VhostUserProtocolFeatures,
         base_features: u64,
@@ -98,7 +96,6 @@ impl VhostUserVirtioDevice {
 
         let mut handler = VhostUserHandler::new_from_connection(
             connection,
-            max_queues as u64,
             allow_features,
             init_features,
             allow_protocol_features,
@@ -164,7 +161,7 @@ impl VirtioDevice for VhostUserVirtioDevice {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: BTreeMap<usize, (Queue, Event)>,
+        queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         let worker_thread = self
             .handler
@@ -219,7 +216,7 @@ impl VirtioDevice for VhostUserVirtioDevice {
         &mut self,
         // Vhost user doesn't need to pass queue_states back to the device process, since it will
         // already have it.
-        _queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        _queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         self.handler
             .borrow_mut()

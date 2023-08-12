@@ -9,6 +9,7 @@ use std::convert::TryInto;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::c_char;
+use std::os::raw::c_void;
 use std::panic::catch_unwind;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -102,7 +103,7 @@ pub struct rutabaga_handle {
 
 #[repr(C)]
 pub struct rutabaga_mapping {
-    pub ptr: u64,
+    pub ptr: *mut c_void,
     pub size: u64,
 }
 
@@ -147,18 +148,14 @@ fn create_ffi_fence_handler(
     user_data: u64,
     fence_cb: rutabaga_fence_callback,
 ) -> RutabagaFenceHandler {
-    RutabagaFenceClosure::new(Box::new(move |completed_fence| {
-        fence_cb(user_data, &completed_fence)
-    }))
+    RutabagaFenceHandler::new(move |completed_fence| fence_cb(user_data, &completed_fence))
 }
 
 fn create_ffi_debug_handler(
     user_data: u64,
     debug_cb: rutabaga_debug_callback,
 ) -> RutabagaDebugHandler {
-    RutabagaDebugClosure::new(Box::new(move |rutabaga_debug| {
-        debug_cb(user_data, &rutabaga_debug)
-    }))
+    RutabagaDebugHandler::new(move |rutabaga_debug| debug_cb(user_data, &rutabaga_debug))
 }
 
 #[no_mangle]
@@ -543,7 +540,7 @@ pub extern "C" fn rutabaga_resource_map(
     catch_unwind(AssertUnwindSafe(|| {
         let result = ptr.map(resource_id);
         let internal_map = return_on_error!(result);
-        (*mapping).ptr = internal_map.ptr;
+        (*mapping).ptr = internal_map.ptr as *mut c_void;
         (*mapping).size = internal_map.size;
         NO_ERROR
     }))

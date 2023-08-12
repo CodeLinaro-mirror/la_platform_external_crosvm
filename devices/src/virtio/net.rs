@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::anyhow;
+use anyhow::Context;
 use base::error;
 #[cfg(windows)]
 use base::named_pipes::OverlappedWrapper;
@@ -303,12 +304,11 @@ fn process_ctrl_request<T: TapT>(
 pub fn process_ctrl<T: TapT>(
     interrupt: &Interrupt,
     ctrl_queue: &mut Queue,
-    mem: &GuestMemory,
     tap: &mut T,
     acked_features: u64,
     vq_pairs: u16,
 ) -> Result<(), NetError> {
-    while let Some(mut desc_chain) = ctrl_queue.pop(mem) {
+    while let Some(mut desc_chain) = ctrl_queue.pop() {
         if let Err(e) = process_ctrl_request(&mut desc_chain.reader, tap, acked_features, vq_pairs)
         {
             error!("process_ctrl_request failed: {}", e);
@@ -323,10 +323,10 @@ pub fn process_ctrl<T: TapT>(
                 .map_err(NetError::WriteAck)?;
         }
         let len = desc_chain.writer.bytes_written() as u32;
-        ctrl_queue.add_used(mem, desc_chain, len);
+        ctrl_queue.add_used(desc_chain, len);
     }
 
-    ctrl_queue.trigger_interrupt(mem, interrupt);
+    ctrl_queue.trigger_interrupt(interrupt);
     Ok(())
 }
 
@@ -348,7 +348,6 @@ pub enum Token {
 
 pub(super) struct Worker<T: TapT> {
     pub(super) interrupt: Interrupt,
-    pub(super) mem: GuestMemory,
     pub(super) rx_queue: Queue,
     pub(super) tx_queue: Queue,
     pub(super) ctrl_queue: Option<Queue>,
@@ -372,12 +371,7 @@ where
     T: TapT + ReadNotifier,
 {
     fn process_tx(&mut self) {
-        process_tx(
-            &self.interrupt,
-            &mut self.tx_queue,
-            &self.mem,
-            &mut self.tap,
-        )
+        process_tx(&self.interrupt, &mut self.tx_queue, &mut self.tap)
     }
 
     fn process_ctrl(&mut self) -> Result<(), NetError> {
@@ -389,20 +383,13 @@ where
         process_ctrl(
             &self.interrupt,
             ctrl_queue,
-            &self.mem,
             &mut self.tap,
             self.acked_features,
             self.vq_pairs,
         )
     }
 
-    fn run(
-        &mut self,
-        rx_queue_evt: Event,
-        tx_queue_evt: Event,
-        ctrl_queue_evt: Option<Event>,
-        handle_interrupt_resample: bool,
-    ) -> Result<(), NetError> {
+    fn run(&mut self, handle_interrupt_resample: bool) -> Result<(), NetError> {
         let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
             // This doesn't use get_read_notifier() because of overlapped io; we
             // have overlapped wrapper separate from the TAP so that we can pass
@@ -415,15 +402,15 @@ where
             ),
             #[cfg(unix)]
             (self.tap.get_read_notifier(), Token::RxTap),
-            (&rx_queue_evt, Token::RxQueue),
-            (&tx_queue_evt, Token::TxQueue),
+            (self.rx_queue.event(), Token::RxQueue),
+            (self.tx_queue.event(), Token::TxQueue),
             (&self.kill_evt, Token::Kill),
         ])
         .map_err(NetError::CreateWaitContext)?;
 
-        if let Some(ctrl_evt) = &ctrl_queue_evt {
+        if let Some(ctrl_queue) = &self.ctrl_queue {
             wait_ctx
-                .add(ctrl_evt, Token::CtrlQueue)
+                .add(ctrl_queue.event(), Token::CtrlQueue)
                 .map_err(NetError::CreateWaitContext)?;
         }
 
@@ -447,7 +434,7 @@ where
                     }
                     Token::RxQueue => {
                         let _trace = cros_tracing::trace_event!(VirtioNet, "handle RxQueue event");
-                        if let Err(e) = rx_queue_evt.wait() {
+                        if let Err(e) = self.rx_queue.event().wait() {
                             error!("net: error reading rx queue Event: {}", e);
                             break 'wait;
                         }
@@ -456,7 +443,7 @@ where
                     }
                     Token::TxQueue => {
                         let _trace = cros_tracing::trace_event!(VirtioNet, "handle TxQueue event");
-                        if let Err(e) = tx_queue_evt.wait() {
+                        if let Err(e) = self.tx_queue.event().wait() {
                             error!("net: error reading tx queue Event: {}", e);
                             break 'wait;
                         }
@@ -465,7 +452,7 @@ where
                     Token::CtrlQueue => {
                         let _trace =
                             cros_tracing::trace_event!(VirtioNet, "handle CtrlQueue event");
-                        if let Some(ctrl_evt) = &ctrl_queue_evt {
+                        if let Some(ctrl_evt) = self.ctrl_queue.as_ref().map(|q| q.event()) {
                             if let Err(e) = ctrl_evt.wait() {
                                 error!("net: error reading ctrl queue Event: {}", e);
                                 break 'wait;
@@ -518,6 +505,12 @@ pub struct Net<T: TapT + ReadNotifier + 'static> {
     mtu: u16,
     #[cfg(windows)]
     slirp_kill_evt: Option<Event>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NetSnapshot {
+    avail_features: u64,
+    acked_features: u64,
 }
 
 impl<T> Net<T>
@@ -723,9 +716,9 @@ where
 
     fn activate(
         &mut self,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         let ctrl_vq_enabled = self.acked_features & (1 << virtio_net::VIRTIO_NET_F_CTRL_VQ) != 0;
         let mq_enabled = self.acked_features & (1 << virtio_net::VIRTIO_NET_F_MQ) != 0;
@@ -761,16 +754,14 @@ where
             let tap = self.taps.remove(0);
             let acked_features = self.acked_features;
             let interrupt = interrupt.clone();
-            let memory = mem.clone();
             let first_queue = i == 0;
             // Queues alternate between rx0, tx0, rx1, tx1, ..., rxN, txN, ctrl.
-            let (rx_queue, rx_queue_evt) = queues.pop_first().unwrap().1;
-            let (tx_queue, tx_queue_evt) = queues.pop_first().unwrap().1;
-            let (ctrl_queue, ctrl_queue_evt) = if first_queue && ctrl_vq_enabled {
-                let (queue, evt) = queues.pop_last().unwrap().1;
-                (Some(queue), Some(evt))
+            let rx_queue = queues.pop_first().unwrap().1;
+            let tx_queue = queues.pop_first().unwrap().1;
+            let ctrl_queue = if first_queue && ctrl_vq_enabled {
+                Some(queues.pop_last().unwrap().1)
             } else {
-                (None, None)
+                None
             };
             // Handle interrupt resampling on the first queue's thread.
             let handle_interrupt_resample = first_queue;
@@ -781,7 +772,6 @@ where
                 .push(WorkerThread::start(format!("v_net:{i}"), move |kill_evt| {
                     let mut worker = Worker {
                         interrupt,
-                        mem: memory,
                         rx_queue,
                         tx_queue,
                         ctrl_queue,
@@ -798,12 +788,7 @@ where
                         deferred_rx: false,
                         kill_evt,
                     };
-                    let result = worker.run(
-                        rx_queue_evt,
-                        tx_queue_evt,
-                        ctrl_queue_evt,
-                        handle_interrupt_resample,
-                    );
+                    let result = worker.run(handle_interrupt_resample);
                     if let Err(e) = result {
                         error!("net worker thread exited with error: {}", e);
                     }
@@ -839,7 +824,7 @@ where
 
     fn virtio_wake(
         &mut self,
-        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         match device_state {
             None => Ok(()),
@@ -851,6 +836,27 @@ where
                 Ok(())
             }
         }
+    }
+
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        serde_json::to_value(NetSnapshot {
+            acked_features: self.acked_features,
+            avail_features: self.avail_features,
+        })
+        .context("failed to snapshot virtio Net device")
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let deser: NetSnapshot =
+            serde_json::from_value(data).context("failed to deserialize Net device")?;
+        anyhow::ensure!(
+            self.avail_features == deser.avail_features,
+            "Available features for net device do not match. expected: {},  got: {}",
+            deser.avail_features,
+            self.avail_features
+        );
+        self.acked_features = deser.acked_features;
+        Ok(())
     }
 
     fn reset(&mut self) -> bool {

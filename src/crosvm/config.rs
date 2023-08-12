@@ -24,6 +24,8 @@ use arch::MsrRWType;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use arch::MsrValueFrom;
 use arch::Pstore;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use arch::SmbiosOptions;
 use arch::VcpuAffinity;
 use base::debug;
 use base::pagesize;
@@ -835,8 +837,8 @@ pub struct Config {
     pub balloon_bias: i64,
     pub balloon_control: Option<PathBuf>,
     pub balloon_page_reporting: bool,
-    pub balloon_wss_num_bins: u8,
-    pub balloon_wss_reporting: bool,
+    pub balloon_ws_num_bins: u8,
+    pub balloon_ws_reporting: bool,
     pub battery_config: Option<BatteryConfig>,
     #[cfg(windows)]
     pub block_control_tube: Vec<Tube>,
@@ -914,8 +916,6 @@ pub struct Config {
     pub no_i8042: bool,
     pub no_rtc: bool,
     pub no_smt: bool,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub oem_strings: Vec<String>,
     pub params: Vec<String>,
     #[cfg(feature = "pci-hotplug")]
     pub pci_hotplug_slots: Option<u8>,
@@ -958,6 +958,8 @@ pub struct Config {
     pub shared_dirs: Vec<SharedDir>,
     #[cfg(feature = "slirp-ring-capture")]
     pub slirp_capture_file: Option<String>,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub smbios: SmbiosOptions,
     #[cfg(all(windows, feature = "audio"))]
     pub snd_split_config: Option<SndSplitConfig>,
     pub socket_path: Option<PathBuf>,
@@ -1040,8 +1042,8 @@ impl Default for Config {
             balloon_bias: 0,
             balloon_control: None,
             balloon_page_reporting: false,
-            balloon_wss_num_bins: VIRTIO_BALLOON_WS_DEFAULT_NUM_BINS,
-            balloon_wss_reporting: false,
+            balloon_ws_num_bins: VIRTIO_BALLOON_WS_DEFAULT_NUM_BINS,
+            balloon_ws_reporting: false,
             battery_config: None,
             #[cfg(windows)]
             block_control_tube: Vec::new(),
@@ -1127,8 +1129,6 @@ impl Default for Config {
             no_i8042: false,
             no_rtc: false,
             no_smt: false,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            oem_strings: Vec::new(),
             params: Vec::new(),
             #[cfg(feature = "pci-hotplug")]
             pci_hotplug_slots: None,
@@ -1164,6 +1164,8 @@ impl Default for Config {
             shared_dirs: Vec::new(),
             #[cfg(feature = "slirp-ring-capture")]
             slirp_capture_file: None,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            smbios: SmbiosOptions::default(),
             #[cfg(all(windows, feature = "audio"))]
             snd_split_config: None,
             socket_path: None,

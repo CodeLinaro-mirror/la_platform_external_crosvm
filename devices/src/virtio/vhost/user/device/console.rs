@@ -161,33 +161,26 @@ impl VhostUserBackend for ConsoleBackend {
         &mut self,
         idx: usize,
         queue: virtio::Queue,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         doorbell: Interrupt,
-        kick_evt: Event,
     ) -> anyhow::Result<()> {
         let queue = Arc::new(Mutex::new(queue));
         match idx {
             // ReceiveQueue
             0 => {
-                let res = self.device.console.start_receive_queue(
-                    &self.ex,
-                    mem,
-                    queue.clone(),
-                    doorbell,
-                    kick_evt,
-                );
+                let res =
+                    self.device
+                        .console
+                        .start_receive_queue(&self.ex, queue.clone(), doorbell);
                 self.active_in_queue = Some(queue);
                 res
             }
             // TransmitQueue
             1 => {
-                let res = self.device.console.start_transmit_queue(
-                    &self.ex,
-                    mem,
-                    queue.clone(),
-                    doorbell,
-                    kick_evt,
-                );
+                let res =
+                    self.device
+                        .console
+                        .start_transmit_queue(&self.ex, queue.clone(), doorbell);
                 self.active_out_queue = Some(queue);
                 res
             }

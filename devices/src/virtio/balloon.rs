@@ -14,8 +14,8 @@ use anyhow::Context;
 use balloon_control::BalloonStats;
 use balloon_control::BalloonTubeCommand;
 use balloon_control::BalloonTubeResult;
-use balloon_control::BalloonWSS;
-use balloon_control::WSSBucket;
+use balloon_control::BalloonWS;
+use balloon_control::WSBucket;
 use balloon_control::VIRTIO_BALLOON_WS_MAX_NUM_BINS;
 use balloon_control::VIRTIO_BALLOON_WS_MIN_NUM_BINS;
 use base::error;
@@ -101,7 +101,7 @@ pub enum BalloonError {
 }
 pub type Result<T> = std::result::Result<T, BalloonError>;
 
-// Balloon implements six virt IO queues: Inflate, Deflate, Stats, Event, WssData, WssCmd.
+// Balloon implements six virt IO queues: Inflate, Deflate, Stats, Event, WsData, WsCmd.
 const QUEUE_SIZE: u16 = 128;
 const QUEUE_SIZES: &[u16] = &[
     QUEUE_SIZE, QUEUE_SIZE, QUEUE_SIZE, QUEUE_SIZE, QUEUE_SIZE, QUEUE_SIZE,
@@ -116,7 +116,7 @@ const VIRTIO_BALLOON_F_STATS_VQ: u32 = 1; // Stats reporting enabled
 const VIRTIO_BALLOON_F_DEFLATE_ON_OOM: u32 = 2; // Deflate balloon on OOM
 const VIRTIO_BALLOON_F_PAGE_REPORTING: u32 = 5; // Page reporting virtqueue
                                                 // TODO(b/273973298): this should maybe be bit 6? to be changed later
-const VIRTIO_BALLOON_F_WSS_REPORTING: u32 = 8; // Working Set Size reporting virtqueues
+const VIRTIO_BALLOON_F_WS_REPORTING: u32 = 8; // Working Set Reporting virtqueues
 
 #[derive(Copy, Clone)]
 #[repr(u32)]
@@ -124,8 +124,8 @@ const VIRTIO_BALLOON_F_WSS_REPORTING: u32 = 8; // Working Set Size reporting vir
 pub enum BalloonFeatures {
     // Page Reporting enabled
     PageReporting = VIRTIO_BALLOON_F_PAGE_REPORTING,
-    // WSS Reporting enabled
-    WSSReporting = VIRTIO_BALLOON_F_WSS_REPORTING,
+    // WS Reporting enabled
+    WSReporting = VIRTIO_BALLOON_F_WS_REPORTING,
 }
 
 // These feature bits are part of the proposal:
@@ -141,8 +141,8 @@ struct virtio_balloon_config {
     actual: Le32,
     free_page_hint_cmd_id: Le32,
     poison_val: Le32,
-    // WSS field is part of proposed spec extension (b/273973298).
-    wss_num_bins: u8,
+    // WS field is part of proposed spec extension (b/273973298).
+    ws_num_bins: u8,
     _reserved: [u8; 3],
 }
 
@@ -151,7 +151,7 @@ struct virtio_balloon_config {
 struct BalloonState {
     num_pages: u32,
     actual_pages: u32,
-    expecting_wss: bool,
+    expecting_ws: bool,
     // Flag indicating that the balloon is in the process of a failable update. This
     // is set by an Adjust command that has allow_failure set, and is cleared when the
     // Adjusted success/failure response is sent.
@@ -211,10 +211,10 @@ struct virtio_balloon_event_header {
     evt_type: Le32,
 }
 
-// virtio_balloon_wss is used to deserialize from the wss data vq.
+// virtio_balloon_ws is used to deserialize from the ws data vq.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
-struct virtio_balloon_wss {
+struct virtio_balloon_ws {
     tag: Le16,
     node_id: Le16,
     // virtio prefers field members to align on a word boundary so we must pad. see:
@@ -225,25 +225,25 @@ struct virtio_balloon_wss {
     memory_size_bytes: [Le64; 2],
 }
 
-impl virtio_balloon_wss {
-    fn update_wss(&self, wss: &mut BalloonWSS) {
-        let bucket = WSSBucket {
+impl virtio_balloon_ws {
+    fn update_ws(&self, ws: &mut BalloonWS) {
+        let bucket = WSBucket {
             age: self.idle_age_ms.to_native(),
             bytes: [
                 self.memory_size_bytes[0].to_native(),
                 self.memory_size_bytes[1].to_native(),
             ],
         };
-        wss.wss.push(bucket);
+        ws.ws.push(bucket);
     }
 }
 
-const _VIRTIO_BALLOON_WSS_OP_INVALID: u16 = 0;
-const VIRTIO_BALLOON_WSS_OP_REQUEST: u16 = 1;
-const VIRTIO_BALLOON_WSS_OP_CONFIG: u16 = 2;
-const _VIRTIO_BALLOON_WSS_OP_DISCARD: u16 = 3;
+const _VIRTIO_BALLOON_WS_OP_INVALID: u16 = 0;
+const VIRTIO_BALLOON_WS_OP_REQUEST: u16 = 1;
+const VIRTIO_BALLOON_WS_OP_CONFIG: u16 = 2;
+const _VIRTIO_BALLOON_WS_OP_DISCARD: u16 = 3;
 
-// virtio_balloon_op is used to serialize to the wss cmd vq.
+// virtio_balloon_op is used to serialize to the ws cmd vq.
 #[repr(C, packed)]
 #[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
 struct virtio_balloon_op {
@@ -350,7 +350,6 @@ where
 
 // Async task that handles the main balloon inflate and deflate queues.
 async fn handle_queue<F>(
-    mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
     release_memory_tube: Option<&Tube>,
@@ -363,7 +362,7 @@ where
 {
     loop {
         let mut avail_desc = match queue
-            .next_async_interruptable(mem, &mut queue_event, &mut stop_rx)
+            .next_async_interruptable(&mut queue_event, &mut stop_rx)
             .await
         {
             Ok(Some(res)) => res,
@@ -378,8 +377,8 @@ where
         {
             error!("balloon: failed to process inflate addresses: {}", e);
         }
-        queue.add_used(mem, avail_desc, 0);
-        queue.trigger_interrupt(mem, &interrupt);
+        queue.add_used(avail_desc, 0);
+        queue.trigger_interrupt(&interrupt);
     }
 }
 
@@ -404,7 +403,6 @@ where
 
 // Async task that handles the page reporting queue.
 async fn handle_reporting_queue<F>(
-    mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
     release_memory_tube: Option<&Tube>,
@@ -417,7 +415,7 @@ where
 {
     loop {
         let avail_desc = match queue
-            .next_async_interruptable(mem, &mut queue_event, &mut stop_rx)
+            .next_async_interruptable(&mut queue_event, &mut stop_rx)
             .await
         {
             Ok(Some(res)) => res,
@@ -431,8 +429,8 @@ where
         {
             error!("balloon: failed to process reported buffer: {}", e);
         }
-        queue.add_used(mem, avail_desc, 0);
-        queue.trigger_interrupt(mem, &interrupt);
+        queue.add_used(avail_desc, 0);
+        queue.trigger_interrupt(&interrupt);
     }
 }
 
@@ -455,7 +453,6 @@ fn parse_balloon_stats(reader: &mut Reader) -> BalloonStats {
 // The guests queues an initial buffer on boot, which is read and then this future will block until
 // signaled from the command socket that stats should be collected again.
 async fn handle_stats_queue(
-    mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
     mut stats_rx: mpsc::Receiver<()>,
@@ -466,7 +463,7 @@ async fn handle_stats_queue(
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Queue {
     let mut avail_desc = match queue
-        .next_async_interruptable(mem, &mut queue_event, &mut stop_rx)
+        .next_async_interruptable(&mut queue_event, &mut stop_rx)
         .await
     {
         // Consume the first stats buffer sent from the guest at startup. It was not
@@ -495,10 +492,10 @@ async fn handle_stats_queue(
         };
 
         // Request a new stats_desc to the guest.
-        queue.add_used(mem, avail_desc, 0);
-        queue.trigger_interrupt(mem, &interrupt);
+        queue.add_used(avail_desc, 0);
+        queue.trigger_interrupt(&interrupt);
 
-        avail_desc = match queue.next_async(mem, &mut queue_event).await {
+        avail_desc = match queue.next_async(&mut queue_event).await {
             Err(e) => {
                 error!("Failed to read descriptor {}", e);
                 return queue;
@@ -572,7 +569,6 @@ async fn handle_event(
 
 // Async task that handles the events queue.
 async fn handle_events_queue(
-    mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
     state: Arc<AsyncRwLock<BalloonState>>,
@@ -581,7 +577,7 @@ async fn handle_events_queue(
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<Queue> {
     while let Some(mut avail_desc) = queue
-        .next_async_interruptable(mem, &mut queue_event, &mut stop_rx)
+        .next_async_interruptable(&mut queue_event, &mut stop_rx)
         .await
         .map_err(BalloonError::AsyncAwait)?
     {
@@ -593,37 +589,36 @@ async fn handle_events_queue(
         )
         .await?;
 
-        queue.add_used(mem, avail_desc, 0);
-        queue.trigger_interrupt(mem, &interrupt);
+        queue.add_used(avail_desc, 0);
+        queue.trigger_interrupt(&interrupt);
     }
     Ok(queue)
 }
 
-enum WSSOp {
-    WSSReport,
-    WSSConfig {
-        bins: Vec<u64>,
-        refresh_threshold: u64,
-        report_threshold: u64,
+enum WSOp {
+    WSReport,
+    WSConfig {
+        bins: Vec<u32>,
+        refresh_threshold: u32,
+        report_threshold: u32,
     },
 }
 
-async fn handle_wss_op_queue(
-    mem: &GuestMemory,
+async fn handle_ws_op_queue(
     mut queue: Queue,
     mut queue_event: EventAsync,
-    mut wss_op_rx: mpsc::Receiver<WSSOp>,
+    mut ws_op_rx: mpsc::Receiver<WSOp>,
     state: Arc<AsyncRwLock<BalloonState>>,
     interrupt: Interrupt,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<Queue> {
     loop {
         let op = select_biased! {
-            next_op = wss_op_rx.next().fuse() => {
+            next_op = ws_op_rx.next().fuse() => {
                 match next_op {
                     Some(op) => op,
                     None => {
-                        error!("wss op tube was closed");
+                        error!("ws op tube was closed");
                         break;
                     }
                 }
@@ -633,31 +628,31 @@ async fn handle_wss_op_queue(
             }
         };
         let mut avail_desc = queue
-            .next_async(mem, &mut queue_event)
+            .next_async(&mut queue_event)
             .await
             .map_err(BalloonError::AsyncAwait)?;
         let writer = &mut avail_desc.writer;
 
         match op {
-            WSSOp::WSSReport => {
+            WSOp::WSReport => {
                 {
                     let mut state = state.lock().await;
-                    state.expecting_wss = true;
+                    state.expecting_ws = true;
                 }
 
-                let wss_r = virtio_balloon_op {
-                    type_: VIRTIO_BALLOON_WSS_OP_REQUEST.into(),
+                let ws_r = virtio_balloon_op {
+                    type_: VIRTIO_BALLOON_WS_OP_REQUEST.into(),
                 };
 
-                writer.write_obj(wss_r).map_err(BalloonError::WriteQueue)?;
+                writer.write_obj(ws_r).map_err(BalloonError::WriteQueue)?;
             }
-            WSSOp::WSSConfig {
+            WSOp::WSConfig {
                 bins,
                 refresh_threshold,
                 report_threshold,
             } => {
                 let cmd = virtio_balloon_op {
-                    type_: VIRTIO_BALLOON_WSS_OP_CONFIG.into(),
+                    type_: VIRTIO_BALLOON_WS_OP_CONFIG.into(),
                 };
 
                 writer.write_obj(cmd).map_err(BalloonError::WriteQueue)?;
@@ -674,41 +669,39 @@ async fn handle_wss_op_queue(
         }
 
         let len = writer.bytes_written() as u32;
-        queue.add_used(mem, avail_desc, len);
-        queue.trigger_interrupt(mem, &interrupt);
+        queue.add_used(avail_desc, len);
+        queue.trigger_interrupt(&interrupt);
     }
 
     Ok(queue)
 }
 
-fn parse_balloon_wss(reader: &mut Reader) -> BalloonWSS {
-    let mut wss = BalloonWSS::new();
-    for res in reader.iter::<virtio_balloon_wss>() {
+fn parse_balloon_ws(reader: &mut Reader) -> BalloonWS {
+    let mut ws = BalloonWS::new();
+    for res in reader.iter::<virtio_balloon_ws>() {
         match res {
-            Ok(wss_msg) => {
-                wss_msg.update_wss(&mut wss);
+            Ok(ws_msg) => {
+                ws_msg.update_ws(&mut ws);
             }
             Err(e) => {
-                error!("error while reading wss: {}", e);
+                error!("error while reading ws: {}", e);
                 break;
             }
         }
     }
-    if wss.wss.len() < VIRTIO_BALLOON_WS_MIN_NUM_BINS
-        || wss.wss.len() > VIRTIO_BALLOON_WS_MAX_NUM_BINS
+    if ws.ws.len() < VIRTIO_BALLOON_WS_MIN_NUM_BINS || ws.ws.len() > VIRTIO_BALLOON_WS_MAX_NUM_BINS
     {
-        error!("unexpected number of WSS buckets: {}", wss.wss.len());
+        error!("unexpected number of WS buckets: {}", ws.ws.len());
     }
-    wss
+    ws
 }
 
 // Async task that handles the stats queue. Note that the arrival of events on
-// the WSS vq may be the result of either a WSS request (WSS-R) command having
+// the WS vq may be the result of either a WS request (WS-R) command having
 // been sent to the guest, or an unprompted send due to memory pressue in the
 // guest. If the data was requested, we should also send that back on the
 // command tube.
-async fn handle_wss_data_queue(
-    mem: &GuestMemory,
+async fn handle_ws_data_queue(
     mut queue: Queue,
     mut queue_event: EventAsync,
     command_tube: &AsyncTube,
@@ -719,7 +712,7 @@ async fn handle_wss_data_queue(
 ) -> Result<Queue> {
     loop {
         let mut avail_desc = match queue
-            .next_async_interruptable(mem, &mut queue_event, &mut stop_rx)
+            .next_async_interruptable(&mut queue_event, &mut stop_rx)
             .await
             .map_err(BalloonError::AsyncAwait)?
         {
@@ -727,38 +720,35 @@ async fn handle_wss_data_queue(
             None => return Ok(queue),
         };
 
-        let wss = parse_balloon_wss(&mut avail_desc.reader);
+        let ws = parse_balloon_ws(&mut avail_desc.reader);
 
         let mut state = state.lock().await;
 
-        // update wss report with balloon pages now that we have a lock on state
+        // update ws report with balloon pages now that we have a lock on state
         let balloon_actual = (state.actual_pages as u64) << VIRTIO_BALLOON_PFN_SHIFT;
 
-        if state.expecting_wss {
-            let result = BalloonTubeResult::WorkingSetSize {
-                wss,
-                balloon_actual,
-            };
+        if state.expecting_ws {
+            let result = BalloonTubeResult::WorkingSet { ws, balloon_actual };
             let send_result = command_tube.send(result).await;
             if let Err(e) = send_result {
-                error!("failed to send wss result: {}", e);
+                error!("failed to send ws result: {}", e);
             }
 
-            state.expecting_wss = false;
+            state.expecting_ws = false;
         } else {
             #[cfg(feature = "registered_events")]
             if let Some(registered_evt_q) = registered_evt_q {
                 if let Err(e) = registered_evt_q
-                    .send(RegisteredEventWithData::from_wss(&wss, balloon_actual))
+                    .send(RegisteredEventWithData::from_ws(&ws, balloon_actual))
                     .await
                 {
-                    error!("failed to send VirtioBalloonWSSReport event: {}", e);
+                    error!("failed to send VirtioBalloonWSReport event: {}", e);
                 }
             }
         }
 
-        queue.add_used(mem, avail_desc, 0);
-        queue.trigger_interrupt(mem, &interrupt);
+        queue.add_used(avail_desc, 0);
+        queue.trigger_interrupt(&interrupt);
     }
 }
 
@@ -769,7 +759,7 @@ async fn handle_command_tube(
     interrupt: Interrupt,
     state: Arc<AsyncRwLock<BalloonState>>,
     mut stats_tx: mpsc::Sender<()>,
-    mut wss_op_tx: mpsc::Sender<WSSOp>,
+    mut ws_op_tx: mpsc::Sender<WSOp>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     loop {
@@ -799,17 +789,17 @@ async fn handle_command_tube(
                         }
                     }
                 }
-                BalloonTubeCommand::WorkingSetSizeConfig {
+                BalloonTubeCommand::WorkingSetConfig {
                     bins,
                     refresh_threshold,
                     report_threshold,
                 } => {
-                    if let Err(e) = wss_op_tx.try_send(WSSOp::WSSConfig {
+                    if let Err(e) = ws_op_tx.try_send(WSOp::WSConfig {
                         bins,
                         refresh_threshold,
                         report_threshold,
                     }) {
-                        error!("failed to send config to wss handler: {}", e);
+                        error!("failed to send config to ws handler: {}", e);
                     }
                 }
                 BalloonTubeCommand::Stats => {
@@ -817,9 +807,9 @@ async fn handle_command_tube(
                         error!("failed to signal the stat handler: {}", e);
                     }
                 }
-                BalloonTubeCommand::WorkingSetSize => {
-                    if let Err(e) = wss_op_tx.try_send(WSSOp::WSSReport) {
-                        error!("failed to send report request to wss handler: {}", e);
+                BalloonTubeCommand::WorkingSet => {
+                    if let Err(e) = ws_op_tx.try_send(WSOp::WSReport) {
+                        error!("failed to send report request to ws handler: {}", e);
                     }
                 }
             },
@@ -861,23 +851,23 @@ async fn handle_pending_adjusted_responses(
 
 /// Represents queues & events for the balloon device.
 struct BalloonQueues {
-    inflate: (Queue, Event),
-    deflate: (Queue, Event),
-    stats: Option<(Queue, Event)>,
-    reporting: Option<(Queue, Event)>,
-    events: Option<(Queue, Event)>,
-    wss: (Option<(Queue, Event)>, Option<(Queue, Event)>),
+    inflate: Queue,
+    deflate: Queue,
+    stats: Option<Queue>,
+    reporting: Option<Queue>,
+    events: Option<Queue>,
+    ws: (Option<Queue>, Option<Queue>),
 }
 
 impl BalloonQueues {
-    fn new(inflate: (Queue, Event), deflate: (Queue, Event)) -> Self {
+    fn new(inflate: Queue, deflate: Queue) -> Self {
         BalloonQueues {
             inflate,
             deflate,
             stats: None,
             reporting: None,
             events: None,
-            wss: (None, None),
+            ws: (None, None),
         }
     }
 }
@@ -889,7 +879,7 @@ struct PausedQueues {
     stats: Option<Queue>,
     reporting: Option<Queue>,
     events: Option<Queue>,
-    wss: (Option<Queue>, Option<Queue>),
+    ws: (Option<Queue>, Option<Queue>),
 }
 
 impl PausedQueues {
@@ -900,7 +890,7 @@ impl PausedQueues {
             stats: None,
             reporting: None,
             events: None,
-            wss: (None, None),
+            ws: (None, None),
         }
     }
 }
@@ -922,8 +912,8 @@ impl From<Box<PausedQueues>> for BTreeMap<usize, Queue> {
         apply_if_some(queues.stats, |stats| ret.push(stats));
         apply_if_some(queues.reporting, |reporting| ret.push(reporting));
         apply_if_some(queues.events, |events| ret.push(events));
-        apply_if_some(queues.wss.0, |wss_data| ret.push(wss_data));
-        apply_if_some(queues.wss.1, |wss_op| ret.push(wss_op));
+        apply_if_some(queues.ws.0, |ws_data| ret.push(ws_data));
+        apply_if_some(queues.ws.1, |ws_op| ret.push(ws_op));
         // WARNING: We don't use the indices from the virito spec on purpose, see comment in
         // get_queues_from_map for the rationale.
         ret.into_iter().enumerate().collect()
@@ -945,12 +935,12 @@ struct WorkerReturn {
 // The main worker thread. Initialized the asynchronous worker tasks and passes them to the executor
 // to be processed.
 fn run_worker(
-    inflate_queue: (Queue, Event),
-    deflate_queue: (Queue, Event),
-    stats_queue: Option<(Queue, Event)>,
-    reporting_queue: Option<(Queue, Event)>,
-    events_queue: Option<(Queue, Event)>,
-    wss_queues: (Option<(Queue, Event)>, Option<(Queue, Event)>),
+    inflate_queue: Queue,
+    deflate_queue: Queue,
+    stats_queue: Option<Queue>,
+    reporting_queue: Option<Queue>,
+    events_queue: Option<Queue>,
+    ws_queues: (Option<Queue>, Option<Queue>),
     command_tube: Tube,
     #[cfg(windows)] vm_memory_client: VmMemoryClient,
     release_memory_tube: Option<Tube>,
@@ -975,10 +965,13 @@ fn run_worker(
     let paused_queues = {
         // The first queue is used for inflate messages
         let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
+        let inflate_queue_evt = inflate_queue
+            .event()
+            .try_clone()
+            .expect("failed to clone queue event");
         let inflate = handle_queue(
-            &mem,
-            inflate_queue.0,
-            EventAsync::new(inflate_queue.1, &ex).expect("failed to create async event"),
+            inflate_queue,
+            EventAsync::new(inflate_queue_evt, &ex).expect("failed to create async event"),
             release_memory_tube.as_ref(),
             interrupt.clone(),
             |guest_address, len| {
@@ -998,10 +991,13 @@ fn run_worker(
 
         // The second queue is used for deflate messages
         let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
+        let deflate_queue_evt = deflate_queue
+            .event()
+            .try_clone()
+            .expect("failed to clone queue event");
         let deflate = handle_queue(
-            &mem,
-            deflate_queue.0,
-            EventAsync::new(deflate_queue.1, &ex).expect("failed to create async event"),
+            deflate_queue,
+            EventAsync::new(deflate_queue_evt, &ex).expect("failed to create async event"),
             None,
             interrupt.clone(),
             |guest_address, len| {
@@ -1020,10 +1016,13 @@ fn run_worker(
         // The next queue is used for stats messages if VIRTIO_BALLOON_F_STATS_VQ is negotiated.
         let (stats_tx, stats_rx) = mpsc::channel::<()>(1);
         let has_stats_queue = stats_queue.is_some();
-        let stats = if let Some((stats_queue, stats_queue_evt)) = stats_queue {
+        let stats = if let Some(stats_queue) = stats_queue {
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
+            let stats_queue_evt = stats_queue
+                .event()
+                .try_clone()
+                .expect("failed to clone queue event");
             handle_stats_queue(
-                &mem,
                 stats_queue,
                 EventAsync::new(stats_queue_evt, &ex).expect("failed to create async event"),
                 stats_rx,
@@ -1043,10 +1042,13 @@ fn run_worker(
 
         // The next queue is used for reporting messages
         let has_reporting_queue = reporting_queue.is_some();
-        let reporting = if let Some((reporting_queue, reporting_queue_evt)) = reporting_queue {
+        let reporting = if let Some(reporting_queue) = reporting_queue {
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
+            let reporting_queue_evt = reporting_queue
+                .event()
+                .try_clone()
+                .expect("failed to clone queue event");
             handle_reporting_queue(
-                &mem,
                 reporting_queue,
                 EventAsync::new(reporting_queue_evt, &ex).expect("failed to create async event"),
                 release_memory_tube.as_ref(),
@@ -1070,15 +1072,18 @@ fn run_worker(
         let reporting = reporting.fuse();
         pin_mut!(reporting);
 
-        // If VIRTIO_BALLOON_F_WSS_REPORTING is set 2 queues must handled - one for WSS data and one
-        // for WSS notifications.
-        let has_wss_data_queue = wss_queues.0.is_some();
-        let wss_data = if let Some((wss_data_queue, wss_data_queue_evt)) = wss_queues.0 {
+        // If VIRTIO_BALLOON_F_WS_REPORTING is set 2 queues must handled - one for WS data and one
+        // for WS notifications.
+        let has_ws_data_queue = ws_queues.0.is_some();
+        let ws_data = if let Some(ws_data_queue) = ws_queues.0 {
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
-            handle_wss_data_queue(
-                &mem,
-                wss_data_queue,
-                EventAsync::new(wss_data_queue_evt, &ex).expect("failed to create async event"),
+            let ws_data_queue_evt = ws_data_queue
+                .event()
+                .try_clone()
+                .expect("failed to clone queue event");
+            handle_ws_data_queue(
+                ws_data_queue,
+                EventAsync::new(ws_data_queue_evt, &ex).expect("failed to create async event"),
                 &command_tube,
                 #[cfg(feature = "registered_events")]
                 registered_evt_q_async.as_ref(),
@@ -1090,18 +1095,21 @@ fn run_worker(
         } else {
             std::future::pending().right_future()
         };
-        let wss_data = wss_data.fuse();
-        pin_mut!(wss_data);
+        let ws_data = ws_data.fuse();
+        pin_mut!(ws_data);
 
-        let (wss_op_tx, wss_op_rx) = mpsc::channel::<WSSOp>(1);
-        let has_wss_op_queue = wss_queues.1.is_some();
-        let wss_op = if let Some((wss_op_queue, wss_op_queue_evt)) = wss_queues.1 {
+        let (ws_op_tx, ws_op_rx) = mpsc::channel::<WSOp>(1);
+        let has_ws_op_queue = ws_queues.1.is_some();
+        let ws_op = if let Some(ws_op_queue) = ws_queues.1 {
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
-            handle_wss_op_queue(
-                &mem,
-                wss_op_queue,
-                EventAsync::new(wss_op_queue_evt, &ex).expect("failed to create async event"),
-                wss_op_rx,
+            let ws_op_queue_evt = ws_op_queue
+                .event()
+                .try_clone()
+                .expect("failed to clone queue event");
+            handle_ws_op_queue(
+                ws_op_queue,
+                EventAsync::new(ws_op_queue_evt, &ex).expect("failed to create async event"),
+                ws_op_rx,
                 state.clone(),
                 interrupt.clone(),
                 stop_rx,
@@ -1110,8 +1118,8 @@ fn run_worker(
         } else {
             std::future::pending().right_future()
         };
-        let wss_op = wss_op.fuse();
-        pin_mut!(wss_op);
+        let ws_op = ws_op.fuse();
+        pin_mut!(ws_op);
 
         // Future to handle command messages that resize the balloon.
         let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
@@ -1120,7 +1128,7 @@ fn run_worker(
             interrupt.clone(),
             state.clone(),
             stats_tx,
-            wss_op_tx,
+            ws_op_tx,
             stop_rx,
         );
         pin_mut!(command);
@@ -1144,10 +1152,13 @@ fn run_worker(
 
         // The next queue is used for events if VIRTIO_BALLOON_F_EVENTS_VQ is negotiated.
         let has_events_queue = events_queue.is_some();
-        let events = if let Some((events_queue, events_queue_evt)) = events_queue {
+        let events = if let Some(events_queue) = events_queue {
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
+            let events_queue_evt = events_queue
+                .event()
+                .try_clone()
+                .expect("failed to clone queue event");
             handle_events_queue(
-                &mem,
                 events_queue,
                 EventAsync::new(events_queue_evt, &ex).expect("failed to create async event"),
                 state.clone(),
@@ -1178,11 +1189,11 @@ fn run_worker(
                 _ = stats => return Err(anyhow!("stats stopped unexpectedly")),
                 _ = reporting => return Err(anyhow!("reporting stopped unexpectedly")),
                 _ = command.fuse() => return Err(anyhow!("command stopped unexpectedly")),
-                _ = wss_op => return Err(anyhow!("wss_op stopped unexpectedly")),
+                _ = ws_op => return Err(anyhow!("ws_op stopped unexpectedly")),
                 _ = resample.fuse() => return Err(anyhow!("resample stopped unexpectedly")),
                 _ = events => return Err(anyhow!("events stopped unexpectedly")),
                 _ = pending_adjusted.fuse() => return Err(anyhow!("pending_adjusted stopped unexpectedly")),
-                _ = wss_data => return Err(anyhow!("wss_data stopped unexpectedly")),
+                _ = ws_data => return Err(anyhow!("ws_data stopped unexpectedly")),
                 _ = target_reached.fuse() => return Err(anyhow!("target_reached stopped unexpectedly")),
             }
 
@@ -1209,11 +1220,11 @@ fn run_worker(
             if has_stats_queue {
                 paused_queues.stats = Some(stats.await);
             }
-            if has_wss_op_queue {
-                paused_queues.wss.0 = Some(wss_op.await.context("failed to stop wss_op queue")?);
+            if has_ws_op_queue {
+                paused_queues.ws.0 = Some(ws_op.await.context("failed to stop ws_op queue")?);
             }
-            if has_wss_data_queue {
-                paused_queues.wss.1 = Some(wss_data.await.context("failed to stop wss_data queue")?);
+            if has_ws_data_queue {
+                paused_queues.ws.1 = Some(ws_data.await.context("failed to stop ws_data queue")?);
             }
             Ok(paused_queues)
         });
@@ -1282,7 +1293,7 @@ pub struct Balloon {
     worker_thread: Option<WorkerThread<WorkerReturn>>,
     #[cfg(feature = "registered_events")]
     registered_evt_q: Option<SendTube>,
-    wss_num_bins: u8,
+    ws_num_bins: u8,
     target_reached_evt: Option<Event>,
 }
 
@@ -1292,7 +1303,7 @@ struct BalloonSnapshot {
     state: BalloonState,
     features: u64,
     acked_features: u64,
-    wss_num_bins: u8,
+    ws_num_bins: u8,
 }
 
 /// Operation mode of the balloon.
@@ -1319,7 +1330,7 @@ impl Balloon {
         mode: BalloonMode,
         enabled_features: u64,
         #[cfg(feature = "registered_events")] registered_evt_q: Option<SendTube>,
-        wss_num_bins: u8,
+        ws_num_bins: u8,
     ) -> Result<Balloon> {
         let features = base_features
             | 1 << VIRTIO_BALLOON_F_MUST_TELL_HOST
@@ -1343,14 +1354,14 @@ impl Balloon {
                 actual_pages: 0,
                 failable_update: false,
                 pending_adjusted_responses: VecDeque::new(),
-                expecting_wss: false,
+                expecting_ws: false,
             })),
             worker_thread: None,
             features,
             acked_features: 0,
             #[cfg(feature = "registered_events")]
             registered_evt_q,
-            wss_num_bins,
+            ws_num_bins,
             target_reached_evt: None,
         })
     }
@@ -1366,7 +1377,7 @@ impl Balloon {
             // config correctly.
             free_page_hint_cmd_id: 0.into(),
             poison_val: 0.into(),
-            wss_num_bins: self.wss_num_bins,
+            ws_num_bins: self.ws_num_bins,
             _reserved: [0, 0, 0],
         }
     }
@@ -1386,8 +1397,8 @@ impl Balloon {
         if acked_features & (1 << VIRTIO_BALLOON_F_PAGE_REPORTING) != 0 {
             num_queues += 1;
         }
-        // working set size vqueues
-        if acked_features & (1 << VIRTIO_BALLOON_F_WSS_REPORTING) != 0 {
+        // working set vqueues
+        if acked_features & (1 << VIRTIO_BALLOON_F_WS_REPORTING) != 0 {
             num_queues += 2;
         }
 
@@ -1423,7 +1434,7 @@ impl Balloon {
     /// are not negotiated) into a structure that is easier to work with.
     fn get_queues_from_map(
         &self,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<BalloonQueues> {
         let expected_queues = Balloon::num_expected_queues(self.acked_features);
         if queues.len() != expected_queues {
@@ -1449,8 +1460,8 @@ impl Balloon {
         if self.acked_features & (1 << VIRTIO_BALLOON_F_EVENTS_VQ) != 0 {
             queue_struct.events = Some(queues.pop_first().unwrap().1);
         }
-        if self.acked_features & (1 << VIRTIO_BALLOON_F_WSS_REPORTING) != 0 {
-            queue_struct.wss = (
+        if self.acked_features & (1 << VIRTIO_BALLOON_F_WS_REPORTING) != 0 {
+            queue_struct.ws = (
                 Some(queues.pop_first().unwrap().1),
                 Some(queues.pop_first().unwrap().1),
             );
@@ -1490,7 +1501,7 @@ impl Balloon {
                 queues.stats,
                 queues.reporting,
                 queues.events,
-                queues.wss,
+                queues.ws,
                 command_tube,
                 #[cfg(windows)]
                 vm_memory_client,
@@ -1577,7 +1588,7 @@ impl VirtioDevice for Balloon {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: BTreeMap<usize, (Queue, Event)>,
+        queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         let queues = self.get_queues_from_map(queues)?;
         self.start_worker(mem, interrupt, queues)
@@ -1605,7 +1616,7 @@ impl VirtioDevice for Balloon {
 
     fn virtio_wake(
         &mut self,
-        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         if let Some((mem, interrupt, queues)) = queues_state {
             if queues.len() < 2 {
@@ -1628,7 +1639,7 @@ impl VirtioDevice for Balloon {
             features: self.features,
             acked_features: self.acked_features,
             state: state.clone(),
-            wss_num_bins: self.wss_num_bins,
+            ws_num_bins: self.ws_num_bins,
         })
         .context("failed to serialize balloon state")
     }
@@ -1637,7 +1648,7 @@ impl VirtioDevice for Balloon {
         let snap: BalloonSnapshot = serde_json::from_value(data).context("error deserializing")?;
         if snap.features != self.features {
             anyhow::bail!(
-                "expected features to match, but they did not. Live: {:?}, snapshot {:?}",
+                "balloon: expected features to match, but they did not. Live: {:?}, snapshot {:?}",
                 self.features,
                 snap.features,
             );
@@ -1649,7 +1660,7 @@ impl VirtioDevice for Balloon {
             .now_or_never()
             .context("failed to acquire balloon lock")?;
         *state = snap.state;
-        self.wss_num_bins = snap.wss_num_bins;
+        self.ws_num_bins = snap.ws_num_bins;
         self.acked_features = snap.acked_features;
         Ok(())
     }
@@ -1727,7 +1738,7 @@ mod tests {
                 VIRTIO_BALLOON_F_STATS_VQ,
                 VIRTIO_BALLOON_F_EVENTS_VQ,
                 VIRTIO_BALLOON_F_PAGE_REPORTING,
-                VIRTIO_BALLOON_F_WSS_REPORTING
+                VIRTIO_BALLOON_F_WS_REPORTING
             ]))
         );
     }

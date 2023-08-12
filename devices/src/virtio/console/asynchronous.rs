@@ -59,7 +59,6 @@ impl IntoAsync for AsyncSerialInput {}
 
 async fn run_tx_queue(
     queue: &Arc<Mutex<virtio::Queue>>,
-    mem: GuestMemory,
     doorbell: Interrupt,
     kick_evt: EventAsync,
     output: &mut Box<dyn io::Write + Send>,
@@ -69,13 +68,12 @@ async fn run_tx_queue(
             error!("Failed to read kick event for tx queue: {}", e);
             break;
         }
-        process_transmit_queue(&mem, &doorbell, queue, output.as_mut());
+        process_transmit_queue(&doorbell, queue, output.as_mut());
     }
 }
 
 async fn run_rx_queue(
     queue: &Arc<Mutex<virtio::Queue>>,
-    mem: GuestMemory,
     doorbell: Interrupt,
     kick_evt: EventAsync,
     input: &IoSource<AsyncSerialInput>,
@@ -101,7 +99,7 @@ async fn run_rx_queue(
 
         // Submit all the data obtained during this read.
         while !in_buffer.is_empty() {
-            match handle_input(&mem, &doorbell, &mut in_buffer, queue) {
+            match handle_input(&doorbell, &mut in_buffer, queue) {
                 Ok(()) => {}
                 Err(ConsoleError::RxDescriptorsExhausted) => {
                     // Wait until a descriptor becomes available and try again.
@@ -129,16 +127,19 @@ impl ConsoleDevice {
     pub fn start_receive_queue(
         &mut self,
         ex: &Executor,
-        mem: GuestMemory,
         queue: Arc<Mutex<virtio::Queue>>,
         doorbell: Interrupt,
-        kick_evt: Event,
     ) -> anyhow::Result<()> {
         let input_queue = match self.input.as_mut() {
             Some(input_queue) => input_queue,
             None => return Ok(()),
         };
 
+        let kick_evt = queue
+            .lock()
+            .event()
+            .try_clone()
+            .context("Failed to clone queue event")?;
         let kick_evt =
             EventAsync::new(kick_evt, ex).context("Failed to create EventAsync for kick_evt")?;
 
@@ -150,7 +151,7 @@ impl ConsoleDevice {
 
             Ok(async move {
                 select2(
-                    run_rx_queue(&queue, mem, doorbell, kick_evt, &async_input).boxed_local(),
+                    run_rx_queue(&queue, doorbell, kick_evt, &async_input).boxed_local(),
                     abort,
                 )
                 .await;
@@ -173,18 +174,21 @@ impl ConsoleDevice {
     pub fn start_transmit_queue(
         &mut self,
         ex: &Executor,
-        mem: GuestMemory,
         queue: Arc<Mutex<virtio::Queue>>,
         doorbell: Interrupt,
-        kick_evt: Event,
     ) -> anyhow::Result<()> {
+        let kick_evt = queue
+            .lock()
+            .event()
+            .try_clone()
+            .context("Failed to clone queue event")?;
         let kick_evt =
             EventAsync::new(kick_evt, ex).context("Failed to create EventAsync for kick_evt")?;
 
         let tx_future = |mut output, abort| {
             Ok(async move {
                 select2(
-                    run_tx_queue(&queue, mem, doorbell, kick_evt, &mut output).boxed_local(),
+                    run_tx_queue(&queue, doorbell, kick_evt, &mut output).boxed_local(),
                     abort,
                 )
                 .await;
@@ -287,9 +291,9 @@ impl VirtioDevice for AsyncConsole {
 
     fn activate(
         &mut self,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() < 2 {
             return Err(anyhow!("expected 2 queues, got {}", queues.len()));
@@ -312,8 +316,8 @@ impl VirtioDevice for AsyncConsole {
         };
 
         let ex = Executor::new().expect("failed to create an executor");
-        let (receive_queue, receive_evt) = queues.remove(&0).unwrap();
-        let (transmit_queue, transmit_evt) = queues.remove(&1).unwrap();
+        let receive_queue = queues.remove(&0).unwrap();
+        let transmit_queue = queues.remove(&1).unwrap();
 
         self.state =
             VirtioConsoleState::Running(WorkerThread::start("v_console", move |kill_evt| {
@@ -321,15 +325,9 @@ impl VirtioDevice for AsyncConsole {
                 let receive_queue = Arc::new(Mutex::new(receive_queue));
                 let transmit_queue = Arc::new(Mutex::new(transmit_queue));
 
-                console.start_receive_queue(
-                    &ex,
-                    mem.clone(),
-                    receive_queue,
-                    interrupt.clone(),
-                    receive_evt,
-                )?;
+                console.start_receive_queue(&ex, receive_queue, interrupt.clone())?;
 
-                console.start_transmit_queue(&ex, mem, transmit_queue, interrupt, transmit_evt)?;
+                console.start_transmit_queue(&ex, transmit_queue, interrupt)?;
 
                 // Run until the kill event is signaled and cancel all tasks.
                 ex.run_until(async {
