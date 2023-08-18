@@ -47,7 +47,7 @@ rustup update
 if [ "$sync" = "sync" ]
 then
   repo sync -c -j96
-  git fetch --all --prune
+  git fetch aosp upstream-main
 fi
 
 source $ANDROID_BUILD_TOP/build/envsetup.sh

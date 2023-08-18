@@ -140,9 +140,9 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Time to wait for the metrics process to flush and upload all logs.
 const METRICS_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// DLLs that are known to interfere with graphics.
+/// DLLs that are known to interfere with crosvm.
 #[cfg(feature = "sandbox")]
-const BLOCKLIST_GRAPHICS_DLLS: &[&str] = &[
+const BLOCKLIST_DLLS: &[&str] = &[
     "action_x64.dll",
     "AudioDevProps2.dll",
     "GridWndHook.dll",
@@ -150,6 +150,8 @@ const BLOCKLIST_GRAPHICS_DLLS: &[&str] = &[
     "NahimicOSD.dll",
     "TwitchNativeOverlay64.dll",
     "XSplitGameSource64.dll",
+    "SS2OSD.dll",
+    "nhAsusStrixOSD.dll",
 ];
 
 /// Maps a process type to its sandbox policy configuration.
@@ -161,12 +163,17 @@ fn process_policy(process_type: ProcessType, cfg: &Config) -> sandbox::policy::P
         ProcessType::Main => main_process_policy(cfg),
         ProcessType::Metrics => sandbox::policy::METRICS,
         ProcessType::Net => sandbox::policy::NET,
-        ProcessType::Slirp => sandbox::policy::SLIRP,
-        ProcessType::Gpu => gpu_process_policy(),
+        ProcessType::Slirp => slirp_process_policy(cfg),
+        ProcessType::Gpu => sandbox::policy::GPU,
         ProcessType::Snd => sandbox::policy::SND,
         ProcessType::Broker => unimplemented!("No broker policy"),
         ProcessType::Spu => unimplemented!("No SPU policy"),
     };
+
+    for dll in BLOCKLIST_DLLS.iter() {
+        policy.dll_blocklist.push(dll.to_string());
+    }
+
     #[cfg(feature = "asan")]
     adjust_asan_policy(&mut policy);
     #[cfg(feature = "cperfetto")]
@@ -186,19 +193,23 @@ fn main_process_policy(cfg: &Config) -> sandbox::policy::Policy {
         };
         policy.exceptions.push(rule);
     }
-    for dll in BLOCKLIST_GRAPHICS_DLLS.iter() {
-        policy.dll_blocklist.push(dll.to_string());
-    }
     policy
 }
 
-/// Dynamically appends rules to the gpu process's policy.
 #[cfg(feature = "sandbox")]
-fn gpu_process_policy() -> sandbox::policy::Policy {
-    let mut policy = sandbox::policy::GPU;
-    for dll in BLOCKLIST_GRAPHICS_DLLS.iter() {
-        policy.dll_blocklist.push(dll.to_string());
+fn slirp_process_policy(#[allow(unused)] cfg: &Config) -> sandbox::policy::Policy {
+    #[allow(unused_mut)]
+    let mut policy = sandbox::policy::SLIRP;
+
+    #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
+    if let Some(path) = &cfg.slirp_capture_file {
+        policy.exceptions.push(sandbox::policy::Rule {
+            subsystem: sandbox::SubSystem::SUBSYS_FILES,
+            semantics: sandbox::Semantics::FILES_ALLOW_ANY,
+            pattern: path.to_owned(),
+        });
     }
+
     policy
 }
 
@@ -1364,7 +1375,7 @@ fn start_up_net_backend(
         shutdown_event: slirp_kill_event
             .try_clone()
             .expect("Failed to clone slirp kill event."),
-        #[cfg(feature = "slirp-ring-capture")]
+        #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
         slirp_capture_file: cfg.slirp_capture_file.take(),
     };
     slirp_child.bootstrap_tube.send(&slirp_config).unwrap();
