@@ -321,19 +321,15 @@ pub struct GpuDisplay {
     // are declared [Rust RFC 1857].
     inner: Box<dyn SysDisplayT>,
     wait_ctx: WaitContext<DisplayEventToken>,
-    is_x: bool,
 }
 
 impl GpuDisplay {
     /// Opens a connection to X server
-    pub fn open_x<S: AsRef<str>>(display_name: Option<S>) -> GpuDisplayResult<GpuDisplay> {
+    pub fn open_x(display_name: Option<&str>) -> GpuDisplayResult<GpuDisplay> {
         let _ = display_name;
         #[cfg(feature = "x")]
         {
-            let display = match display_name {
-                Some(s) => gpu_display_x::DisplayX::open_display(Some(s.as_ref()))?,
-                None => gpu_display_x::DisplayX::open_display(None)?,
-            };
+            let display = gpu_display_x::DisplayX::open_display(display_name)?;
 
             let wait_ctx = WaitContext::new()?;
             wait_ctx.add(&display, DisplayEventToken::Display)?;
@@ -345,7 +341,6 @@ impl GpuDisplay {
                 surfaces: Default::default(),
                 imports: Default::default(),
                 wait_ctx,
-                is_x: true,
             })
         }
         #[cfg(not(feature = "x"))]
@@ -364,13 +359,7 @@ impl GpuDisplay {
             surfaces: Default::default(),
             imports: Default::default(),
             wait_ctx,
-            is_x: false,
         })
-    }
-
-    /// Return whether this display is an X display
-    pub fn is_x(&self) -> bool {
-        self.is_x
     }
 
     fn handle_event_device(&mut self, event_device_id: u32) {

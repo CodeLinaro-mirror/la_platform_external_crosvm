@@ -9,7 +9,6 @@ mod virtio_gpu;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::VecDeque;
 use std::io::Read;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -325,7 +324,6 @@ pub struct ReturnDescriptor {
 
 pub struct Frontend {
     fence_state: Arc<Mutex<FenceState>>,
-    return_cursor_descriptors: VecDeque<ReturnDescriptor>,
     virtio_gpu: VirtioGpu,
 }
 
@@ -333,7 +331,6 @@ impl Frontend {
     fn new(virtio_gpu: VirtioGpu, fence_state: Arc<Mutex<FenceState>>) -> Frontend {
         Frontend {
             fence_state,
-            return_cursor_descriptors: Default::default(),
             virtio_gpu,
         }
     }
@@ -750,10 +747,6 @@ impl Frontend {
         Some(ReturnDescriptor { desc_chain, len })
     }
 
-    pub fn return_cursor(&mut self) -> Option<ReturnDescriptor> {
-        self.return_cursor_descriptors.pop_front()
-    }
-
     pub fn event_poll(&self) {
         self.virtio_gpu.event_poll();
     }
@@ -823,9 +816,7 @@ struct Worker {
     gpu_control_tube: Tube,
     mem: GuestMemory,
     ctrl_queue: SharedQueueReader,
-    ctrl_evt: Event,
     cursor_queue: LocalQueueReader,
-    cursor_evt: Event,
     resource_bridges: ResourceBridges,
     kill_evt: Event,
     state: Frontend,
@@ -843,9 +834,24 @@ impl Worker {
                 }
             };
 
+        let ctrl_evt = self
+            .ctrl_queue
+            .queue
+            .lock()
+            .event()
+            .try_clone()
+            .expect("failed to clone queue event");
+        let cursor_evt = self
+            .cursor_queue
+            .queue
+            .borrow()
+            .event()
+            .try_clone()
+            .expect("failed to clone queue event");
+
         let mut event_manager = match EventManager::build_with(&[
-            (&self.ctrl_evt, WorkerToken::CtrlQueue),
-            (&self.cursor_evt, WorkerToken::CursorQueue),
+            (&ctrl_evt, WorkerToken::CtrlQueue),
+            (&cursor_evt, WorkerToken::CursorQueue),
             (&display_desc, WorkerToken::Display),
             #[cfg(unix)]
             (&self.gpu_control_tube, WorkerToken::GpuControl),
@@ -915,13 +921,13 @@ impl Worker {
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     WorkerToken::CtrlQueue => {
-                        let _ = self.ctrl_evt.wait();
+                        let _ = ctrl_evt.wait();
                         // Set flag that control queue is available to be read, but defer reading
                         // until rest of the events are processed.
                         ctrl_available = true;
                     }
                     WorkerToken::CursorQueue => {
-                        let _ = self.cursor_evt.wait();
+                        let _ = cursor_evt.wait();
                         if self.state.process_queue(&self.mem, &self.cursor_queue) {
                             signal_used_cursor = true;
                         }
@@ -965,12 +971,6 @@ impl Worker {
                         break 'wait;
                     }
                 }
-            }
-
-            // All cursor commands go first because they have higher priority.
-            while let Some(desc) = self.state.return_cursor() {
-                self.cursor_queue.add_used(desc.desc_chain, desc.len);
-                signal_used_cursor = true;
             }
 
             if display_available {
@@ -1042,7 +1042,7 @@ impl DisplayBackend {
             #[cfg(unix)]
             DisplayBackend::Wayland(path) => GpuDisplay::open_wayland(path.as_ref()),
             #[cfg(unix)]
-            DisplayBackend::X(display) => GpuDisplay::open_x(display.as_ref()),
+            DisplayBackend::X(display) => GpuDisplay::open_x(display.as_deref()),
             DisplayBackend::Stub => GpuDisplay::open_stub(),
             #[cfg(windows)]
             DisplayBackend::WinApi(display_properties) => match wndproc_thread.take() {
@@ -1065,9 +1065,7 @@ struct GpuActivationResources {
     mem: GuestMemory,
     interrupt: Interrupt,
     ctrl_queue: SharedQueueReader,
-    ctrl_evt: Event,
     cursor_queue: LocalQueueReader,
-    cursor_evt: Event,
 }
 
 pub struct Gpu {
@@ -1482,9 +1480,7 @@ impl VirtioDevice for Gpu {
                 gpu_control_tube,
                 mem: activation_resources.mem,
                 ctrl_queue: activation_resources.ctrl_queue,
-                ctrl_evt: activation_resources.ctrl_evt,
                 cursor_queue: activation_resources.cursor_queue,
-                cursor_evt: activation_resources.cursor_evt,
                 resource_bridges,
                 kill_evt,
                 state: Frontend::new(virtio_gpu, fence_state),
@@ -1514,18 +1510,8 @@ impl VirtioDevice for Gpu {
             ));
         }
 
-        let ctrl_queue = queues.remove(&0).unwrap();
-        let ctrl_evt = ctrl_queue
-            .event()
-            .try_clone()
-            .context("failed to clone queue event")?;
-        let ctrl_queue = SharedQueueReader::new(ctrl_queue, interrupt.clone());
-        let cursor_queue = queues.remove(&1).unwrap();
-        let cursor_evt = cursor_queue
-            .event()
-            .try_clone()
-            .context("failed to clone queue event")?;
-        let cursor_queue = LocalQueueReader::new(cursor_queue, interrupt.clone());
+        let ctrl_queue = SharedQueueReader::new(queues.remove(&0).unwrap(), interrupt.clone());
+        let cursor_queue = LocalQueueReader::new(queues.remove(&1).unwrap(), interrupt.clone());
 
         self.worker_thread
             .as_mut()
@@ -1535,9 +1521,7 @@ impl VirtioDevice for Gpu {
                 mem,
                 interrupt,
                 ctrl_queue,
-                ctrl_evt,
                 cursor_queue,
-                cursor_evt,
             })
             .expect("failed to send activation resources to worker thread");
 
