@@ -332,9 +332,8 @@ pub trait Vcpu: downcast_rs::DowncastSync {
     /// and in the same thread as run.
     fn handle_wrmsr(&self);
 
-    /// Signals to the hypervisor that this guest is being paused by userspace.  Only works on Vms
-    /// that support `VmCap::PvClockSuspend`.
-    fn pvclock_ctrl(&self) -> Result<()>;
+    /// Signals to the hypervisor that this Vcpu is being paused by userspace.
+    fn on_suspend(&self) -> Result<()>;
 
     /// Enables a hypervisor-specific extension on this Vcpu.  `cap` is a constant defined by the
     /// hypervisor API (e.g., kvm.h).  `args` are the arguments for enabling the feature, if any.
@@ -477,7 +476,7 @@ pub enum DeviceKind {
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     ArmVgicV3,
     /// RiscV AIA in-kernel emulation
-    #[cfg(any(target_arch = "riscv64"))]
+    #[cfg(target_arch = "riscv64")]
     RiscvAia,
 }
 

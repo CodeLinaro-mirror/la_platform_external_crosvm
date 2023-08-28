@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base::open_file;
+use base::open_file_or_duplicate;
 use base::AsRawDescriptors;
 use base::FileAllocate;
 use base::FileReadWriteAtVolatile;
@@ -31,7 +31,7 @@ use base::RawDescriptor;
 use crc32fast::Hasher;
 use cros_async::BackingMemory;
 use cros_async::Executor;
-use cros_async::MemRegion;
+use cros_async::MemRegionIter;
 use data_model::VolatileSlice;
 use protobuf::Message;
 use protos::cdisk_spec;
@@ -217,7 +217,7 @@ impl CompositeDiskFile {
                 } else {
                     component_path
                 };
-                let comp_file = open_file(
+                let comp_file = open_file_or_duplicate(
                     &path,
                     OpenOptions::new().read(true).write(writable), // TODO(b/190435784): add support for O_DIRECT.
                 )
@@ -474,6 +474,11 @@ impl AsyncDisk for AsyncCompositeDiskFile {
         })
     }
 
+    async fn flush(&self) -> crate::Result<()> {
+        futures::future::try_join_all(self.component_disks.iter().map(|c| c.file.flush())).await?;
+        Ok(())
+    }
+
     async fn fsync(&self) -> crate::Result<()> {
         // TODO: handle the disks concurrently
         for disk in self.component_disks.iter() {
@@ -496,15 +501,18 @@ impl AsyncDisk for AsyncCompositeDiskFile {
         &'a self,
         file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [MemRegion],
+        mem_offsets: MemRegionIter<'a>,
     ) -> crate::Result<usize> {
         let disk = self
             .disk_at_offset(file_offset)
             .map_err(crate::Error::ReadingData)?;
         let remaining_disk = disk.offset + disk.length - file_offset;
-        let mem_offsets = MemRegion::truncate(remaining_disk.try_into().unwrap(), mem_offsets);
         disk.file
-            .read_to_mem(file_offset - disk.offset, mem, &mem_offsets)
+            .read_to_mem(
+                file_offset - disk.offset,
+                mem,
+                mem_offsets.take_bytes(remaining_disk.try_into().unwrap()),
+            )
             .await
     }
 
@@ -512,16 +520,19 @@ impl AsyncDisk for AsyncCompositeDiskFile {
         &'a self,
         file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [MemRegion],
+        mem_offsets: MemRegionIter<'a>,
     ) -> crate::Result<usize> {
         let disk = self
             .disk_at_offset(file_offset)
             .map_err(crate::Error::ReadingData)?;
         let remaining_disk = disk.offset + disk.length - file_offset;
-        let mem_offsets = MemRegion::truncate(remaining_disk.try_into().unwrap(), mem_offsets);
         let n = disk
             .file
-            .write_from_mem(file_offset - disk.offset, mem, &mem_offsets)
+            .write_from_mem(
+                file_offset - disk.offset,
+                mem,
+                mem_offsets.take_bytes(remaining_disk.try_into().unwrap()),
+            )
             .await?;
         disk.set_needs_fsync();
         Ok(n)

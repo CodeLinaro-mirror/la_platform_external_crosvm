@@ -5,6 +5,7 @@
 #![cfg(not(test))]
 #![no_main]
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
@@ -16,7 +17,7 @@ use crosvm_fuzz::fuzz_target;
 use devices::virtio::base_features;
 use devices::virtio::BlockAsync;
 use devices::virtio::Interrupt;
-use devices::virtio::Queue;
+use devices::virtio::QueueConfig;
 use devices::virtio::VirtioDevice;
 use devices::IrqLevelEvent;
 use hypervisor::ProtectionType;
@@ -77,9 +78,10 @@ fuzz_target!(|bytes| {
         return;
     }
 
-    let mut q = Queue::new(QUEUE_SIZE);
+    let mut q = QueueConfig::new(QUEUE_SIZE, 0);
     q.set_size(QUEUE_SIZE / 2);
     q.set_ready(true);
+    let q = q.activate().expect("QueueConfig::activate");
 
     let queue_evt = Event::new().unwrap();
 
@@ -91,6 +93,7 @@ fuzz_target!(|bytes| {
         Box::new(disk_file),
         false,
         true,
+        false,
         512,
         false,
         None,
@@ -109,7 +112,7 @@ fuzz_target!(|bytes| {
                 None,   // msix_config
                 0xFFFF, // VIRTIO_MSI_NO_VECTOR
             ),
-            vec![(q, queue_evt.try_clone().unwrap())],
+            BTreeMap::from([(0, (q, queue_evt.try_clone().unwrap()))]),
         )
         .unwrap();
 

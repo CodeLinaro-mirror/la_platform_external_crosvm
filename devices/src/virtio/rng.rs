@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::collections::BTreeMap as Map;
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use anyhow::anyhow;
@@ -22,7 +22,6 @@ use vm_memory::GuestMemory;
 use super::DeviceType;
 use super::Interrupt;
 use super::Queue;
-use super::SignalableInterrupt;
 use super::VirtioDevice;
 
 const QUEUE_SIZE: u16 = 256;
@@ -167,13 +166,13 @@ impl VirtioDevice for Rng {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != 1 {
             return Err(anyhow!("expected 1 queue, got {}", queues.len()));
         }
 
-        let (queue, queue_evt) = queues.remove(0);
+        let (queue, queue_evt) = queues.remove(&0).unwrap();
 
         self.worker_thread = Some(WorkerThread::start("v_rng", move |kill_evt| {
             let worker = Worker {
@@ -199,21 +198,20 @@ impl VirtioDevice for Rng {
         false
     }
 
-    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         if let Some(worker_thread) = self.worker_thread.take() {
             let queues = worker_thread.stop()?;
-            return Ok(Some(Map::from_iter(queues.into_iter().enumerate())));
+            return Ok(Some(BTreeMap::from_iter(queues.into_iter().enumerate())));
         }
         Ok(None)
     }
 
     fn virtio_wake(
         &mut self,
-        queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
     ) -> anyhow::Result<()> {
-        if let Some((mem, interrupt, mut queues)) = queues_state {
-            let queues_vec = vec![queues.remove(&0).expect("missing requestq")];
-            self.activate(mem, interrupt, queues_vec)?;
+        if let Some((mem, interrupt, queues)) = queues_state {
+            self.activate(mem, interrupt, queues)?;
         }
         Ok(())
     }

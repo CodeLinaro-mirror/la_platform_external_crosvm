@@ -57,6 +57,8 @@ use vm_control::client::do_gpu_display_list;
 #[cfg(feature = "gpu")]
 use vm_control::client::do_gpu_display_remove;
 use vm_control::client::do_modify_battery;
+#[cfg(feature = "pci-hotplug")]
+use vm_control::client::do_net_add;
 use vm_control::client::do_swap_status;
 use vm_control::client::do_usb_attach;
 use vm_control::client::do_usb_detach;
@@ -72,6 +74,8 @@ use vm_control::BalloonControlCommand;
 use vm_control::DiskControlCommand;
 use vm_control::HotPlugDeviceInfo;
 use vm_control::HotPlugDeviceType;
+#[cfg(feature = "pci-hotplug")]
+use vm_control::NetControlCommand;
 use vm_control::RestoreCommand;
 use vm_control::SnapshotCommand;
 use vm_control::SwapCommand;
@@ -174,7 +178,11 @@ fn stop_vms(cmd: cmdline::StopCommand) -> std::result::Result<(), ()> {
 }
 
 fn suspend_vms(cmd: cmdline::SuspendCommand) -> std::result::Result<(), ()> {
-    vms_request(&VmRequest::Suspend, cmd.socket_path)
+    if cmd.full {
+        vms_request(&VmRequest::SuspendVm, cmd.socket_path)
+    } else {
+        vms_request(&VmRequest::SuspendVcpus, cmd.socket_path)
+    }
 }
 
 fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
@@ -183,7 +191,12 @@ fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
         Enable(params) => (VmRequest::Swap(SwapCommand::Enable), &params.socket_path),
         Trim(params) => (VmRequest::Swap(SwapCommand::Trim), &params.socket_path),
         SwapOut(params) => (VmRequest::Swap(SwapCommand::SwapOut), &params.socket_path),
-        Disable(params) => (VmRequest::Swap(SwapCommand::Disable), &params.socket_path),
+        Disable(params) => (
+            VmRequest::Swap(SwapCommand::Disable {
+                slow_file_cleanup: params.slow_file_cleanup,
+            }),
+            &params.socket_path,
+        ),
         Status(params) => (VmRequest::Swap(SwapCommand::Status), &params.socket_path),
     };
     if let VmRequest::Swap(SwapCommand::Status) = req {
@@ -194,7 +207,11 @@ fn swap_vms(cmd: cmdline::SwapCommand) -> std::result::Result<(), ()> {
 }
 
 fn resume_vms(cmd: cmdline::ResumeCommand) -> std::result::Result<(), ()> {
-    vms_request(&VmRequest::Resume, cmd.socket_path)
+    if cmd.full {
+        vms_request(&VmRequest::ResumeVm, cmd.socket_path)
+    } else {
+        vms_request(&VmRequest::ResumeVcpus, cmd.socket_path)
+    }
 }
 
 fn powerbtn_vms(cmd: cmdline::PowerbtnCommand) -> std::result::Result<(), ()> {
@@ -265,7 +282,7 @@ fn modify_battery(cmd: cmdline::BatteryCommand) -> std::result::Result<(), ()> {
 fn modify_vfio(cmd: cmdline::VfioCrosvmCommand) -> std::result::Result<(), ()> {
     let (request, socket_path, vfio_path) = match cmd.command {
         cmdline::VfioSubCommand::Add(c) => {
-            let request = VmRequest::HotPlugCommand {
+            let request = VmRequest::HotPlugVfioCommand {
                 device: HotPlugDeviceInfo {
                     device_type: HotPlugDeviceType::EndPoint,
                     path: c.vfio_path.clone(),
@@ -276,7 +293,7 @@ fn modify_vfio(cmd: cmdline::VfioCrosvmCommand) -> std::result::Result<(), ()> {
             (request, c.socket_path, c.vfio_path)
         }
         cmdline::VfioSubCommand::Remove(c) => {
-            let request = VmRequest::HotPlugCommand {
+            let request = VmRequest::HotPlugVfioCommand {
                 device: HotPlugDeviceInfo {
                     device_type: HotPlugDeviceType::EndPoint,
                     path: c.vfio_path.clone(),
@@ -293,6 +310,24 @@ fn modify_vfio(cmd: cmdline::VfioCrosvmCommand) -> std::result::Result<(), ()> {
     }
 
     vms_request(&request, socket_path)?;
+    Ok(())
+}
+
+#[cfg(feature = "pci-hotplug")]
+fn modify_virtio_net(cmd: cmdline::VirtioNetCommand) -> std::result::Result<(), ()> {
+    match cmd.command {
+        cmdline::VirtioNetSubCommand::AddTap(c) => {
+            let bus_num = do_net_add(&c.tap_name, c.socket_path).map_err(|e| {
+                error!("{}", &e);
+            })?;
+            info!("Tap device {} plugged to PCI bus {}", &c.tap_name, bus_num);
+        }
+        cmdline::VirtioNetSubCommand::RemoveTap(c) => {
+            let request = VmRequest::HotPlugNetCommand(NetControlCommand::RemoveTap(c.bus));
+            vms_request(&request, c.socket_path)?;
+        }
+    };
+
     Ok(())
 }
 
@@ -750,6 +785,10 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
                     }
                     CrossPlatformCommands::Vfio(cmd) => {
                         modify_vfio(cmd).map_err(|_| anyhow!("vfio subcommand failed"))
+                    }
+                    #[cfg(feature = "pci-hotplug")]
+                    CrossPlatformCommands::VirtioNet(cmd) => {
+                        modify_virtio_net(cmd).map_err(|_| anyhow!("virtio subcommand failed"))
                     }
                     CrossPlatformCommands::Snapshot(cmd) => {
                         snapshot_vm(cmd).map_err(|_| anyhow!("snapshot subcommand failed"))

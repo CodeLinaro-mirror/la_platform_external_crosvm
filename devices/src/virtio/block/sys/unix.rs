@@ -6,12 +6,13 @@ use std::cmp::max;
 use std::cmp::min;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::os::unix::prelude::OpenOptionsExt;
+use std::os::fd::AsRawFd;
 
 use anyhow::Context;
+use base::add_fd_flags;
 use base::flock;
 use base::iov_max;
-use base::open_file;
+use base::open_file_or_duplicate;
 use base::FlockOperation;
 use disk::DiskFile;
 
@@ -32,11 +33,7 @@ impl DiskOption {
         let mut options = OpenOptions::new();
         options.read(true).write(!self.read_only);
 
-        if self.direct {
-            options.custom_flags(libc::O_DIRECT);
-        }
-
-        let raw_image: File = open_file(&self.path, &options)
+        let raw_image: File = open_file_or_duplicate(&self.path, &options)
             .with_context(|| format!("failed to load disk image {}", self.path.display()))?;
         // Lock the disk image to prevent other crosvm instances from using it.
         let lock_op = if self.read_only {
@@ -46,6 +43,14 @@ impl DiskOption {
         };
         flock(&raw_image, lock_op, true)
             .with_context(|| format!("failed to lock disk image {}", self.path.display()))?;
+
+        // If O_DIRECT is requested, set the flag via fcntl. It is not done at
+        // open_file_or_reuse time because it will reuse existing fd and will
+        // not actually use the given OpenOptions.
+        if self.direct {
+            add_fd_flags(raw_image.as_raw_fd(), libc::O_DIRECT)
+                .with_context(|| format!("failed to set O_DIRECT to {}", &self.path.display()))?;
+        }
 
         disk::create_disk_file(raw_image, self.sparse, disk::MAX_NESTING_DEPTH, &self.path)
             .context("create_disk_file failed")

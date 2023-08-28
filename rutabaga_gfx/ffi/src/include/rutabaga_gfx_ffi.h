@@ -9,11 +9,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#if defined(__WIN32__)
-struct iovec {
-    void *iov_base; /* Starting address */
-    size_t iov_len; /* Length in bytes */
-};
+#if defined(_WIN32)
+struct iovec;
 #else
 #include <sys/uio.h>
 #endif
@@ -33,17 +30,6 @@ extern "C" {
 #define RUTABAGA_VERSION_PATCH 1
 
 /**
- * Blob resource creation parameters.
- */
-#define RUTABAGA_BLOB_MEM_GUEST 1
-#define RUTABAGA_BLOB_MEM_HOST3D 2
-#define RUTABAGA_BLOB_MEM_HOST3D_GUEST 3
-
-#define RUTABAGA_BLOB_FLAG_USE_MAPPABLE 1
-#define RUTABAGA_BLOB_FLAG_USE_SHAREABLE 2
-#define RUTABAGA_BLOB_FLAG_USE_CROSS_DEVICE 4
-
-/**
  * Rutabaga capsets.
  */
 #define RUTABAGA_CAPSET_VIRGL 1
@@ -57,22 +43,22 @@ extern "C" {
 #define RUTABAGA_CAPSET_GFXSTREAM_COMPOSER 9
 
 /**
+ * Blob resource creation parameters.
+ */
+#define RUTABAGA_BLOB_MEM_GUEST 1
+#define RUTABAGA_BLOB_MEM_HOST3D 2
+#define RUTABAGA_BLOB_MEM_HOST3D_GUEST 3
+
+#define RUTABAGA_BLOB_FLAG_USE_MAPPABLE 1
+#define RUTABAGA_BLOB_FLAG_USE_SHAREABLE 2
+#define RUTABAGA_BLOB_FLAG_USE_CROSS_DEVICE 4
+
+/**
  * Mapped memory caching flags (see virtio_gpu spec)
  */
 #define RUTABAGA_MAP_CACHE_CACHED 1
 #define RUTABAGA_MAP_CACHE_UNCACHED 2
 #define RUTABAGA_MAP_CACHE_WC 3
-
-/**
- * Rutabaga flags for creating fences.
- */
-#define RUTABAGA_FLAG_FENCE (1 << 0)
-#define RUTABAGA_FLAG_INFO_RING_IDX (1 << 1)
-
-/**
- * Rutabaga channel types
- */
-#define RUTABAGA_CHANNEL_TYPE_WAYLAND 1
 
 /**
  * Rutabaga handle types
@@ -88,14 +74,30 @@ extern "C" {
 #define RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_WIN32 0x8
 #define RUTABAGA_FENCE_HANDLE_TYPE_ZIRCON 0x9
 
-struct rutabaga;
+/**
+ * Rutabaga channel types
+ */
+#define RUTABAGA_CHANNEL_TYPE_WAYLAND 1
 
-struct rutabaga_fence {
-    uint32_t flags;
-    uint64_t fence_id;
-    uint32_t ctx_id;
-    uint32_t ring_idx;
-};
+/**
+ * Rutabaga WSI
+ */
+#define RUTABAGA_WSI_SURFACELESS 0x1
+
+/**
+ * Rutabaga flags for creating fences.
+ */
+#define RUTABAGA_FLAG_FENCE (1 << 0)
+#define RUTABAGA_FLAG_INFO_RING_IDX (1 << 1)
+
+/**
+ * Rutabaga Debug
+ */
+#define RUTABAGA_DEBUG_ERROR 0x1
+#define RUTABAGA_DEBUG_WARN 0x2
+#define RUTABAGA_DEBUG_INFO 0x3
+
+struct rutabaga;
 
 struct rutabaga_create_blob {
     uint32_t blob_mem;
@@ -145,6 +147,15 @@ struct rutabaga_mapping {
     uint64_t size;
 };
 
+struct rutabaga_command {
+    uint32_t ctx_id;
+    uint32_t cmd_size;
+    uint8_t *cmd;
+
+    uint32_t num_in_fences;
+    uint64_t *fence_ids;
+};
+
 /**
  * Assumes null-terminated C-string.
  */
@@ -158,16 +169,39 @@ struct rutabaga_channels {
     size_t num_channels;
 };
 
+struct rutabaga_fence {
+    uint32_t flags;
+    uint64_t fence_id;
+    uint32_t ctx_id;
+    uint32_t ring_idx;
+};
+
+struct rutabaga_debug {
+    uint32_t debug_type;
+    const char *message;
+};
+
 /**
  * Throwing an exception inside this callback is not allowed.
  */
-typedef void (*write_fence_cb)(uint64_t user_data, struct rutabaga_fence fence_data);
+typedef void (*rutabaga_fence_callback)(uint64_t user_data, const struct rutabaga_fence *fence);
+
+/**
+ * # Safety
+ * - Throwing an exception inside this callback is not allowed.
+ * - `rutabaga_debug` and contained values only valid for the duration of callback.
+ */
+typedef void (*rutabaga_debug_callback)(uint64_t user_data, const struct rutabaga_debug *debug);
 
 struct rutabaga_builder {
     // Required for correct functioning
     uint64_t user_data;
     uint64_t capset_mask;
-    write_fence_cb fence_cb;
+    uint64_t wsi;
+    rutabaga_fence_callback fence_cb;
+
+    // Optional for debugging.
+    rutabaga_debug_callback debug_cb;
 
     // Optional and platform specific
     struct rutabaga_channels *channels;
@@ -284,10 +318,11 @@ int32_t rutabaga_resource_map_info(struct rutabaga *ptr, uint32_t resource_id, u
 
 /**
  * # Safety
- * - `commands` must point to a contiguous memory region of `size` bytes.
+ * - `cmd` must be not null
+ * - `cmd->cmd` point to a contiguous memory region of `cmd_size` bytes.
+ * - `cmd->fence_ids` must point to a contiguous array of `num_in_fences` elements
  */
-int32_t rutabaga_submit_command(struct rutabaga *ptr, uint32_t ctx_id, uint8_t *commands,
-                                size_t size);
+int32_t rutabaga_submit_command(struct rutabaga *ptr, struct rutabaga_command *cmd);
 
 int32_t rutabaga_create_fence(struct rutabaga *ptr, const struct rutabaga_fence *fence);
 

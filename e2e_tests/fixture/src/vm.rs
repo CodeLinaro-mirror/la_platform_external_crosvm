@@ -40,7 +40,7 @@ const ARCH: &str = "riscv64";
 const COMMUNICATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Timeout for the VM to boot and the delegate to report that it's ready.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Default timeout when waiting for guest commands to execute
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -457,6 +457,24 @@ impl TestVm {
         )?
     }
 
+    /// Hotplug a tap device.
+    pub fn hotplug_tap(&mut self, tap_name: &str) -> Result<()> {
+        self.sys.crosvm_command(
+            "virtio-net",
+            vec!["add".to_owned(), tap_name.to_owned()],
+            self.sudo,
+        )
+    }
+
+    /// Remove hotplugged device on bus.
+    pub fn remove_pci_device(&mut self, bus_num: u8) -> Result<()> {
+        self.sys.crosvm_command(
+            "virtio-net",
+            vec!["remove".to_owned(), bus_num.to_string()],
+            self.sudo,
+        )
+    }
+
     pub fn stop(&mut self) -> Result<()> {
         self.sys.crosvm_command("stop", vec![], self.sudo)
     }
@@ -465,8 +483,18 @@ impl TestVm {
         self.sys.crosvm_command("suspend", vec![], self.sudo)
     }
 
+    pub fn suspend_full(&mut self) -> Result<()> {
+        self.sys
+            .crosvm_command("suspend", vec!["--full".to_string()], self.sudo)
+    }
+
     pub fn resume(&mut self) -> Result<()> {
         self.sys.crosvm_command("resume", vec![], self.sudo)
+    }
+
+    pub fn resume_full(&mut self) -> Result<()> {
+        self.sys
+            .crosvm_command("resume", vec!["--full".to_string()], self.sudo)
     }
 
     pub fn disk(&mut self, args: Vec<String>) -> Result<()> {

@@ -20,6 +20,8 @@ mod msix;
 mod pci_address;
 mod pci_configuration;
 mod pci_device;
+#[cfg(feature = "pci-hotplug")]
+mod pci_hotplug;
 mod pci_root;
 #[cfg(unix)]
 mod pcie;
@@ -40,6 +42,8 @@ pub use self::ac97::Ac97Dev;
 #[cfg(feature = "audio")]
 pub use self::ac97::Ac97Parameters;
 pub use self::acpi::DeviceVcfgRegister;
+pub use self::acpi::DsmMethod;
+pub use self::acpi::GpeScope;
 pub use self::acpi::PowerResourceMethod;
 #[cfg(unix)]
 pub use self::coiommu::CoIommuDev;
@@ -73,6 +77,14 @@ pub use self::pci_device::IoEventError as PciIoEventError;
 pub use self::pci_device::PciBus;
 pub use self::pci_device::PciDevice;
 pub use self::pci_device::PreferredIrq;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci_hotplug::HotPluggable;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci_hotplug::IntxParameter;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci_hotplug::NetResourceCarrier;
+#[cfg(feature = "pci-hotplug")]
+pub use self::pci_hotplug::ResourceCarrier;
 pub use self::pci_root::PciConfigIo;
 pub use self::pci_root::PciConfigMmio;
 pub use self::pci_root::PciRoot;
@@ -96,7 +108,7 @@ pub use self::stub::StubPciParameters;
 pub use self::vfio_pci::VfioPciDevice;
 
 /// PCI has four interrupt pins A->D.
-#[derive(Copy, Clone, Ord, PartialOrd, PartialEq, Eq)]
+#[derive(Copy, Clone, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PciInterruptPin {
     IntA,
     IntB,
@@ -109,6 +121,11 @@ impl PciInterruptPin {
         self as u32
     }
 }
+
+// VCFG
+pub const PCI_VCFG_PM: usize = 0x0;
+pub const PCI_VCFG_DSM: usize = 0x1;
+pub const PCI_VCFG_NOTY: usize = 0x2;
 
 pub const PCI_VENDOR_ID_INTEL: u16 = 0x8086;
 pub const PCI_VENDOR_ID_REDHAT: u16 = 0x1b36;
@@ -138,6 +155,7 @@ pub enum CrosvmDeviceId {
     AcAdapter = 20,
     VirtualPmc = 21,
     VirtCpufreq = 22,
+    FwCfg = 23,
 }
 
 impl TryFrom<u16> for CrosvmDeviceId {

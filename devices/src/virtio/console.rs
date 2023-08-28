@@ -9,7 +9,7 @@
 pub mod asynchronous;
 mod sys;
 
-use std::collections::BTreeMap as Map;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io;
 use std::io::Read;
@@ -48,7 +48,6 @@ use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::Reader;
-use crate::virtio::SignalableInterrupt;
 use crate::virtio::VirtioDevice;
 
 pub(crate) const QUEUE_SIZE: u16 = 256;
@@ -79,12 +78,12 @@ pub struct virtio_console_config {
 /// # Arguments
 ///
 /// * `mem` - The GuestMemory to write the data into
-/// * `interrupt` - SignalableInterrupt used to signal that the queue has been used
+/// * `interrupt` - Interrupt used to signal that the queue has been used
 /// * `buffer` - Ring buffer providing data to put into the guest
 /// * `receive_queue` - The receive virtio Queue
-fn handle_input<I: SignalableInterrupt>(
+fn handle_input(
     mem: &GuestMemory,
-    interrupt: &I,
+    interrupt: &Interrupt,
     buffer: &mut VecDeque<u8>,
     receive_queue: &Arc<Mutex<Queue>>,
 ) -> result::Result<(), ConsoleError> {
@@ -142,12 +141,12 @@ fn process_transmit_request(reader: &mut Reader, output: &mut dyn io::Write) -> 
 /// # Arguments
 ///
 /// * `mem` - The GuestMemory to take the data from
-/// * `interrupt` - SignalableInterrupt used to signal (if required) that the queue has been used
+/// * `interrupt` - Interrupt used to signal (if required) that the queue has been used
 /// * `transmit_queue` - The transmit virtio Queue
 /// * `output` - The output sink we are going to write the data into
-fn process_transmit_queue<I: SignalableInterrupt>(
+fn process_transmit_queue(
     mem: &GuestMemory,
-    interrupt: &I,
+    interrupt: &Interrupt,
     transmit_queue: &Arc<Mutex<Queue>>,
     output: &mut dyn io::Write,
 ) {
@@ -335,14 +334,14 @@ impl VirtioDevice for Console {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() < 2 {
             return Err(anyhow!("expected 2 queues, got {}", queues.len()));
         }
 
-        let (receive_queue, receive_evt) = queues.remove(0);
-        let (transmit_queue, transmit_evt) = queues.remove(0);
+        let (receive_queue, receive_evt) = queues.remove(&0).unwrap();
+        let (transmit_queue, transmit_evt) = queues.remove(&1).unwrap();
 
         if self.in_avail_evt.is_none() {
             self.in_avail_evt = Some(Event::new().context("failed creating Event")?);
@@ -407,7 +406,7 @@ impl VirtioDevice for Console {
         false
     }
 
-    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         if let Some(worker_thread) = self.worker_thread.take() {
             if let Some(input_thread) = self.input_thread.take() {
                 input_thread.stop();
@@ -428,23 +427,21 @@ impl VirtioDevice for Console {
                     ))
                 }
             };
-            return Ok(Some(Map::from([(0, receive_queue), (1, transmit_queue)])));
+            return Ok(Some(BTreeMap::from([
+                (0, receive_queue),
+                (1, transmit_queue),
+            ])));
         }
         Ok(None)
     }
 
     fn virtio_wake(
         &mut self,
-        queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
     ) -> anyhow::Result<()> {
         match queues_state {
             None => Ok(()),
-            Some((mem, interrupt, mut queues)) => {
-                let queues = vec![
-                    queues.remove(&0).expect("rx queue must be present"),
-                    queues.remove(&1).expect("tx queue must be present"),
-                ];
-
+            Some((mem, interrupt, queues)) => {
                 // TODO(khei): activate is just what we want at the moment, but we should probably move
                 // it into a "start workers" function to make it obvious that it isn't strictly
                 // used for activate events.
@@ -455,7 +452,7 @@ impl VirtioDevice for Console {
     }
 
     fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
-        serde_json::to_value(&ConsoleSnapshot {
+        serde_json::to_value(ConsoleSnapshot {
             // Snapshot base_features as a safeguard when restoring the console device. Saving this
             // info allows us to validate that the proper config was used for the console.
             base_features: self.base_features,

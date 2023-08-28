@@ -4,6 +4,7 @@
 
 mod sys;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::io::Write;
@@ -12,7 +13,6 @@ use std::net::Ipv4Addr;
 use std::os::raw::c_uint;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use anyhow::anyhow;
 use base::error;
@@ -34,8 +34,8 @@ use net_util::TapT;
 use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
-use sync::Mutex;
 use thiserror::Error as ThisError;
+use virtio_sys::virtio_config::VIRTIO_F_RING_PACKED;
 use virtio_sys::virtio_net;
 use virtio_sys::virtio_net::virtio_net_hdr_v1;
 use virtio_sys::virtio_net::VIRTIO_NET_CTRL_GUEST_OFFLOADS;
@@ -53,7 +53,6 @@ use super::DeviceType;
 use super::Interrupt;
 use super::Queue;
 use super::Reader;
-use super::SignalableInterrupt;
 use super::VirtioDevice;
 
 /// The maximum buffer size when segmentation offload is enabled. This
@@ -202,6 +201,8 @@ pub struct NetParameters {
     // to the fact this struct is used for argument parsing.
     #[cfg(unix)]
     pub vhost_net: Option<VhostNetParameters>,
+    #[serde(default)]
+    pub packed_queue: bool,
 }
 
 impl FromStr for NetParameters {
@@ -299,17 +300,14 @@ fn process_ctrl_request<T: TapT>(
     Ok(())
 }
 
-pub fn process_ctrl<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
-    ctrl_queue: &Arc<Mutex<Queue>>,
+pub fn process_ctrl<T: TapT>(
+    interrupt: &Interrupt,
+    ctrl_queue: &mut Queue,
     mem: &GuestMemory,
     tap: &mut T,
     acked_features: u64,
     vq_pairs: u16,
 ) -> Result<(), NetError> {
-    let mut ctrl_queue = ctrl_queue
-        .try_lock()
-        .expect("Lock should not be unavailable");
     while let Some(mut desc_chain) = ctrl_queue.pop(mem) {
         if let Err(e) = process_ctrl_request(&mut desc_chain.reader, tap, acked_features, vq_pairs)
         {
@@ -351,9 +349,9 @@ pub enum Token {
 pub(super) struct Worker<T: TapT> {
     pub(super) interrupt: Interrupt,
     pub(super) mem: GuestMemory,
-    pub(super) rx_queue: Arc<Mutex<Queue>>,
-    pub(super) tx_queue: Arc<Mutex<Queue>>,
-    pub(super) ctrl_queue: Option<Arc<Mutex<Queue>>>,
+    pub(super) rx_queue: Queue,
+    pub(super) tx_queue: Queue,
+    pub(super) ctrl_queue: Option<Queue>,
     pub(super) tap: T,
     #[cfg(windows)]
     pub(super) overlapped_wrapper: OverlappedWrapper,
@@ -374,7 +372,12 @@ where
     T: TapT + ReadNotifier,
 {
     fn process_tx(&mut self) {
-        process_tx(&self.interrupt, &self.tx_queue, &self.mem, &mut self.tap)
+        process_tx(
+            &self.interrupt,
+            &mut self.tx_queue,
+            &self.mem,
+            &mut self.tap,
+        )
     }
 
     fn process_ctrl(&mut self) -> Result<(), NetError> {
@@ -528,6 +531,7 @@ where
         tap: T,
         vq_pairs: u16,
         mac_addr: Option<MacAddress>,
+        use_packed_queue: bool,
     ) -> Result<Net<T>, NetError> {
         let taps = tap.into_mq_taps(vq_pairs).map_err(NetError::TapOpen)?;
 
@@ -559,6 +563,10 @@ where
 
         if vq_pairs > 1 {
             avail_features |= 1 << virtio_net::VIRTIO_NET_F_MQ;
+        }
+
+        if use_packed_queue {
+            avail_features |= 1 << VIRTIO_F_RING_PACKED;
         }
 
         if mac_addr.is_some() {
@@ -717,7 +725,7 @@ where
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         let ctrl_vq_enabled = self.acked_features & (1 << virtio_net::VIRTIO_NET_F_CTRL_VQ) != 0;
         let mq_enabled = self.acked_features & (1 << virtio_net::VIRTIO_NET_F_MQ) != 0;
@@ -756,11 +764,11 @@ where
             let memory = mem.clone();
             let first_queue = i == 0;
             // Queues alternate between rx0, tx0, rx1, tx1, ..., rxN, txN, ctrl.
-            let (rx_queue, rx_queue_evt) = queues.remove(0);
-            let (tx_queue, tx_queue_evt) = queues.remove(0);
+            let (rx_queue, rx_queue_evt) = queues.pop_first().unwrap().1;
+            let (tx_queue, tx_queue_evt) = queues.pop_first().unwrap().1;
             let (ctrl_queue, ctrl_queue_evt) = if first_queue && ctrl_vq_enabled {
-                let (queue, evt) = queues.remove(queues.len() - 1);
-                (Some(Arc::new(Mutex::new(queue))), Some(evt))
+                let (queue, evt) = queues.pop_last().unwrap().1;
+                (Some(queue), Some(evt))
             } else {
                 (None, None)
             };
@@ -774,8 +782,8 @@ where
                     let mut worker = Worker {
                         interrupt,
                         mem: memory,
-                        rx_queue: Arc::new(Mutex::new(rx_queue)),
-                        tx_queue: Arc::new(Mutex::new(tx_queue)),
+                        rx_queue,
+                        tx_queue,
                         ctrl_queue,
                         tap,
                         #[cfg(windows)]
@@ -804,6 +812,45 @@ where
         }
         cros_tracing::trace_simple_print!("Net device activated: {:?}", self);
         Ok(())
+    }
+
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
+        if self.worker_threads.is_empty() {
+            return Ok(None);
+        }
+        let mut queues = BTreeMap::new();
+        let mut queue_index = 0;
+        let mut ctrl_queue = None;
+        for worker_thread in self.worker_threads.drain(..) {
+            let mut worker = worker_thread.stop();
+            if worker.ctrl_queue.is_some() {
+                ctrl_queue = worker.ctrl_queue.take();
+            }
+            self.taps.push(worker.tap);
+            queues.insert(queue_index + 0, worker.rx_queue);
+            queues.insert(queue_index + 1, worker.tx_queue);
+            queue_index += 2;
+        }
+        if let Some(ctrl_queue) = ctrl_queue {
+            queues.insert(queue_index, ctrl_queue);
+        }
+        Ok(Some(queues))
+    }
+
+    fn virtio_wake(
+        &mut self,
+        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        match device_state {
+            None => Ok(()),
+            Some((mem, interrupt, queues)) => {
+                // TODO: activate is just what we want at the moment, but we should probably move
+                // it into a "start workers" function to make it obvious that it isn't strictly
+                // used for activate events.
+                self.activate(mem, interrupt, queues)?;
+                Ok(())
+            }
+        }
     }
 
     fn reset(&mut self) -> bool {
@@ -858,7 +905,8 @@ mod tests {
                 mode: NetParametersMode::TapName {
                     tap_name: "tap".to_string(),
                     mac: None
-                }
+                },
+                packed_queue: false
             }
         );
 
@@ -872,7 +920,8 @@ mod tests {
                 mode: NetParametersMode::TapName {
                     tap_name: "tap".to_string(),
                     mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
-                }
+                },
+                packed_queue: false
             }
         );
 
@@ -886,7 +935,8 @@ mod tests {
                 mode: NetParametersMode::TapFd {
                     tap_fd: 12,
                     mac: None
-                }
+                },
+                packed_queue: false,
             }
         );
 
@@ -900,7 +950,8 @@ mod tests {
                 mode: NetParametersMode::TapFd {
                     tap_fd: 12,
                     mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
-                }
+                },
+                packed_queue: false
             }
         );
 
@@ -918,7 +969,8 @@ mod tests {
                     host_ip: Ipv4Addr::from_str("192.168.10.1").unwrap(),
                     netmask: Ipv4Addr::from_str("255.255.255.0").unwrap(),
                     mac: MacAddress::from_str("3d:70:eb:61:1a:91").unwrap(),
-                }
+                },
+                packed_queue: false
             }
         );
 
@@ -950,7 +1002,8 @@ mod tests {
                     host_ip: Ipv4Addr::from_str("192.168.10.1").unwrap(),
                     netmask: Ipv4Addr::from_str("255.255.255.0").unwrap(),
                     mac: MacAddress::from_str("3d:70:eb:61:1a:91").unwrap(),
-                }
+                },
+                packed_queue: false
             }
         );
 
@@ -963,7 +1016,8 @@ mod tests {
                 mode: NetParametersMode::TapFd {
                     tap_fd: 3,
                     mac: None
-                }
+                },
+                packed_queue: false
             }
         );
 
@@ -976,7 +1030,8 @@ mod tests {
                 mode: NetParametersMode::TapName {
                     tap_name: "crosvm_tap".to_owned(),
                     mac: None
-                }
+                },
+                packed_queue: false
             }
         );
 
@@ -990,7 +1045,38 @@ mod tests {
                 mode: NetParametersMode::TapName {
                     tap_name: "crosvm_tap".to_owned(),
                     mac: Some(MacAddress::from_str("3d:70:eb:61:1a:91").unwrap())
-                }
+                },
+                packed_queue: false
+            }
+        );
+
+        let params = from_net_arg("tap-name=tap,packed-queue=true").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                #[cfg(unix)]
+                vhost_net: None,
+                vq_pairs: None,
+                mode: NetParametersMode::TapName {
+                    tap_name: "tap".to_string(),
+                    mac: None
+                },
+                packed_queue: true
+            }
+        );
+
+        let params = from_net_arg("tap-name=tap,packed-queue").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                #[cfg(unix)]
+                vhost_net: None,
+                vq_pairs: None,
+                mode: NetParametersMode::TapName {
+                    tap_name: "tap".to_string(),
+                    mac: None
+                },
+                packed_queue: true
             }
         );
 

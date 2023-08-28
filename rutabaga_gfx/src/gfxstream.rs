@@ -8,11 +8,14 @@
 
 #![cfg(feature = "gfxstream")]
 
+use std::convert::TryInto;
 use std::mem::size_of;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
 use std::os::raw::c_uint;
 use std::os::raw::c_void;
+use std::panic::catch_unwind;
+use std::process::abort;
 use std::ptr::null;
 use std::ptr::null_mut;
 use std::sync::Arc;
@@ -33,11 +36,15 @@ use crate::rutabaga_os::SafeDescriptor;
 use crate::rutabaga_utils::*;
 
 // See `virtgpu-gfxstream-renderer.h` for definitions
+const STREAM_RENDERER_PARAM_NULL: u64 = 0;
 const STREAM_RENDERER_PARAM_USER_DATA: u64 = 1;
 const STREAM_RENDERER_PARAM_RENDERER_FLAGS: u64 = 2;
 const STREAM_RENDERER_PARAM_FENCE_CALLBACK: u64 = 3;
 const STREAM_RENDERER_PARAM_WIN0_WIDTH: u64 = 4;
 const STREAM_RENDERER_PARAM_WIN0_HEIGHT: u64 = 5;
+const STREAM_RENDERER_PARAM_DEBUG_CALLBACK: u64 = 6;
+
+const STREAM_RENDERER_MAX_PARAMS: usize = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +68,15 @@ pub struct stream_renderer_vulkan_info {
     pub driver_uuid: [u8; 16],
 }
 
+#[repr(C)]
+pub struct stream_renderer_command {
+    pub ctx_id: u32,
+    pub cmd_size: u32,
+    pub cmd: *const u8,
+    pub num_in_fences: u32,
+    pub in_fence_descriptors: *const u64,
+}
+
 #[allow(non_camel_case_types)]
 pub type stream_renderer_create_blob = ResourceCreateBlob;
 
@@ -72,6 +88,9 @@ pub type stream_renderer_box = virgl_box;
 
 #[allow(non_camel_case_types)]
 pub type stream_renderer_fence = RutabagaFence;
+
+#[allow(non_camel_case_types)]
+pub type stream_renderer_debug = RutabagaDebug;
 
 extern "C" {
     // Entry point for the stream renderer.
@@ -119,7 +138,7 @@ extern "C" {
         iovec: *mut iovec,
         iovec_cnt: c_uint,
     ) -> c_int;
-    fn stream_renderer_submit_cmd(commands: *mut c_void, ctx_id: i32, dword_count: i32) -> c_int;
+    fn stream_renderer_submit_cmd(cmd: *const stream_renderer_command) -> c_int;
     fn stream_renderer_resource_attach_iov(
         res_handle: c_int,
         iov: *mut iovec,
@@ -169,7 +188,7 @@ extern "C" {
 /// The virtio-gpu backend state tracker which supports accelerated rendering.
 pub struct Gfxstream {
     /// Cookie used by Gfxstream, should be held as long as the renderer is alive.
-    _cookie: Box<VirglCookie>,
+    _cookie: Box<RutabagaCookie>,
 }
 
 struct GfxstreamContext {
@@ -182,15 +201,17 @@ impl RutabagaContext for GfxstreamContext {
         if commands.len() % size_of::<u32>() != 0 {
             return Err(RutabagaError::InvalidCommandSize(commands.len()));
         }
-        let dword_count = (commands.len() / size_of::<u32>()) as i32;
-        // Safe because the context and buffer are valid and gfxstream will have been
-        // initialized if there are Context instances.
+
         let ret = unsafe {
-            stream_renderer_submit_cmd(
-                commands.as_mut_ptr() as *mut c_void,
-                self.ctx_id as i32,
-                dword_count,
-            )
+            let cmd = stream_renderer_command {
+                ctx_id: self.ctx_id,
+                cmd_size: commands.len().try_into()?,
+                cmd: commands.as_mut_ptr(),
+                num_in_fences: 0,
+                in_fence_descriptors: null(),
+            };
+
+            stream_renderer_submit_cmd(&cmd as *const stream_renderer_command)
         };
         ret_to_res(ret)
     }
@@ -237,24 +258,51 @@ impl Drop for GfxstreamContext {
     }
 }
 
+extern "C" fn write_context_fence(cookie: *mut c_void, fence: *const RutabagaFence) {
+    catch_unwind(|| {
+        assert!(!cookie.is_null());
+        let cookie = unsafe { &*(cookie as *mut RutabagaCookie) };
+        if let Some(handler) = &cookie.fence_handler {
+            // We trust gfxstream not give a dangling pointer
+            unsafe { handler.call(*fence) };
+        }
+    })
+    .unwrap_or_else(|_| abort())
+}
+
+extern "C" fn gfxstream_debug_callback(cookie: *mut c_void, debug: *const stream_renderer_debug) {
+    catch_unwind(|| {
+        assert!(!cookie.is_null());
+        let cookie = unsafe { &*(cookie as *mut RutabagaCookie) };
+        if let Some(handler) = &cookie.debug_handler {
+            // We trust gfxstream not give a dangling pointer
+            unsafe { handler.call(*debug) };
+        }
+    })
+    .unwrap_or_else(|_| abort())
+}
+
 impl Gfxstream {
     pub fn init(
         display_width: u32,
         display_height: u32,
         gfxstream_flags: GfxstreamFlags,
         fence_handler: RutabagaFenceHandler,
+        debug_handler: Option<RutabagaDebugHandler>,
     ) -> RutabagaResult<Box<dyn RutabagaComponent>> {
-        let mut cookie = Box::new(VirglCookie {
+        let use_debug = debug_handler.is_some();
+        let mut cookie = Box::new(RutabagaCookie {
             render_server_fd: None,
-            fence_handler: Some(fence_handler.clone()),
+            fence_handler: Some(fence_handler),
+            debug_handler,
         });
 
-        let mut stream_renderer_params = [
+        let mut stream_renderer_params: [stream_renderer_param; STREAM_RENDERER_MAX_PARAMS] = [
             stream_renderer_param {
                 key: STREAM_RENDERER_PARAM_USER_DATA,
                 // Safe as cookie outlives the stream renderer (stream_renderer_teardown called
                 // at Gfxstream Drop)
-                value: &mut *cookie as *mut VirglCookie as u64,
+                value: &mut *cookie as *mut RutabagaCookie as u64,
             },
             stream_renderer_param {
                 key: STREAM_RENDERER_PARAM_RENDERER_FLAGS,
@@ -271,6 +319,17 @@ impl Gfxstream {
             stream_renderer_param {
                 key: STREAM_RENDERER_PARAM_WIN0_HEIGHT,
                 value: display_height as u64,
+            },
+            if use_debug {
+                stream_renderer_param {
+                    key: STREAM_RENDERER_PARAM_DEBUG_CALLBACK,
+                    value: gfxstream_debug_callback as usize as u64,
+                }
+            } else {
+                stream_renderer_param {
+                    key: STREAM_RENDERER_PARAM_NULL,
+                    value: 0,
+                }
             },
         ];
 

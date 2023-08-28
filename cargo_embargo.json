@@ -50,6 +50,8 @@
   ],
   "global_defaults": "crosvm_inner_defaults",
   "apex_available": [],
+  "product_available": false,
+  "vendor_available": false,
   "module_name_overrides": {
     "libbase": "libbase_rust",
     "libbase64": "libbase64_rust",
@@ -105,6 +107,7 @@
     "vfio_sys_test_src_lib",
     "vhost_test_src_lib",
     "virtio_sys_test_src_lib",
+    "wire_format_derive_test_src_lib",
     "wire_format_derive_test_wire_format_derive"
   ],
   "module_visibility": {

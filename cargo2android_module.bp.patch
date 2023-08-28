@@ -5,6 +5,9 @@ arch: {
     arm64: {
         rustlibs: ["libaarch64"],
     },
+    riscv64: {
+        rustlibs: ["libriscv64"],
+    },
 },
 target: {
     host: {

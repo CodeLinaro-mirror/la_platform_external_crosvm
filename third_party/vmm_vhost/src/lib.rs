@@ -34,6 +34,7 @@
 
 use std::fs::File;
 use std::io::Error as IOError;
+use std::num::TryFromIntError;
 
 use remain::sorted;
 use thiserror::Error as ThisError;
@@ -101,6 +102,9 @@ pub enum Error {
     /// Fd array in question is too big or too small
     #[error("wrong number of attached fds")]
     IncorrectFds,
+    /// Invalid cast to int.
+    #[error("invalid cast to int: {0}")]
+    InvalidCastToInt(TryFromIntError),
     /// Invalid message format, flag or content.
     #[error("invalid message")]
     InvalidMessage,
@@ -478,7 +482,6 @@ mod tests {
         master.set_vring_num(0, 256).unwrap();
         master.set_vring_base(0, 0).unwrap();
         let config = VringConfigData {
-            queue_max_size: 256,
             queue_size: 128,
             flags: VhostUserVringAddrFlags::VHOST_VRING_F_LOG.bits(),
             desc_table_addr: 0x1000,

@@ -14,41 +14,24 @@ use anyhow::Result;
 use base::trace;
 use base::Protection;
 use cros_async::MemRegion;
-use data_model::Le16;
-use data_model::Le32;
-use data_model::Le64;
 use smallvec::SmallVec;
 use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
-use zerocopy::AsBytes;
-use zerocopy::FromBytes;
 
 use crate::virtio::descriptor_utils::Reader;
 use crate::virtio::descriptor_utils::Writer;
 use crate::virtio::ipc_memory_mapper::ExportedRegion;
 use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
-use crate::virtio::memory_util::read_obj_from_addr_wrapper;
 
-const VIRTQ_DESC_F_NEXT: u16 = 0x1;
-const VIRTQ_DESC_F_WRITE: u16 = 0x2;
+/// Virtio flag indicating there is a next descriptor in descriptor chain
+pub const VIRTQ_DESC_F_NEXT: u16 = 0x1;
+/// Virtio flag indicating descriptor is write-only
+pub const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 
-/// A single virtio split queue descriptor (`struct virtq_desc` in the spec).
-#[derive(Copy, Clone, Debug, FromBytes, AsBytes)]
-#[repr(C)]
-pub struct Desc {
-    /// Guest address of memory described by this descriptor.
-    pub addr: Le64,
-
-    /// Length of this descriptor's memory region in byutes.
-    pub len: Le32,
-
-    /// `VIRTQ_DESC_F_*` flags for this descriptor.
-    pub flags: Le16,
-
-    /// Index of the next descriptor in the chain (only valid if `flags & VIRTQ_DESC_F_NEXT`).
-    pub next: Le16,
-}
+/// Packed virtqueue flags
+pub const VIRTQ_DESC_F_AVAIL: u16 = 0x80;
+pub const VIRTQ_DESC_F_USED: u16 = 0x8000;
 
 /// Type of access allowed for a single virtio descriptor within a descriptor chain.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -77,6 +60,12 @@ pub struct DescriptorChain {
 
     /// The writable memory regions that make up the descriptor chain.
     pub writer: Writer,
+
+    /// The descriptor chain id(only if it is a packed virtqueue descriptor chain)
+    pub id: Option<u16>,
+
+    ///  Number of descriptor in descriptor chain
+    pub count: u16,
 }
 
 impl DescriptorChain {
@@ -127,13 +116,17 @@ impl DescriptorChain {
             }
         }
 
+        let count = chain.count();
+        let id = chain.id();
+
         Self::validate_mem_regions(mem, &readable_regions, &writable_regions)
             .context("invalid descriptor chain memory regions")?;
 
         trace!(
-            "DescriptorChain readable={} writable={}",
+            "Descriptor chain created, index:{index}, count:{count}, buffer id:{:?}, readable:{}, writable:{}",
+            id,
             readable_regions.len(),
-            writable_regions.len(),
+            writable_regions.len()
         );
 
         let exported_regions = if exported_regions.is_empty() {
@@ -150,6 +143,8 @@ impl DescriptorChain {
             index,
             reader,
             writer,
+            id,
+            count,
         };
 
         Ok(desc_chain)
@@ -273,121 +268,11 @@ pub struct Descriptor {
 pub trait DescriptorChainIter {
     /// Return the next descriptor in the chain, or `None` if there are no more descriptors.
     fn next(&mut self) -> Result<Option<Descriptor>>;
-}
 
-/// Iterator over the descriptors of a split virtqueue descriptor chain.
-pub struct SplitDescriptorChain<'m, 'd> {
-    /// Current descriptor index within `desc_table`, or `None` if the iterator is exhausted.
-    index: Option<u16>,
+    /// Return the number of descriptor has been iterated in the chain
+    fn count(&self) -> u16;
 
-    /// Number of descriptors returned by the iterator already.
-    /// If `count` reaches `queue_size`, the chain has a loop and is therefore invalid.
-    count: u16,
-
-    queue_size: u16,
-
-    /// If `writable` is true, a writable descriptor has already been encountered.
-    /// Valid descriptor chains must consist of readable descriptors followed by writable
-    /// descriptors.
-    writable: bool,
-
-    mem: &'m GuestMemory,
-    desc_table: GuestAddress,
-    exported_desc_table: Option<&'d ExportedRegion>,
-}
-
-impl<'m, 'd> SplitDescriptorChain<'m, 'd> {
-    /// Construct a new iterator over a split virtqueue descriptor chain.
-    ///
-    /// # Arguments
-    /// * `mem` - The [`GuestMemory`] containing the descriptor chain.
-    /// * `desc_table` - Guest physical address of the descriptor table.
-    /// * `queue_size` - Total number of entries in the descriptor table.
-    /// * `index` - The index of the first descriptor in the chain.
-    /// * `exported_desc_table` - If specified, contains the IOMMU mapping of the descriptor table
-    ///   region.
-    pub fn new(
-        mem: &'m GuestMemory,
-        desc_table: GuestAddress,
-        queue_size: u16,
-        index: u16,
-        exported_desc_table: Option<&'d ExportedRegion>,
-    ) -> SplitDescriptorChain<'m, 'd> {
-        trace!("starting split descriptor chain head={index}");
-        SplitDescriptorChain {
-            index: Some(index),
-            count: 0,
-            queue_size,
-            writable: false,
-            mem,
-            desc_table,
-            exported_desc_table,
-        }
-    }
-}
-
-impl DescriptorChainIter for SplitDescriptorChain<'_, '_> {
-    fn next(&mut self) -> Result<Option<Descriptor>> {
-        let index = match self.index {
-            Some(index) => index,
-            None => return Ok(None),
-        };
-
-        if index >= self.queue_size {
-            bail!(
-                "out of bounds descriptor index {} for queue size {}",
-                index,
-                self.queue_size
-            );
-        }
-
-        if self.count >= self.queue_size {
-            bail!("descriptor chain loop detected");
-        }
-        self.count += 1;
-
-        let desc_addr = self
-            .desc_table
-            .checked_add((index as u64) * 16)
-            .context("integer overflow")?;
-        let desc =
-            read_obj_from_addr_wrapper::<Desc>(self.mem, self.exported_desc_table, desc_addr)
-                .with_context(|| format!("failed to read desc {:#x}", desc_addr.offset()))?;
-
-        let address: u64 = desc.addr.into();
-        let len: u32 = desc.len.into();
-        let flags: u16 = desc.flags.into();
-        let next: u16 = desc.next.into();
-
-        trace!("{index:5}: addr={address:#016x} len={len:#08x} flags={flags:#x}");
-
-        let unexpected_flags = flags & !(VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT);
-        if unexpected_flags != 0 {
-            bail!("unexpected flags in descriptor {index}: {unexpected_flags:#x}")
-        }
-
-        let access = if flags & VIRTQ_DESC_F_WRITE != 0 {
-            DescriptorAccess::DeviceWrite
-        } else {
-            DescriptorAccess::DeviceRead
-        };
-
-        if access == DescriptorAccess::DeviceRead && self.writable {
-            bail!("invalid device-readable descriptor following writable descriptors");
-        } else if access == DescriptorAccess::DeviceWrite {
-            self.writable = true;
-        }
-
-        self.index = if flags & VIRTQ_DESC_F_NEXT != 0 {
-            Some(next)
-        } else {
-            None
-        };
-
-        Ok(Some(Descriptor {
-            address,
-            len,
-            access,
-        }))
-    }
+    /// Return Packed descriptor chain buffer id if iterator reaches end, otherwise return None
+    /// SplitDescriptorChainIter should return None.
+    fn id(&self) -> Option<u16>;
 }

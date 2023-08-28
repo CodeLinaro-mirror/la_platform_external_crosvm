@@ -59,7 +59,6 @@ use crate::VcpuX86_64;
 use crate::VmCap;
 use crate::VmX86_64;
 use crate::Xsave;
-use crate::MAX_IOAPIC_PINS;
 use crate::NUM_IOAPIC_PINS;
 
 type KvmCpuId = kvm::CpuId;
@@ -302,15 +301,9 @@ impl KvmVm {
         }
     }
 
-    /// Retrieves the KVM_IOAPIC_NUM_PINS value for emulated IO-APIC.
+    /// Retrieves the number of pins for emulated IO-APIC.
     pub fn get_ioapic_num_pins(&self) -> Result<usize> {
-        // Safe because we know that our file is a KVM fd, and if the cap is invalid KVM assumes
-        // it's an unavailable extension and returns 0, producing default KVM_IOAPIC_NUM_PINS value.
-        match unsafe { ioctl_with_val(self, KVM_CHECK_EXTENSION(), KVM_CAP_IOAPIC_NUM_PINS as u64) }
-        {
-            ret if ret < 0 => errno_result(),
-            ret => Ok((ret as usize).max(NUM_IOAPIC_PINS).min(MAX_IOAPIC_PINS)),
-        }
+        Ok(NUM_IOAPIC_PINS)
     }
 
     /// Retrieves the state of IOAPIC by issuing KVM_GET_IRQCHIP ioctl.
@@ -562,19 +555,6 @@ impl VmX86_64 for KvmVm {
 }
 
 impl KvmVcpu {
-    /// Arch-specific implementation of `Vcpu::pvclock_ctrl`.
-    pub fn pvclock_ctrl_arch(&self) -> Result<()> {
-        let ret = unsafe {
-            // The ioctl is safe because it does not read or write memory in this process.
-            ioctl(self, KVM_KVMCLOCK_CTRL())
-        };
-        if ret == 0 {
-            Ok(())
-        } else {
-            errno_result()
-        }
-    }
-
     /// Handles a `KVM_EXIT_SYSTEM_EVENT` with event type `KVM_SYSTEM_EVENT_RESET` with the given
     /// event flags and returns the appropriate `VcpuExit` value for the run loop to handle.
     pub fn system_event_reset(&self, _event_flags: u64) -> Result<VcpuExit> {
@@ -1215,7 +1195,7 @@ impl From<&kvm_ioapic_state> for IoapicState {
             ioregsel: item.ioregsel as u8,
             ioapicid: item.id,
             current_interrupt_level_bitmap: item.irr,
-            redirect_table: [IoapicRedirectionTableEntry::default(); 120],
+            redirect_table: [IoapicRedirectionTableEntry::default(); NUM_IOAPIC_PINS],
         };
         for (in_state, out_state) in item.redirtbl.iter().zip(state.redirect_table.iter_mut()) {
             *out_state = in_state.into();

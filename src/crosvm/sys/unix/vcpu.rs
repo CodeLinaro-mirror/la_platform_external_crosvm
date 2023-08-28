@@ -24,6 +24,7 @@ use arch::LinuxArch;
 use arch::VcpuArch;
 use arch::VcpuInitArch;
 use arch::VmArch;
+use base::signal::clear_signal_handler;
 use base::signal::BlockedSignal;
 use base::*;
 use devices::Bus;
@@ -211,6 +212,10 @@ pub fn setup_vcpu_signal_handler() -> Result<()> {
     Ok(())
 }
 
+pub fn remove_vcpu_signal_handler() -> Result<()> {
+    clear_signal_handler(SIGRTMIN() + 0).context("error unregistering signal handler")
+}
+
 fn vcpu_loop<V>(
     mut run_mode: VmRunMode,
     cpu_id: usize,
@@ -220,7 +225,6 @@ fn vcpu_loop<V>(
     delay_rt: bool,
     io_bus: Bus,
     mmio_bus: Bus,
-    requires_pvclock_ctrl: bool,
     from_main_tube: mpsc::Receiver<VcpuControl>,
     #[cfg(feature = "gdb")] to_gdb_tube: Option<mpsc::Sender<VcpuDebugStatusMessage>>,
     #[cfg(feature = "gdb")] guest_mem: GuestMemory,
@@ -272,21 +276,13 @@ where
                         VcpuControl::RunState(new_mode) => {
                             run_mode = new_mode;
                             match run_mode {
-                                VmRunMode::Running => break 'state_loop,
+                                VmRunMode::Running => {}
                                 VmRunMode::Suspending => {
-                                    // On KVM implementations that use a paravirtualized
-                                    // clock (e.g. x86), a flag must be set to indicate to
-                                    // the guest kernel that a vCPU was suspended. The guest
-                                    // kernel will use this flag to prevent the soft lockup
-                                    // detection from triggering when this vCPU resumes,
-                                    // which could happen days later in realtime.
-                                    if requires_pvclock_ctrl {
-                                        if let Err(e) = vcpu.pvclock_ctrl() {
-                                            error!(
-                                                "failed to tell hypervisor vcpu {} is suspending: {}",
-                                                cpu_id, e
-                                            );
-                                        }
+                                    if let Err(e) = vcpu.on_suspend() {
+                                        error!(
+                                            "failed to tell hypervisor vcpu {} is suspending: {}",
+                                            cpu_id, e
+                                        );
                                     }
                                 }
                                 VmRunMode::Breakpoint => {}
@@ -340,6 +336,9 @@ where
                             }
                         }
                     }
+                }
+                if run_mode == VmRunMode::Running {
+                    break 'state_loop;
                 }
             }
         }
@@ -489,7 +488,6 @@ pub fn run_vcpu<V>(
     mut io_bus: Bus,
     mut mmio_bus: Bus,
     vm_evt_wrtube: SendTube,
-    requires_pvclock_ctrl: bool,
     from_main_tube: mpsc::Receiver<VcpuControl>,
     #[cfg(feature = "gdb")] to_gdb_tube: Option<mpsc::Sender<VcpuDebugStatusMessage>>,
     enable_core_scheduling: bool,
@@ -576,7 +574,6 @@ where
                     delay_rt,
                     io_bus,
                     mmio_bus,
-                    requires_pvclock_ctrl,
                     from_main_tube,
                     #[cfg(feature = "gdb")]
                     to_gdb_tube,
@@ -588,6 +585,8 @@ where
                     bus_lock_ratelimit_ctrl,
                 );
 
+                // We don't want any more VCPU signals from now until the thread exits.
+                let _ = block_signal(SIGRTMIN() + 0);
                 set_vcpu_thread_local(None, SIGRTMIN() + 0);
 
                 vcpu_exit_state

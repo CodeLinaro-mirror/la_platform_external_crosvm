@@ -20,7 +20,7 @@ use std::path::Path;
 use std::str;
 
 use base::error;
-use base::open_file;
+use base::open_file_or_duplicate;
 use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::FileAllocate;
@@ -38,6 +38,7 @@ use libc::ENOTSUP;
 use remain::sorted;
 use thiserror::Error;
 
+use crate::asynchronous::DiskFlush;
 use crate::create_disk_file;
 use crate::qcow::qcow_raw_file::QcowRawFile;
 use crate::qcow::refcount::RefCount;
@@ -428,6 +429,14 @@ pub struct QcowFile {
 
 impl DiskFile for QcowFile {}
 
+impl DiskFlush for QcowFile {
+    fn flush(&mut self) -> io::Result<()> {
+        // Using fsync is overkill here, but, the code for flushing state to file tangled up with
+        // the fsync, so it is best we can do for now.
+        self.fsync()
+    }
+}
+
 impl QcowFile {
     /// Creates a QcowFile from `file`. File must be a valid qcow2 image.
     pub fn from(mut file: File, max_nesting_depth: u32) -> Result<QcowFile> {
@@ -456,7 +465,7 @@ impl QcowFile {
 
         let backing_file = if let Some(backing_file_path) = header.backing_file_path.as_ref() {
             let path = backing_file_path.clone();
-            let backing_raw_file = open_file(
+            let backing_raw_file = open_file_or_duplicate(
                 Path::new(&path),
                 OpenOptions::new().read(true), // TODO(b/190435784): Add support for O_DIRECT.
             )
@@ -606,7 +615,7 @@ impl QcowFile {
         backing_file_max_nesting_depth: u32,
     ) -> Result<QcowFile> {
         let backing_path = Path::new(backing_file_name);
-        let backing_raw_file = open_file(
+        let backing_raw_file = open_file_or_duplicate(
             backing_path,
             OpenOptions::new().read(true), // TODO(b/190435784): add support for O_DIRECT.
         )

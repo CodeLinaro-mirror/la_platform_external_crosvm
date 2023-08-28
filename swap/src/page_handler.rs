@@ -125,7 +125,6 @@ struct Region<'a> {
     swap_in_pages: usize,
     /// the amount of pages which were already initialized on page faults.
     redundant_pages: usize,
-    swap_active: bool,
 }
 
 /// MoveToStaging copies chunks of consecutive pages next to each other on the guest memory to the
@@ -249,7 +248,6 @@ impl<'a> PageHandler<'a> {
                         zeroed_pages: 0,
                         swap_in_pages: 0,
                         redundant_pages: 0,
-                        swap_active: false,
                     });
                     offset_pages += num_of_pages;
                 }
@@ -502,29 +500,13 @@ impl<'a> PageHandler<'a> {
             copies,
         });
 
-        let moved_pages = bytes_to_pages(moved_size);
-        // Suppress error log on the first swap_out, since page counts are not initialized but zero.
-        if region.swap_active
-            && moved_pages
-                != (region.copied_from_file_pages
-                    + region.copied_from_staging_pages
-                    + region.zeroed_pages
-                    + region.swap_in_pages)
-        {
-            error!(
-                "moved pages ({}) does not match with resident pages (copied(file): {}, copied(staging): {}, zeroed: {}, swap_in: {}).",
-                moved_pages, region.copied_from_file_pages, region.copied_from_staging_pages,
-                region.zeroed_pages, region.swap_in_pages
-            );
-        }
         region.copied_from_file_pages = 0;
         region.copied_from_staging_pages = 0;
         region.zeroed_pages = 0;
         region.swap_in_pages = 0;
         region.redundant_pages = 0;
-        region.swap_active = true;
 
-        Ok(moved_pages)
+        Ok(bytes_to_pages(moved_size))
     }
 
     /// Write a chunk of consecutive pages in the staging memory to the swap file.
@@ -588,16 +570,6 @@ impl<'a> PageHandler<'a> {
         }
     }
 
-    /// Returns count of pages active on the memory.
-    pub fn compute_resident_pages(&self) -> usize {
-        self.ctx
-            .lock()
-            .regions
-            .iter()
-            .map(|r| r.copied_from_file_pages + r.copied_from_staging_pages + r.zeroed_pages)
-            .sum()
-    }
-
     /// Returns count of pages copied from vmm-swap file to the guest memory.
     fn compute_copied_from_file_pages(&self) -> usize {
         self.ctx
@@ -653,17 +625,14 @@ impl<'a> PageHandler<'a> {
             .sum()
     }
 
-    /// Generates [SwapMetrics].
-    pub fn compute_metrics(&self) -> SwapMetrics {
-        SwapMetrics {
-            resident_pages: self.compute_resident_pages() as u64,
-            copied_from_file_pages: self.compute_copied_from_file_pages() as u64,
-            copied_from_staging_pages: self.compute_copied_from_staging_pages() as u64,
-            zeroed_pages: self.compute_zeroed_pages() as u64,
-            redundant_pages: self.compute_redundant_pages() as u64,
-            staging_pages: self.compute_staging_pages() as u64,
-            swap_pages: self.compute_swap_pages() as u64,
-        }
+    /// Fill [SwapMetrics] with page handler metrics.
+    pub fn load_metrics(&self, metrics: &mut SwapMetrics) {
+        metrics.copied_from_file_pages = self.compute_copied_from_file_pages() as u64;
+        metrics.copied_from_staging_pages = self.compute_copied_from_staging_pages() as u64;
+        metrics.zeroed_pages = self.compute_zeroed_pages() as u64;
+        metrics.redundant_pages = self.compute_redundant_pages() as u64;
+        metrics.staging_pages = self.compute_staging_pages() as u64;
+        metrics.swap_pages = self.compute_swap_pages() as u64;
     }
 }
 

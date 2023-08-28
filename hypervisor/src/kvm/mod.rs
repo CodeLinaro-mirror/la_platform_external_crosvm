@@ -295,11 +295,14 @@ impl KvmVm {
             .build()
             .map_err(|_| Error::new(ENOSPC))?;
 
+        let cap_kvmclock_ctrl = self.check_raw_capability(KvmCap::KvmclockCtrl);
+
         Ok(KvmVcpu {
             kvm: self.kvm.try_clone()?,
             vm: self.vm.try_clone()?,
             vcpu,
             id,
+            cap_kvmclock_ctrl,
             run_mmap: Arc::new(run_mmap),
         })
     }
@@ -543,7 +546,6 @@ impl Vm for KvmVm {
         match c {
             VmCap::DirtyLog => true,
             VmCap::PvClock => false,
-            VmCap::PvClockSuspend => self.check_raw_capability(KvmCap::KvmclockCtrl),
             VmCap::Protected => self.check_raw_capability(KvmCap::ArmProtectedVm),
             VmCap::EarlyInitCpuid => false,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -795,6 +797,7 @@ pub struct KvmVcpu {
     vm: SafeDescriptor,
     vcpu: SafeDescriptor,
     id: usize,
+    cap_kvmclock_ctrl: bool,
     run_mmap: Arc<MemoryMapping>,
 }
 
@@ -807,6 +810,7 @@ impl Vcpu for KvmVcpu {
             kvm: self.kvm.try_clone()?,
             vm,
             vcpu,
+            cap_kvmclock_ctrl: self.cap_kvmclock_ctrl,
             id: self.id,
             run_mmap: self.run_mmap.clone(),
         })
@@ -837,8 +841,19 @@ impl Vcpu for KvmVcpu {
         }
     }
 
-    fn pvclock_ctrl(&self) -> Result<()> {
-        self.pvclock_ctrl_arch()
+    fn on_suspend(&self) -> Result<()> {
+        // On KVM implementations that use a paravirtualized clock (e.g. x86), a flag must be set to
+        // indicate to the guest kernel that a vCPU was suspended. The guest kernel will use this
+        // flag to prevent the soft lockup detection from triggering when this vCPU resumes, which
+        // could happen days later in realtime.
+        if self.cap_kvmclock_ctrl {
+            // The ioctl is safe because it does not read or write memory in this process.
+            if unsafe { ioctl(self, KVM_KVMCLOCK_CTRL()) } != 0 {
+                return errno_result();
+            }
+        }
+
+        Ok(())
     }
 
     unsafe fn enable_raw_capability(&self, cap: u32, args: &[u64; 4]) -> Result<()> {
@@ -1020,42 +1035,46 @@ impl Vcpu for KvmVcpu {
         let run = unsafe { &mut *(self.run_mmap.as_ptr() as *mut kvm_run) };
         // Verify that the handler is called in the right context.
         assert!(run.exit_reason == KVM_EXIT_IO);
-        let run_start = run as *mut kvm_run as *mut u8;
         // Safe because the exit_reason (which comes from the kernel) told us which
         // union field to use.
         let io = unsafe { run.__bindgen_anon_1.io };
-        let size = (io.count as usize) * (io.size as usize);
+        let size = usize::from(io.size);
+
+        // The data_offset is defined by the kernel to be some number of bytes into the kvm_run
+        // structure, which we have fully mmap'd.
+        let mut data_ptr = unsafe { (run as *mut kvm_run as *mut u8).add(io.data_offset as usize) };
+
         match io.direction as u32 {
             KVM_EXIT_IO_IN => {
-                if let Some(data) = handle_fn(IoParams {
-                    address: io.port.into(),
-                    size,
-                    operation: IoOperation::Read,
-                }) {
-                    // The data_offset is defined by the kernel to be some number of bytes
-                    // into the kvm_run structure, which we have fully mmap'd.
-                    unsafe {
-                        let data_ptr = run_start.offset(io.data_offset as isize);
-                        copy_nonoverlapping(data.as_ptr(), data_ptr, size);
+                for _ in 0..io.count {
+                    if let Some(data) = handle_fn(IoParams {
+                        address: io.port.into(),
+                        size,
+                        operation: IoOperation::Read,
+                    }) {
+                        unsafe {
+                            copy_nonoverlapping(data.as_ptr(), data_ptr, size);
+                            data_ptr = data_ptr.add(size);
+                        }
+                    } else {
+                        return Err(Error::new(EINVAL));
                     }
-                    Ok(())
-                } else {
-                    Err(Error::new(EINVAL))
                 }
+                Ok(())
             }
             KVM_EXIT_IO_OUT => {
-                let mut data = [0; 8];
-                // The data_offset is defined by the kernel to be some number of bytes
-                // into the kvm_run structure, which we have fully mmap'd.
-                unsafe {
-                    let data_ptr = run_start.offset(io.data_offset as isize);
-                    copy_nonoverlapping(data_ptr, data.as_mut_ptr(), min(size, data.len()));
+                for _ in 0..io.count {
+                    let mut data = [0; 8];
+                    unsafe {
+                        copy_nonoverlapping(data_ptr, data.as_mut_ptr(), min(size, data.len()));
+                        data_ptr = data_ptr.add(size);
+                    }
+                    handle_fn(IoParams {
+                        address: io.port.into(),
+                        size,
+                        operation: IoOperation::Write { data },
+                    });
                 }
-                handle_fn(IoParams {
-                    address: io.port.into(),
-                    size,
-                    operation: IoOperation::Write { data },
-                });
                 Ok(())
             }
             _ => Err(Error::new(EINVAL)),

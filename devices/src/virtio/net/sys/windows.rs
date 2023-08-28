@@ -27,10 +27,10 @@ use super::super::super::net::NetError;
 use super::super::super::net::Token;
 use super::super::super::net::Worker;
 use super::super::super::net::MAX_BUFFER_SIZE;
+use super::super::super::Interrupt;
 use super::super::super::ProtectionType;
 use super::super::super::Queue;
 use super::super::super::Reader;
-use super::super::super::SignalableInterrupt;
 
 // This file should not be included at virtio mod level if slirp is not include. In case it is,
 // throw a user friendly message.
@@ -41,7 +41,7 @@ compile_error!("Net device without slirp not supported on windows");
 // if a buffer was used, and false if the frame must be deferred until a buffer
 // is made available by the driver.
 fn rx_single_frame(
-    rx_queue: &mut MutexGuard<Queue>,
+    rx_queue: &mut Queue,
     mem: &GuestMemory,
     rx_buf: &mut [u8],
     rx_count: usize,
@@ -71,9 +71,9 @@ fn rx_single_frame(
     true
 }
 
-pub fn process_rx<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
-    rx_queue: &Arc<Mutex<Queue>>,
+pub fn process_rx<T: TapT>(
+    interrupt: &Interrupt,
+    rx_queue: &mut Queue,
     mem: &GuestMemory,
     tap: &mut T,
     rx_buf: &mut [u8],
@@ -84,7 +84,6 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
     let mut needs_interrupt = false;
     let mut first_frame = true;
 
-    let mut rx_queue = rx_queue.try_lock().expect("Lock should not be unavailable");
     // Read as many frames as possible.
     loop {
         let res = if *deferred_rx {
@@ -96,7 +95,7 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
         match res {
             Ok(count) => {
                 *rx_count = count;
-                if !rx_single_frame(&mut rx_queue, mem, rx_buf, *rx_count) {
+                if !rx_single_frame(rx_queue, mem, rx_buf, *rx_count) {
                     *deferred_rx = true;
                     break;
                 } else if first_frame {
@@ -152,9 +151,9 @@ pub fn process_rx<I: SignalableInterrupt, T: TapT>(
     needs_interrupt
 }
 
-pub fn process_tx<I: SignalableInterrupt, T: TapT>(
-    interrupt: &I,
-    tx_queue: &Arc<Mutex<Queue>>,
+pub fn process_tx<T: TapT>(
+    interrupt: &Interrupt,
+    tx_queue: &mut Queue,
     mem: &GuestMemory,
     tap: &mut T,
 ) {
@@ -173,7 +172,6 @@ pub fn process_tx<I: SignalableInterrupt, T: TapT>(
         Ok(count)
     }
 
-    let mut tx_queue = tx_queue.try_lock().expect("Lock should not be unavailable");
     while let Some(mut desc_chain) = tx_queue.pop(mem) {
         let mut frame = [0u8; MAX_BUFFER_SIZE];
         match read_to_end(&mut desc_chain.reader, &mut frame[..]) {
@@ -200,7 +198,7 @@ where
     pub(super) fn process_rx_slirp(&mut self) -> bool {
         process_rx(
             &self.interrupt,
-            &self.rx_queue,
+            &mut self.rx_queue,
             &self.mem,
             &mut self.tap,
             &mut self.rx_buf,
@@ -219,10 +217,7 @@ where
         // until we manage to receive this deferred frame.
         if self.deferred_rx {
             if rx_single_frame(
-                &mut self
-                    .rx_queue
-                    .try_lock()
-                    .expect("Lock should not be unavailable"),
+                &mut self.rx_queue,
                 &self.mem,
                 &mut self.rx_buf,
                 self.rx_count,
@@ -241,12 +236,7 @@ where
         }
         needs_interrupt |= self.process_rx_slirp();
         if needs_interrupt {
-            self.interrupt.signal_used_queue(
-                self.rx_queue
-                    .try_lock()
-                    .expect("Lock should not be unavailable")
-                    .vector(),
-            );
+            self.interrupt.signal_used_queue(self.rx_queue.vector());
         }
         Ok(())
     }
@@ -256,13 +246,14 @@ where
         wait_ctx: &WaitContext<Token>,
         _tap_polling_enabled: bool,
     ) -> result::Result<(), NetError> {
-        let mut rx_queue = self
-            .rx_queue
-            .try_lock()
-            .expect("Lock should not be unavailable");
         // There should be a buffer available now to receive the frame into.
         if self.deferred_rx
-            && rx_single_frame(&mut rx_queue, &self.mem, &mut self.rx_buf, self.rx_count)
+            && rx_single_frame(
+                &mut self.rx_queue,
+                &self.mem,
+                &mut self.rx_buf,
+                self.rx_count,
+            )
         {
             // The guest has made buffers available, so add the tap back to the
             // poll context in case it was removed.
@@ -274,7 +265,7 @@ where
                 }
             }
             self.deferred_rx = false;
-            self.interrupt.signal_used_queue(rx_queue.vector());
+            self.interrupt.signal_used_queue(self.rx_queue.vector());
         }
         Ok(())
     }

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 
@@ -144,7 +145,7 @@ fn handle_request(
 
 async fn handle_queue(
     mem: &GuestMemory,
-    mut queue: Queue,
+    queue: &mut Queue,
     mut queue_event: EventAsync,
     interrupt: Interrupt,
     pmem_device_tube: Tube,
@@ -179,7 +180,7 @@ async fn handle_queue(
 
 fn run_worker(
     queue_evt: Event,
-    queue: Queue,
+    queue: &mut Queue,
     pmem_device_tube: Tube,
     interrupt: Interrupt,
     kill_evt: Event,
@@ -217,13 +218,19 @@ fn run_worker(
 }
 
 pub struct Pmem {
-    worker_thread: Option<WorkerThread<()>>,
+    worker_thread: Option<WorkerThread<Queue>>,
     base_features: u64,
     disk_image: Option<File>,
     mapping_address: GuestAddress,
     mapping_arena_slot: MemSlot,
     mapping_size: u64,
     pmem_device_tube: Option<Tube>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PmemSnapshot {
+    mapping_address: GuestAddress,
+    mapping_size: u64,
 }
 
 impl Pmem {
@@ -288,13 +295,13 @@ impl VirtioDevice for Pmem {
         &mut self,
         memory: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != 1 {
             return Err(anyhow!("expected 1 queue, got {}", queues.len()));
         }
 
-        let (queue, queue_event) = queues.remove(0);
+        let (mut queue, queue_event) = queues.remove(&0).unwrap();
 
         let mapping_arena_slot = self.mapping_arena_slot;
         // We checked that this fits in a usize in `Pmem::new`.
@@ -308,16 +315,64 @@ impl VirtioDevice for Pmem {
         self.worker_thread = Some(WorkerThread::start("v_pmem", move |kill_event| {
             run_worker(
                 queue_event,
-                queue,
+                &mut queue,
                 pmem_device_tube,
                 interrupt,
                 kill_event,
                 memory,
                 mapping_arena_slot,
                 mapping_size,
-            )
+            );
+            queue
         }));
 
+        Ok(())
+    }
+
+    fn reset(&mut self) -> bool {
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let _queue = worker_thread.stop();
+            return true;
+        }
+        false
+    }
+
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let queue = worker_thread.stop();
+            return Ok(Some(BTreeMap::from([(0, queue)])));
+        }
+        Ok(None)
+    }
+
+    fn virtio_wake(
+        &mut self,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        if let Some((mem, interrupt, queues)) = queues_state {
+            self.activate(mem, interrupt, queues)?;
+        }
+        Ok(())
+    }
+
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        serde_json::to_value(PmemSnapshot {
+            mapping_address: self.mapping_address,
+            mapping_size: self.mapping_size,
+        })
+        .context("failed to serialize pmem snapshot")
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let snapshot: PmemSnapshot =
+            serde_json::from_value(data).context("failed to deserialize pmem snapshot")?;
+        anyhow::ensure!(
+            snapshot.mapping_address == self.mapping_address
+                && snapshot.mapping_size == self.mapping_size,
+            "pmem snapshot doesn't match config: expected {:?}, got {:?}",
+            (self.mapping_address, self.mapping_size),
+            (snapshot.mapping_address, snapshot.mapping_size),
+        );
         Ok(())
     }
 }

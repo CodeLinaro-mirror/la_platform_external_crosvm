@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::anyhow;
@@ -103,7 +104,7 @@ impl VirtioDevice for Scmi {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<(Queue, Event)>,
+        queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != NUM_QUEUES {
             return Err(anyhow!(
@@ -127,7 +128,7 @@ impl VirtioDevice for Scmi {
         let activate_vqs = |_handle: &VhostScmiHandle| -> Result<()> { Ok(()) };
 
         worker
-            .init(mem, QUEUE_SIZES, activate_vqs)
+            .init(mem, QUEUE_SIZES, activate_vqs, None)
             .context("vhost worker init exited with error")?;
 
         self.worker_thread = Some(WorkerThread::start("vhost_scmi", move |kill_evt| {

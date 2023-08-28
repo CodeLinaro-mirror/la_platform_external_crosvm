@@ -37,6 +37,7 @@ members = [
     "arch",
     "argh_helpers",
     "audio_util",
+    "audio_streams_conformance_test",
     "base",
     "bit_field",
     "broker_ipc",
@@ -150,6 +151,9 @@ gdb = [
 ## Enables a panic handler that writes panic info to the `RUST_PANIC_SIG` memfd.
 panic-memfd = []
 
+## Enables PCI hotplug. Only available on Linux, and currently only for x86/x86-64.
+pci-hotplug = ["devices/pci-hotplug", "vm_control/pci-hotplug"]
+
 ## Enables the use of the qcow format for block devices.
 qcow = ["disk/qcow"]
 
@@ -254,9 +258,6 @@ slirp = ["devices/slirp", "net_util/slirp"]
 ## Run crosvm with `--disable-sandbox` by default.
 default-no-sandbox = []
 
-## Special build of crosvm for ChromeOS that only supports direct device passthrough.
-direct = ["balloon", "devices/direct", "arch/direct", "x86_64/direct"]
-
 #! ### Project specific features
 #!
 #! These features are specific to downstream projects and may not be functional or useful
@@ -350,7 +351,12 @@ all-riscv64 = [
 ]
 
 ## All features that are compiled and tested for x86_64
-all-x86_64 = ["all-default", "plugin", "scudo"]
+all-x86_64 = [
+    "all-default",
+    "pci-hotplug",
+    "plugin",
+    "scudo"
+]
 
 ## All features that are compiled and tested for armhf
 ## Note: This platform is deprecated and will be phased out.

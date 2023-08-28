@@ -19,7 +19,6 @@ use hypervisor::IoapicState;
 use hypervisor::MsiAddressMessage;
 use hypervisor::MsiDataMessage;
 use hypervisor::TriggerMode;
-use hypervisor::MAX_IOAPIC_PINS;
 use hypervisor::NUM_IOAPIC_PINS;
 use remain::sorted;
 use serde::Deserialize;
@@ -214,7 +213,8 @@ impl BusDevice for Ioapic {
 
 impl Ioapic {
     pub fn new(irq_tube: Tube, num_pins: usize) -> Result<Ioapic> {
-        let num_pins = num_pins.max(NUM_IOAPIC_PINS).min(MAX_IOAPIC_PINS);
+        // TODO(dverkamp): clean this up once we are sure all callers use 24 pins.
+        assert_eq!(num_pins, NUM_IOAPIC_PINS);
         let mut entry = IoapicRedirectionTableEntry::new();
         entry.set_interrupt_mask(true);
         Ok(Ioapic {
@@ -228,32 +228,6 @@ impl Ioapic {
             interrupt_level: (0..num_pins).map(|_| false).collect(),
             irq_tube,
         })
-    }
-
-    pub fn init_direct_gsi<F>(&mut self, register_irqfd: F) -> Result<()>
-    where
-        F: Fn(u32, &Event) -> Result<()>,
-    {
-        for (gsi, out_event) in self.out_events.iter_mut().enumerate() {
-            let event = Event::new()?;
-            register_irqfd(gsi as u32, &event)?;
-            *out_event = Some(OutEvent {
-                irq_event: IrqEvent {
-                    gsi: gsi as u32,
-                    event,
-                    resample_event: None,
-                    source: IrqEventSource {
-                        device_id: CrosvmDeviceId::DirectGsi.into(),
-                        queue_id: 0,
-                        device_name: "direct_gsi".into(),
-                    },
-                },
-                // TODO(b/275124020): make sure this works with snapshotting by restoring
-                // the ioapic first, and then calling this function.
-                snapshot: None,
-            });
-        }
-        Ok(())
     }
 
     pub fn get_ioapic_state(&self) -> IoapicState {

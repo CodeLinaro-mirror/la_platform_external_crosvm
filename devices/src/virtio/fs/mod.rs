@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
@@ -42,12 +43,15 @@ use crate::virtio::VirtioDevice;
 use crate::virtio::VirtioPciShmCap;
 
 mod caps;
+mod config;
 mod expiring_map;
 mod multikey;
 pub mod passthrough;
 mod read_dir;
 mod worker;
 
+pub use config::CachePolicy;
+pub use config::Config;
 use fuse::Server;
 use passthrough::PassthroughFs;
 pub use worker::process_fs_queue;
@@ -124,7 +128,7 @@ impl Fs {
         base_features: u64,
         tag: &str,
         num_workers: usize,
-        fs_cfg: passthrough::Config,
+        fs_cfg: Config,
         tube: Tube,
     ) -> Result<Fs> {
         if tag.len() > FS_MAX_TAG_LEN {
@@ -204,7 +208,7 @@ impl VirtioDevice for Fs {
         &mut self,
         guest_mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<(Queue, Event)>,
+        queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != self.queue_sizes.len() {
             return Err(anyhow!(
@@ -246,7 +250,6 @@ impl VirtioDevice for Fs {
 
         self.workers = queues
             .into_iter()
-            .enumerate()
             .map(|(idx, (queue, evt))| {
                 let mem = guest_mem.clone();
                 let server = server.clone();

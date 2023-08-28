@@ -43,22 +43,19 @@ use zerocopy::AsBytes;
 
 use crate::virtio::device_constants::vsock::NUM_QUEUES;
 use crate::virtio::device_constants::vsock::QUEUE_SIZE;
-// TODO(acourbot) try to remove the system dependencies and make the device usable on all platforms.
-use crate::virtio::vhost::user::device::handler::sys::unix::Doorbell;
 use crate::virtio::vhost::user::device::handler::vmm_va_to_gpa;
 use crate::virtio::vhost::user::device::handler::MappingInfo;
 use crate::virtio::vhost::user::device::handler::VhostUserPlatformOps;
 use crate::virtio::vhost::user::VhostUserDevice;
 use crate::virtio::vhost::user::VhostUserListener;
 use crate::virtio::vhost::user::VhostUserListenerTrait;
-use crate::virtio::Queue;
-use crate::virtio::SignalableInterrupt;
+use crate::virtio::QueueConfig;
 
 const MAX_VRING_LEN: u16 = QUEUE_SIZE;
 const EVENT_QUEUE: usize = NUM_QUEUES - 1;
 
 struct VsockBackend {
-    queues: [Queue; NUM_QUEUES],
+    queues: [QueueConfig; NUM_QUEUES],
     vmm_maps: Option<Vec<MappingInfo>>,
     mem: Option<GuestMemory>,
     ops: Box<dyn VhostUserPlatformOps>,
@@ -113,9 +110,9 @@ impl VhostUserDevice for VhostUserVsockDevice {
     ) -> anyhow::Result<Box<dyn vmm_vhost::VhostUserSlaveReqHandler>> {
         let backend = VsockBackend {
             queues: [
-                Queue::new(MAX_VRING_LEN),
-                Queue::new(MAX_VRING_LEN),
-                Queue::new(MAX_VRING_LEN),
+                QueueConfig::new(MAX_VRING_LEN, 0),
+                QueueConfig::new(MAX_VRING_LEN, 0),
+                QueueConfig::new(MAX_VRING_LEN, 0),
             ],
             vmm_maps: None,
             mem: None,
@@ -276,9 +273,9 @@ impl VhostUserSlaveReqHandlerMut for VsockBackend {
         let index = index as usize;
         let base = base as u16;
 
-        let mut queue = &mut self.queues[index];
-        queue.next_avail = Wrapping(base);
-        queue.next_used = Wrapping(base);
+        let queue = &mut self.queues[index];
+        queue.set_next_avail(Wrapping(base));
+        queue.set_next_used(Wrapping(base));
 
         if index == EVENT_QUEUE {
             return Ok(());
@@ -296,7 +293,7 @@ impl VhostUserSlaveReqHandlerMut for VsockBackend {
 
         let index = index as usize;
         let next_avail = if index == EVENT_QUEUE {
-            self.queues[index].next_avail.0
+            self.queues[index].next_avail().0
         } else {
             self.handle
                 .get_vring_base(index)
@@ -329,15 +326,17 @@ impl VhostUserSlaveReqHandlerMut for VsockBackend {
 
         let doorbell = self.ops.set_vring_call(index, fd)?;
         let index = usize::from(index);
-        let event = match doorbell {
-            Doorbell::Call(call_event) => call_event.into_inner(),
-            Doorbell::Vfio(doorbell_region) => {
-                let kernel_evt = Event::new().map_err(|_| Error::SlaveInternalError)?;
+        let kernel_evt: Event;
+        let event = match doorbell.get_interrupt_evt() {
+            Some(call_evt) => call_evt,
+            None => {
+                kernel_evt = Event::new().map_err(|_| Error::SlaveInternalError)?;
                 let task_evt = EventAsync::new(
                     kernel_evt.try_clone().expect("failed to clone event"),
                     &self.ex,
                 )
                 .map_err(|_| Error::SlaveInternalError)?;
+                let doorbell = doorbell.clone();
                 self.ex
                     .spawn_local(async move {
                         loop {
@@ -345,16 +344,16 @@ impl VhostUserSlaveReqHandlerMut for VsockBackend {
                                 .next_val()
                                 .await
                                 .expect("failed to wait for event fd");
-                            doorbell_region.signal_used_queue(index as u16);
+                            doorbell.signal_used_queue(index as u16);
                         }
                     })
                     .detach();
-                kernel_evt
+                &kernel_evt
             }
         };
         if index != EVENT_QUEUE {
             self.handle
-                .set_vring_call(index, &event)
+                .set_vring_call(index, event)
                 .map_err(convert_vhost_error)?;
         }
 

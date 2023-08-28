@@ -4,7 +4,7 @@
 
 mod sys;
 
-use std::collections::BTreeMap as Map;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ use super::DeviceType;
 use super::Interrupt;
 use super::Queue;
 use super::Reader;
-use super::SignalableInterrupt;
+use super::StoppedWorker;
 use super::VirtioDevice;
 use crate::UnpinRequest;
 use crate::UnpinResponse;
@@ -142,7 +142,8 @@ struct virtio_balloon_config {
     free_page_hint_cmd_id: Le32,
     poison_val: Le32,
     // WSS field is part of proposed spec extension (b/273973298).
-    wss_num_bins: Le32,
+    wss_num_bins: u8,
+    _reserved: [u8; 3],
 }
 
 // BalloonState is shared by the worker and device thread.
@@ -151,7 +152,6 @@ struct BalloonState {
     num_pages: u32,
     actual_pages: u32,
     expecting_wss: bool,
-    expected_wss_id: u64,
     // Flag indicating that the balloon is in the process of a failable update. This
     // is set by an Adjust command that has allow_failure set, and is cleared when the
     // Adjusted success/failure response is sent.
@@ -395,8 +395,7 @@ where
     let reported_ranges: Vec<(u64, u64)> = avail_desc
         .reader
         .get_remaining_regions()
-        .iter()
-        .chain(avail_desc.writer.get_remaining_regions().iter())
+        .chain(avail_desc.writer.get_remaining_regions())
         .map(|r| (r.offset, r.len as u64))
         .collect();
 
@@ -459,7 +458,7 @@ async fn handle_stats_queue(
     mem: &GuestMemory,
     mut queue: Queue,
     mut queue_event: EventAsync,
-    mut stats_rx: mpsc::Receiver<u64>,
+    mut stats_rx: mpsc::Receiver<()>,
     command_tube: &AsyncTube,
     #[cfg(feature = "registered_events")] registered_evt_q: Option<&SendTubeAsync>,
     state: Arc<AsyncRwLock<BalloonState>>,
@@ -481,13 +480,13 @@ async fn handle_stats_queue(
     };
 
     loop {
-        let id = select_biased! {
-            id_res = stats_rx.next() => {
+        select_biased! {
+            msg = stats_rx.next() => {
                 // Wait for a request to read the stats.
-                match id_res {
-                    Some(id) => id,
+                match msg {
+                    Some(()) => (),
                     None => {
-                        error!("stats signal tube was closed");
+                        error!("stats signal channel was closed");
                         return queue;
                     }
                 }
@@ -512,7 +511,6 @@ async fn handle_stats_queue(
         let result = BalloonTubeResult::Stats {
             balloon_actual: actual_pages << VIRTIO_BALLOON_PFN_SHIFT,
             stats,
-            id,
         };
         let send_result = command_tube.send(result).await;
         if let Err(e) = send_result {
@@ -602,9 +600,7 @@ async fn handle_events_queue(
 }
 
 enum WSSOp {
-    WSSReport {
-        id: u64,
-    },
+    WSSReport,
     WSSConfig {
         bins: Vec<u64>,
         refresh_threshold: u64,
@@ -643,11 +639,10 @@ async fn handle_wss_op_queue(
         let writer = &mut avail_desc.writer;
 
         match op {
-            WSSOp::WSSReport { id } => {
+            WSSOp::WSSReport => {
                 {
                     let mut state = state.lock().await;
                     state.expecting_wss = true;
-                    state.expected_wss_id = id;
                 }
 
                 let wss_r = virtio_balloon_op {
@@ -743,7 +738,6 @@ async fn handle_wss_data_queue(
             let result = BalloonTubeResult::WorkingSetSize {
                 wss,
                 balloon_actual,
-                id: state.expected_wss_id,
             };
             let send_result = command_tube.send(result).await;
             if let Err(e) = send_result {
@@ -774,11 +768,16 @@ async fn handle_command_tube(
     command_tube: &AsyncTube,
     interrupt: Interrupt,
     state: Arc<AsyncRwLock<BalloonState>>,
-    mut stats_tx: mpsc::Sender<u64>,
+    mut stats_tx: mpsc::Sender<()>,
     mut wss_op_tx: mpsc::Sender<WSSOp>,
+    mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     loop {
-        match command_tube.next().await {
+        let cmd_res = select_biased! {
+            res = command_tube.next().fuse() => res,
+            _ = stop_rx => return Ok(())
+        };
+        match cmd_res {
             Ok(command) => match command {
                 BalloonTubeCommand::Adjust {
                     num_bytes,
@@ -813,17 +812,28 @@ async fn handle_command_tube(
                         error!("failed to send config to wss handler: {}", e);
                     }
                 }
-                BalloonTubeCommand::Stats { id } => {
-                    if let Err(e) = stats_tx.try_send(id) {
+                BalloonTubeCommand::Stats => {
+                    if let Err(e) = stats_tx.try_send(()) {
                         error!("failed to signal the stat handler: {}", e);
                     }
                 }
-                BalloonTubeCommand::WorkingSetSize { id } => {
-                    if let Err(e) = wss_op_tx.try_send(WSSOp::WSSReport { id }) {
+                BalloonTubeCommand::WorkingSetSize => {
+                    if let Err(e) = wss_op_tx.try_send(WSSOp::WSSReport) {
                         error!("failed to send report request to wss handler: {}", e);
                     }
                 }
             },
+            #[cfg(windows)]
+            Err(base::TubeError::Recv(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // On Windows, async IO tasks like the next/recv above are cancelled as the VM is
+                // shutting down. For the sake of consistency with unix, we can't *just* return
+                // here; instead, we wait for the stop request to arrive, *and then* return.
+                //
+                // The real fix is to get rid of the global unblock pool, since then we won't
+                // cancel the tasks early (b/196911556).
+                let _ = stop_rx.await;
+                return Ok(());
+            }
             Err(e) => {
                 return Err(BalloonError::ReceivingCommand(e));
             }
@@ -872,19 +882,6 @@ impl BalloonQueues {
     }
 }
 
-impl From<Map<usize, (Queue, Event)>> for BalloonQueues {
-    fn from(mut queues: Map<usize, (Queue, Event)>) -> Self {
-        BalloonQueues {
-            inflate: queues.remove(&0).expect("the inflate queue is required"),
-            deflate: queues.remove(&1).expect("the deflate queue is required"),
-            stats: queues.remove(&2),
-            reporting: queues.remove(&3),
-            events: queues.remove(&4),
-            wss: (queues.remove(&5), queues.remove(&6)),
-        }
-    }
-}
-
 /// When the worker is stopped, the queues are preserved here.
 struct PausedQueues {
     inflate: Queue,
@@ -917,17 +914,19 @@ where
     }
 }
 
-impl From<Box<PausedQueues>> for Map<usize, Queue> {
-    fn from(queues: Box<PausedQueues>) -> Map<usize, Queue> {
-        let mut ret = Map::new();
-        ret.insert(0, queues.inflate);
-        ret.insert(1, queues.deflate);
-        apply_if_some(queues.stats, |stats| ret.insert(2, stats));
-        apply_if_some(queues.reporting, |reporting| ret.insert(3, reporting));
-        apply_if_some(queues.events, |events| ret.insert(4, events));
-        apply_if_some(queues.wss.0, |wss_data| ret.insert(5, wss_data));
-        apply_if_some(queues.wss.1, |wss_op| ret.insert(6, wss_op));
-        ret
+impl From<Box<PausedQueues>> for BTreeMap<usize, Queue> {
+    fn from(queues: Box<PausedQueues>) -> BTreeMap<usize, Queue> {
+        let mut ret = Vec::new();
+        ret.push(queues.inflate);
+        ret.push(queues.deflate);
+        apply_if_some(queues.stats, |stats| ret.push(stats));
+        apply_if_some(queues.reporting, |reporting| ret.push(reporting));
+        apply_if_some(queues.events, |events| ret.push(events));
+        apply_if_some(queues.wss.0, |wss_data| ret.push(wss_data));
+        apply_if_some(queues.wss.1, |wss_op| ret.push(wss_op));
+        // WARNING: We don't use the indices from the virito spec on purpose, see comment in
+        // get_queues_from_map for the rationale.
+        ret.into_iter().enumerate().collect()
     }
 }
 
@@ -1019,9 +1018,7 @@ fn run_worker(
         pin_mut!(deflate);
 
         // The next queue is used for stats messages if VIRTIO_BALLOON_F_STATS_VQ is negotiated.
-        // The message type is the id of the stats request, so we can detect if there are any stale
-        // stats results that were queued during an error condition.
-        let (stats_tx, stats_rx) = mpsc::channel::<u64>(1);
+        let (stats_tx, stats_rx) = mpsc::channel::<()>(1);
         let has_stats_queue = stats_queue.is_some();
         let stats = if let Some((stats_queue, stats_queue_evt)) = stats_queue {
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
@@ -1117,12 +1114,14 @@ fn run_worker(
         pin_mut!(wss_op);
 
         // Future to handle command messages that resize the balloon.
+        let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
         let command = handle_command_tube(
             &command_tube,
             interrupt.clone(),
             state.clone(),
             stats_tx,
             wss_op_tx,
+            stop_rx,
         );
         pin_mut!(command);
 
@@ -1345,7 +1344,6 @@ impl Balloon {
                 failable_update: false,
                 pending_adjusted_responses: VecDeque::new(),
                 expecting_wss: false,
-                expected_wss_id: 0,
             })),
             worker_thread: None,
             features,
@@ -1368,7 +1366,8 @@ impl Balloon {
             // config correctly.
             free_page_hint_cmd_id: 0.into(),
             poison_val: 0.into(),
-            wss_num_bins: (self.wss_num_bins as u32).into(),
+            wss_num_bins: self.wss_num_bins,
+            _reserved: [0, 0, 0],
         }
     }
 
@@ -1395,7 +1394,7 @@ impl Balloon {
         num_queues
     }
 
-    fn stop_worker(&mut self) -> StoppedWorker {
+    fn stop_worker(&mut self) -> StoppedWorker<PausedQueues> {
         if let Some(worker_thread) = self.worker_thread.take() {
             let worker_ret = worker_thread.stop();
             self.release_memory_tube = worker_ret.release_memory_tube;
@@ -1422,9 +1421,9 @@ impl Balloon {
     /// Given a filtered queue vector from [VirtioDevice::activate], extract
     /// the queues (accounting for queues that are missing because the features
     /// are not negotiated) into a structure that is easier to work with.
-    fn get_queues_from_vec(
+    fn get_queues_from_map(
         &self,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<BalloonQueues> {
         let expected_queues = Balloon::num_expected_queues(self.acked_features);
         if queues.len() != expected_queues {
@@ -1435,21 +1434,26 @@ impl Balloon {
             ));
         }
 
-        let inflate_queue = queues.remove(0);
-        let deflate_queue = queues.remove(0);
+        // WARNING: We use `pop_first` instead of explicitly using the indices from the virtio spec
+        // because the Linux virtio drivers only "allocates" queue indices that are used.
+        let inflate_queue = queues.pop_first().unwrap().1;
+        let deflate_queue = queues.pop_first().unwrap().1;
         let mut queue_struct = BalloonQueues::new(inflate_queue, deflate_queue);
 
         if self.acked_features & (1 << VIRTIO_BALLOON_F_STATS_VQ) != 0 {
-            queue_struct.stats = Some(queues.remove(0));
+            queue_struct.stats = Some(queues.pop_first().unwrap().1);
         }
         if self.acked_features & (1 << VIRTIO_BALLOON_F_PAGE_REPORTING) != 0 {
-            queue_struct.reporting = Some(queues.remove(0));
+            queue_struct.reporting = Some(queues.pop_first().unwrap().1);
         }
         if self.acked_features & (1 << VIRTIO_BALLOON_F_EVENTS_VQ) != 0 {
-            queue_struct.events = Some(queues.remove(0));
+            queue_struct.events = Some(queues.pop_first().unwrap().1);
         }
         if self.acked_features & (1 << VIRTIO_BALLOON_F_WSS_REPORTING) != 0 {
-            queue_struct.wss = (Some(queues.remove(0)), Some(queues.remove(0)));
+            queue_struct.wss = (
+                Some(queues.pop_first().unwrap().1),
+                Some(queues.pop_first().unwrap().1),
+            );
         }
         Ok(queue_struct)
     }
@@ -1504,21 +1508,6 @@ impl Balloon {
 
         Ok(())
     }
-}
-
-/// When we request to stop the worker, this represents the terminal state
-/// for the thread (if it exists).
-enum StoppedWorker {
-    /// Worker stopped successfully & returned its queues.
-    WithQueues(Box<PausedQueues>),
-
-    /// Worker wasn't running when the stop was requested.
-    AlreadyStopped,
-
-    /// Worker was running but did not successfully return its queues. Something
-    /// has gone wrong (and will be in the error log). In the case of a device
-    /// reset this is fine since the next activation will replace the queues.
-    MissingQueues,
 }
 
 impl VirtioDevice for Balloon {
@@ -1588,9 +1577,9 @@ impl VirtioDevice for Balloon {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: Vec<(Queue, Event)>,
+        queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
-        let queues = self.get_queues_from_vec(queues)?;
+        let queues = self.get_queues_from_map(queues)?;
         self.start_worker(mem, interrupt, queues)
     }
 
@@ -1601,7 +1590,7 @@ impl VirtioDevice for Balloon {
         true
     }
 
-    fn virtio_sleep(&mut self) -> anyhow::Result<Option<Map<usize, Queue>>> {
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         match self.stop_worker() {
             StoppedWorker::WithQueues(paused_queues) => Ok(Some(paused_queues.into())),
             StoppedWorker::MissingQueues => {
@@ -1616,14 +1605,14 @@ impl VirtioDevice for Balloon {
 
     fn virtio_wake(
         &mut self,
-        queues_state: Option<(GuestMemory, Interrupt, Map<usize, (Queue, Event)>)>,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
     ) -> anyhow::Result<()> {
         if let Some((mem, interrupt, queues)) = queues_state {
             if queues.len() < 2 {
                 anyhow::bail!("{} queues were found, but an activated balloon must have at least 2 active queues.", queues.len());
             }
 
-            let balloon_queues = queues.into();
+            let balloon_queues = self.get_queues_from_map(queues)?;
             self.start_worker(mem, interrupt, balloon_queues)?;
         }
         Ok(())

@@ -16,7 +16,8 @@ use base::Event;
 use base::RawDescriptor;
 use base::INVALID_DESCRIPTOR;
 use data_model::zerocopy_from_reader;
-use data_model::DataInit;
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;
 
 use crate::backend::VhostBackend;
 use crate::backend::VhostUserMemoryRegionInfo;
@@ -365,7 +366,7 @@ impl<E: Endpoint<MasterReq>> VhostBackend for Master<E> {
         let mut node = self.node();
         let hdr = node.send_request_header(MasterReq::SNAPSHOT, None)?;
         let (success_msg, buf_reply, _) = node.recv_reply_with_payload::<VhostUserSuccess>(&hdr)?;
-        if !success_msg.success {
+        if !success_msg.success() {
             Err(VhostUserError::SnapshotError(anyhow!(
                 "Device process responded with a failure on SNAPSHOT."
             )))
@@ -393,7 +394,7 @@ impl<E: Endpoint<MasterReq>> VhostBackend for Master<E> {
             queue_evt_fds.as_deref(),
         )?;
         let reply = node.recv_reply::<VhostUserSuccess>(&hdr)?;
-        if !reply.success {
+        if !reply.success() {
             Err(VhostUserError::RestoreError(anyhow!(
                 "Device process responded with a failure on RESTORE."
             )))
@@ -509,10 +510,13 @@ impl<E: Endpoint<MasterReq>> VhostUserMaster for Master<E> {
     }
 
     fn set_config(&mut self, offset: u32, flags: VhostUserConfigFlags, buf: &[u8]) -> Result<()> {
-        if buf.len() > MAX_MSG_SIZE {
-            return Err(VhostUserError::InvalidParam);
-        }
-        let body = VhostUserConfig::new(offset, buf.len() as u32, flags);
+        let body = VhostUserConfig::new(
+            offset,
+            buf.len()
+                .try_into()
+                .map_err(VhostUserError::InvalidCastToInt)?,
+            flags,
+        );
         if !body.is_valid() {
             return Err(VhostUserError::InvalidParam);
         }
@@ -711,37 +715,36 @@ impl<E: Endpoint<MasterReq>> MasterInternal<E> {
         Ok(hdr)
     }
 
-    fn send_request_with_body<T: Sized + DataInit>(
+    fn send_request_with_body<T: Sized + AsBytes>(
         &mut self,
         code: MasterReq,
         msg: &T,
         fds: Option<&[RawDescriptor]>,
     ) -> VhostUserResult<VhostUserMsgHeader<MasterReq>> {
-        if mem::size_of::<T>() > MAX_MSG_SIZE {
-            return Err(VhostUserError::InvalidParam);
-        }
         let hdr = self.new_request_header(code, mem::size_of::<T>() as u32);
         self.main_sock.send_message(&hdr, msg, fds)?;
         Ok(hdr)
     }
 
-    fn send_request_with_payload<T: Sized + DataInit>(
+    fn send_request_with_payload<T: Sized + AsBytes>(
         &mut self,
         code: MasterReq,
         msg: &T,
         payload: &[u8],
         fds: Option<&[RawDescriptor]>,
     ) -> VhostUserResult<VhostUserMsgHeader<MasterReq>> {
-        let len = mem::size_of::<T>() + payload.len();
-        if len > MAX_MSG_SIZE {
-            return Err(VhostUserError::InvalidParam);
-        }
         if let Some(fd_arr) = fds {
             if fd_arr.len() > MAX_ATTACHED_FD_ENTRIES {
                 return Err(VhostUserError::InvalidParam);
             }
         }
-        let hdr = self.new_request_header(code, len as u32);
+        let len = mem::size_of::<T>()
+            .checked_add(payload.len())
+            .ok_or(VhostUserError::OversizedMsg)?;
+        let hdr = self.new_request_header(
+            code,
+            len.try_into().map_err(VhostUserError::InvalidCastToInt)?,
+        );
         self.main_sock
             .send_message_with_payload(&hdr, msg, payload, fds)?;
         Ok(hdr)
@@ -765,11 +768,11 @@ impl<E: Endpoint<MasterReq>> MasterInternal<E> {
         Ok(hdr)
     }
 
-    fn recv_reply<T: Sized + DataInit + Default + VhostUserMsgValidator>(
+    fn recv_reply<T: Sized + FromBytes + AsBytes + Default + VhostUserMsgValidator>(
         &mut self,
         hdr: &VhostUserMsgHeader<MasterReq>,
     ) -> VhostUserResult<T> {
-        if mem::size_of::<T>() > MAX_MSG_SIZE || hdr.is_reply() {
+        if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam);
         }
         let (reply, body, rfds) = self.main_sock.recv_body::<T>()?;
@@ -779,11 +782,11 @@ impl<E: Endpoint<MasterReq>> MasterInternal<E> {
         Ok(body)
     }
 
-    fn recv_reply_with_files<T: Sized + DataInit + Default + VhostUserMsgValidator>(
+    fn recv_reply_with_files<T: Sized + AsBytes + FromBytes + Default + VhostUserMsgValidator>(
         &mut self,
         hdr: &VhostUserMsgHeader<MasterReq>,
     ) -> VhostUserResult<(T, Option<Vec<File>>)> {
-        if mem::size_of::<T>() > MAX_MSG_SIZE || hdr.is_reply() {
+        if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam);
         }
 
@@ -794,11 +797,11 @@ impl<E: Endpoint<MasterReq>> MasterInternal<E> {
         Ok((body, files))
     }
 
-    fn recv_reply_with_payload<T: Sized + DataInit + Default + VhostUserMsgValidator>(
+    fn recv_reply_with_payload<T: Sized + AsBytes + FromBytes + Default + VhostUserMsgValidator>(
         &mut self,
         hdr: &VhostUserMsgHeader<MasterReq>,
     ) -> VhostUserResult<(T, Vec<u8>, Option<Vec<File>>)> {
-        if mem::size_of::<T>() > MAX_MSG_SIZE || hdr.is_reply() {
+        if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam);
         }
 
@@ -845,6 +848,8 @@ mod tests {
     use crate::connection::tests::create_pair;
     use crate::connection::tests::TestEndpoint;
     use crate::connection::tests::TestMaster;
+
+    const BUFFER_SIZE: usize = 0x1001;
 
     #[test]
     fn create_master() {
@@ -955,7 +960,7 @@ mod tests {
     #[test]
     fn test_master_set_config_negative() {
         let (mut master, _peer) = create_pair();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         master
             .set_config(0x100, VhostUserConfigFlags::WRITABLE, &buf[0..4])
@@ -1013,7 +1018,7 @@ mod tests {
     #[test]
     fn test_master_get_config_negative0() {
         let (mut master, mut peer) = create_pair2();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         let mut hdr = VhostUserMsgHeader::new(MasterReq::GET_CONFIG, 0x4, 16);
         let msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
@@ -1035,7 +1040,7 @@ mod tests {
     #[test]
     fn test_master_get_config_negative1() {
         let (mut master, mut peer) = create_pair2();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         let mut hdr = VhostUserMsgHeader::new(MasterReq::GET_CONFIG, 0x4, 16);
         let msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
@@ -1056,7 +1061,7 @@ mod tests {
     #[test]
     fn test_master_get_config_negative2() {
         let (mut master, mut peer) = create_pair2();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         let hdr = VhostUserMsgHeader::new(MasterReq::GET_CONFIG, 0x4, 16);
         let msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
@@ -1070,7 +1075,7 @@ mod tests {
     #[test]
     fn test_master_get_config_negative3() {
         let (mut master, mut peer) = create_pair2();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         let hdr = VhostUserMsgHeader::new(MasterReq::GET_CONFIG, 0x4, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
@@ -1091,7 +1096,7 @@ mod tests {
     #[test]
     fn test_master_get_config_negative4() {
         let (mut master, mut peer) = create_pair2();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         let hdr = VhostUserMsgHeader::new(MasterReq::GET_CONFIG, 0x4, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
@@ -1112,7 +1117,7 @@ mod tests {
     #[test]
     fn test_master_get_config_negative5() {
         let (mut master, mut peer) = create_pair2();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         let hdr = VhostUserMsgHeader::new(MasterReq::GET_CONFIG, 0x4, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
@@ -1122,7 +1127,7 @@ mod tests {
             .get_config(0x100, 4, VhostUserConfigFlags::WRITABLE, &buf[0..4])
             .is_ok());
 
-        msg.offset = (MAX_MSG_SIZE + 1) as u32;
+        msg.offset = (BUFFER_SIZE) as u32;
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
         assert!(master
@@ -1133,7 +1138,7 @@ mod tests {
     #[test]
     fn test_master_get_config_negative6() {
         let (mut master, mut peer) = create_pair2();
-        let buf = vec![0x0; MAX_MSG_SIZE + 1];
+        let buf = vec![0x0; BUFFER_SIZE];
 
         let hdr = VhostUserMsgHeader::new(MasterReq::GET_CONFIG, 0x4, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());

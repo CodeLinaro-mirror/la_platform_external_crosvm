@@ -9,8 +9,8 @@ cfg_if::cfg_if! {
         use base::RawDescriptor;
         use devices::virtio::vhost::user::device::parse_wayland_sock;
 
-        use super::sys::config::VfioOption;
-        use super::config::SharedDir;
+        use crate::crosvm::sys::config::VfioOption;
+        use crate::crosvm::sys::config::SharedDir;
     }
 }
 
@@ -47,6 +47,7 @@ use devices::virtio::NetParameters;
 use devices::virtio::NetParametersMode;
 #[cfg(feature = "audio")]
 use devices::Ac97Parameters;
+use devices::FwCfgParameters;
 use devices::PflashParameters;
 use devices::SerialHardware;
 use devices::SerialParameters;
@@ -77,14 +78,11 @@ use crate::crosvm::config::parse_ac97_options;
 use crate::crosvm::config::parse_bus_id_addr;
 use crate::crosvm::config::parse_cpu_affinity;
 use crate::crosvm::config::parse_cpu_capacity;
-#[cfg(feature = "direct")]
-use crate::crosvm::config::parse_direct_io_options;
 use crate::crosvm::config::parse_dynamic_power_coefficient;
+use crate::crosvm::config::parse_fw_cfg_options;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::crosvm::config::parse_memory_region;
 use crate::crosvm::config::parse_mmio_address_range;
-#[cfg(feature = "direct")]
-use crate::crosvm::config::parse_pcie_root_port_params;
 use crate::crosvm::config::parse_pflash_parameters;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::parse_plugin_mount_option;
@@ -95,14 +93,10 @@ use crate::crosvm::config::BatteryConfig;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::BindMount;
 use crate::crosvm::config::CpuOptions;
-#[cfg(feature = "direct")]
-use crate::crosvm::config::DirectIoOption;
 use crate::crosvm::config::Executable;
 use crate::crosvm::config::FileBackedMappingParameters;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::GidMap;
-#[cfg(feature = "direct")]
-use crate::crosvm::config::HostPcieRootPortParameters;
 use crate::crosvm::config::HypervisorKind;
 use crate::crosvm::config::IrqChipKind;
 use crate::crosvm::config::MemOptions;
@@ -161,6 +155,8 @@ pub enum CrossPlatformCommands {
     Usb(UsbCommand),
     Version(VersionCommand),
     Vfio(VfioCrosvmCommand),
+    #[cfg(feature = "pci-hotplug")]
+    VirtioNet(VirtioNetCommand),
     Snapshot(SnapshotCommand),
 }
 
@@ -296,6 +292,9 @@ pub struct ResumeCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
+    /// suspend VM VCPUs and Devices
+    #[argh(switch)]
+    pub full: bool,
 }
 
 #[derive(FromArgs)]
@@ -314,6 +313,9 @@ pub struct SuspendCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
+    /// suspend VM VCPUs and Devices
+    #[argh(switch)]
+    pub full: bool,
 }
 
 #[derive(FromArgs)]
@@ -350,6 +352,9 @@ pub struct SwapDisableCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
+    #[argh(switch)]
+    /// clean up the swap file in the background.
+    pub slow_file_cleanup: bool,
 }
 
 #[derive(FromArgs)]
@@ -468,6 +473,49 @@ pub enum VfioSubCommand {
 pub struct VfioCrosvmCommand {
     #[argh(subcommand)]
     pub command: VfioSubCommand,
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum VirtioNetSubCommand {
+    AddTap(VirtioNetAddSubCommand),
+    RemoveTap(VirtioNetRemoveSubCommand),
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "add")]
+/// Add by Tap name.
+pub struct VirtioNetAddSubCommand {
+    #[argh(positional)]
+    /// tap name
+    pub tap_name: String,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "remove")]
+/// Remove tap by bus number.
+pub struct VirtioNetRemoveSubCommand {
+    #[argh(positional)]
+    /// bus number for device to remove
+    pub bus: u8,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "virtio-net")]
+/// add network device as virtio into guest.
+pub struct VirtioNetCommand {
+    #[argh(subcommand)]
+    pub command: VirtioNetSubCommand,
 }
 
 #[derive(FromArgs)]
@@ -958,6 +1006,9 @@ pub struct RunCommand {
     ///         worker threads in parallel. this option is not
     ///         effective for vhost-user blk device.
     ///         (default: false)
+    ///     packed-queue=BOOL - Use packed virtqueue
+    ///         in block device. If false, use split virtqueue.
+    ///         (default: false)
     block: Vec<DiskOptionWithId>,
 
     /// ratelimit enforced on detected bus locks in guest.
@@ -1071,56 +1122,6 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// don't set VCPUs real-time until make-rt command is run
     pub delay_rt: Option<bool>,
-
-    #[cfg(feature = "direct")]
-    #[argh(option, arg_name = "irq")]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite)]
-    /// enable interrupt passthrough
-    pub direct_edge_irq: Vec<u32>,
-
-    #[cfg(feature = "direct")]
-    #[argh(option, arg_name = "event=gbllock|powerbtn|sleepbtn|rtc")]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite)]
-    /// enable ACPI fixed event interrupt and register access passthrough
-    pub direct_fixed_event: Vec<devices::ACPIPMFixedEvent>,
-
-    #[cfg(feature = "direct")]
-    #[argh(option, arg_name = "gpe")]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite)]
-    /// enable GPE interrupt and register access passthrough
-    pub direct_gpe: Vec<u32>,
-
-    #[cfg(feature = "direct")]
-    #[argh(option, arg_name = "irq")]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite)]
-    /// enable interrupt passthrough
-    pub direct_level_irq: Vec<u32>,
-
-    #[cfg(feature = "direct")]
-    #[argh(
-        option,
-        arg_name = "PATH@RANGE[,RANGE[,...]]",
-        from_str_fn(parse_direct_io_options)
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_option)]
-    /// path and ranges for direct memory mapped I/O access. RANGE may be decimal or hex (starting with 0x)
-    pub direct_mmio: Option<DirectIoOption>,
-
-    #[cfg(feature = "direct")]
-    #[argh(
-        option,
-        arg_name = "PATH@RANGE[,RANGE[,...]]",
-        from_str_fn(parse_direct_io_options)
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_option)]
-    /// path and ranges for direct port mapped I/O access. RANGE may be decimal or hex (starting with 0x)
-    pub direct_pmio: Option<DirectIoOption>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -1236,6 +1237,24 @@ pub struct RunCommand {
     /// force use of a calibrated TSC cpuid leaf (0x15) even if the hypervisor
     /// doesn't require one.
     pub force_calibrated_tsc_leaf: Option<bool>,
+
+    #[argh(
+        option,
+        arg_name = "[name=NAME,path=PATH,string=STRING]",
+        from_str_fn(parse_fw_cfg_options)
+    )]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = append)]
+    /// comma separated key=value pairs to specify data to pass to
+    /// fw_cfg.
+    /// Possible key values:
+    ///     name - Name of the file in fw_cfg that will
+    ///      be associated with user-provided data
+    ///     path - Path to data that will be included in
+    ///      fw_cfg under filename
+    ///     string - Alternative to path, data to be in
+    ///      included in fw_cfg under filename
+    pub fw_cfg: Vec<FwCfgParameters>,
 
     #[cfg(feature = "gdb")]
     #[argh(option, arg_name = "PORT")]
@@ -1521,6 +1540,10 @@ pub struct RunCommand {
     ///                       Default: false.  [Optional]
     ///   vq-pairs=N      - number of rx/tx queue pairs.
     ///                       Default: 1.      [Optional]
+    ///   packed-queue    - use packed queue.
+    ///                       If not set or set to false, it will
+    ///                       use split virtqueue.
+    ///                       Default: false.  [Optional]
     ///
     /// Either one tap_name, one tap_fd or a triplet of host_ip,
     /// netmask and mac must be specified.
@@ -1591,6 +1614,13 @@ pub struct RunCommand {
     /// extra kernel or plugin command line arguments. Can be given more than once
     pub params: Vec<String>,
 
+    #[cfg(unix)]
+    #[argh(option, arg_name = "pci_hotplug_slots")]
+    #[serde(default)]
+    #[merge(strategy = overwrite_option)]
+    /// number of hotplug slot count (default: None)
+    pub pci_hotplug_slots: Option<u8>,
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[argh(option, arg_name = "pci_low_mmio_start")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1608,17 +1638,6 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// region for PCIe Enhanced Configuration Access Mechanism
     pub pcie_ecam: Option<AddressRange>,
-
-    #[cfg(feature = "direct")]
-    #[argh(
-        option,
-        arg_name = "PATH[,hp_gpe=NUM]",
-        from_str_fn(parse_pcie_root_port_params)
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite)]
-    /// path to sysfs of host pcie root port and host pcie root port hotplug gpe number
-    pub pcie_root_port: Vec<HostPcieRootPortParameters>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -2029,6 +2048,12 @@ pub struct RunCommand {
     ///     subsystem_device=NUM - PCI subsystem device ID
     ///     revision=NUM - revision
     pub stub_pci_device: Vec<StubPciParameters>,
+
+    #[argh(switch)]
+    #[serde(skip)] // TODO(b/255223604)
+    #[merge(strategy = overwrite_option)]
+    /// start a VM with vCPUs and devices suspended
+    pub suspended: Option<bool>,
 
     #[argh(option, long = "swap", arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -2682,6 +2707,8 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
         cfg.pstore = cmd.pstore;
 
+        cfg.fw_cfg_parameters = cmd.fw_cfg;
+
         #[cfg(unix)]
         for (name, params) in cmd.wayland_sock {
             if cfg.wayland_socket_paths.contains_key(&name) {
@@ -2700,6 +2727,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.swap_dir = cmd.swap_dir;
         cfg.restore_path = cmd.restore;
+        cfg.suspended = cmd.suspended.unwrap_or_default();
 
         if let Some(mut socket_path) = cmd.socket {
             if socket_path.is_dir() {
@@ -2940,6 +2968,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                     },
                     vhost_net: vhost_net_config.clone(),
                     vq_pairs: cmd.net_vq_pairs,
+                    packed_queue: false,
                 });
             }
 
@@ -2952,6 +2981,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                     mode: NetParametersMode::TapFd { tap_fd, mac: None },
                     vhost_net: vhost_net_config.clone(),
                     vq_pairs: cmd.net_vq_pairs,
+                    packed_queue: false,
                 });
             }
 
@@ -2989,12 +3019,13 @@ impl TryFrom<RunCommand> for super::config::Config {
                     },
                     vhost_net: vhost_net_config,
                     vq_pairs: cmd.net_vq_pairs,
+                    packed_queue: false,
                 });
             }
 
             // The number of vq pairs on a network device shall never exceed the number of vcpu
             // cores. Fix that up if needed.
-            for mut net in &mut cfg.net {
+            for net in &mut cfg.net {
                 if let Some(vq_pairs) = net.vq_pairs {
                     if vq_pairs as usize > cfg.vcpu_count.unwrap_or(1) {
                         log::warn!("the number of net vq pairs must not exceed the vcpu count, falling back to single queue mode");
@@ -3101,6 +3132,11 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
         }
 
+        #[cfg(feature = "pci-hotplug")]
+        {
+            cfg.pci_hotplug_slots = cmd.pci_hotplug_slots;
+        }
+
         // cfg.balloon_bias is in bytes.
         if let Some(b) = cmd.balloon_bias_mib {
             cfg.balloon_bias = b * 1024 * 1024;
@@ -3115,18 +3151,6 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.vhost_user_video_dec = cmd.vhost_user_video_decoder;
         cfg.vhost_user_vsock = cmd.vhost_user_vsock;
         cfg.vhost_user_wl = cmd.vhost_user_wl;
-
-        #[cfg(feature = "direct")]
-        {
-            cfg.direct_pmio = cmd.direct_pmio;
-            cfg.direct_mmio = cmd.direct_mmio;
-            cfg.direct_level_irq = cmd.direct_level_irq;
-            cfg.direct_edge_irq = cmd.direct_edge_irq;
-            cfg.direct_gpe = cmd.direct_gpe;
-            cfg.direct_fixed_evts = cmd.direct_fixed_event;
-            cfg.pcie_rp = cmd.pcie_root_port;
-            cfg.mmio_address_ranges = cmd.mmio_address_range.unwrap_or_default();
-        }
 
         cfg.disable_virtio_intx = cmd.disable_virtio_intx.unwrap_or_default();
 

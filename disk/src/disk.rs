@@ -26,6 +26,7 @@ use cros_async::AllocateMode;
 use cros_async::BackingMemory;
 use cros_async::Executor;
 use cros_async::IoSource;
+use cros_async::MemRegionIter;
 use thiserror::Error as ThisError;
 
 mod asynchronous;
@@ -92,6 +93,8 @@ pub enum Error {
     Fsync(cros_async::AsyncError),
     #[error("failure with fdatasync: {0}")]
     IoFdatasync(io::Error),
+    #[error("failure with flush: {0}")]
+    IoFlush(io::Error),
     #[error("failure with fsync: {0}")]
     IoFsync(io::Error),
     #[error("checking host fs type: {0}")]
@@ -328,6 +331,9 @@ pub trait AsyncDisk: DiskGetLen + FileSetLen + FileAllocate {
     /// Returns the inner file consuming self.
     fn into_inner(self: Box<Self>) -> Box<dyn DiskFile>;
 
+    /// Flush intermediary buffers and/or dirty state to file. fsync not required.
+    async fn flush(&self) -> Result<()>;
+
     /// Asynchronously fsyncs any completed operations to the disk.
     async fn fsync(&self) -> Result<()>;
 
@@ -341,7 +347,7 @@ pub trait AsyncDisk: DiskGetLen + FileSetLen + FileAllocate {
         &'a self,
         file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [cros_async::MemRegion],
+        mem_offsets: cros_async::MemRegionIter<'a>,
     ) -> Result<usize>;
 
     /// Writes to the file at 'file_offset' from memory `mem` at `mem_offsets`.
@@ -349,7 +355,7 @@ pub trait AsyncDisk: DiskGetLen + FileSetLen + FileAllocate {
         &'a self,
         file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [cros_async::MemRegion],
+        mem_offsets: cros_async::MemRegionIter<'a>,
     ) -> Result<usize>;
 
     /// Replaces a range of bytes with a hole.
@@ -368,7 +374,11 @@ pub trait AsyncDisk: DiskGetLen + FileSetLen + FileAllocate {
             len: buf.len(),
         };
         let n = self
-            .read_to_mem(file_offset, backing_mem.clone(), &[region])
+            .read_to_mem(
+                file_offset,
+                backing_mem.clone(),
+                MemRegionIter::new(&[region]),
+            )
             .await?;
         backing_mem
             .get_volatile_slice(region)
@@ -388,8 +398,12 @@ pub trait AsyncDisk: DiskGetLen + FileSetLen + FileAllocate {
             offset: 0,
             len: buf.len(),
         };
-        self.write_from_mem(file_offset, backing_mem, &[region])
-            .await
+        self.write_from_mem(
+            file_offset,
+            backing_mem,
+            cros_async::MemRegionIter::new(&[region]),
+        )
+        .await
     }
 }
 
@@ -430,6 +444,11 @@ impl AsyncDisk for SingleFileDisk {
         Box::new(self.inner.into_source())
     }
 
+    async fn flush(&self) -> Result<()> {
+        // Nothing to flush, all file mutations are immediately sent to the OS.
+        Ok(())
+    }
+
     async fn fsync(&self) -> Result<()> {
         self.inner.fsync().await.map_err(Error::Fsync)
     }
@@ -442,7 +461,7 @@ impl AsyncDisk for SingleFileDisk {
         &'a self,
         file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [cros_async::MemRegion],
+        mem_offsets: cros_async::MemRegionIter<'a>,
     ) -> Result<usize> {
         self.inner
             .read_to_mem(Some(file_offset), mem, mem_offsets)
@@ -454,7 +473,7 @@ impl AsyncDisk for SingleFileDisk {
         &'a self,
         file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [cros_async::MemRegion],
+        mem_offsets: cros_async::MemRegionIter<'a>,
     ) -> Result<usize> {
         self.inner
             .write_from_mem(Some(file_offset), mem, mem_offsets)

@@ -43,6 +43,8 @@ use resources::Alloc;
 use resources::Error as ResourcesError;
 use sync::Mutex;
 use thiserror::Error;
+use vfio_sys::vfio::vfio_acpi_dsm;
+use vfio_sys::vfio::VFIO_IRQ_SET_DATA_BOOL;
 use vfio_sys::*;
 use vm_memory::MemoryRegionInformation;
 use zerocopy::AsBytes;
@@ -93,6 +95,14 @@ pub enum VfioError {
     Resources(ResourcesError),
     #[error("unknown vfio device type (flags: {0:#x})")]
     UnknownDeviceType(u32),
+    #[error("failed to call vfio device's ACPI _DSM: {0}")]
+    VfioAcpiDsm(Error),
+    #[error("failed to disable vfio deviece's acpi notification: {0}")]
+    VfioAcpiNotificationDisable(Error),
+    #[error("failed to enable vfio deviece's acpi notification: {0}")]
+    VfioAcpiNotificationEnable(Error),
+    #[error("failed to test vfio deviece's acpi notification: {0}")]
+    VfioAcpiNotificationTest(Error),
     #[error(
         "vfio API version doesn't match with VFIO_API_VERSION defined in vfio_sys/src/vfio.rs"
     )]
@@ -942,6 +952,99 @@ impl VfioDevice {
         let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE(), &device_feature[0]) };
         if ret < 0 {
             Err(VfioError::VfioPmLowPowerExit(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// call _DSM from the device's ACPI table
+    pub fn acpi_dsm(&self, args: &[u8]) -> Result<Vec<u8>> {
+        let count = args.len();
+        let mut dsm = vec_with_array_field::<vfio_acpi_dsm, u8>(count);
+        dsm[0].argsz = (mem::size_of::<vfio_acpi_dsm>() + count * mem::size_of::<u8>()) as u32;
+        dsm[0].padding = 0;
+        // Safe as we allocated enough space to hold args
+        unsafe {
+            dsm[0].args.as_mut_slice(count).clone_from_slice(args);
+        }
+        // Safe as we are the owner of self and dsm which are valid value
+        let ret = unsafe { ioctl_with_mut_ref(&self.dev, VFIO_DEVICE_ACPI_DSM(), &mut dsm[0]) };
+        if ret < 0 {
+            Err(VfioError::VfioAcpiDsm(get_error()))
+        } else {
+            // Safe as we allocated enough space to hold args
+            let res = unsafe { dsm[0].args.as_slice(count) };
+            Ok(res.to_vec())
+        }
+    }
+
+    /// Enable vfio device's ACPI notifications and associate EventFD with device.
+    pub fn acpi_notification_evt_enable(
+        &self,
+        acpi_notification_eventfd: &Event,
+        index: u32,
+    ) -> Result<()> {
+        let u32_size = mem::size_of::<u32>();
+        let count = 1;
+
+        let mut irq_set = vec_with_array_field::<vfio_irq_set, u32>(count);
+        irq_set[0].argsz = (mem::size_of::<vfio_irq_set>() + count * u32_size) as u32;
+        irq_set[0].flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+        irq_set[0].index = index;
+        irq_set[0].start = 0;
+        irq_set[0].count = count as u32;
+
+        // It is safe as enough space is reserved through vec_with_array_field(u32)<count>.
+        let data = unsafe { irq_set[0].data.as_mut_slice(count * u32_size) };
+        data.copy_from_slice(&acpi_notification_eventfd.as_raw_descriptor().to_ne_bytes()[..]);
+
+        // Safe as we are the owner of self and irq_set which are valid value
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        if ret < 0 {
+            Err(VfioError::VfioAcpiNotificationEnable(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Disable vfio device's ACPI notification and disconnect EventFd with device.
+    pub fn acpi_notification_disable(&self, index: u32) -> Result<()> {
+        let mut irq_set = vec_with_array_field::<vfio_irq_set, u32>(0);
+        irq_set[0].argsz = mem::size_of::<vfio_irq_set>() as u32;
+        irq_set[0].flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER;
+        irq_set[0].index = index;
+        irq_set[0].start = 0;
+        irq_set[0].count = 0;
+
+        // Safe as we are the owner of self and irq_set which are valid value
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        if ret < 0 {
+            Err(VfioError::VfioAcpiNotificationDisable(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Test vfio device's ACPI notification by simulating hardware triggering.
+    /// When the signaling mechanism is set, the VFIO_IRQ_SET_DATA_BOOL can be used with
+    /// VFIO_IRQ_SET_ACTION_TRIGGER to perform kernel level interrupt loopback testing.
+    pub fn acpi_notification_test(&self, index: u32, val: u32) -> Result<()> {
+        let u32_size = mem::size_of::<u32>();
+        let mut irq_set = vec_with_array_field::<vfio_irq_set, u32>(1);
+        irq_set[0].argsz = (mem::size_of::<vfio_irq_set>() + u32_size) as u32;
+        irq_set[0].flags = VFIO_IRQ_SET_DATA_BOOL | VFIO_IRQ_SET_ACTION_TRIGGER;
+        irq_set[0].index = index;
+        irq_set[0].start = 0;
+        irq_set[0].count = 1;
+
+        // It is safe as enough space is reserved through vec_with_array_field(u32)<count>.
+        let data = unsafe { irq_set[0].data.as_mut_slice(u32_size) };
+        data.copy_from_slice(&val.to_ne_bytes()[..]);
+
+        // Safe as we are the owner of self and irq_set which are valid value
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        if ret < 0 {
+            Err(VfioError::VfioAcpiNotificationTest(get_error()))
         } else {
             Ok(())
         }

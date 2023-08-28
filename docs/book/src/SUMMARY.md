@@ -12,7 +12,8 @@
   - [System Requirements](./running_crosvm/requirements.md)
   - [Features](./running_crosvm/features.md)
   - [Programmatic Interaction](./running_crosvm/programmatic_interaction.md)
-- [Testing](./testing.md)
+- [Testing](./testing/index.md)
+  - [Fuzzing](./testing/fuzzing.md)
 - [Devices](./devices/index.md)
   - [Block](./devices/block.md)
   - [Network](./devices/net.md)
@@ -20,6 +21,7 @@
   - [Fs](./devices/fs.md)
   - [Vsock](./devices/vsock.md)
   - [Pmem](./devices/pmem.md)
+  - [USB](./devices/usb.md)
   - [Wayland](./devices/wayland.md)
   - [Video (experimental)](./devices/video.md)
   - [Vhost-user](./devices/vhost_user.md)
@@ -45,6 +47,7 @@ ______________________________________________________________________
   - [Seccomp](./appendix/seccomp.md)
   - [Memory Layout](./appendix/memory_layout.md)
   - [Minijail](./appendix/minijail.md)
+  - [Rutabaga](./appendix/rutabaga_gfx.md)
 
 ______________________________________________________________________
 

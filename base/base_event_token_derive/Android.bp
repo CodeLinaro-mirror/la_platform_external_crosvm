@@ -11,12 +11,12 @@ package {
 }
 
 rust_test_host {
-    name: "base_event_token_derive_test_event_token_derive",
+    name: "base_event_token_derive_test_src_lib",
     defaults: ["crosvm_inner_defaults"],
     crate_name: "base_event_token_derive",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["event_token_derive.rs"],
+    srcs: ["src/lib.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -36,7 +36,7 @@ rust_proc_macro {
     crate_name: "base_event_token_derive",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["event_token_derive.rs"],
+    srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
         "libproc_macro2",

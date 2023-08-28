@@ -115,6 +115,9 @@ rust_binary {
         arm64: {
             rustlibs: ["libaarch64"],
         },
+        riscv64: {
+            rustlibs: ["libriscv64"],
+        },
     },
     target: {
         host: {
@@ -240,6 +243,9 @@ rust_test {
         },
         arm64: {
             rustlibs: ["libaarch64"],
+        },
+        riscv64: {
+            rustlibs: ["libriscv64"],
         },
     },
     target: {

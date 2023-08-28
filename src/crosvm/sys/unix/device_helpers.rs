@@ -246,13 +246,14 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
             self.disk.path.display(),
         );
         let disk_image = self.disk.open()?;
-
+        let base_features = virtio::base_features(protection_type);
         Ok(Box::new(
             virtio::BlockAsync::new(
-                virtio::base_features(protection_type),
+                base_features,
                 disk_image,
                 self.disk.read_only,
                 self.disk.sparse,
+                self.disk.packed_queue,
                 self.disk.block_size,
                 self.disk.multiple_workers,
                 self.disk.id,
@@ -271,12 +272,15 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
     ) -> anyhow::Result<Box<dyn VhostUserDevice>> {
         let disk = self.disk;
         let disk_image = disk.open()?;
+        let base_features = virtio::base_features(ProtectionType::Unprotected);
+
         let block = Box::new(
             virtio::BlockAsync::new(
-                virtio::base_features(ProtectionType::Unprotected),
+                base_features,
                 disk_image,
                 disk.read_only,
                 disk.sparse,
+                disk.packed_queue,
                 disk.block_size,
                 false,
                 disk.id,
@@ -781,17 +785,24 @@ impl VirtioDeviceBuilder for &NetParameters {
     ) -> anyhow::Result<Box<dyn VirtioDevice>> {
         let vq_pairs = self.vq_pairs.unwrap_or(1);
         let multi_vq = vq_pairs > 1 && self.vhost_net.is_none();
+
         let features = virtio::base_features(protection_type);
         let (tap, mac) = create_tap_for_net_device(&self.mode, multi_vq)?;
 
         Ok(if let Some(vhost_net) = &self.vhost_net {
             Box::new(
-                virtio::vhost::Net::<_, vhost::Net<_>>::new(&vhost_net.device, features, tap, mac)
-                    .context("failed to set up virtio-vhost networking")?,
+                virtio::vhost::Net::<_, vhost::Net<_>>::new(
+                    &vhost_net.device,
+                    features,
+                    tap,
+                    mac,
+                    self.packed_queue,
+                )
+                .context("failed to set up virtio-vhost networking")?,
             ) as Box<dyn VirtioDevice>
         } else {
             Box::new(
-                virtio::Net::new(features, tap, vq_pairs, mac)
+                virtio::Net::new(features, tap, vq_pairs, mac, self.packed_queue)
                     .context("failed to set up virtio networking")?,
             ) as Box<dyn VirtioDevice>
         })
@@ -1123,7 +1134,7 @@ pub fn create_fs_device(
     gid_map: &str,
     src: &Path,
     tag: &str,
-    fs_cfg: virtio::fs::passthrough::Config,
+    fs_cfg: virtio::fs::Config,
     device_tube: Tube,
 ) -> DeviceResult {
     let max_open_files =
@@ -1211,7 +1222,7 @@ pub fn create_pmem_device(
     index: usize,
     pmem_device_tube: Tube,
 ) -> DeviceResult {
-    let fd = open_file(
+    let fd = open_file_or_duplicate(
         &disk.path,
         OpenOptions::new().read(true).write(!disk.read_only),
     )
@@ -1442,7 +1453,6 @@ pub fn create_vfio_device(
     guest_address: Option<PciAddress>,
     coiommu_endpoints: Option<&mut Vec<u16>>,
     iommu_dev: IommuDevType,
-    #[cfg(feature = "direct")] is_intel_lpss: bool,
 ) -> DeviceResult<(VfioDeviceVariant, Option<Minijail>, Option<VfioWrapper>)> {
     let vfio_container = VfioCommonSetup::vfio_get_container(iommu_dev, Some(vfio_path))
         .context("failed to get vfio container")?;
@@ -1485,8 +1495,6 @@ pub fn create_vfio_device(
                 vfio_device_tube_msix,
                 VmMemoryClient::new(vfio_device_tube_mem),
                 vfio_device_tube_vm,
-                #[cfg(feature = "direct")]
-                is_intel_lpss,
             )?;
             // early reservation for pass-through PCI devices.
             let endpoint_addr = vfio_pci_device

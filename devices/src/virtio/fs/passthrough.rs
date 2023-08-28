@@ -17,7 +17,6 @@ use std::os::raw::c_int;
 use std::os::raw::c_long;
 use std::ptr::addr_of;
 use std::ptr::addr_of_mut;
-use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -56,8 +55,6 @@ use fuse::sys::WRITE_KILL_PRIV;
 use fuse::Mapper;
 #[cfg(feature = "arc_quota")]
 use protobuf::Message;
-use serde::Deserialize;
-use serde::Serialize;
 use sync::Mutex;
 #[cfg(feature = "arc_quota")]
 use system_api::client::OrgChromiumArcQuota;
@@ -76,6 +73,8 @@ use crate::virtio::fs::caps::Capability;
 use crate::virtio::fs::caps::Caps;
 use crate::virtio::fs::caps::Set as CapSet;
 use crate::virtio::fs::caps::Value as CapValue;
+use crate::virtio::fs::config::CachePolicy;
+use crate::virtio::fs::config::Config;
 use crate::virtio::fs::expiring_map::ExpiringMap;
 use crate::virtio::fs::multikey::MultikeyBTreeMap;
 use crate::virtio::fs::read_dir::ReadDir;
@@ -445,199 +444,6 @@ fn statat<D: AsRawDescriptor>(dir: &D, name: &CStr) -> io::Result<libc::stat64> 
     Ok(unsafe { st.assume_init() })
 }
 
-/// The caching policy that the file system should report to the FUSE client. By default the FUSE
-/// protocol uses close-to-open consistency. This means that any cached contents of the file are
-/// invalidated the next time that file is opened.
-#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CachePolicy {
-    /// The client should never cache file data and all I/O should be directly forwarded to the
-    /// server. This policy must be selected when file contents may change without the knowledge of
-    /// the FUSE client (i.e., the file system does not have exclusive access to the directory).
-    Never,
-
-    /// The client is free to choose when and how to cache file data. This is the default policy and
-    /// uses close-to-open consistency as described in the enum documentation.
-    #[default]
-    Auto,
-
-    /// The client should always cache file data. This means that the FUSE client will not
-    /// invalidate any cached data that was returned by the file system the last time the file was
-    /// opened. This policy should only be selected when the file system has exclusive access to the
-    /// directory.
-    Always,
-}
-
-impl FromStr for CachePolicy {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "never" | "Never" | "NEVER" => Ok(CachePolicy::Never),
-            "auto" | "Auto" | "AUTO" => Ok(CachePolicy::Auto),
-            "always" | "Always" | "ALWAYS" => Ok(CachePolicy::Always),
-            _ => Err("invalid cache policy"),
-        }
-    }
-}
-
-/// Options that configure the behavior of the file system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
-    /// How long the FUSE client should consider directory entries to be valid. If the contents of a
-    /// directory can only be modified by the FUSE client (i.e., the file system has exclusive
-    /// access), then this should be a large value.
-    ///
-    /// The default value for this option is 5 seconds.
-    pub entry_timeout: Duration,
-
-    /// How long the FUSE client should consider file and directory attributes to be valid. If the
-    /// attributes of a file or directory can only be modified by the FUSE client (i.e., the file
-    /// system has exclusive access), then this should be set to a large value.
-    ///
-    /// The default value for this option is 5 seconds.
-    pub attr_timeout: Duration,
-
-    /// The caching policy the file system should use. See the documentation of `CachePolicy` for
-    /// more details.
-    pub cache_policy: CachePolicy,
-
-    /// Whether the file system should enabled writeback caching. This can improve performance as it
-    /// allows the FUSE client to cache and coalesce multiple writes before sending them to the file
-    /// system. However, enabling this option can increase the risk of data corruption if the file
-    /// contents can change without the knowledge of the FUSE client (i.e., the server does **NOT**
-    /// have exclusive access). Additionally, the file system should have read access to all files
-    /// in the directory it is serving as the FUSE client may send read requests even for files
-    /// opened with `O_WRONLY`.
-    ///
-    /// Therefore callers should only enable this option when they can guarantee that: 1) the file
-    /// system has exclusive access to the directory and 2) the file system has read permissions for
-    /// all files in that directory.
-    ///
-    /// The default value for this option is `false`.
-    pub writeback: bool,
-
-    /// Controls whether security.* xattrs (except for security.selinux) are re-written. When this
-    /// is set to true, the server will add a "user.virtiofs" prefix to xattrs in the security
-    /// namespace. Setting these xattrs requires CAP_SYS_ADMIN in the namespace where the file
-    /// system was mounted and since the server usually runs in an unprivileged user namespace, it's
-    /// unlikely to have that capability.
-    ///
-    /// The default value for this option is `false`.
-    pub rewrite_security_xattrs: bool,
-
-    /// Use case-insensitive lookups for directory entries (ASCII only).
-    ///
-    /// The default value for this option is `false`.
-    pub ascii_casefold: bool,
-
-    // UIDs which are privileged to perform quota-related operations. We cannot perform a CAP_FOWNER
-    // check so we consult this list when the VM tries to set the project quota and the process uid
-    // doesn't match the owner uid. In that case, all uids in this list are treated as if they have
-    // CAP_FOWNER.
-    #[cfg(feature = "arc_quota")]
-    pub privileged_quota_uids: Vec<libc::uid_t>,
-
-    /// Use DAX for shared files.
-    ///
-    /// Enabling DAX can improve performance for frequently accessed files by mapping regions of the
-    /// file directly into the VM's memory region, allowing direct access with the cost of slightly
-    /// increased latency the first time the file is accessed. Additionally, since the mapping is
-    /// shared directly from the host kernel's file cache, enabling DAX can improve performance even
-    /// when the cache policy is `Never`.
-    ///
-    /// The default value for this option is `false`.
-    pub use_dax: bool,
-
-    /// Enable support for POSIX acls.
-    ///
-    /// Enable POSIX acl support for the shared directory. This requires that the underlying file
-    /// system also supports POSIX acls.
-    ///
-    /// The default value for this option is `true`.
-    pub posix_acl: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            entry_timeout: Duration::from_secs(5),
-            attr_timeout: Duration::from_secs(5),
-            cache_policy: Default::default(),
-            writeback: false,
-            rewrite_security_xattrs: false,
-            ascii_casefold: false,
-            #[cfg(feature = "arc_quota")]
-            privileged_quota_uids: Default::default(),
-            use_dax: false,
-            posix_acl: true,
-        }
-    }
-}
-
-impl FromStr for Config {
-    type Err = &'static str;
-
-    fn from_str(params: &str) -> Result<Self, Self::Err> {
-        let mut cfg = Self::default();
-        if params.is_empty() {
-            return Ok(cfg);
-        }
-        for opt in params.split(':') {
-            let mut o = opt.splitn(2, '=');
-            let kind = o.next().ok_or("`cfg` options mut not be empty")?;
-            let value = o
-                .next()
-                .ok_or("`cfg` options must be of the form `kind=value`")?;
-            match kind {
-                #[cfg(feature = "arc_quota")]
-                "privileged_quota_uids" => {
-                    cfg.privileged_quota_uids =
-                        value.split(' ').map(|s| s.parse().unwrap()).collect();
-                }
-                "timeout" => {
-                    let seconds = value.parse().map_err(|_| "`timeout` must be an integer")?;
-
-                    let dur = Duration::from_secs(seconds);
-                    cfg.entry_timeout = dur;
-                    cfg.attr_timeout = dur;
-                }
-                "cache" => {
-                    let policy = value
-                        .parse()
-                        .map_err(|_| "`cache` must be one of `never`, `always`, or `auto`")?;
-                    cfg.cache_policy = policy;
-                }
-                "writeback" => {
-                    let writeback = value.parse().map_err(|_| "`writeback` must be a boolean")?;
-                    cfg.writeback = writeback;
-                }
-                "rewrite-security-xattrs" => {
-                    let rewrite_security_xattrs = value
-                        .parse()
-                        .map_err(|_| "`rewrite-security-xattrs` must be a boolean")?;
-                    cfg.rewrite_security_xattrs = rewrite_security_xattrs;
-                }
-                "ascii_casefold" => {
-                    let ascii_casefold = value
-                        .parse()
-                        .map_err(|_| "`ascii_casefold` must be a boolean")?;
-                    cfg.ascii_casefold = ascii_casefold;
-                }
-                "dax" => {
-                    let use_dax = value.parse().map_err(|_| "`dax` must be a boolean")?;
-                    cfg.use_dax = use_dax;
-                }
-                "posix_acl" => {
-                    let posix_acl = value.parse().map_err(|_| "`posix_acl` must be a boolean")?;
-                    cfg.posix_acl = posix_acl;
-                }
-                _ => return Err("unrecognized option for virtio-fs config"),
-            }
-        }
-        Ok(cfg)
-    }
-}
-
 /// Per-directory cache for `PassthroughFs::ascii_casefold_lookup()`.
 ///
 /// The key of the underlying `BTreeMap` is a lower-cased file name in the direcoty.
@@ -782,7 +588,7 @@ pub struct PassthroughFs {
 
     // Time-expiring cache for `ascii_casefold_lookup()`.
     // The key is an inode of a directory, and the value is a cache for the directory.
-    // Each value will be expired `cfg.entry_timeout` after it's created.
+    // Each value will be expired `cfg.timeout` after it's created.
     //
     // TODO(b/267748212): Instead of per-device Mutex, we might want to have per-directory Mutex
     // if we use PassthroughFs in multi-threaded environments.
@@ -840,9 +646,7 @@ impl PassthroughFs {
         let proc = unsafe { File::from_raw_descriptor(raw_descriptor) };
 
         let expiring_casefold_lookup_caches = if cfg.ascii_casefold {
-            Some(Mutex::new(ExpiringCasefoldLookupCaches::new(
-                cfg.entry_timeout,
-            )))
+            Some(Mutex::new(ExpiringCasefoldLookupCaches::new(cfg.timeout)))
         } else {
             None
         };
@@ -1011,8 +815,9 @@ impl PassthroughFs {
             inode,
             generation: 0,
             attr: st,
-            attr_timeout: self.cfg.attr_timeout,
-            entry_timeout: self.cfg.entry_timeout,
+            // We use the same timeout for the attribute and the entry.
+            attr_timeout: self.cfg.timeout,
+            entry_timeout: self.cfg.timeout,
         }
     }
 
@@ -1069,8 +874,9 @@ impl PassthroughFs {
                 inode: self.increase_inode_refcount(data),
                 generation: 0,
                 attr: st,
-                attr_timeout: self.cfg.attr_timeout,
-                entry_timeout: self.cfg.entry_timeout,
+                // We use the same timeout for the attribute and the entry.
+                attr_timeout: self.cfg.timeout,
+                entry_timeout: self.cfg.timeout,
             });
         }
 
@@ -1172,7 +978,7 @@ impl PassthroughFs {
     fn do_getattr(&self, inode: &InodeData) -> io::Result<(libc::stat64, Duration)> {
         let st = stat(inode)?;
 
-        Ok((st, self.cfg.attr_timeout))
+        Ok((st, self.cfg.timeout))
     }
 
     fn do_unlink(&self, parent: &InodeData, name: &CStr, flags: libc::c_int) -> io::Result<()> {
@@ -1814,13 +1620,31 @@ impl FileSystem for PassthroughFs {
     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
         let _trace = fs_trace!(self.tag, "lookup", parent, name);
         let data = self.find_inode(parent)?;
-        self.do_lookup(&data, name).or_else(|e| {
-            if self.cfg.ascii_casefold {
-                self.ascii_casefold_lookup(&data, name.to_bytes())
-            } else {
-                Err(e)
+
+        let mut res = self.do_lookup(&data, name);
+        // If `ascii_casefold` is enabled, fallback to `ascii_casefold_lookup()`.
+        if res.is_err() && self.cfg.ascii_casefold {
+            res = self.ascii_casefold_lookup(&data, name.to_bytes());
+        }
+        // FUSE takes a inode=0 as a request to do negative dentry cache.
+        // So, if `negative_timeout` is set, return success with the timeout value and inode=0 as a
+        // response.
+        if let Err(e) = &res {
+            if e.kind() == std::io::ErrorKind::NotFound && !self.cfg.negative_timeout.is_zero() {
+                let attr = MaybeUninit::<libc::stat64>::zeroed();
+                res = Ok(Entry {
+                    inode: 0, // Using 0 for negative entry
+                    entry_timeout: self.cfg.negative_timeout,
+                    // Zero-fill other fields that won't be used.
+                    attr_timeout: Duration::from_secs(0),
+                    generation: 0,
+                    // Safe because zero-initialized `stat64` is a valid value.
+                    attr: unsafe { attr.assume_init() },
+                });
             }
-        })
+        }
+
+        res
     }
 
     fn forget(&self, _ctx: Context, inode: Inode, count: u64) {
@@ -3236,8 +3060,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let timeout = Duration::from_millis(10);
         let cfg = Config {
-            entry_timeout: timeout,
-            attr_timeout: timeout,
+            timeout,
             cache_policy: CachePolicy::Auto,
             ascii_casefold,
             ..Default::default()
@@ -3306,8 +3129,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let timeout = Duration::from_millis(10);
         let cfg = Config {
-            entry_timeout: timeout,
-            attr_timeout: timeout,
+            timeout,
             cache_policy: CachePolicy::Auto,
             ascii_casefold,
             ..Default::default()
@@ -3391,5 +3213,44 @@ mod tests {
         // When removing b.txt, it must be removed from the cache as well.
         unlink(&fs, &b_path).expect("remove b.txt");
         assert!(!fs.exists_in_casefold_cache(parent, &CString::new("B.TXT").unwrap()));
+    }
+
+    #[test]
+    fn lookup_negative_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        // Prepare `a.txt` before starting the test.
+        create_test_data(&temp_dir, &[], &[]);
+
+        let cfg = Config {
+            negative_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let fs = PassthroughFs::new("tag", cfg).unwrap();
+
+        let capable = FsOptions::empty();
+        fs.init(capable).unwrap();
+
+        let a_path = temp_dir.path().join("a.txt");
+        // a.txt hasn't existed yet.
+        // Since negative_timeout is enabled, success with inode=0 is expected.
+        assert_eq!(
+            0,
+            lookup(&fs, &a_path).expect("lookup a.txt"),
+            "Entry with inode=0 is expected for non-existing file 'a.txt'"
+        );
+        // Create a.txt
+        let a_entry = create(&fs, &a_path).expect("create a.txt");
+        assert_eq!(
+            a_entry.inode,
+            lookup(&fs, &a_path).expect("lookup a.txt"),
+            "Created file 'a.txt' must be looked up"
+        );
+        // Remove a.txt
+        unlink(&fs, &a_path).expect("Remove");
+        assert_eq!(
+            0,
+            lookup(&fs, &a_path).expect("lookup a.txt"),
+            "Entry with inode=0 is expected for the removed file 'a.txt'"
+        );
     }
 }

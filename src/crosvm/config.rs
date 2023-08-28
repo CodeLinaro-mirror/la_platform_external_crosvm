@@ -49,8 +49,7 @@ use devices::virtio::NetParameters;
 use devices::Ac97Backend;
 #[cfg(feature = "audio")]
 use devices::Ac97Parameters;
-#[cfg(feature = "direct")]
-use devices::BusRange;
+use devices::FwCfgParameters;
 use devices::PciAddress;
 use devices::PflashParameters;
 use devices::StubPciParameters;
@@ -71,14 +70,15 @@ use x86_64::set_enable_pnp_data_msr_config;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use x86_64::CpuIdCall;
 
+#[cfg(unix)]
+use crate::crosvm::sys::config::SharedDir;
+
 pub(crate) use super::sys::HypervisorKind;
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
-        use devices::virtio::fs::passthrough;
         #[cfg(feature = "gpu")]
         use crate::crosvm::sys::GpuRenderServerParameters;
-        use libc::{getegid, geteuid};
 
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         static VHOST_SCMI_PATH: &str = "/dev/vhost-scmi";
@@ -317,14 +317,6 @@ impl FromStr for GidMap {
     }
 }
 
-/// Direct IO forwarding options
-#[cfg(feature = "direct")]
-#[derive(Debug, Deserialize, Serialize)]
-pub struct DirectIoOption {
-    pub path: PathBuf,
-    pub ranges: Vec<BusRange>,
-}
-
 pub const DEFAULT_TOUCH_DEVICE_HEIGHT: u32 = 1024;
 pub const DEFAULT_TOUCH_DEVICE_WIDTH: u32 = 1280;
 
@@ -399,145 +391,6 @@ impl FromStr for TouchDeviceOption {
     }
 }
 
-#[derive(Default, Eq, PartialEq, Serialize, Deserialize)]
-pub enum SharedDirKind {
-    FS,
-    #[default]
-    P9,
-}
-
-impl FromStr for SharedDirKind {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use SharedDirKind::*;
-        match s {
-            "fs" | "FS" => Ok(FS),
-            "9p" | "9P" | "p9" | "P9" => Ok(P9),
-            _ => Err("invalid file system type"),
-        }
-    }
-}
-
-#[cfg(unix)]
-pub struct SharedDir {
-    pub src: PathBuf,
-    pub tag: String,
-    pub kind: SharedDirKind,
-    pub ugid: (Option<u32>, Option<u32>),
-    pub uid_map: String,
-    pub gid_map: String,
-    pub fs_cfg: passthrough::Config,
-    pub p9_cfg: p9::Config,
-}
-
-#[cfg(unix)]
-impl Default for SharedDir {
-    fn default() -> SharedDir {
-        SharedDir {
-            src: Default::default(),
-            tag: Default::default(),
-            kind: Default::default(),
-            ugid: (None, None),
-            uid_map: format!("0 {} 1", unsafe { geteuid() }),
-            gid_map: format!("0 {} 1", unsafe { getegid() }),
-            fs_cfg: Default::default(),
-            p9_cfg: Default::default(),
-        }
-    }
-}
-
-#[cfg(unix)]
-impl FromStr for SharedDir {
-    type Err = &'static str;
-
-    fn from_str(param: &str) -> Result<Self, Self::Err> {
-        // This is formatted as multiple fields, each separated by ":". The first 2 fields are
-        // fixed (src:tag).  The rest may appear in any order:
-        //
-        // * type=TYPE - must be one of "p9" or "fs" (default: p9)
-        // * uidmap=UIDMAP - a uid map in the format "inner outer count[,inner outer count]"
-        //   (default: "0 <current euid> 1")
-        // * gidmap=GIDMAP - a gid map in the same format as uidmap
-        //   (default: "0 <current egid> 1")
-        // * privileged_quota_uids=UIDS - Space-separated list of privileged uid values. When
-        //   performing quota-related operations, these UIDs are treated as if they have
-        //   CAP_FOWNER.
-        // * timeout=TIMEOUT - a timeout value in seconds, which indicates how long attributes
-        //   and directory contents should be considered valid (default: 5)
-        // * cache=CACHE - one of "never", "always", or "auto" (default: auto)
-        // * writeback=BOOL - indicates whether writeback caching should be enabled (default: false)
-        // * uid=UID - uid of the device process in the user namespace created by minijail.
-        //   (default: 0)
-        // * gid=GID - gid of the device process in the user namespace created by minijail.
-        //   (default: 0)
-        // These two options (uid/gid) are useful when the crosvm process has no
-        // CAP_SETGID/CAP_SETUID but an identity mapping of the current user/group
-        // between the VM and the host is required.
-        // Say the current user and the crosvm process has uid 5000, a user can use
-        // "uid=5000" and "uidmap=5000 5000 1" such that files owned by user 5000
-        // still appear to be owned by user 5000 in the VM. These 2 options are
-        // useful only when there is 1 user in the VM accessing shared files.
-        // If multiple users want to access the shared file, gid/uid options are
-        // useless. It'd be better to create a new user namespace and give
-        // CAP_SETUID/CAP_SETGID to the crosvm.
-        let mut components = param.split(':');
-        let src = PathBuf::from(
-            components
-                .next()
-                .ok_or("missing source path for `shared-dir`")?,
-        );
-        let tag = components
-            .next()
-            .ok_or("missing tag for `shared-dir`")?
-            .to_owned();
-
-        if !src.is_dir() {
-            return Err("source path for `shared-dir` must be a directory");
-        }
-
-        let mut shared_dir = SharedDir {
-            src,
-            tag,
-            ..Default::default()
-        };
-        let mut type_opts = vec![];
-        for opt in components {
-            let mut o = opt.splitn(2, '=');
-            let kind = o.next().ok_or("`shared-dir` options must not be empty")?;
-            let value = o
-                .next()
-                .ok_or("`shared-dir` options must be of the form `kind=value`")?;
-
-            match kind {
-                "type" => {
-                    shared_dir.kind = value
-                        .parse()
-                        .map_err(|_| "`type` must be one of `fs` or `9p`")?
-                }
-                "uidmap" => shared_dir.uid_map = value.into(),
-                "gidmap" => shared_dir.gid_map = value.into(),
-                "uid" => {
-                    shared_dir.ugid.0 = Some(value.parse().map_err(|_| "`uid` must be an integer")?)
-                }
-                "gid" => {
-                    shared_dir.ugid.1 = Some(value.parse().map_err(|_| "`gid` must be an integer")?)
-                }
-                _ => type_opts.push(opt),
-            }
-        }
-        match shared_dir.kind {
-            SharedDirKind::FS => {
-                shared_dir.fs_cfg = type_opts.join(":").parse()?;
-            }
-            SharedDirKind::P9 => {
-                shared_dir.p9_cfg = type_opts.join(":").parse()?;
-            }
-        }
-        Ok(shared_dir)
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, FromKeyValues)]
 #[serde(deny_unknown_fields)]
 pub struct FileBackedMappingParameters {
@@ -553,12 +406,6 @@ pub struct FileBackedMappingParameters {
     pub sync: bool,
     #[serde(default)]
     pub align: bool,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct HostPcieRootPortParameters {
-    pub host_path: PathBuf,
-    pub hp_gpe: Option<u32>,
 }
 
 fn parse_hex_or_decimal(maybe_hex_string: &str) -> Result<u64, String> {
@@ -631,6 +478,28 @@ pub fn parse_userspace_msr_options(value: &str) -> Result<(u32, MsrConfig), Stri
             filter: options.filter,
         },
     ))
+}
+
+pub fn validate_fw_cfg_parameters(params: &FwCfgParameters) -> Result<(), String> {
+    if params.name.is_none() && (params.string.is_some() || params.path.is_some()) {
+        return Err("Must give name of data to --fw-cfg".to_string());
+    }
+
+    if params.string.is_some() && params.path.is_some()
+        || params.name.is_some() && params.string.is_none() && params.path.is_none()
+    {
+        return Err("Provide exactly one of string or path args to --fw-cfg".to_string());
+    }
+
+    Ok(())
+}
+
+pub fn parse_fw_cfg_options(s: &str) -> Result<FwCfgParameters, String> {
+    let params: FwCfgParameters = from_key_values(s)?;
+
+    validate_fw_cfg_parameters(&params)?;
+
+    Ok(params)
 }
 
 pub fn validate_serial_parameters(params: &SerialParameters) -> Result<(), String> {
@@ -765,53 +634,6 @@ pub fn parse_memory_region(value: &str) -> Result<AddressRange, String> {
             "pcie-ecam must be representable as AddressRange",
         ))
     }
-}
-
-#[cfg(feature = "direct")]
-pub fn parse_pcie_root_port_params(value: &str) -> Result<HostPcieRootPortParameters, String> {
-    let opts: Vec<_> = value.split(',').collect();
-    if opts.len() > 2 {
-        return Err(invalid_value_err(
-            value,
-            "pcie-root-port has maxmimum two arguments",
-        ));
-    }
-    let pcie_path = PathBuf::from(opts[0]);
-    if !pcie_path.exists() {
-        return Err(invalid_value_err(
-            value,
-            "the pcie root port path does not exist",
-        ));
-    }
-    if !pcie_path.is_dir() {
-        return Err(invalid_value_err(
-            value,
-            "the pcie root port path should be directory",
-        ));
-    }
-
-    let hp_gpe = if opts.len() == 2 {
-        let gpes: Vec<&str> = opts[1].split('=').collect();
-        if gpes.len() != 2 || gpes[0] != "hp_gpe" {
-            return Err(invalid_value_err(value, "it should be hp_gpe=Num"));
-        }
-        match gpes[1].parse::<u32>() {
-            Ok(gpe) => Some(gpe),
-            Err(_) => {
-                return Err(invalid_value_err(
-                    value,
-                    "host hp gpe must be a non-negative integer",
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    Ok(HostPcieRootPortParameters {
-        host_path: pcie_path,
-        hp_gpe,
-    })
 }
 
 pub fn parse_bus_id_addr(v: &str) -> Result<(u8, u8, u16, u16), String> {
@@ -955,50 +777,6 @@ pub fn parse_cpu_affinity(s: &str) -> Result<VcpuAffinity, String> {
     }
 }
 
-#[cfg(feature = "direct")]
-pub fn parse_direct_io_options(s: &str) -> Result<DirectIoOption, String> {
-    let parts: Vec<&str> = s.splitn(2, '@').collect();
-    if parts.len() != 2 {
-        return Err(invalid_value_err(
-            s,
-            "missing port range, use /path@X-Y,Z,.. syntax",
-        ));
-    }
-    let path = PathBuf::from(parts[0]);
-    if !path.exists() {
-        return Err(invalid_value_err(parts[0], "the path does not exist"));
-    };
-    let ranges: Result<Vec<BusRange>, String> = parts[1]
-        .split(',')
-        .map(|frag| frag.split('-'))
-        .map(|mut range| {
-            let base = range
-                .next()
-                .map(parse_hex_or_decimal)
-                .map_or(Ok(None), |r| r.map(Some));
-            let last = range
-                .next()
-                .map(parse_hex_or_decimal)
-                .map_or(Ok(None), |r| r.map(Some));
-            (base, last)
-        })
-        .map(|range| match range {
-            (Ok(Some(base)), Ok(None)) => Ok(BusRange { base, len: 1 }),
-            (Ok(Some(base)), Ok(Some(last))) => Ok(BusRange {
-                base,
-                len: last.saturating_sub(base).saturating_add(1),
-            }),
-            (Err(_), _) => Err(invalid_value_err(s, "invalid base range value")),
-            (_, Err(_)) => Err(invalid_value_err(s, "invalid last range value")),
-            _ => Err(invalid_value_err(s, "invalid range format")),
-        })
-        .collect();
-    Ok(DirectIoOption {
-        path,
-        ranges: ranges?,
-    })
-}
-
 pub fn executable_is_plugin(executable: &Option<Executable>) -> bool {
     matches!(executable, Some(Executable::Plugin(_)))
 }
@@ -1078,18 +856,6 @@ pub struct Config {
     #[cfg(feature = "crash-report")]
     pub crash_report_uuid: Option<String>,
     pub delay_rt: bool,
-    #[cfg(feature = "direct")]
-    pub direct_edge_irq: Vec<u32>,
-    #[cfg(feature = "direct")]
-    pub direct_fixed_evts: Vec<devices::ACPIPMFixedEvent>,
-    #[cfg(feature = "direct")]
-    pub direct_gpe: Vec<u32>,
-    #[cfg(feature = "direct")]
-    pub direct_level_irq: Vec<u32>,
-    #[cfg(feature = "direct")]
-    pub direct_mmio: Option<DirectIoOption>,
-    #[cfg(feature = "direct")]
-    pub direct_pmio: Option<DirectIoOption>,
     pub disable_virtio_intx: bool,
     pub disks: Vec<DiskOption>,
     pub display_window_keyboard: bool,
@@ -1104,6 +870,7 @@ pub struct Config {
     pub file_backed_mappings: Vec<FileBackedMappingParameters>,
     pub force_calibrated_tsc_leaf: bool,
     pub force_s2idle: bool,
+    pub fw_cfg_parameters: Vec<FwCfgParameters>,
     #[cfg(feature = "gdb")]
     pub gdb: Option<u32>,
     #[cfg(all(windows, feature = "gpu"))]
@@ -1150,12 +917,12 @@ pub struct Config {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub oem_strings: Vec<String>,
     pub params: Vec<String>,
+    #[cfg(feature = "pci-hotplug")]
+    pub pci_hotplug_slots: Option<u8>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub pci_low_start: Option<u64>,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub pcie_ecam: Option<AddressRange>,
-    #[cfg(feature = "direct")]
-    pub pcie_rp: Vec<HostPcieRootPortParameters>,
     pub per_vm_core_scheduling: bool,
     pub pflash_parameters: Option<PflashParameters>,
     #[cfg(feature = "plugin")]
@@ -1200,6 +967,7 @@ pub struct Config {
     pub sound: Option<PathBuf>,
     pub strict_balloon: bool,
     pub stub_pci_devices: Vec<StubPciParameters>,
+    pub suspended: bool,
     pub swap_dir: Option<PathBuf>,
     pub swiotlb: Option<u64>,
     #[cfg(target_os = "android")]
@@ -1293,18 +1061,6 @@ impl Default for Config {
             cpu_capacity: BTreeMap::new(),
             cpu_clusters: Vec::new(),
             delay_rt: false,
-            #[cfg(feature = "direct")]
-            direct_edge_irq: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_fixed_evts: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_gpe: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_level_irq: Vec::new(),
-            #[cfg(feature = "direct")]
-            direct_mmio: None,
-            #[cfg(feature = "direct")]
-            direct_pmio: None,
             disks: Vec::new(),
             disable_virtio_intx: false,
             display_window_keyboard: false,
@@ -1319,6 +1075,7 @@ impl Default for Config {
             file_backed_mappings: Vec::new(),
             force_calibrated_tsc_leaf: false,
             force_s2idle: false,
+            fw_cfg_parameters: Vec::new(),
             #[cfg(feature = "gdb")]
             gdb: None,
             #[cfg(all(windows, feature = "gpu"))]
@@ -1373,12 +1130,12 @@ impl Default for Config {
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             oem_strings: Vec::new(),
             params: Vec::new(),
+            #[cfg(feature = "pci-hotplug")]
+            pci_hotplug_slots: None,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             pci_low_start: None,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             pcie_ecam: None,
-            #[cfg(feature = "direct")]
-            pcie_rp: Vec::new(),
             per_vm_core_scheduling: false,
             pflash_parameters: None,
             #[cfg(feature = "plugin")]
@@ -1409,7 +1166,6 @@ impl Default for Config {
             slirp_capture_file: None,
             #[cfg(all(windows, feature = "audio"))]
             snd_split_config: None,
-            swap_dir: None,
             socket_path: None,
             #[cfg(feature = "tpm")]
             software_tpm: false,
@@ -1417,6 +1173,8 @@ impl Default for Config {
             sound: None,
             strict_balloon: false,
             stub_pci_devices: Vec::new(),
+            suspended: false,
+            swap_dir: None,
             swiotlb: None,
             #[cfg(target_os = "android")]
             task_profiles: Vec::new(),
@@ -1678,9 +1436,6 @@ fn validate_file_backed_mapping(mapping: &mut FileBackedMappingParameters) -> Re
 #[cfg(test)]
 #[allow(clippy::needless_update)]
 mod tests {
-    #[cfg(unix)]
-    use std::time::Duration;
-
     use argh::FromArgs;
     use devices::PciClassCode;
     use devices::StubPciParameters;
@@ -2138,52 +1893,6 @@ mod tests {
         assert_eq!(params.revision, 0xa);
     }
 
-    #[cfg(feature = "direct")]
-    #[test]
-    fn parse_direct_io_options_valid() {
-        // Use /dev/zero here which is usually available on any systems,
-        // /dev/mem may not.
-        let params = parse_direct_io_options("/dev/zero@1,100-110").unwrap();
-        assert_eq!(params.path.to_str(), Some("/dev/zero"));
-        assert_eq!(params.ranges[0], BusRange { base: 1, len: 1 });
-        assert_eq!(params.ranges[1], BusRange { base: 100, len: 11 });
-    }
-
-    #[cfg(feature = "direct")]
-    #[test]
-    fn parse_direct_io_options_hex() {
-        // Use /dev/zero here which is usually available on any systems,
-        // /dev/mem may not.
-        let params = parse_direct_io_options("/dev/zero@1,0x10,100-110,0x10-0x20").unwrap();
-        assert_eq!(params.path.to_str(), Some("/dev/zero"));
-        assert_eq!(params.ranges[0], BusRange { base: 1, len: 1 });
-        assert_eq!(params.ranges[1], BusRange { base: 0x10, len: 1 });
-        assert_eq!(params.ranges[2], BusRange { base: 100, len: 11 });
-        assert_eq!(
-            params.ranges[3],
-            BusRange {
-                base: 0x10,
-                len: 0x11
-            }
-        );
-    }
-
-    #[cfg(feature = "direct")]
-    #[test]
-    fn parse_direct_io_options_invalid() {
-        // Use /dev/zero here which is usually available on any systems,
-        // /dev/mem may not.
-        assert!(parse_direct_io_options("/dev/zero@0y10")
-            .unwrap_err()
-            .to_string()
-            .contains("invalid base range value"));
-
-        assert!(parse_direct_io_options("/dev/zero@")
-            .unwrap_err()
-            .to_string()
-            .contains("invalid base range value"));
-    }
-
     #[test]
     fn parse_file_backed_mapping_valid() {
         let params = from_key_values::<FileBackedMappingParameters>(
@@ -2247,6 +1956,44 @@ mod tests {
         validate_file_backed_mapping(&mut params).unwrap();
         assert_eq!(params.address, 0x3000);
         assert_eq!(params.size, 0x2000);
+    }
+
+    #[test]
+    fn parse_fw_cfg_valid_no_params() {
+        assert!(TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(&[], &["--fw-cfg", "", "/dev/null"],)
+                .unwrap()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn parse_fw_cfg_valid_string() {
+        assert!(TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--fw-cfg", "name=bar,string=foo", "/dev/null"],
+            )
+            .unwrap()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn parse_fw_cfg_invalid_both_string_and_path() {
+        assert!(crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &["--fw-cfg", "name=bar,string=foo,path=path/to/file",]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parse_fw_cfg_invalid_no_name() {
+        assert!(
+            crate::crosvm::cmdline::RunCommand::from_args(&[], &["--fw-cfg", "string=foo",])
+                .is_err()
+        );
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -2329,88 +2076,5 @@ mod tests {
                 uuid: Some(Uuid::parse_str("23546c3d-962d-4ebc-94d9-4acf50996944").unwrap()),
             }
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_shared_dir() {
-        // Although I want to test /usr/local/bin, Use / instead of
-        // /usr/local/bin, as /usr/local/bin doesn't always exist.
-        let s = "/:usr_local_bin:type=fs:cache=always:uidmap=0 655360 5000,5000 600 50,5050 660410 1994950:gidmap=0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950:timeout=3600:rewrite-security-xattrs=true:writeback=true";
-
-        let shared_dir: SharedDir = s.parse().unwrap();
-        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
-        assert_eq!(shared_dir.tag, "usr_local_bin");
-        assert!(shared_dir.kind == SharedDirKind::FS);
-        assert_eq!(
-            shared_dir.uid_map,
-            "0 655360 5000,5000 600 50,5050 660410 1994950"
-        );
-        assert_eq!(
-            shared_dir.gid_map,
-            "0 655360 1065,1065 20119 1,1066 656426 3934,5000 600 50,5050 660410 1994950"
-        );
-        assert_eq!(shared_dir.fs_cfg.ascii_casefold, false);
-        assert_eq!(shared_dir.fs_cfg.attr_timeout, Duration::from_secs(3600));
-        assert_eq!(shared_dir.fs_cfg.entry_timeout, Duration::from_secs(3600));
-        assert_eq!(shared_dir.fs_cfg.writeback, true);
-        assert_eq!(
-            shared_dir.fs_cfg.cache_policy,
-            passthrough::CachePolicy::Always
-        );
-        assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
-        assert_eq!(shared_dir.fs_cfg.use_dax, false);
-        assert_eq!(shared_dir.fs_cfg.posix_acl, true);
-        assert_eq!(shared_dir.ugid, (None, None));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_shared_dir_parses_ascii_casefold_and_posix_acl() {
-        // Although I want to test /usr/local/bin, Use / instead of
-        // /usr/local/bin, as /usr/local/bin doesn't always exist.
-        let s = "/:usr_local_bin:type=fs:ascii_casefold=true:posix_acl=false";
-
-        let shared_dir: SharedDir = s.parse().unwrap();
-        assert_eq!(shared_dir.fs_cfg.ascii_casefold, true);
-        assert_eq!(shared_dir.fs_cfg.posix_acl, false);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_shared_dir_oem() {
-        let shared_dir: SharedDir = "/:oem_etc:type=fs:cache=always:uidmap=0 299 1, 5000 600 50:gidmap=0 300 1, 5000 600 50:timeout=3600:rewrite-security-xattrs=true".parse().unwrap();
-        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
-        assert_eq!(shared_dir.tag, "oem_etc");
-        assert!(shared_dir.kind == SharedDirKind::FS);
-        assert_eq!(shared_dir.uid_map, "0 299 1, 5000 600 50");
-        assert_eq!(shared_dir.gid_map, "0 300 1, 5000 600 50");
-        assert_eq!(shared_dir.fs_cfg.ascii_casefold, false);
-        assert_eq!(shared_dir.fs_cfg.attr_timeout, Duration::from_secs(3600));
-        assert_eq!(shared_dir.fs_cfg.entry_timeout, Duration::from_secs(3600));
-        assert_eq!(shared_dir.fs_cfg.writeback, false);
-        assert_eq!(
-            shared_dir.fs_cfg.cache_policy,
-            passthrough::CachePolicy::Always
-        );
-        assert_eq!(shared_dir.fs_cfg.rewrite_security_xattrs, true);
-        assert_eq!(shared_dir.fs_cfg.use_dax, false);
-        assert_eq!(shared_dir.fs_cfg.posix_acl, true);
-        assert_eq!(shared_dir.ugid, (None, None));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_shared_dir_ugid_set() {
-        let shared_dir: SharedDir =
-            "/:hostRoot:type=fs:uidmap=40417 40417 1:gidmap=5000 5000 1:uid=40417:gid=5000"
-                .parse()
-                .unwrap();
-        assert_eq!(shared_dir.src, Path::new("/").to_path_buf());
-        assert_eq!(shared_dir.tag, "hostRoot");
-        assert!(shared_dir.kind == SharedDirKind::FS);
-        assert_eq!(shared_dir.uid_map, "40417 40417 1");
-        assert_eq!(shared_dir.gid_map, "5000 5000 1");
-        assert_eq!(shared_dir.ugid, (Some(40417), Some(5000)));
     }
 }

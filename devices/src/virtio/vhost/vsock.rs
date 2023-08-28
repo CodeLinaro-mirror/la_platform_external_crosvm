@@ -2,24 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::os::unix::prelude::OpenOptionsExt;
 
 use anyhow::anyhow;
 use anyhow::Context;
 use base::error;
-use base::open_file;
+use base::open_file_or_duplicate;
 use base::warn;
 use base::AsRawDescriptor;
 use base::Event;
 use base::RawDescriptor;
 use base::WorkerThread;
 use data_model::Le64;
+use serde::Deserialize;
+use serde::Serialize;
 use vhost::Vhost;
 use vhost::Vsock as VhostVsockHandle;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
 
+use super::worker::VringBase;
 use super::worker::Worker;
 use super::Error;
 use super::Result;
@@ -33,18 +37,34 @@ use crate::virtio::Queue;
 use crate::virtio::VirtioDevice;
 
 pub struct Vsock {
-    worker_thread: Option<WorkerThread<()>>,
+    worker_thread: Option<WorkerThread<Worker<VhostVsockHandle>>>,
     vhost_handle: Option<VhostVsockHandle>,
     cid: u64,
     interrupts: Option<Vec<Event>>,
     avail_features: u64,
     acked_features: u64,
+    // vrings_base states:
+    // None - device was just created or is running.
+    // Some - device was put to sleep after running or was restored.
+    vrings_base: Option<Vec<VringBase>>,
+    // Some iff the device is active and awake.
+    event_queue: Option<Queue>,
+    // If true, we should send a TRANSPORT_RESET event to the guest at the next opportunity.
+    needs_transport_reset: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VsockSnapshot {
+    cid: u64,
+    avail_features: u64,
+    acked_features: u64,
+    vrings_base: Vec<VringBase>,
 }
 
 impl Vsock {
     /// Create a new virtio-vsock device with the given VM cid.
     pub fn new(base_features: u64, vsock_config: &VsockConfig) -> anyhow::Result<Vsock> {
-        let device_file = open_file(
+        let device_file = open_file_or_duplicate(
             &vsock_config.vhost_device,
             OpenOptions::new()
                 .read(true)
@@ -74,6 +94,9 @@ impl Vsock {
             interrupts: Some(interrupts),
             avail_features,
             acked_features: 0,
+            vrings_base: None,
+            event_queue: None,
+            needs_transport_reset: false,
         })
     }
 
@@ -85,6 +108,9 @@ impl Vsock {
             interrupts: None,
             avail_features: features,
             acked_features: 0,
+            vrings_base: None,
+            event_queue: None,
+            needs_transport_reset: false,
         }
     }
 
@@ -145,7 +171,7 @@ impl VirtioDevice for Vsock {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != NUM_QUEUES {
             return Err(anyhow!(
@@ -159,9 +185,36 @@ impl VirtioDevice for Vsock {
         let interrupts = self.interrupts.take().context("missing interrupts")?;
         let acked_features = self.acked_features;
         let cid = self.cid;
+
         // The third vq is an event-only vq that is not handled by the vhost
         // subsystem (but still needs to exist).  Split it off here.
-        let _event_queue = queues.remove(2);
+        let mut event_queue = queues.remove(&2).unwrap().0;
+        // Send TRANSPORT_RESET event if needed.
+        if self.needs_transport_reset {
+            self.needs_transport_reset = false;
+
+            // We assume the event queue is non-empty. This should be OK for existing use cases
+            // because we expect the guest vsock driver to be initialized at the time of snapshot
+            // and this is only the event we ever write to the queue.
+            //
+            // If that assumption becomes invalid, we could integrate this logic into the worker
+            // thread's event loop so that it can wait for space in the queue.
+            let mut avail_desc = event_queue
+                .pop(&mem)
+                .expect("event queue is empty, can't send transport reset event");
+            let transport_reset = virtio_sys::virtio_vsock::virtio_vsock_event{
+                id: virtio_sys::virtio_vsock::virtio_vsock_event_id_VIRTIO_VSOCK_EVENT_TRANSPORT_RESET.into(),
+            };
+            avail_desc
+                .writer
+                .write_obj(transport_reset)
+                .expect("failed to write transport reset event");
+            let len = avail_desc.writer.bytes_written() as u32;
+            event_queue.add_used(&mem, avail_desc, len);
+            event_queue.trigger_interrupt(&mem, &interrupt);
+        }
+        self.event_queue = Some(event_queue);
+
         let mut worker = Worker::new(
             queues,
             vhost_handle,
@@ -177,7 +230,7 @@ impl VirtioDevice for Vsock {
             Ok(())
         };
         worker
-            .init(mem, QUEUE_SIZES, activate_vqs)
+            .init(mem, QUEUE_SIZES, activate_vqs, self.vrings_base.take())
             .context("vsock worker init exited with error")?;
 
         self.worker_thread = Some(WorkerThread::start("vhost_vsock", move |kill_evt| {
@@ -186,6 +239,7 @@ impl VirtioDevice for Vsock {
             if let Err(e) = result {
                 error!("vsock worker thread exited with error: {:?}", e);
             }
+            worker
         }));
 
         Ok(())
@@ -201,6 +255,90 @@ impl VirtioDevice for Vsock {
                 Err(e) => error!("{}: failed to set owner: {:?}", self.debug_label(), e),
             }
         }
+    }
+
+    fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let worker = worker_thread.stop();
+            self.interrupts = Some(worker.vhost_interrupt);
+            worker
+                .vhost_handle
+                .stop()
+                .context("failed to stop vrings")?;
+            let mut queues: BTreeMap<usize, Queue> = worker
+                .queues
+                .into_iter()
+                .map(|(i, (q, _))| (i, q))
+                .collect();
+            let mut vrings_base = Vec::new();
+            for (pos, _) in queues.iter() {
+                let vring_base = VringBase {
+                    index: *pos,
+                    base: worker.vhost_handle.get_vring_base(*pos)?,
+                };
+                vrings_base.push(vring_base);
+            }
+            self.vrings_base = Some(vrings_base);
+            self.vhost_handle = Some(worker.vhost_handle);
+            queues.insert(
+                2,
+                self.event_queue.take().expect("Vsock event queue missing"),
+            );
+            return Ok(Some(BTreeMap::from_iter(queues)));
+        }
+        Ok(None)
+    }
+
+    fn virtio_wake(
+        &mut self,
+        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+    ) -> anyhow::Result<()> {
+        match device_state {
+            None => Ok(()),
+            Some((mem, interrupt, queues)) => {
+                // TODO: activate is just what we want at the moment, but we should probably move
+                // it into a "start workers" function to make it obvious that it isn't strictly
+                // used for activate events.
+                self.activate(mem, interrupt, queues)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        let vrings_base = self.vrings_base.clone().unwrap_or_default();
+        serde_json::to_value(VsockSnapshot {
+            // `cid` and `avail_features` are snapshot as a safeguard. Upon restore, validate
+            // cid and avail_features in the current vsock match the previously snapshot vsock.
+            cid: self.cid,
+            avail_features: self.avail_features,
+            acked_features: self.acked_features,
+            vrings_base,
+        })
+        .context("failed to snapshot virtio console")
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let deser: VsockSnapshot =
+            serde_json::from_value(data).context("failed to deserialize virtio vsock")?;
+        anyhow::ensure!(
+            self.cid == deser.cid,
+            "Virtio vsock incorrect cid for restore:\n Expected: {}, Actual: {}",
+            self.cid,
+            deser.cid,
+        );
+        anyhow::ensure!(
+            self.avail_features == deser.avail_features,
+            "Virtio vsock incorrect avail features for restore:\n Expected: {}, Actual: {}",
+            self.avail_features,
+            deser.avail_features,
+        );
+        self.acked_features = deser.acked_features;
+        self.vrings_base = Some(deser.vrings_base);
+        // Send the TRANSPORT_RESET on next wake so that the guest knows that its existing vsock
+        // connections are broken.
+        self.needs_transport_reset = true;
+        Ok(())
     }
 }
 

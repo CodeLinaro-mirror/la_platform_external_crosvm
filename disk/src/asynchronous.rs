@@ -70,10 +70,16 @@ impl<T: DiskFile + Send> AsRawDescriptors for AsyncDiskFileWrapper<T> {
     }
 }
 
+pub trait DiskFlush {
+    /// Flush intermediary buffers and/or dirty state to file. fsync not required.
+    fn flush(&mut self) -> io::Result<()>;
+}
+
 #[async_trait(?Send)]
 impl<
         T: 'static
             + DiskFile
+            + DiskFlush
             + Send
             + FileAllocate
             + FileSetLen
@@ -88,6 +94,16 @@ impl<
             .expect("AsyncDiskFile pool shutdown failed");
         let mtx: Mutex<T> = Arc::try_unwrap(self.inner).expect("AsyncDiskFile arc unwrap failed");
         Box::new(mtx.into_inner())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        let inner_clone = self.inner.clone();
+        self.blocking_pool
+            .spawn(move || {
+                let mut disk_file = inner_clone.lock();
+                disk_file.flush().map_err(Error::IoFlush)
+            })
+            .await
     }
 
     async fn fsync(&self) -> Result<()> {
@@ -114,10 +130,10 @@ impl<
         &'a self,
         mut file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [cros_async::MemRegion],
+        mem_offsets: cros_async::MemRegionIter<'a>,
     ) -> Result<usize> {
         let inner_clone = self.inner.clone();
-        let mem_offsets = mem_offsets.to_vec();
+        let mem_offsets: Vec<cros_async::MemRegion> = mem_offsets.collect();
         self.blocking_pool
             .spawn(move || {
                 let mut disk_file = inner_clone.lock();
@@ -142,10 +158,10 @@ impl<
         &'a self,
         mut file_offset: u64,
         mem: Arc<dyn BackingMemory + Send + Sync>,
-        mem_offsets: &'a [cros_async::MemRegion],
+        mem_offsets: cros_async::MemRegionIter<'a>,
     ) -> Result<usize> {
         let inner_clone = self.inner.clone();
-        let mem_offsets = mem_offsets.to_vec();
+        let mem_offsets: Vec<cros_async::MemRegion> = mem_offsets.collect();
         self.blocking_pool
             .spawn(move || {
                 let mut disk_file = inner_clone.lock();

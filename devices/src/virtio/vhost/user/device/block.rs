@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::bail;
+use anyhow::Context;
 use base::error;
 use base::warn;
 use base::Event;
@@ -21,6 +22,8 @@ use cros_async::ExecutorKind;
 use cros_async::TaskHandle;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
+use serde::Deserialize;
+use serde::Serialize;
 use sync::Mutex;
 pub use sys::start_device as run_block_device;
 pub use sys::Options;
@@ -36,7 +39,6 @@ use crate::virtio::block::asynchronous::ConfigChangeSignal;
 use crate::virtio::block::asynchronous::WorkerCmd;
 use crate::virtio::block::DiskState;
 use crate::virtio::copy_config;
-use crate::virtio::vhost::user::device::handler::sys::Doorbell;
 use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
 use crate::virtio::vhost::user::device::handler::Error as DeviceError;
 use crate::virtio::vhost::user::device::handler::VhostBackendReqConnection;
@@ -44,6 +46,7 @@ use crate::virtio::vhost::user::device::handler::VhostBackendReqConnectionState;
 use crate::virtio::vhost::user::device::handler::VhostUserBackend;
 use crate::virtio::vhost::user::device::handler::VhostUserPlatformOps;
 use crate::virtio::vhost::user::device::VhostUserDevice;
+use crate::virtio::Interrupt;
 
 const NUM_QUEUES: u16 = 16;
 
@@ -61,9 +64,18 @@ struct BlockBackend {
     worker: Option<Worker>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct BlockBackendSnapshot {
+    acked_features: u64,
+    // `avail_features` and `acked_protocol_features` don't need to be snapshotted, but they are
+    // to be used to make sure that the proper features are used on `restore`.
+    avail_features: u64,
+    acked_protocol_features: u64,
+}
+
 struct Worker {
     worker_task: TaskHandle<Option<base::Tube>>,
-    worker_tx: mpsc::UnboundedSender<WorkerCmd<Doorbell>>,
+    worker_tx: mpsc::UnboundedSender<WorkerCmd>,
     kill_evt: Event,
 }
 
@@ -143,7 +155,7 @@ impl VhostUserDevice for BlockAsync {
 
         let backend_req_conn = Arc::new(Mutex::new(VhostBackendReqConnectionState::NoConnection));
 
-        let mut backend = BlockBackend {
+        let backend = BlockBackend {
             ex: ex.clone(),
             disk_state,
             disk_size: Arc::clone(&self.disk_size),
@@ -156,7 +168,6 @@ impl VhostUserDevice for BlockAsync {
             control_tube: self.control_tube,
             worker: None,
         };
-        backend.start_worker();
 
         let handler = DeviceRequestHandler::new(Box::new(backend), ops);
         Ok(Box::new(std::sync::Mutex::new(handler)))
@@ -226,9 +237,12 @@ impl VhostUserBackend for BlockBackend {
         idx: usize,
         queue: virtio::Queue,
         mem: GuestMemory,
-        doorbell: Doorbell,
+        doorbell: Interrupt,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
+        // `start_worker` will return early if the worker has already started.
+        self.start_worker();
+
         self.worker
             .as_ref()
             .expect("worker not started")
@@ -286,6 +300,38 @@ impl VhostUserBackend for BlockBackend {
                 .expect("run_until failed");
         }
 
+        Ok(())
+    }
+
+    fn snapshot(&self) -> anyhow::Result<Vec<u8>> {
+        // The queue states are being snapshotted in the device handler.
+        let serialized_bytes = serde_json::to_vec(&BlockBackendSnapshot {
+            acked_features: self.acked_features,
+            avail_features: self.avail_features,
+            acked_protocol_features: self.acked_protocol_features.bits(),
+        })
+        .context("Failed to serialize BlockBackendSnapshot")?;
+
+        Ok(serialized_bytes)
+    }
+
+    fn restore(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+        let block_backend_snapshot: BlockBackendSnapshot =
+            serde_json::from_slice(&data).context("Failed to deserialize BlockBackendSnapshot")?;
+        anyhow::ensure!(
+            self.avail_features == block_backend_snapshot.avail_features,
+            "Vhost user block restored avail_features do not match. Live: {:?}, snapshot: {:?}",
+            self.avail_features,
+            block_backend_snapshot.avail_features,
+        );
+        anyhow::ensure!(
+            self.acked_protocol_features.bits() == block_backend_snapshot.acked_protocol_features,
+            "Vhost user block restored acked_protocol_features do not match. Live: {:?}, \
+            snapshot: {:?}",
+            self.acked_protocol_features,
+            block_backend_snapshot.acked_protocol_features
+        );
+        self.acked_features = block_backend_snapshot.acked_features;
         Ok(())
     }
 }

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -23,7 +24,6 @@ use super::DescriptorChain;
 use super::DeviceType;
 use super::Interrupt;
 use super::Queue;
-use super::SignalableInterrupt;
 use super::VirtioDevice;
 
 // A single queue of size 2. The guest kernel driver will enqueue a single
@@ -198,12 +198,12 @@ impl VirtioDevice for Tpm {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: Vec<(Queue, Event)>,
+        mut queues: BTreeMap<usize, (Queue, Event)>,
     ) -> anyhow::Result<()> {
         if queues.len() != 1 {
             return Err(anyhow!("expected 1 queue, got {}", queues.len()));
         }
-        let (queue, queue_evt) = queues.remove(0);
+        let (queue, queue_evt) = queues.pop_first().unwrap().1;
 
         let backend = self.backend.take().context("no backend in vtpm")?;
 

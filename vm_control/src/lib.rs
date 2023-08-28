@@ -23,6 +23,8 @@ use base::MemoryMappingBuilderWindows;
 use hypervisor::BalloonEvent;
 use hypervisor::MemRegion;
 
+#[cfg(feature = "balloon")]
+mod balloon_tube;
 pub mod client;
 pub mod display;
 pub mod sys;
@@ -42,15 +44,6 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use anyhow::Context;
-pub use balloon_control::BalloonStats;
-#[cfg(feature = "balloon")]
-use balloon_control::BalloonTubeCommand;
-#[cfg(feature = "balloon")]
-use balloon_control::BalloonTubeResult;
-pub use balloon_control::BalloonWSS;
-pub use balloon_control::WSSBucket;
-pub use balloon_control::VIRTIO_BALLOON_WS_MAX_NUM_BINS;
-pub use balloon_control::VIRTIO_BALLOON_WS_MIN_NUM_BINS;
 use base::error;
 use base::info;
 use base::warn;
@@ -109,6 +102,8 @@ pub use vm_control_product::GpuSendToService;
 pub use vm_control_product::ServiceSendToGpu;
 use vm_memory::GuestAddress;
 
+#[cfg(feature = "balloon")]
+pub use crate::balloon_tube::*;
 #[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebug;
 #[cfg(feature = "gdb")]
@@ -187,34 +182,6 @@ pub trait PmResource {
 /// require adding a big dependency for a single const.
 pub const USB_CONTROL_MAX_PORTS: usize = 16;
 
-// Balloon commands that are sent on the crosvm control socket.
-#[derive(Serialize, Deserialize, Debug)]
-pub enum BalloonControlCommand {
-    /// Set the size of the VM's balloon.
-    Adjust {
-        num_bytes: u64,
-    },
-    Stats,
-    WorkingSetSize,
-    WorkingSetSizeConfig {
-        bins: Vec<u64>,
-        refresh_threshold: u64,
-        report_threshold: u64,
-    },
-}
-
-// BalloonControlResult holds results for BalloonControlCommand defined above.
-#[derive(Serialize, Deserialize, Debug)]
-pub enum BalloonControlResult {
-    Stats {
-        stats: BalloonStats,
-        balloon_actual: u64,
-    },
-    WorkingSetSize {
-        wss: BalloonWSS,
-    },
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DiskControlCommand {
     /// Resize a disk to `new_size` in bytes.
@@ -235,6 +202,14 @@ impl Display for DiskControlCommand {
 pub enum DiskControlResult {
     Ok,
     Err(SysError),
+}
+
+/// Net control commands for adding and removing tap devices.
+#[cfg(feature = "pci-hotplug")]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum NetControlCommand {
+    AddTap(String),
+    RemoveTap(u8),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -261,6 +236,29 @@ pub struct UsbControlAttachedDevice {
 impl UsbControlAttachedDevice {
     pub fn valid(self) -> bool {
         self.port != 0
+    }
+}
+
+#[cfg(feature = "pci-hotplug")]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[must_use]
+/// Result for hotplug and removal of PCI device.
+pub enum PciControlResult {
+    AddOk { bus: u8 },
+    ErrString(String),
+    RemoveOk,
+}
+
+#[cfg(feature = "pci-hotplug")]
+impl Display for PciControlResult {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::PciControlResult::*;
+
+        match self {
+            AddOk { bus } => write!(f, "add_ok {}", bus),
+            ErrString(e) => write!(f, "error: {}", e),
+            RemoveOk => write!(f, "remove_ok"),
+        }
     }
 }
 
@@ -1214,7 +1212,7 @@ pub enum SwapCommand {
     Enable,
     Trim,
     SwapOut,
-    Disable,
+    Disable { slow_file_cleanup: bool },
     Status,
 }
 
@@ -1233,11 +1231,11 @@ pub enum VmRequest {
     /// Trigger a RTC interrupt in the guest.
     Rtc,
     /// Suspend the VM's VCPUs until resume.
-    Suspend,
+    SuspendVcpus,
     /// Swap the memory content into files on a disk
     Swap(SwapCommand),
     /// Resume the VM's VCPUs that were previously suspended.
-    Resume,
+    ResumeVcpus,
     /// Inject a general-purpose event.
     Gpe(u32),
     /// Inject a PCI PME
@@ -1245,6 +1243,7 @@ pub enum VmRequest {
     /// Make the VM's RT VCPU real-time.
     MakeRT,
     /// Command for balloon driver.
+    #[cfg(feature = "balloon")]
     BalloonCommand(BalloonControlCommand),
     /// Send a command to a disk chosen by `disk_index`.
     /// `disk_index` is a 0-based count of `--disk`, `--rwdisk`, and `-r` command-line options.
@@ -1259,11 +1258,14 @@ pub enum VmRequest {
     GpuCommand(GpuControlCommand),
     /// Command to set battery.
     BatCommand(BatteryType, BatControlCommand),
-    /// Command to add/remove multiple pci devices
-    HotPlugCommand {
+    /// Command to add/remove multiple vfio-pci devices
+    HotPlugVfioCommand {
         device: HotPlugDeviceInfo,
         add: bool,
     },
+    /// Command to add/remove network tap device as virtio-pci device
+    #[cfg(feature = "pci-hotplug")]
+    HotPlugNetCommand(NetControlCommand),
     /// Command to Snapshot devices
     Snapshot(SnapshotCommand),
     /// Command to Restore devices
@@ -1283,6 +1285,10 @@ pub enum VmRequest {
     /// Unregister for all event notification
     #[cfg(feature = "registered_events")]
     Unregister { socket_addr: String },
+    /// Suspend VM VCPUs and Devices until resume.
+    SuspendVm,
+    /// Resume VM VCPUs and Devices.
+    ResumeVm,
 }
 
 /// NOTE: when making any changes to this enum please also update
@@ -1546,9 +1552,6 @@ impl VmRequest {
     pub fn execute(
         &self,
         run_mode: &mut Option<VmRunMode>,
-        #[cfg(feature = "balloon")] balloon_host_tube: Option<&Tube>,
-        #[cfg(feature = "balloon")] balloon_stats_id: &mut u64,
-        #[cfg(feature = "balloon")] balloon_wss_id: &mut u64,
         disk_host_tubes: &[Tube],
         pm: &mut Option<Arc<Mutex<dyn PmResource + Send>>>,
         #[cfg(feature = "gpu")] gpu_control_tube: Option<&Tube>,
@@ -1596,8 +1599,42 @@ impl VmRequest {
                     VmResponse::Err(SysError::new(ENOTSUP))
                 }
             }
-            VmRequest::Suspend => {
+            VmRequest::SuspendVcpus => {
                 *run_mode = Some(VmRunMode::Suspending);
+                VmResponse::Ok
+            }
+            VmRequest::ResumeVcpus => {
+                if let Err(e) = device_control_tube.send(&DeviceControlCommand::GetDevicesState) {
+                    error!("failed to send GetDevicesState: {}", e);
+                    return VmResponse::Err(SysError::new(EIO));
+                }
+                let devices_state = match device_control_tube.recv() {
+                    Ok(VmResponse::DevicesState(state)) => state,
+                    Ok(resp) => {
+                        error!("failed to get devices state. Unexpected behavior: {}", resp);
+                        return VmResponse::Err(SysError::new(EINVAL));
+                    }
+                    Err(e) => {
+                        error!("failed to get devices state. Unexpected behavior: {}", e);
+                        return VmResponse::Err(SysError::new(EINVAL));
+                    }
+                };
+                if let DevicesState::Sleep = devices_state {
+                    error!("Trying to wake Vcpus while Devices are asleep. Did you mean to use `crosvm resume --full`?");
+                    return VmResponse::Err(SysError::new(EINVAL));
+                }
+                *run_mode = Some(VmRunMode::Running);
+
+                if force_s2idle {
+                    // During resume also emulate powerbtn event which will allow to wakeup fully
+                    // suspended guest.
+                    if let Some(pm) = pm {
+                        pm.lock().pwrbtn_evt();
+                    } else {
+                        error!("triggering power btn during resume not supported");
+                        return VmResponse::Err(SysError::new(ENOTSUP));
+                    }
+                }
                 VmResponse::Ok
             }
             VmRequest::Swap(SwapCommand::Enable) => {
@@ -1659,10 +1696,14 @@ impl VmRequest {
                 }
                 VmResponse::Err(SysError::new(ENOTSUP))
             }
-            VmRequest::Swap(SwapCommand::Disable) => {
+            VmRequest::Swap(SwapCommand::Disable {
+                #[cfg(feature = "swap")]
+                slow_file_cleanup,
+                ..
+            }) => {
                 #[cfg(feature = "swap")]
                 if let Some(swap_controller) = swap_controller {
-                    return match swap_controller.disable() {
+                    return match swap_controller.disable(slow_file_cleanup) {
                         Ok(()) => VmResponse::Ok,
                         Err(e) => {
                             error!("swap disable failed: {}", e);
@@ -1685,20 +1726,64 @@ impl VmRequest {
                 }
                 VmResponse::Err(SysError::new(ENOTSUP))
             }
-            VmRequest::Resume => {
-                *run_mode = Some(VmRunMode::Running);
-
-                if force_s2idle {
-                    // During resume also emulate powerbtn event which will allow to wakeup fully
-                    // suspended guest.
-                    if let Some(pm) = pm {
-                        pm.lock().pwrbtn_evt();
-                    } else {
-                        error!("triggering power btn during resume not supported");
-                        return VmResponse::Err(SysError::new(ENOTSUP));
+            VmRequest::SuspendVm => {
+                kick_vcpus(VcpuControl::RunState(VmRunMode::Suspending));
+                let current_mode = match get_vcpu_state(kick_vcpus, vcpu_size) {
+                    Ok(state) => state,
+                    Err(e) => {
+                        error!("failed to get vcpu state: {e}");
+                        return VmResponse::Err(SysError::new(EIO));
+                    }
+                };
+                if current_mode != VmRunMode::Suspending {
+                    error!("vCPUs failed to all suspend.");
+                    return VmResponse::Err(SysError::new(EIO));
+                }
+                if let Err(e) = device_control_tube
+                    .send(&DeviceControlCommand::SleepDevices)
+                    .context("send command to devices control socket")
+                {
+                    error!("{:?}", e);
+                    return VmResponse::Err(SysError::new(EIO));
+                };
+                match device_control_tube
+                    .recv()
+                    .context("receive from devices control socket")
+                {
+                    Ok(VmResponse::Ok) => VmResponse::Ok,
+                    Ok(resp) => {
+                        error!("device sleep failed: {}", resp);
+                        VmResponse::Err(SysError::new(EIO))
+                    }
+                    Err(e) => {
+                        error!("receive from devices control socket: {:?}", e);
+                        VmResponse::Err(SysError::new(EIO))
                     }
                 }
-
+            }
+            VmRequest::ResumeVm => {
+                if let Err(e) = device_control_tube
+                    .send(&DeviceControlCommand::WakeDevices)
+                    .context("send command to devices control socket")
+                {
+                    error!("{:?}", e);
+                    return VmResponse::Err(SysError::new(EIO));
+                };
+                match device_control_tube
+                    .recv()
+                    .context("receive from devices control socket")
+                {
+                    Ok(VmResponse::Ok) => (),
+                    Ok(resp) => {
+                        error!("device wake failed: {}", resp);
+                        return VmResponse::Err(SysError::new(EIO));
+                    }
+                    Err(e) => {
+                        error!("receive from devices control socket: {:?}", e);
+                        return VmResponse::Err(SysError::new(EIO));
+                    }
+                }
+                kick_vcpus(VcpuControl::RunState(VmRunMode::Running));
                 VmResponse::Ok
             }
             VmRequest::Gpe(gpe) => {
@@ -1724,150 +1809,7 @@ impl VmRequest {
                 VmResponse::Ok
             }
             #[cfg(feature = "balloon")]
-            VmRequest::BalloonCommand(BalloonControlCommand::Adjust { num_bytes }) => {
-                if let Some(balloon_host_tube) = balloon_host_tube {
-                    match balloon_host_tube.send(&BalloonTubeCommand::Adjust {
-                        num_bytes,
-                        allow_failure: false,
-                    }) {
-                        Ok(_) => VmResponse::Ok,
-                        Err(_) => VmResponse::Err(SysError::last()),
-                    }
-                } else {
-                    VmResponse::Err(SysError::new(ENOTSUP))
-                }
-            }
-            #[cfg(feature = "balloon")]
-            VmRequest::BalloonCommand(BalloonControlCommand::WorkingSetSizeConfig {
-                ref bins,
-                refresh_threshold,
-                report_threshold,
-            }) => {
-                if let Some(balloon_host_tube) = balloon_host_tube {
-                    match balloon_host_tube.send(&BalloonTubeCommand::WorkingSetSizeConfig {
-                        bins: bins.clone(),
-                        refresh_threshold,
-                        report_threshold,
-                    }) {
-                        Ok(_) => VmResponse::Ok,
-                        Err(_) => VmResponse::Err(SysError::last()),
-                    }
-                } else {
-                    VmResponse::Err(SysError::new(ENOTSUP))
-                }
-            }
-            #[cfg(feature = "balloon")]
-            VmRequest::BalloonCommand(BalloonControlCommand::Stats) => {
-                if let Some(balloon_host_tube) = balloon_host_tube {
-                    // NB: There are a few reasons stale balloon stats could be left
-                    // in balloon_host_tube:
-                    //  - the send succeeds, but the recv fails because the device
-                    //      is not ready yet. So when the device is ready, there are
-                    //      extra stats requests queued.
-                    //  - the send succeed, but the recv times out. When the device
-                    //      does return the stats, there will be no consumer.
-                    //
-                    // To guard against this, add an `id` to the stats request. If
-                    // the id returned to us doesn't match, we keep trying to read
-                    // until it does.
-                    *balloon_stats_id = (*balloon_stats_id).wrapping_add(1);
-                    let sent_id = *balloon_stats_id;
-                    match balloon_host_tube.send(&BalloonTubeCommand::Stats { id: sent_id }) {
-                        Ok(_) => {
-                            loop {
-                                match balloon_host_tube.recv() {
-                                    Ok(BalloonTubeResult::Stats {
-                                        stats,
-                                        balloon_actual,
-                                        id,
-                                    }) => {
-                                        if sent_id != id {
-                                            // Keep trying to get the fresh stats.
-                                            continue;
-                                        }
-                                        break VmResponse::BalloonStats {
-                                            stats,
-                                            balloon_actual,
-                                        };
-                                    }
-                                    Err(e) => {
-                                        error!("balloon socket recv for stats failed: {}", e);
-                                        break VmResponse::Err(SysError::last());
-                                    }
-                                    Ok(BalloonTubeResult::Adjusted { .. }) => {
-                                        unreachable!("unexpected adjusted response")
-                                    }
-                                    Ok(BalloonTubeResult::WorkingSetSize { .. }) => {
-                                        // stale WSS message, can discard
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => VmResponse::Err(SysError::last()),
-                    }
-                } else {
-                    VmResponse::Err(SysError::new(ENOTSUP))
-                }
-            }
-            #[cfg(feature = "balloon")]
-            VmRequest::BalloonCommand(BalloonControlCommand::WorkingSetSize) => {
-                if let Some(balloon_host_tube) = balloon_host_tube {
-                    // NB: There are a few reasons stale balloon wss could be left
-                    // in balloon_wss_host_tube:
-                    //  - the send succeeds, but the recv fails because the device
-                    //      is not ready yet. So when the device is ready, there are
-                    //      extra ess requests queued.
-                    //  - the send succeed, but the recv times out. When the device
-                    //      does return the stats, there will be no consumer.
-                    //
-                    // To guard against this, add an `id` to the wss request. If
-                    // the id returned to us doesn't match, we keep trying to read
-                    // until it does.
-                    *balloon_wss_id = (*balloon_wss_id).wrapping_add(1);
-                    let sent_id = *balloon_wss_id;
-                    match balloon_host_tube
-                        .send(&BalloonTubeCommand::WorkingSetSize { id: sent_id })
-                    {
-                        Ok(_) => {
-                            loop {
-                                match balloon_host_tube.recv() {
-                                    Ok(BalloonTubeResult::WorkingSetSize {
-                                        wss,
-                                        balloon_actual,
-                                        id,
-                                    }) => {
-                                        if sent_id != id {
-                                            // Keep trying to get fresh stats.
-                                            continue;
-                                        }
-                                        break VmResponse::BalloonWSS {
-                                            wss,
-                                            balloon_actual,
-                                        };
-                                    }
-                                    Err(e) => {
-                                        error!("balloon socket recv for wss failed: {}", e);
-                                        break VmResponse::Err(SysError::last());
-                                    }
-                                    Ok(BalloonTubeResult::Adjusted { .. }) => {
-                                        unreachable!("unexpected adjusted response")
-                                    }
-                                    Ok(BalloonTubeResult::Stats { .. }) => {
-                                        // stale stats message, can discard
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => VmResponse::Err(SysError::last()),
-                    }
-                } else {
-                    VmResponse::Err(SysError::new(ENOTSUP))
-                }
-            }
-            #[cfg(not(feature = "balloon"))]
-            VmRequest::BalloonCommand(_) => VmResponse::Err(SysError::new(ENOTSUP)),
+            VmRequest::BalloonCommand(_) => unreachable!("Should be handled with BalloonTube"),
             VmRequest::DiskCommand {
                 disk_index,
                 ref command,
@@ -1942,7 +1884,11 @@ impl VmRequest {
                     None => VmResponse::BatResponse(BatControlResult::NoBatDevice),
                 }
             }
-            VmRequest::HotPlugCommand { device: _, add: _ } => VmResponse::Ok,
+            VmRequest::HotPlugVfioCommand { device: _, add: _ } => VmResponse::Ok,
+            #[cfg(feature = "pci-hotplug")]
+            VmRequest::HotPlugNetCommand(ref _net_cmd) => {
+                VmResponse::ErrString("hot plug not supported".to_owned())
+            }
             VmRequest::Snapshot(SnapshotCommand::Take { ref snapshot_path }) => {
                 match do_snapshot(
                     snapshot_path.to_path_buf(),
@@ -2101,8 +2047,8 @@ pub fn do_restore(
     vcpu_size: usize,
     mut restore_irqchip: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
-    let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
+    let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size);
+    let _devices_guard = DeviceSleepGuard::new(device_control_tube)?;
 
     // Restore IrqChip
     let irq_path = restore_path.with_extension("irqchip");
@@ -2179,15 +2125,20 @@ pub enum VmResponse {
     /// number `pfn` and memory slot number `slot`.
     RegisterMemory { pfn: u64, slot: u32 },
     /// Results of balloon control commands.
+    #[cfg(feature = "balloon")]
     BalloonStats {
         stats: BalloonStats,
         balloon_actual: u64,
     },
     /// Results of balloon WSS-R command
+    #[cfg(feature = "balloon")]
     BalloonWSS {
         wss: BalloonWSS,
         balloon_actual: u64,
     },
+    /// Results of PCI hot plug
+    #[cfg(feature = "pci-hotplug")]
+    PciHotPlugResponse { bus: u8 },
     /// Results of usb control commands.
     UsbResponse(UsbControlResult),
     #[cfg(feature = "gpu")]
@@ -2214,6 +2165,7 @@ impl Display for VmResponse {
                 "memory registered to page frame number {:#x} and memory slot {}",
                 pfn, slot
             ),
+            #[cfg(feature = "balloon")]
             VmResponse::BalloonStats {
                 stats,
                 balloon_actual,
@@ -2226,6 +2178,7 @@ impl Display for VmResponse {
                     balloon_actual
                 )
             }
+            #[cfg(feature = "balloon")]
             VmResponse::BalloonWSS {
                 wss,
                 balloon_actual,
@@ -2239,6 +2192,8 @@ impl Display for VmResponse {
                 )
             }
             UsbResponse(result) => write!(f, "usb control request get result {:?}", result),
+            #[cfg(feature = "pci-hotplug")]
+            PciHotPlugResponse { bus } => write!(f, "pci hotplug bus {:?}", bus),
             #[cfg(feature = "gpu")]
             GpuResponse(result) => write!(f, "gpu control request result {:?}", result),
             BatResponse(result) => write!(f, "{}", result),
@@ -2259,24 +2214,6 @@ impl Display for VmResponse {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Ac97Control {
     Mute(bool),
-}
-
-#[cfg(test)]
-mod tests {
-    use base::Event;
-
-    use super::*;
-
-    #[test]
-    fn sock_send_recv_event() {
-        let (req, res) = Tube::pair().unwrap();
-        let e1 = Event::new().unwrap();
-        res.send(&e1).unwrap();
-
-        let recv_event: Event = req.recv().unwrap();
-        recv_event.signal().unwrap();
-        e1.wait().unwrap();
-    }
 }
 
 #[sorted]

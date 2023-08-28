@@ -19,6 +19,8 @@ use std::ffi::CStr;
 use std::panic::catch_unwind;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::time::Duration;
 
 use libc::c_char;
 use libc::ssize_t;
@@ -84,7 +86,7 @@ pub unsafe extern "C" fn crosvm_client_stop_vm(socket_path: *const c_char) -> bo
 pub unsafe extern "C" fn crosvm_client_suspend_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Suspend, socket_path).is_ok()
+            vms_request(&VmRequest::SuspendVcpus, socket_path).is_ok()
         } else {
             false
         }
@@ -105,7 +107,7 @@ pub unsafe extern "C" fn crosvm_client_suspend_vm(socket_path: *const c_char) ->
 pub unsafe extern "C" fn crosvm_client_resume_vm(socket_path: *const c_char) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Resume, socket_path).is_ok()
+            vms_request(&VmRequest::ResumeVcpus, socket_path).is_ok()
         } else {
             false
         }
@@ -203,7 +205,16 @@ pub unsafe extern "C" fn crosvm_client_swap_swapout_vm(socket_path: *const c_cha
     .unwrap_or(false)
 }
 
-/// Disable vmm swap for crosvm instance whose control socket is listening on `socket_path`.
+/// Arguments structure for crosvm_client_swap_disable_vm2.
+#[repr(C)]
+pub struct SwapDisableArgs {
+    /// The path of the control socket to target.
+    socket_path: *const c_char,
+    /// Whether or not the swap file should be cleaned up in the background.
+    slow_file_cleanup: bool,
+}
+
+/// Disable vmm swap according to `args`.
 ///
 /// The function returns true on success or false if an error occured.
 ///
@@ -213,13 +224,21 @@ pub unsafe extern "C" fn crosvm_client_swap_swapout_vm(socket_path: *const c_cha
 /// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
 /// null pointers are passed.
 #[no_mangle]
-pub unsafe extern "C" fn crosvm_client_swap_disable_vm(socket_path: *const c_char) -> bool {
+pub unsafe extern "C" fn crosvm_client_swap_disable_vm(args: *mut SwapDisableArgs) -> bool {
     catch_unwind(|| {
-        if let Some(socket_path) = validate_socket_path(socket_path) {
-            vms_request(&VmRequest::Swap(SwapCommand::Disable), socket_path).is_ok()
-        } else {
-            false
+        if args.is_null() {
+            return false;
         }
+        let Some(socket_path) = validate_socket_path((*args).socket_path) else {
+            return false;
+        };
+        vms_request(
+            &VmRequest::Swap(SwapCommand::Disable {
+                slow_file_cleanup: (*args).slow_file_cleanup,
+            }),
+            socket_path,
+        )
+        .is_ok()
     })
     .unwrap_or(false)
 }
@@ -571,13 +590,49 @@ pub unsafe extern "C" fn crosvm_client_balloon_stats(
     stats: *mut BalloonStatsFfi,
     actual: *mut u64,
 ) -> bool {
+    crosvm_client_balloon_stats_impl(
+        socket_path,
+        #[cfg(unix)]
+        None,
+        stats,
+        actual,
+    )
+}
+
+/// See crosvm_client_balloon_stats.
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn crosvm_client_balloon_stats_with_timeout(
+    socket_path: *const c_char,
+    timeout_ms: u64,
+    stats: *mut BalloonStatsFfi,
+    actual: *mut u64,
+) -> bool {
+    crosvm_client_balloon_stats_impl(
+        socket_path,
+        Some(Duration::from_millis(timeout_ms)),
+        stats,
+        actual,
+    )
+}
+
+fn crosvm_client_balloon_stats_impl(
+    socket_path: *const c_char,
+    #[cfg(unix)] timeout_ms: Option<Duration>,
+    stats: *mut BalloonStatsFfi,
+    actual: *mut u64,
+) -> bool {
     catch_unwind(|| {
         if let Some(socket_path) = validate_socket_path(socket_path) {
             let request = &VmRequest::BalloonCommand(BalloonControlCommand::Stats {});
+            #[cfg(not(unix))]
+            let resp = handle_request(request, socket_path);
+            #[cfg(unix)]
+            let resp = handle_request_with_timeout(request, socket_path, timeout_ms);
             if let Ok(VmResponse::BalloonStats {
                 stats: ref balloon_stats,
                 balloon_actual,
-            }) = handle_request(request, socket_path)
+            }) = resp
             {
                 if !stats.is_null() {
                     // SAFETY: just checked that `stats` is not null.

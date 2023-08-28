@@ -182,11 +182,12 @@ pub trait BusResumeDevice: Send {
 /// The key to identify hotplug device from host view.
 /// like host sysfs path for vfio pci device, host disk file
 /// path for virtio block device
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum HostHotPlugKey {
-    UpstreamPort { host_addr: PciAddress },
-    DownstreamPort { host_addr: PciAddress },
-    Vfio { host_addr: PciAddress },
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum HotPlugKey {
+    HostUpstreamPort { host_addr: PciAddress },
+    HostDownstreamPort { host_addr: PciAddress },
+    HostVfio { host_addr: PciAddress },
+    GuestDevice { guest_addr: PciAddress },
 }
 
 /// Trait for devices that notify hotplug event into guest
@@ -202,16 +203,18 @@ pub trait HotPlugBus {
     /// - 'None': hotplug bus isn't match with host pci device
     /// - 'Some(bus_num)': hotplug bus is match and put the device at bus_num
     fn is_match(&self, host_addr: PciAddress) -> Option<u8>;
+    /// Gets the secondary bus number of this bus
+    fn get_secondary_bus_number(&self) -> Option<u8>;
     /// Add hotplug device into this bus
-    /// * 'host_key' - the key to identify hotplug device from host view
+    /// * 'hotplug_key' - the key to identify hotplug device from host view
     /// * 'guest_addr' - the guest pci address for hotplug device
-    fn add_hotplug_device(&mut self, host_key: HostHotPlugKey, guest_addr: PciAddress);
-    /// get guest pci address from the specified host_key
-    fn get_hotplug_device(&self, host_key: HostHotPlugKey) -> Option<PciAddress>;
+    fn add_hotplug_device(&mut self, hotplug_key: HotPlugKey, guest_addr: PciAddress);
+    /// get guest pci address from the specified hotplug_key
+    fn get_hotplug_device(&self, hotplug_key: HotPlugKey) -> Option<PciAddress>;
     /// Check whether this hotplug bus is empty
     fn is_empty(&self) -> bool;
     /// Get hotplug key of this hotplug bus
-    fn get_hotplug_key(&self) -> Option<HostHotPlugKey>;
+    fn get_hotplug_key(&self) -> Option<HotPlugKey>;
 }
 
 /// Trait for generic device abstraction, that is, all devices that reside on BusDevice and want
@@ -360,8 +363,7 @@ impl Bus {
         let devices = self.devices.lock();
         let (range, entry) = devices
             .range(..=BusRange { base: addr, len: 1 })
-            .rev()
-            .next()?;
+            .next_back()?;
         Some((*range, entry.clone()))
     }
 
@@ -465,11 +467,7 @@ impl Bus {
                         Some(dev_dq) => {
                             match dev_dq.pop_front() {
                                 Some(dev_data) => {
-                                    let restore_res = (*device_lock).restore(dev_data);
-                                    if let Err(e) = &restore_res {
-                                        error!("restore failed with error: {}", e);
-                                    }
-                                    restore_res.context("device failed to restore snapshot")?;
+                                    (*device_lock).restore(dev_data).context("device failed to restore snapshot")?;
                                 }
                                 None => base::info!("no data found in snapshot for {}", device_lock.debug_label()),
                             }

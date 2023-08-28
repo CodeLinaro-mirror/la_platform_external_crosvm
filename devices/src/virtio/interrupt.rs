@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use base::Event;
+use base::MemoryMapping;
 use serde::Deserialize;
 use serde::Serialize;
 use sync::Mutex;
@@ -18,26 +19,6 @@ use crate::irq_event::IrqEdgeEvent;
 use crate::irq_event::IrqLevelEvent;
 use crate::pci::MsixConfig;
 
-pub trait SignalableInterrupt: Clone {
-    /// Writes to the irqfd to VMM to deliver virtual interrupt to the guest.
-    fn signal(&self, vector: u16, interrupt_status_mask: u32);
-
-    /// Notify the driver that buffers have been placed in the used queue.
-    fn signal_used_queue(&self, vector: u16) {
-        self.signal(vector, INTERRUPT_STATUS_USED_RING)
-    }
-
-    /// Notify the driver that the device configuration has changed.
-    fn signal_config_changed(&self);
-
-    /// Get the event to signal resampling is needed if it exists.
-    fn get_resample_evt(&self) -> Option<&Event>;
-
-    /// Reads the status and writes to the interrupt event. Doesn't read the resample event, it
-    /// assumes the resample has been requested.
-    fn do_interrupt_resample(&self);
-}
-
 struct TransportPci {
     irq_evt_lvl: IrqLevelEvent,
     msix_config: Option<Arc<Mutex<MsixConfig>>>,
@@ -45,14 +26,41 @@ struct TransportPci {
 }
 
 enum Transport {
-    Pci { pci: TransportPci },
-    Mmio { irq_evt_edge: IrqEdgeEvent },
+    Pci {
+        pci: TransportPci,
+    },
+    Mmio {
+        irq_evt_edge: IrqEdgeEvent,
+    },
+    VhostUser {
+        call_evt: Event,
+    },
+    VirtioVhostUser {
+        doorbell_region: MemoryMapping,
+        offset: usize,
+    },
 }
 
 struct InterruptInner {
     interrupt_status: AtomicUsize,
     transport: Transport,
     async_intr_status: bool,
+}
+
+impl InterruptInner {
+    /// Add `interrupt_status_mask` to any existing interrupt status.
+    ///
+    /// Returns `true` if the interrupt should be triggered after this update.
+    fn update_interrupt_status(&self, interrupt_status_mask: u32) -> bool {
+        // Set bit in ISR and inject the interrupt if it was not already pending.
+        // Don't need to inject the interrupt if the guest hasn't processed it.
+        // In hypervisors where interrupt_status is updated asynchronously, inject the
+        // interrupt even if the previous interrupt appears to be already pending.
+        self.interrupt_status
+            .fetch_or(interrupt_status_mask as usize, Ordering::SeqCst)
+            == 0
+            || self.async_intr_status
+    }
 }
 
 #[derive(Clone)]
@@ -65,46 +73,57 @@ pub struct InterruptSnapshot {
     interrupt_status: usize,
 }
 
-impl SignalableInterrupt for Interrupt {
-    /// Virtqueue Interrupts From The Device
+impl Interrupt {
+    /// Writes to the irqfd to VMM to deliver virtual interrupt to the guest.
     ///
     /// If MSI-X is enabled in this device, MSI-X interrupt is preferred.
     /// Write to the irqfd to VMM to deliver virtual interrupt to the guest
-    fn signal(&self, vector: u16, interrupt_status_mask: u32) {
-        // Don't need to set ISR for MSI-X interrupts
-        if let Transport::Pci { pci } = &self.inner.as_ref().transport {
-            if let Some(msix_config) = &pci.msix_config {
-                let mut msix_config = msix_config.lock();
-                if msix_config.enabled() {
-                    if vector != VIRTIO_MSI_NO_VECTOR {
-                        msix_config.trigger(vector);
+    pub fn signal(&self, vector: u16, interrupt_status_mask: u32) {
+        match &self.inner.transport {
+            Transport::Pci { pci } => {
+                // Don't need to set ISR for MSI-X interrupts
+                if let Some(msix_config) = &pci.msix_config {
+                    let mut msix_config = msix_config.lock();
+                    if msix_config.enabled() {
+                        if vector != VIRTIO_MSI_NO_VECTOR {
+                            msix_config.trigger(vector);
+                        }
+                        return;
                     }
-                    return;
+                }
+
+                if self.inner.update_interrupt_status(interrupt_status_mask) {
+                    pci.irq_evt_lvl.trigger().unwrap();
                 }
             }
-        }
-
-        // Set bit in ISR and inject the interrupt if it was not already pending.
-        // Don't need to inject the interrupt if the guest hasn't processed it.
-        // In hypervisors where interrupt_status is updated asynchronously, inject the
-        // interrupt even if the previous interrupt appears to be already pending.
-        if self
-            .inner
-            .as_ref()
-            .interrupt_status
-            .fetch_or(interrupt_status_mask as usize, Ordering::SeqCst)
-            == 0
-            || self.inner.as_ref().async_intr_status
-        {
-            // Write to irqfd to inject PCI INTx or MMIO interrupt
-            match &self.inner.as_ref().transport {
-                Transport::Pci { pci } => pci.irq_evt_lvl.trigger().unwrap(),
-                Transport::Mmio { irq_evt_edge } => irq_evt_edge.trigger().unwrap(),
+            Transport::Mmio { irq_evt_edge } => {
+                if self.inner.update_interrupt_status(interrupt_status_mask) {
+                    irq_evt_edge.trigger().unwrap();
+                }
+            }
+            Transport::VhostUser { call_evt } => {
+                // TODO(b/187487351): To avoid sending unnecessary events, we might want to support
+                // interrupt status. For this purpose, we need a mechanism to share interrupt status
+                // between the vmm and the device process.
+                call_evt.signal().unwrap();
+            }
+            Transport::VirtioVhostUser {
+                doorbell_region,
+                offset,
+            } => {
+                // Write `1` to the doorbell, which will be forwarded to the sibling's call FD.
+                doorbell_region.write_obj_volatile(1_u8, *offset).unwrap();
             }
         }
     }
 
-    fn signal_config_changed(&self) {
+    /// Notify the driver that buffers have been placed in the used queue.
+    pub fn signal_used_queue(&self, vector: u16) {
+        self.signal(vector, INTERRUPT_STATUS_USED_RING)
+    }
+
+    /// Notify the driver that the device configuration has changed.
+    pub fn signal_config_changed(&self) {
         let vector = match &self.inner.as_ref().transport {
             Transport::Pci { pci } => pci.config_msix_vector,
             _ => VIRTIO_MSI_NO_VECTOR,
@@ -112,14 +131,17 @@ impl SignalableInterrupt for Interrupt {
         self.signal(vector, INTERRUPT_STATUS_CONFIG_CHANGED)
     }
 
-    fn get_resample_evt(&self) -> Option<&Event> {
+    /// Get the event to signal resampling is needed if it exists.
+    pub fn get_resample_evt(&self) -> Option<&Event> {
         match &self.inner.as_ref().transport {
             Transport::Pci { pci } => Some(pci.irq_evt_lvl.get_resample()),
             _ => None,
         }
     }
 
-    fn do_interrupt_resample(&self) {
+    /// Reads the status and writes to the interrupt event. Doesn't read the resample event, it
+    /// assumes the resample has been requested.
+    pub fn do_interrupt_resample(&self) {
         if self.inner.interrupt_status.load(Ordering::SeqCst) != 0 {
             match &self.inner.as_ref().transport {
                 Transport::Pci { pci } => pci.irq_evt_lvl.trigger().unwrap(),
@@ -184,11 +206,38 @@ impl Interrupt {
         }
     }
 
+    /// Create an `Interrupt` wrapping a vhost-user vring call event.
+    pub fn new_vhost_user(call_evt: Event) -> Interrupt {
+        Interrupt {
+            inner: Arc::new(InterruptInner {
+                interrupt_status: AtomicUsize::new(0),
+                transport: Transport::VhostUser { call_evt },
+                async_intr_status: false,
+            }),
+        }
+    }
+
+    /// Create an `Interrupt` wrapping a VVU memory-mapped doorbell region.
+    pub fn new_virtio_vhost_user(mmap: MemoryMapping, offset: usize) -> Interrupt {
+        Interrupt {
+            inner: Arc::new(InterruptInner {
+                interrupt_status: AtomicUsize::new(0),
+                transport: Transport::VirtioVhostUser {
+                    doorbell_region: mmap,
+                    offset,
+                },
+                async_intr_status: false,
+            }),
+        }
+    }
+
     /// Get a reference to the interrupt event.
-    pub fn get_interrupt_evt(&self) -> &Event {
+    pub fn get_interrupt_evt(&self) -> Option<&Event> {
         match &self.inner.as_ref().transport {
-            Transport::Pci { pci } => pci.irq_evt_lvl.get_trigger(),
-            Transport::Mmio { irq_evt_edge } => irq_evt_edge.get_trigger(),
+            Transport::Pci { pci } => Some(pci.irq_evt_lvl.get_trigger()),
+            Transport::Mmio { irq_evt_edge } => Some(irq_evt_edge.get_trigger()),
+            Transport::VhostUser { call_evt } => Some(call_evt),
+            Transport::VirtioVhostUser { .. } => None,
         }
     }
 
