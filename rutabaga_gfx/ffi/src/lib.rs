@@ -8,6 +8,7 @@ extern crate rutabaga_gfx;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::io::IoSliceMut;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
 use std::panic::catch_unwind;
@@ -20,7 +21,6 @@ use std::slice::from_raw_parts;
 use std::slice::from_raw_parts_mut;
 use std::sync::Mutex;
 
-use data_model::VolatileSlice;
 use libc::iovec;
 use libc::EINVAL;
 use libc::ESRCH;
@@ -429,10 +429,10 @@ pub unsafe extern "C" fn rutabaga_resource_transfer_read(
     catch_unwind(AssertUnwindSafe(|| {
         let mut slice_opt = None;
         if let Some(iovec) = buf {
-            slice_opt = Some(VolatileSlice::from_raw_parts(
+            slice_opt = Some(IoSliceMut::new(std::slice::from_raw_parts_mut(
                 iovec.iov_base as *mut u8,
                 iovec.iov_len,
-            ));
+            )));
         }
 
         let result = ptr.transfer_read(ctx_id, resource_id, *transfer, slice_opt);
@@ -579,7 +579,8 @@ pub unsafe extern "C" fn rutabaga_submit_command(
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let cmd_slice = from_raw_parts_mut(cmd.cmd, cmd.cmd_size as usize);
-        let result = ptr.submit_command(cmd.ctx_id, cmd_slice);
+        let fence_ids = from_raw_parts(cmd.fence_ids, cmd.num_in_fences as usize);
+        let result = ptr.submit_command(cmd.ctx_id, cmd_slice, fence_ids);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)

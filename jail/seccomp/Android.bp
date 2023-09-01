@@ -329,6 +329,44 @@ prebuilt_etc {
 }
 
 genrule {
+    name: "vhost_scmi_device.policy_inline_aarch64",
+    defaults: ["crosvm_inline_seccomp_policy_aarch64"],
+    out: ["vhost_scmi_device.policy"],
+    srcs: ["aarch64/vhost_scmi_device.policy"],
+}
+
+prebuilt_usr_share_host {
+    name: "vhost_scmi_device.policy_aarch64",
+    filename: "vhost_scmi_device.policy",
+    relative_install_path: "crosvm/aarch64-linux-gnu/seccomp",
+    src: ":vhost_scmi_device.policy_inline_aarch64",
+}
+
+prebuilt_etc {
+    name: "vhost_scmi_device.policy",
+    relative_install_path: "seccomp_policy/crosvm",
+    arch: {
+        arm64: {
+            src: ":vhost_scmi_device.policy_inline_aarch64",
+        },
+    },
+    target: {
+        android_x86_64: {
+            enabled: false,
+        },
+        android_arm: {
+            enabled: false,
+        },
+        android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
+            enabled: false,
+        },
+    },
+}
+
+genrule {
     name: "vvu_proxy_device.policy_inline_x86_64",
     defaults: ["crosvm_inline_seccomp_policy_x86_64"],
     out: ["vvu_proxy_device.policy"],
@@ -1504,6 +1542,44 @@ prebuilt_etc {
         },
     },
     target: {
+        android_arm: {
+            enabled: false,
+        },
+        android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
+            enabled: false,
+        },
+    },
+}
+
+genrule {
+    name: "fw_cfg_device.policy_inline_x86_64",
+    defaults: ["crosvm_inline_seccomp_policy_x86_64"],
+    out: ["fw_cfg_device.policy"],
+    srcs: ["x86_64/fw_cfg_device.policy"],
+}
+
+prebuilt_usr_share_host {
+    name: "fw_cfg_device.policy_x86_64",
+    filename: "fw_cfg_device.policy",
+    relative_install_path: "crosvm/x86_64-linux-gnu/seccomp",
+    src: ":fw_cfg_device.policy_inline_x86_64",
+}
+
+prebuilt_etc {
+    name: "fw_cfg_device.policy",
+    relative_install_path: "seccomp_policy/crosvm",
+    arch: {
+        x86_64: {
+            src: ":fw_cfg_device.policy_inline_x86_64",
+        },
+    },
+    target: {
+        android_arm64: {
+            enabled: false,
+        },
         android_arm: {
             enabled: false,
         },

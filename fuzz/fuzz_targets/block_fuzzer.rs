@@ -15,6 +15,7 @@ use std::mem::size_of;
 use base::Event;
 use crosvm_fuzz::fuzz_target;
 use devices::virtio::base_features;
+use devices::virtio::block::DiskOption;
 use devices::virtio::BlockAsync;
 use devices::virtio::Interrupt;
 use devices::virtio::QueueConfig;
@@ -89,17 +90,11 @@ fuzz_target!(|bytes| {
     let features = base_features(ProtectionType::Unprotected);
 
     let disk_file = tempfile::tempfile().unwrap();
+    let disk_option = DiskOption::default();
     let mut block = BlockAsync::new(
         features,
         Box::new(disk_file),
-        false,
-        true,
-        false,
-        512,
-        false,
-        None,
-        None,
-        None,
+        &disk_option,
         None,
         None,
         None,

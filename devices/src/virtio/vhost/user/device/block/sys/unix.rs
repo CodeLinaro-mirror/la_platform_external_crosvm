@@ -46,31 +46,17 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
     let disk = DiskOption {
         path: filename.into(),
         read_only: fileopts.contains(&"read-only"),
-        root: false,
         sparse: false,
-        direct: false,
-        block_size: 512,
-        id: None,
-        multiple_workers: false,
-        async_executor: None,
-        packed_queue: false,
-        bootindex: None,
+        ..DiskOption::default()
     };
 
     let block = Box::new(BlockAsync::new(
         base_features(ProtectionType::Unprotected),
         disk.open()?,
-        disk.read_only,
-        disk.sparse,
-        false,
-        disk.block_size,
-        false,
+        &disk,
         None,
         None,
         None,
-        None,
-        None,
-        disk.bootindex,
     )?);
 
     let listener = VhostUserListener::new_from_socket_or_vfio(

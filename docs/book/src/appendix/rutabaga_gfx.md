@@ -66,4 +66,11 @@ meson setup build/
 meson install -C build
 ```
 
-Headless Vulkan tests (`deqp-vk`, `vulkaninfo`) should work after that.
+Some headless Vulkan tests (`deqp-vk`, `vulkaninfo`) should work after that, but others may not
+(such as `vulkan-samples`).
+
+### Latest releases for potential packaging
+
+- [Rutabaga FFI v0.1.2](https://crates.io/crates/rutabaga_gfx_ffi)
+- [gfxstream v0.1.2](https://android-review.googlesource.com/c/platform/hardware/google/gfxstream/+/2710135)
+- [AEMU v0.1.2](https://android-review.googlesource.com/c/platform/hardware/google/aemu/+/2708637)

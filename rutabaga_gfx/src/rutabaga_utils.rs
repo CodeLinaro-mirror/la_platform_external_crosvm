@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use std::str::Utf8Error;
 use std::sync::Arc;
 
-use data_model::VolatileMemoryError;
 #[cfg(unix)]
 use nix::Error as NixError;
 use remain::sorted;
@@ -123,6 +122,7 @@ pub const RUTABAGA_CONTEXT_INIT_CAPSET_ID_MASK: u32 = 0x00ff;
 /// Rutabaga flags for creating fences.
 pub const RUTABAGA_FLAG_FENCE: u32 = 1 << 0;
 pub const RUTABAGA_FLAG_INFO_RING_IDX: u32 = 1 << 1;
+pub const RUTABAGA_FLAG_FENCE_SHAREABLE: u32 = 1 << 2;
 
 /// Convenience struct for Rutabaga fences
 #[repr(C)]
@@ -311,9 +311,6 @@ pub enum RutabagaError {
     #[cfg(feature = "vulkano")]
     #[error("vulkano memory map failure {0}")]
     VkMemoryMapError(MemoryMapError),
-    /// Volatile memory error
-    #[error("noticed a volatile memory error {0}")]
-    VolatileMemoryError(VolatileMemoryError),
 }
 
 #[cfg(unix)]
@@ -344,12 +341,6 @@ impl From<TryFromIntError> for RutabagaError {
 impl From<Utf8Error> for RutabagaError {
     fn from(e: Utf8Error) -> RutabagaError {
         RutabagaError::Utf8Error(e)
-    }
-}
-
-impl From<VolatileMemoryError> for RutabagaError {
-    fn from(e: VolatileMemoryError) -> RutabagaError {
-        RutabagaError::VolatileMemoryError(e)
     }
 }
 

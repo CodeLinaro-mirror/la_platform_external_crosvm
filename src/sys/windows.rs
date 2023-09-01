@@ -21,7 +21,6 @@ use std::arch::x86_64::__cpuid;
 #[cfg(feature = "whpx")]
 use std::arch::x86_64::__cpuid_count;
 use std::cmp::Reverse;
-#[cfg(feature = "gpu")]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::File;
@@ -104,6 +103,7 @@ use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
 use devices::virtio::vhost::user::gpu::sys::windows::product::GpuBackendConfig as GpuBackendConfigProduct;
 #[cfg(feature = "audio")]
 use devices::virtio::vhost::user::snd::sys::windows::product::SndBackendConfig as SndBackendConfigProduct;
+#[cfg(feature = "balloon")]
 use devices::virtio::BalloonFeatures;
 #[cfg(feature = "balloon")]
 use devices::virtio::BalloonMode;
@@ -180,6 +180,7 @@ use sync::Mutex;
 use tube_transporter::TubeToken;
 use tube_transporter::TubeTransporterReader;
 use vm_control::api::VmMemoryClient;
+#[cfg(feature = "balloon")]
 use vm_control::BalloonControlCommand;
 #[cfg(feature = "balloon")]
 use vm_control::BalloonTube;
@@ -287,15 +288,8 @@ fn create_block_device(cfg: &Config, disk: &DiskOption, disk_device_tube: Tube) 
     let dev = virtio::BlockAsync::new(
         features,
         disk.open()?,
-        disk.read_only,
-        disk.sparse,
-        disk.packed_queue,
-        disk.block_size,
-        disk.multiple_workers,
-        disk.id,
+        disk,
         Some(disk_device_tube),
-        None,
-        disk.async_executor,
         None,
         None,
     )
@@ -593,6 +587,7 @@ fn create_virtio_devices(
         devs.push(create_vhost_user_net_device(cfg, net_vhost_user_tube)?);
     }
 
+    #[cfg(feature = "balloon")]
     if let (Some(balloon_device_tube), Some(dynamic_mapping_device_tube)) =
         (balloon_device_tube, dynamic_mapping_device_tube)
     {
@@ -1008,6 +1003,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         _ => product::handle_received_token(
             &event.token,
             anti_tamper_main_thread_tube,
+            #[cfg(feature = "balloon")]
             balloon_tube,
             control_tubes,
             guest_os,
@@ -1767,7 +1763,6 @@ fn create_whpx_vm(
         force_calibrated_tsc_leaf,
         false, /* host_cpu_topology */
         false, /* enable_hwp */
-        false, /* enable_pnp_data */
         no_smt,
         false, /* itmt */
         None,  /* hybrid_type */
@@ -1929,6 +1924,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .ok_or_else(|| anyhow!("requested memory size too large"))?,
         swiotlb,
         vcpu_count: cfg.vcpu_count.unwrap_or(1),
+        fw_cfg_enable: false,
         bootorder_fw_cfg_blob: Vec::new(),
         vcpu_affinity: cfg.vcpu_affinity.clone(),
         cpu_clusters: cfg.cpu_clusters.clone(),
@@ -2459,6 +2455,7 @@ where
         &mut vcpu_ids,
         cfg.dump_device_tree_blob.clone(),
         /*debugcon_jail=*/ None,
+        None,
         None,
     )
     .exit_context(Exit::BuildVm, "the architecture failed to build the vm")?;

@@ -5,9 +5,8 @@
 //! rutabaga_core: Cross-platform, Rust-based, Wayland and Vulkan centric GPU virtualization.
 use std::collections::BTreeMap as Map;
 use std::convert::TryInto;
+use std::io::IoSliceMut;
 use std::sync::Arc;
-
-use data_model::VolatileSlice;
 
 use crate::cross_domain::CrossDomain;
 
@@ -147,7 +146,7 @@ pub trait RutabagaComponent {
         _ctx_id: u32,
         _resource: &mut RutabagaResource,
         _transfer: Transfer3D,
-        _buf: Option<VolatileSlice>,
+        _buf: Option<IoSliceMut>,
     ) -> RutabagaResult<()> {
         Ok(())
     }
@@ -213,7 +212,7 @@ pub trait RutabagaContext {
     }
 
     /// Implementations must handle the context-specific command stream.
-    fn submit_cmd(&mut self, _commands: &mut [u8]) -> RutabagaResult<()>;
+    fn submit_cmd(&mut self, _commands: &mut [u8], _fence_ids: &[u64]) -> RutabagaResult<()>;
 
     /// Implementations may use `resource` in this context's command stream.
     fn attach(&mut self, _resource: &mut RutabagaResource);
@@ -540,7 +539,7 @@ impl Rutabaga {
         ctx_id: u32,
         resource_id: u32,
         transfer: Transfer3D,
-        buf: Option<VolatileSlice>,
+        buf: Option<IoSliceMut>,
     ) -> RutabagaResult<()> {
         let component = self
             .components
@@ -834,13 +833,18 @@ impl Rutabaga {
     }
 
     /// submits `commands` to the context given by `ctx_id`.
-    pub fn submit_command(&mut self, ctx_id: u32, commands: &mut [u8]) -> RutabagaResult<()> {
+    pub fn submit_command(
+        &mut self,
+        ctx_id: u32,
+        commands: &mut [u8],
+        fence_ids: &[u64],
+    ) -> RutabagaResult<()> {
         let ctx = self
             .contexts
             .get_mut(&ctx_id)
             .ok_or(RutabagaError::InvalidContextId)?;
 
-        ctx.submit_cmd(commands)
+        ctx.submit_cmd(commands, fence_ids)
     }
 }
 
