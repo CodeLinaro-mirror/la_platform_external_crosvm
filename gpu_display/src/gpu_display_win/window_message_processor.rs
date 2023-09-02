@@ -2,10 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::rc::Rc;
+use std::time::Duration;
+
 use anyhow::Context;
 use anyhow::Result;
 use base::error;
 use base::warn;
+use base::Tube;
+use linux_input_sys::virtio_input_event;
 #[cfg(feature = "kiwi")]
 use vm_control::ServiceSendToGpu;
 use winapi::shared::minwindef::LPARAM;
@@ -20,6 +25,14 @@ use super::window::Window;
 use super::window_message_dispatcher::DisplayEventDispatcher;
 use super::ObjectId;
 use crate::EventDevice;
+use crate::EventDeviceKind;
+
+// Once a window message is added to the message queue, if it is not retrieved within 5 seconds,
+// Windows will mark the application as "Not Responding", so we'd better finish processing any
+// message within this timeout and retrieve the next one.
+// https://docs.microsoft.com/en-us/windows/win32/win7appqual/preventing-hangs-in-windows-applications
+#[allow(dead_code)]
+pub(crate) const HANDLE_WINDOW_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Thread message for killing the window during a `WndProcThread` drop. This indicates an error
 /// within crosvm that internally causes the WndProc thread to be dropped, rather than when the
@@ -38,8 +51,14 @@ pub(crate) const WM_USER_HOST_VIEWPORT_CHANGE_INTERNAL: UINT = WM_USER + 1;
 /// destructing the message.
 pub(crate) const WM_USER_HANDLE_DISPLAY_MESSAGE_INTERNAL: UINT = WM_USER + 2;
 
+/// Struct for resources used for window message handler creation.
+pub struct MessageHandlerResources {
+    pub display_event_dispatcher: DisplayEventDispatcher,
+    pub gpu_main_display_tube: Option<Rc<Tube>>,
+}
+
 pub type CreateMessageHandlerFunction<T> =
-    Box<dyn FnOnce(&Window, DisplayEventDispatcher) -> Result<T>>;
+    Box<dyn FnOnce(&Window, MessageHandlerResources) -> Result<T>>;
 
 /// Called after the handler creation finishes. The argument indicates whether that was successful.
 pub type CreateMessageHandlerCallback = Box<dyn FnOnce(bool)>;
@@ -54,6 +73,8 @@ pub enum DisplaySendToWndProc<T: HandleWindowMessage> {
         event_device_id: ObjectId,
         event_device: EventDevice,
     },
+    /// Handle a guest -> host input_event.
+    HandleEventDevice(ObjectId),
 }
 
 /// A trait for processing messages retrieved from the window message queue. All messages routed to
@@ -127,6 +148,15 @@ pub trait HandleWindowMessage {
     #[cfg(feature = "kiwi")]
     fn on_handle_service_message(&mut self, _window: &Window, _message: &ServiceSendToGpu) {}
 
+    /// Called when processing inbound events from event devices.
+    fn on_handle_event_device(
+        &mut self,
+        _window: &Window,
+        _event_device_kind: EventDeviceKind,
+        _event: virtio_input_event,
+    ) {
+    }
+
     /// Called when processing `WM_USER_HOST_VIEWPORT_CHANGE_INTERNAL`.
     fn on_host_viewport_change(&mut self, _window: &Window, _l_param: LPARAM) {}
 
@@ -162,9 +192,9 @@ impl<T: HandleWindowMessage> WindowMessageProcessor<T> {
     pub fn create_message_handler(
         &mut self,
         create_handler_func: CreateMessageHandlerFunction<T>,
-        display_event_dispatcher: DisplayEventDispatcher,
+        handler_resources: MessageHandlerResources,
     ) -> Result<()> {
-        create_handler_func(&self.window, display_event_dispatcher)
+        create_handler_func(&self.window, handler_resources)
             .map(|handler| {
                 self.message_handler.replace(handler);
                 if let Some(handler) = &mut self.message_handler {
@@ -172,6 +202,19 @@ impl<T: HandleWindowMessage> WindowMessageProcessor<T> {
                 }
             })
             .context("When creating window message handler")
+    }
+
+    pub fn handle_event_device(
+        &mut self,
+        event_device_kind: EventDeviceKind,
+        event: virtio_input_event,
+    ) {
+        match &mut self.message_handler {
+            Some(handler) => handler.on_handle_event_device(&self.window, event_device_kind, event),
+            None => error!(
+                "Cannot handle event device because window message handler has not been created!",
+            ),
+        }
     }
 
     #[cfg(feature = "kiwi")]
