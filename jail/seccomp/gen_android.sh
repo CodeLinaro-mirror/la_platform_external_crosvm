@@ -65,14 +65,12 @@ function scan_policy_name() {
        --hide=serial.policy \
        --hide=net.policy \
        --hide=block.policy \
-       --hide=vvu.policy \
        --hide=vhost_user.policy \
        --hide=vhost_vsock.policy \
       `# Root policy files we don't need yet.` \
        --hide=net_device_vhost_user.policy \
        --hide=swap_monitor.policy \
        --hide=vhost_vsock_device_vhost_user.policy \
-       --hide=vhost_vsock_device_vvu.policy \
        -1
     popd > /dev/null 2>&1
   )
@@ -125,7 +123,7 @@ python_binary_host {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "set -o pipefail; \$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) \$(location x86_64/serial.policy) \$(location x86_64/net.policy) \$(location x86_64/block.policy) \$(location x86_64/vvu.policy) \$(location x86_64/vhost_user.policy) \$(location x86_64/vhost_vsock.policy) < \$(in) | \$(location detect_duplication) > \$(out)",
+    cmd: "set -o pipefail; \$(location policy-inliner.sh) \$(location x86_64/common_device.policy) \$(location x86_64/gpu_common.policy) \$(location x86_64/serial.policy) \$(location x86_64/net.policy) \$(location x86_64/block.policy) \$(location x86_64/vhost_user.policy) \$(location x86_64/vhost_vsock.policy) < \$(in) | \$(location detect_duplication) > \$(out)",
     tools: [
         "detect_duplication",
     ],
@@ -136,7 +134,6 @@ genrule_defaults {
         "x86_64/serial.policy",
         "x86_64/net.policy",
         "x86_64/block.policy",
-        "x86_64/vvu.policy",
         "x86_64/vhost_user.policy",
         "x86_64/vhost_vsock.policy",
     ],

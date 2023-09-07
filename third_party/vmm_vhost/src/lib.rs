@@ -51,7 +51,7 @@ pub use sys::*;
 cfg_if::cfg_if! {
     if #[cfg(feature = "vmm")] {
         pub(crate) mod master;
-        pub use self::master::{Master, VhostUserMaster};
+        pub use self::master::Master;
         mod master_req_handler;
         pub use self::master_req_handler::{VhostUserMasterReqHandler,
                                     VhostUserMasterReqHandlerMut};
@@ -62,16 +62,10 @@ cfg_if::cfg_if! {
         mod slave_req_handler;
         mod slave_proxy;
         pub use self::slave_req_handler::{
-            Protocol, SlaveReqHandler, SlaveReqHelper, VhostUserSlaveReqHandler,
+            SlaveReqHandler, SlaveReqHelper, VhostUserSlaveReqHandler,
             VhostUserSlaveReqHandlerMut,
         };
         pub use self::slave_proxy::Slave;
-    }
-}
-cfg_if::cfg_if! {
-    if #[cfg(all(feature = "device", unix))] {
-        mod slave;
-        pub use self::slave::SlaveListener;
     }
 }
 cfg_if::cfg_if! {
@@ -254,7 +248,6 @@ mod tests {
     use tempfile::tempfile;
 
     use super::*;
-    use crate::backend::VhostBackend;
     use crate::connection::tests::*;
     use crate::dummy_slave::DummySlaveReqHandler;
     use crate::dummy_slave::VIRTIO_FEATURES;

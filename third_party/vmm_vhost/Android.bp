@@ -52,7 +52,6 @@ rust_library {
     features: [
         "default",
         "device",
-        "vfio-device",
         "vmm",
     ],
     rustlibs: [
@@ -89,7 +88,6 @@ rust_test {
     features: [
         "default",
         "device",
-        "vfio-device",
         "vmm",
     ],
     rustlibs: [

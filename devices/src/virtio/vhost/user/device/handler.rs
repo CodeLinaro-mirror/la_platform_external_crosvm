@@ -90,7 +90,6 @@ use vmm_vhost::message::VhostUserVirtioFeatures;
 use vmm_vhost::message::VhostUserVringAddrFlags;
 use vmm_vhost::message::VhostUserVringState;
 use vmm_vhost::Error as VhostError;
-use vmm_vhost::Protocol;
 use vmm_vhost::Result as VhostResult;
 use vmm_vhost::Slave;
 use vmm_vhost::VhostUserMasterReqHandler;
@@ -275,8 +274,6 @@ impl Vring {
 
 /// Trait for defining vhost-user ops that are platform-dependent.
 pub trait VhostUserPlatformOps {
-    /// Returns the protocol implemented by these platform ops.
-    fn protocol(&self) -> Protocol;
     /// Create the guest memory for the backend.
     ///
     /// `contexts` and `files` must be the same size, and provide a description of the memory
@@ -312,10 +309,6 @@ pub trait VhostUserPlatformOps {
 pub(super) struct VhostUserRegularOps;
 
 impl VhostUserPlatformOps for VhostUserRegularOps {
-    fn protocol(&self) -> Protocol {
-        Protocol::Regular
-    }
-
     fn set_mem_table(
         &mut self,
         contexts: &[VhostUserMemoryRegion],
@@ -425,10 +418,6 @@ impl DeviceRequestHandler {
 }
 
 impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
-    fn protocol(&self) -> Protocol {
-        self.ops.protocol()
-    }
-
     fn set_owner(&mut self) -> VhostResult<()> {
         if self.owned {
             return Err(VhostError::InvalidOperation);
@@ -972,6 +961,7 @@ mod tests {
     use tempfile::Builder;
     #[cfg(unix)]
     use tempfile::TempDir;
+    use vmm_vhost::connection::Listener;
     use vmm_vhost::message::MasterReq;
     use vmm_vhost::SlaveReqHandler;
     use vmm_vhost::VhostUserSlaveReqHandler;
@@ -1090,14 +1080,13 @@ mod tests {
         use std::os::unix::net::UnixStream;
 
         use vmm_vhost::connection::socket::Listener as SocketListener;
-        use vmm_vhost::SlaveListener;
 
         const QUEUES_NUM: usize = 2;
 
         let dir = temp_dir();
         let mut path = dir.path().to_owned();
         path.push("sock");
-        let listener = SocketListener::new(&path, true).unwrap();
+        let mut listener = SocketListener::new(&path, true).unwrap();
 
         let vmm_bar = Arc::new(Barrier::new(2));
         let dev_bar = vmm_bar.clone();
@@ -1160,45 +1149,45 @@ mod tests {
             Box::new(FakeBackend::new()),
             Box::new(VhostUserRegularOps),
         ));
-        let mut listener = SlaveListener::<SocketListener, _>::new(listener, handler).unwrap();
 
         // Notify listener is ready.
         tx.send(()).unwrap();
 
-        let mut listener = listener.accept().unwrap().unwrap();
+        let endpoint = listener.accept().unwrap().unwrap();
+        let mut req_handler = SlaveReqHandler::new(endpoint, handler);
 
         // VhostUserHandler::new()
-        handle_request(&mut listener).expect("set_owner");
-        handle_request(&mut listener).expect("get_features");
-        handle_request(&mut listener).expect("set_features");
-        handle_request(&mut listener).expect("get_protocol_features");
-        handle_request(&mut listener).expect("set_protocol_features");
+        handle_request(&mut req_handler).expect("set_owner");
+        handle_request(&mut req_handler).expect("get_features");
+        handle_request(&mut req_handler).expect("set_features");
+        handle_request(&mut req_handler).expect("get_protocol_features");
+        handle_request(&mut req_handler).expect("set_protocol_features");
 
         // VhostUserHandler::read_config()
-        handle_request(&mut listener).expect("get_config");
+        handle_request(&mut req_handler).expect("get_config");
 
         // VhostUserHandler::set_mem_table()
-        handle_request(&mut listener).expect("set_mem_table");
+        handle_request(&mut req_handler).expect("set_mem_table");
 
         for _ in 0..QUEUES_NUM {
             // VhostUserHandler::activate_vring()
-            handle_request(&mut listener).expect("set_vring_num");
-            handle_request(&mut listener).expect("set_vring_addr");
-            handle_request(&mut listener).expect("set_vring_base");
-            handle_request(&mut listener).expect("set_vring_call");
-            handle_request(&mut listener).expect("set_vring_kick");
-            handle_request(&mut listener).expect("set_vring_enable");
+            handle_request(&mut req_handler).expect("set_vring_num");
+            handle_request(&mut req_handler).expect("set_vring_addr");
+            handle_request(&mut req_handler).expect("set_vring_base");
+            handle_request(&mut req_handler).expect("set_vring_call");
+            handle_request(&mut req_handler).expect("set_vring_kick");
+            handle_request(&mut req_handler).expect("set_vring_enable");
         }
 
         // sleep
-        handle_request(&mut listener).expect("sleep");
+        handle_request(&mut req_handler).expect("sleep");
 
         // wake
-        handle_request(&mut listener).expect("wake");
+        handle_request(&mut req_handler).expect("wake");
 
         dev_bar.wait();
 
-        match handle_request(&mut listener) {
+        match handle_request(&mut req_handler) {
             Err(VhostError::ClientExit) => (),
             r => panic!("Err(ClientExit) was expected but {:?}", r),
         }
