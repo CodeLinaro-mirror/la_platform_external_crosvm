@@ -236,9 +236,8 @@ impl VhostUserBackend for BlockBackend {
         &mut self,
         idx: usize,
         queue: virtio::Queue,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         doorbell: Interrupt,
-        kick_evt: Event,
     ) -> anyhow::Result<()> {
         // `start_worker` will return early if the worker has already started.
         self.start_worker();
@@ -250,9 +249,7 @@ impl VhostUserBackend for BlockBackend {
             .unbounded_send(WorkerCmd::StartQueue {
                 index: idx,
                 queue,
-                kick_evt,
                 interrupt: doorbell,
-                mem,
             })
             .unwrap_or_else(|_| panic!("worker channel closed early"));
         Ok(())

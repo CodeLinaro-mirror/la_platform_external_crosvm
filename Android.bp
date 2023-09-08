@@ -126,6 +126,9 @@ rust_binary {
                 "gpu",
                 "virgl_renderer_next",
             ],
+            strip: {
+                keep_symbols_and_debug_frame: true,
+            },
         },
         android: {
             shared_libs: [
@@ -255,6 +258,9 @@ rust_test {
                 "gpu",
                 "virgl_renderer_next",
             ],
+            strip: {
+                keep_symbols_and_debug_frame: true,
+            },
         },
         android: {
             shared_libs: [

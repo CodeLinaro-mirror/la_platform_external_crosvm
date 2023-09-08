@@ -9,6 +9,7 @@ use std::io::Read;
 use std::io::Write;
 use std::mem::size_of;
 
+use base::Event;
 use crosvm_fuzz::fuzz_target;
 use crosvm_fuzz::rand::FuzzRng;
 use devices::virtio::QueueConfig;
@@ -74,7 +75,7 @@ fuzz_target!(|data: &[u8]| {
     q.set_ready(true);
 
     GUEST_MEM.with(|mem| {
-        let mut q = if let Ok(q) = q.activate() {
+        let mut q = if let Ok(q) = q.activate(mem, Event::new().unwrap()) {
             q
         } else {
             return;
@@ -107,7 +108,7 @@ fuzz_target!(|data: &[u8]| {
         rng.fill_bytes(&mut buf[..]);
         mem.write_all_at_addr(&buf[..], q.used_ring()).unwrap();
 
-        while let Some(mut avail_desc) = q.pop(mem) {
+        while let Some(mut avail_desc) = q.pop() {
             // Read the entire readable portion of the buffer.
             let mut read_buf = vec![0u8; avail_desc.reader.available_bytes()];
             avail_desc.reader.read_exact(&mut read_buf).unwrap();
@@ -117,7 +118,7 @@ fuzz_target!(|data: &[u8]| {
             avail_desc.writer.write_all(&write_buf).unwrap();
 
             let bytes_written = avail_desc.writer.bytes_written() as u32;
-            q.add_used(mem, avail_desc, bytes_written);
+            q.add_used(avail_desc, bytes_written);
         }
     });
 });

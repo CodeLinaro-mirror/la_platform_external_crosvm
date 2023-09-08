@@ -18,6 +18,7 @@ use std::time::Duration;
 use std::u32;
 
 use anyhow::Context;
+use base::debug;
 use base::error;
 use base::info;
 use base::warn;
@@ -150,6 +151,11 @@ pub enum ExecuteError {
     WriteStatus(io::Error),
 }
 
+enum LogLevel {
+    Debug,
+    Error,
+}
+
 impl ExecuteError {
     fn status(&self) -> u8 {
         match self {
@@ -167,6 +173,21 @@ impl ExecuteError {
             ExecuteError::WriteIo { .. } => VIRTIO_BLK_S_IOERR,
             ExecuteError::WriteStatus(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::Unsupported(_) => VIRTIO_BLK_S_UNSUPP,
+        }
+    }
+
+    fn log_level(&self) -> LogLevel {
+        match self {
+            // Since there is no feature bit for the guest to detect support for
+            // VIRTIO_BLK_T_GET_ID, the driver has to try executing the request to see if it works.
+            ExecuteError::Unsupported(VIRTIO_BLK_T_GET_ID) => LogLevel::Debug,
+            // Log disk I/O errors at debug level to avoid flooding the logs.
+            ExecuteError::ReadIo { .. }
+            | ExecuteError::WriteIo { .. }
+            | ExecuteError::Flush { .. }
+            | ExecuteError::DiscardWriteZeroes { .. } => LogLevel::Debug,
+            // Log all other failures as errors.
+            _ => LogLevel::Error,
         }
     }
 }
@@ -262,8 +283,9 @@ async fn process_one_request(
     {
         Ok(()) => VIRTIO_BLK_S_OK,
         Err(e) => {
-            if !matches!(e, ExecuteError::Unsupported(VIRTIO_BLK_T_GET_ID)) {
-                error!("failed executing disk request: {}", e);
+            match e.log_level() {
+                LogLevel::Debug => debug!("failed executing disk request: {}", e),
+                LogLevel::Error => error!("failed executing disk request: {}", e),
             }
             e.status()
         }
@@ -280,7 +302,6 @@ pub async fn process_one_chain(
     queue: &RefCell<Queue>,
     mut avail_desc: DescriptorChain,
     disk_state: &AsyncRwLock<DiskState>,
-    mem: &GuestMemory,
     interrupt: &Interrupt,
     flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
@@ -296,15 +317,14 @@ pub async fn process_one_chain(
     };
 
     let mut queue = queue.borrow_mut();
-    queue.add_used(mem, avail_desc, len as u32);
-    queue.trigger_interrupt(mem, interrupt);
+    queue.add_used(avail_desc, len as u32);
+    queue.trigger_interrupt(interrupt);
 }
 
 // There is one async task running `handle_queue` per virtio queue in use.
 // Receives messages from the guest and queues a task to complete the operations with the async
 // executor.
 async fn handle_queue(
-    mem: GuestMemory,
     disk_state: Rc<AsyncRwLock<DiskState>>,
     queue: Rc<RefCell<Queue>>,
     evt: EventAsync,
@@ -339,12 +359,11 @@ async fn handle_queue(
                 return queue;
             }
         };
-        while let Some(descriptor_chain) = queue.borrow_mut().pop(&mem) {
+        while let Some(descriptor_chain) = queue.borrow_mut().pop() {
             background_tasks.push(process_one_chain(
                 &queue,
                 descriptor_chain,
                 &disk_state,
-                &mem,
                 &interrupt,
                 &flush_timer,
                 &flush_timer_armed,
@@ -473,9 +492,7 @@ pub enum WorkerCmd {
     StartQueue {
         index: usize,
         queue: Queue,
-        kick_evt: Event,
         interrupt: Interrupt,
-        mem: GuestMemory,
     },
     StopQueue {
         index: usize,
@@ -545,10 +562,10 @@ pub async fn run_worker(
             worker_cmd = worker_rx.next() => {
                 match worker_cmd {
                     None => anyhow::bail!("worker control channel unexpectedly closed"),
-                    Some(WorkerCmd::StartQueue{index, queue, kick_evt, interrupt, mem}) => {
+                    Some(WorkerCmd::StartQueue{index, queue, interrupt}) => {
                         let (tx, rx) = oneshot::channel();
+                        let kick_evt = queue.event().try_clone().expect("Failed to clone queue event");
                         let (handle_queue_future, remote_handle) = handle_queue(
-                            mem,
                             Rc::clone(disk_state),
                             Rc::new(RefCell::new(queue)),
                             EventAsync::new(kick_evt, ex).expect("Failed to create async event for queue"),
@@ -973,9 +990,9 @@ impl VirtioDevice for BlockAsync {
 
     fn activate(
         &mut self,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         interrupt: Interrupt,
-        queues: BTreeMap<usize, (Queue, Event)>,
+        queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         assert!(self.num_activated_queues.is_none());
         self.num_activated_queues = Some(queues.len());
@@ -1014,21 +1031,18 @@ impl VirtioDevice for BlockAsync {
 
         let mut worker_threads = vec![];
         for (queues, disk_image) in queues_per_worker.into_iter() {
-            let mem = mem.clone();
             let shared_state = Arc::clone(&shared_state);
             let interrupt = interrupt.clone();
             let control_tube = self.control_tube.take();
 
             let (worker_tx, worker_rx) = mpsc::unbounded();
             // Add commands to start all the queues before starting the worker.
-            for (index, (queue, event)) in queues.into_iter() {
+            for (index, queue) in queues.into_iter() {
                 worker_tx
                     .unbounded_send(WorkerCmd::StartQueue {
                         index,
                         queue,
-                        kick_evt: event,
                         interrupt: interrupt.clone(),
-                        mem: mem.clone(),
                     })
                     .unwrap_or_else(|_| panic!("worker channel closed early"));
             }
@@ -1141,7 +1155,7 @@ impl VirtioDevice for BlockAsync {
 
     fn virtio_wake(
         &mut self,
-        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         if let Some((mem, interrupt, queues)) = queues_state {
             // TODO: activate is just what we want at the moment, but we should probably move
@@ -1641,18 +1655,20 @@ mod tests {
         // activate with queues of an arbitrary size.
         let mut q0 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q0.set_ready(true);
-        let q0 = q0.activate().expect("QueueConfig::activate");
-        let e0 = Event::new().unwrap();
+        let q0 = q0
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         let mut q1 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q1.set_ready(true);
-        let q1 = q1.activate().expect("QueueConfig::activate");
-        let e1 = Event::new().unwrap();
+        let q1 = q1
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         b.activate(
             mem.clone(),
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
+            BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("activate should succeed");
         // assert resources are consumed
@@ -1680,18 +1696,20 @@ mod tests {
         // re-activate should succeed
         let mut q0 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q0.set_ready(true);
-        let q0 = q0.activate().expect("QueueConfig::activate");
-        let e0 = Event::new().unwrap();
+        let q0 = q0
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         let mut q1 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q1.set_ready(true);
-        let q1 = q1.activate().expect("QueueConfig::activate");
-        let e1 = Event::new().unwrap();
+        let q1 = q1
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         b.activate(
             mem,
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
+            BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("re-activate should succeed");
     }
@@ -1752,21 +1770,19 @@ mod tests {
         // activate with queues of an arbitrary size.
         let mut q0 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q0.set_ready(true);
-        let q0 = q0.activate().expect("QueueConfig::activate");
-        let e0 = Event::new().unwrap();
+        let q0 = q0
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         let mut q1 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q1.set_ready(true);
-        let q1 = q1.activate().expect("QueueConfig::activate");
-        let e1 = Event::new().unwrap();
+        let q1 = q1
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         let interrupt = Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR);
-        b.activate(
-            mem,
-            interrupt.clone(),
-            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
-        )
-        .expect("activate should succeed");
+        b.activate(mem, interrupt.clone(), BTreeMap::from([(0, q0), (1, q1)]))
+            .expect("activate should succeed");
 
         // assert the original size first
         assert_eq!(
@@ -1863,18 +1879,20 @@ mod tests {
         // activate with queues of an arbitrary size.
         let mut q0 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q0.set_ready(true);
-        let q0 = q0.activate().expect("QueueConfig::activate");
-        let e0 = Event::new().unwrap();
+        let q0 = q0
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         let mut q1 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q1.set_ready(true);
-        let q1 = q1.activate().expect("QueueConfig::activate");
-        let e1 = Event::new().unwrap();
+        let q1 = q1
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         b.activate(
             mem.clone(),
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
+            BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("activate should succeed");
 
@@ -1891,18 +1909,20 @@ mod tests {
         // activate should succeed
         let mut q0 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q0.set_ready(true);
-        let q0 = q0.activate().expect("QueueConfig::activate");
-        let e0 = Event::new().unwrap();
+        let q0 = q0
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         let mut q1 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
         q1.set_ready(true);
-        let q1 = q1.activate().expect("QueueConfig::activate");
-        let e1 = Event::new().unwrap();
+        let q1 = q1
+            .activate(&mem, Event::new().unwrap())
+            .expect("QueueConfig::activate");
 
         b.activate(
             mem,
             Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
-            BTreeMap::from([(0, (q0, e0)), (1, (q1, e1))]),
+            BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("activate should succeed");
 

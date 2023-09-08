@@ -9,7 +9,6 @@ use anyhow::bail;
 use anyhow::Context;
 use base::error;
 use base::AsRawDescriptors;
-use base::Event;
 use cros_async::EventAsync;
 use cros_async::Executor;
 use cros_async::IntoAsync;
@@ -50,7 +49,6 @@ const MAX_QUEUE_NUM: usize = 3; /* rx, tx, ctrl */
 
 async fn run_tx_queue<T: TapT>(
     mut queue: Queue,
-    mem: GuestMemory,
     mut tap: T,
     doorbell: Interrupt,
     kick_evt: EventAsync,
@@ -72,14 +70,13 @@ async fn run_tx_queue<T: TapT>(
             }
         }
 
-        process_tx(&doorbell, &mut queue, &mem, &mut tap);
+        process_tx(&doorbell, &mut queue, &mut tap);
     }
     queue
 }
 
 async fn run_ctrl_queue<T: TapT>(
     mut queue: Queue,
-    mem: GuestMemory,
     mut tap: T,
     doorbell: Interrupt,
     kick_evt: EventAsync,
@@ -103,14 +100,7 @@ async fn run_ctrl_queue<T: TapT>(
             }
         }
 
-        if let Err(e) = process_ctrl(
-            &doorbell,
-            &mut queue,
-            &mem,
-            &mut tap,
-            acked_features,
-            vq_pairs,
-        ) {
+        if let Err(e) = process_ctrl(&doorbell, &mut queue, &mut tap, acked_features, vq_pairs) {
             error!("Failed to process ctrl queue: {}", e);
             break;
         }
@@ -125,7 +115,7 @@ pub struct NetBackend<T: TapT + IntoAsync> {
     acked_protocol_features: VhostUserProtocolFeatures,
     mtu: u16,
     #[cfg(all(windows, feature = "slirp"))]
-    slirp_kill_event: Event,
+    slirp_kill_event: base::Event,
     workers: [Option<(TaskHandle<Queue>, oneshot::Sender<()>)>; MAX_QUEUE_NUM],
 }
 
@@ -212,9 +202,8 @@ where
         queue: virtio::Queue,
         mem: GuestMemory,
         doorbell: Interrupt,
-        kick_evt: Event,
     ) -> anyhow::Result<()> {
-        sys::start_queue(self, idx, queue, mem, doorbell, kick_evt)
+        sys::start_queue(self, idx, queue, mem, doorbell)
     }
 
     fn stop_queue(&mut self, idx: usize) -> anyhow::Result<virtio::Queue> {

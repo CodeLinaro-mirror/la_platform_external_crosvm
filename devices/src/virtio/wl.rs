@@ -1690,17 +1690,15 @@ pub struct DescriptorsExhausted;
 /// Handle incoming events and forward them to the VM over the input queue.
 pub fn process_in_queue(
     interrupt: &Interrupt,
-    in_queue: &Rc<RefCell<Queue>>,
-    mem: &GuestMemory,
+    in_queue: &mut Queue,
     state: &mut WlState,
 ) -> ::std::result::Result<(), DescriptorsExhausted> {
     state.process_wait_context();
 
     let mut needs_interrupt = false;
     let mut exhausted_queue = false;
-    let mut in_queue = in_queue.borrow_mut();
     loop {
-        let mut desc = if let Some(d) = in_queue.peek(mem) {
+        let mut desc = if let Some(d) = in_queue.peek() {
             d
         } else {
             exhausted_queue = true;
@@ -1719,8 +1717,8 @@ pub fn process_in_queue(
             }
             let bytes_written = desc.writer.bytes_written() as u32;
             needs_interrupt = true;
-            in_queue.pop_peeked(mem);
-            in_queue.add_used(mem, desc, bytes_written);
+            in_queue.pop_peeked();
+            in_queue.add_used(desc, bytes_written);
         } else {
             break;
         }
@@ -1730,7 +1728,7 @@ pub fn process_in_queue(
     }
 
     if needs_interrupt {
-        in_queue.trigger_interrupt(mem, interrupt);
+        in_queue.trigger_interrupt(interrupt);
     }
 
     if exhausted_queue {
@@ -1741,15 +1739,9 @@ pub fn process_in_queue(
 }
 
 /// Handle messages from the output queue and forward them to the display sever, if necessary.
-pub fn process_out_queue(
-    interrupt: &Interrupt,
-    out_queue: &Rc<RefCell<Queue>>,
-    mem: &GuestMemory,
-    state: &mut WlState,
-) {
+pub fn process_out_queue(interrupt: &Interrupt, out_queue: &mut Queue, state: &mut WlState) {
     let mut needs_interrupt = false;
-    let mut out_queue = out_queue.borrow_mut();
-    while let Some(mut desc) = out_queue.pop(mem) {
+    while let Some(mut desc) = out_queue.pop() {
         let resp = match state.execute(&mut desc.reader) {
             Ok(r) => r,
             Err(e) => WlResp::Err(Box::new(e)),
@@ -1763,31 +1755,27 @@ pub fn process_out_queue(
         }
 
         let len = desc.writer.bytes_written() as u32;
-        out_queue.add_used(mem, desc, len);
+        out_queue.add_used(desc, len);
         needs_interrupt = true;
     }
 
     if needs_interrupt {
-        out_queue.trigger_interrupt(mem, interrupt);
+        out_queue.trigger_interrupt(interrupt);
     }
 }
 
 struct Worker {
     interrupt: Interrupt,
-    mem: GuestMemory,
-    in_queue: Rc<RefCell<Queue>>,
-    in_queue_evt: Event,
-    out_queue: Rc<RefCell<Queue>>,
-    out_queue_evt: Event,
+    in_queue: Queue,
+    out_queue: Queue,
     state: WlState,
 }
 
 impl Worker {
     fn new(
-        mem: GuestMemory,
         interrupt: Interrupt,
-        in_queue: (Queue, Event),
-        out_queue: (Queue, Event),
+        in_queue: Queue,
+        out_queue: Queue,
         wayland_paths: BTreeMap<String, PathBuf>,
         mapper: Box<dyn SharedMemoryMapper>,
         use_transition_flags: bool,
@@ -1798,11 +1786,8 @@ impl Worker {
     ) -> Worker {
         Worker {
             interrupt,
-            mem,
-            in_queue: Rc::new(RefCell::new(in_queue.0)),
-            in_queue_evt: in_queue.1,
-            out_queue: Rc::new(RefCell::new(out_queue.0)),
-            out_queue_evt: out_queue.1,
+            in_queue,
+            out_queue,
             state: WlState::new(
                 wayland_paths,
                 mapper,
@@ -1827,8 +1812,8 @@ impl Worker {
         }
 
         let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
-            (&self.in_queue_evt, Token::InQueue),
-            (&self.out_queue_evt, Token::OutQueue),
+            (self.in_queue.event(), Token::InQueue),
+            (self.out_queue.event(), Token::OutQueue),
             (&kill_evt, Token::Kill),
             (&self.state.wait_ctx, Token::State),
         ])
@@ -1853,7 +1838,7 @@ impl Worker {
             for event in &events {
                 match event.token {
                     Token::InQueue => {
-                        let _ = self.in_queue_evt.wait();
+                        let _ = self.in_queue.event().wait();
                         if !watching_state_ctx {
                             if let Err(e) =
                                 wait_ctx.modify(&self.state.wait_ctx, EventType::Read, Token::State)
@@ -1865,22 +1850,14 @@ impl Worker {
                         }
                     }
                     Token::OutQueue => {
-                        let _ = self.out_queue_evt.wait();
-                        process_out_queue(
-                            &self.interrupt,
-                            &self.out_queue,
-                            &self.mem,
-                            &mut self.state,
-                        );
+                        let _ = self.out_queue.event().wait();
+                        process_out_queue(&self.interrupt, &mut self.out_queue, &mut self.state);
                     }
                     Token::Kill => break 'wait,
                     Token::State => {
-                        if let Err(DescriptorsExhausted) = process_in_queue(
-                            &self.interrupt,
-                            &self.in_queue,
-                            &self.mem,
-                            &mut self.state,
-                        ) {
+                        if let Err(DescriptorsExhausted) =
+                            process_in_queue(&self.interrupt, &mut self.in_queue, &mut self.state)
+                        {
                             if let Err(e) =
                                 wait_ctx.modify(&self.state.wait_ctx, EventType::None, Token::State)
                             {
@@ -1899,15 +1876,9 @@ impl Worker {
                 }
             }
         }
-        let in_queue = match Rc::try_unwrap(self.in_queue) {
-            Ok(queue_cell) => queue_cell.into_inner(),
-            Err(_) => panic!("failed to recover queue from worker"),
-        };
 
-        let out_queue = match Rc::try_unwrap(self.out_queue) {
-            Ok(queue_cell) => queue_cell.into_inner(),
-            Err(_) => panic!("failed to recover queue from worker"),
-        };
+        let in_queue = self.in_queue;
+        let out_queue = self.out_queue;
 
         Ok(vec![in_queue, out_queue])
     }
@@ -1918,10 +1889,8 @@ pub struct Wl {
     wayland_paths: BTreeMap<String, PathBuf>,
     mapper: Option<Box<dyn SharedMemoryMapper>>,
     resource_bridge: Option<Tube>,
-    use_transition_flags: bool,
-    use_send_vfd_v2: bool,
-    use_shmem: bool,
     base_features: u64,
+    acked_features: u64,
     #[cfg(feature = "minigbm")]
     gralloc: Option<RutabagaGralloc>,
     address_offset: Option<u64>,
@@ -1938,10 +1907,8 @@ impl Wl {
             wayland_paths,
             mapper: None,
             resource_bridge,
-            use_transition_flags: false,
-            use_send_vfd_v2: false,
-            use_shmem: false,
             base_features,
+            acked_features: 0,
             #[cfg(feature = "minigbm")]
             gralloc: None,
             address_offset: None,
@@ -1992,22 +1959,14 @@ impl VirtioDevice for Wl {
     }
 
     fn ack_features(&mut self, value: u64) {
-        if value & (1 << VIRTIO_WL_F_TRANS_FLAGS) != 0 {
-            self.use_transition_flags = true;
-        }
-        if value & (1 << VIRTIO_WL_F_SEND_FENCES) != 0 {
-            self.use_send_vfd_v2 = true;
-        }
-        if value & (1 << VIRTIO_WL_F_USE_SHMEM) != 0 {
-            self.use_shmem = true;
-        }
+        self.acked_features |= value;
     }
 
     fn activate(
         &mut self,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
             return Err(anyhow!(
@@ -2020,15 +1979,16 @@ impl VirtioDevice for Wl {
         let mapper = self.mapper.take().context("missing mapper")?;
 
         let wayland_paths = self.wayland_paths.clone();
-        let use_transition_flags = self.use_transition_flags;
-        let use_send_vfd_v2 = self.use_send_vfd_v2;
+        let use_transition_flags = self.acked_features & (1 << VIRTIO_WL_F_TRANS_FLAGS) != 0;
+        let use_send_vfd_v2 = self.acked_features & (1 << VIRTIO_WL_F_SEND_FENCES) != 0;
+        let use_shmem = self.acked_features & (1 << VIRTIO_WL_F_USE_SHMEM) != 0;
         let resource_bridge = self.resource_bridge.take();
         #[cfg(feature = "minigbm")]
         let gralloc = self
             .gralloc
             .take()
             .expect("gralloc already passed to worker");
-        let address_offset = if !self.use_shmem {
+        let address_offset = if !use_shmem {
             self.address_offset
         } else {
             None
@@ -2036,7 +1996,6 @@ impl VirtioDevice for Wl {
 
         self.worker_thread = Some(WorkerThread::start("v_wl", move |kill_evt| {
             Worker::new(
-                mem,
                 interrupt,
                 queues.pop_first().unwrap().1,
                 queues.pop_first().unwrap().1,
@@ -2080,7 +2039,7 @@ impl VirtioDevice for Wl {
 
     fn virtio_wake(
         &mut self,
-        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         match device_state {
             None => Ok(()),

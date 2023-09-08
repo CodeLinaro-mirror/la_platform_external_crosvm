@@ -249,6 +249,15 @@ impl ReadNotifier for TaggedControlTube {
     }
 }
 
+impl CloseNotifier for TaggedControlTube {
+    fn get_close_notifier(&self) -> &dyn AsRawDescriptor {
+        match self {
+            Self::Vm(tube) => tube.0.get_close_notifier(),
+            Self::Product(tube) => tube.get_close_notifier(),
+        }
+    }
+}
+
 pub enum ExitState {
     Reset,
     Stop,
@@ -1458,6 +1467,17 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     guest_os.irq_chip.kick_halted_vcpus();
     let _ = exit_evt.signal();
 
+    if guest_os.devices_thread.is_some() {
+        if let Err(e) = device_ctrl_tube.send(&DeviceControlCommand::Exit) {
+            error!("failed to stop device control loop: {}", e);
+        };
+        if let Some(thread) = guest_os.devices_thread.take() {
+            if let Err(e) = thread.join() {
+                error!("failed to exit devices thread: {:?}", e);
+            }
+        }
+    }
+
     // Shut down the VM memory handler thread.
     if let Err(e) = vm_memory_handler_control.send(&VmMemoryHandlerRequest::Exit) {
         error!(
@@ -1549,7 +1569,7 @@ fn remove_closed_tubes<T, U>(
 ) -> anyhow::Result<()>
 where
     T: EventToken,
-    U: ReadNotifier,
+    U: ReadNotifier + CloseNotifier,
 {
     tube_ids_to_remove.dedup();
     for id in tube_ids_to_remove {
@@ -1557,6 +1577,10 @@ where
             wait_ctx
                 .delete(socket.get_read_notifier())
                 .context("failed to remove descriptor from wait context")?;
+
+            // There may be a close notifier registered for this Tube. If there isn't one
+            // registered, we just ignore the error.
+            let _ = wait_ctx.delete(socket.get_close_notifier());
         }
     }
     Ok(())
@@ -1973,7 +1997,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         pcie_ecam: cfg.pcie_ecam,
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        oem_strings: cfg.oem_strings.clone(),
+        smbios: cfg.smbios.clone(),
         dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
     })
 }

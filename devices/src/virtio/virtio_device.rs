@@ -24,8 +24,6 @@ use crate::pci::PciCapability;
 use crate::pci::{MsixConfig, MsixStatus};
 use crate::virtio::ipc_memory_mapper::IpcMemoryMapper;
 use crate::virtio::queue::QueueConfig;
-use crate::virtio::queue::QueueType;
-use virtio_sys::virtio_config::VIRTIO_F_RING_PACKED;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VirtioTransportType {
@@ -120,7 +118,7 @@ pub trait VirtioDevice: Send {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        queues: BTreeMap<usize, (Queue, Event)>,
+        queues: BTreeMap<usize, Queue>,
     ) -> Result<()>;
 
     /// Optionally deactivates this device. If the reset method is
@@ -225,7 +223,7 @@ pub trait VirtioDevice: Send {
     /// is an error.
     fn virtio_wake(
         &mut self,
-        _queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        _queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         anyhow::bail!("virtio_wake not implemented for {}", self.debug_label());
     }
@@ -263,14 +261,5 @@ pub trait VirtioDevice: Send {
             "vhost_user_restore not implemented for {}",
             self.debug_label()
         );
-    }
-
-    /// Returns the queue type to use for this device based on the negotiated virtio features.
-    /// Used for queue's restore from snapshot
-    fn queue_type(&self) -> QueueType {
-        if ((self.features() >> VIRTIO_F_RING_PACKED) & 1) != 0 {
-            return QueueType::Packed;
-        }
-        QueueType::Split
     }
 }

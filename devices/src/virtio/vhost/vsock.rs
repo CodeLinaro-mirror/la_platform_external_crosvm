@@ -171,7 +171,7 @@ impl VirtioDevice for Vsock {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != NUM_QUEUES {
             return Err(anyhow!(
@@ -188,7 +188,7 @@ impl VirtioDevice for Vsock {
 
         // The third vq is an event-only vq that is not handled by the vhost
         // subsystem (but still needs to exist).  Split it off here.
-        let mut event_queue = queues.remove(&2).unwrap().0;
+        let mut event_queue = queues.remove(&2).unwrap();
         // Send TRANSPORT_RESET event if needed.
         if self.needs_transport_reset {
             self.needs_transport_reset = false;
@@ -200,7 +200,7 @@ impl VirtioDevice for Vsock {
             // If that assumption becomes invalid, we could integrate this logic into the worker
             // thread's event loop so that it can wait for space in the queue.
             let mut avail_desc = event_queue
-                .pop(&mem)
+                .pop()
                 .expect("event queue is empty, can't send transport reset event");
             let transport_reset = virtio_sys::virtio_vsock::virtio_vsock_event{
                 id: virtio_sys::virtio_vsock::virtio_vsock_event_id_VIRTIO_VSOCK_EVENT_TRANSPORT_RESET.into(),
@@ -210,8 +210,8 @@ impl VirtioDevice for Vsock {
                 .write_obj(transport_reset)
                 .expect("failed to write transport reset event");
             let len = avail_desc.writer.bytes_written() as u32;
-            event_queue.add_used(&mem, avail_desc, len);
-            event_queue.trigger_interrupt(&mem, &interrupt);
+            event_queue.add_used(avail_desc, len);
+            event_queue.trigger_interrupt(&interrupt);
         }
         self.event_queue = Some(event_queue);
 
@@ -265,11 +265,7 @@ impl VirtioDevice for Vsock {
                 .vhost_handle
                 .stop()
                 .context("failed to stop vrings")?;
-            let mut queues: BTreeMap<usize, Queue> = worker
-                .queues
-                .into_iter()
-                .map(|(i, (q, _))| (i, q))
-                .collect();
+            let mut queues: BTreeMap<usize, Queue> = worker.queues;
             let mut vrings_base = Vec::new();
             for (pos, _) in queues.iter() {
                 let vring_base = VringBase {
@@ -291,7 +287,7 @@ impl VirtioDevice for Vsock {
 
     fn virtio_wake(
         &mut self,
-        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        device_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         match device_state {
             None => Ok(()),

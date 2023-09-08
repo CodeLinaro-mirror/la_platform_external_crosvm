@@ -11,7 +11,6 @@ use base::error;
 use base::warn;
 use base::AsRawDescriptor;
 use base::Error as SysError;
-use base::Event;
 use base::RawDescriptor;
 use base::Tube;
 use base::WorkerThread;
@@ -206,9 +205,9 @@ impl VirtioDevice for Fs {
 
     fn activate(
         &mut self,
-        guest_mem: GuestMemory,
+        _guest_mem: GuestMemory,
         interrupt: Interrupt,
-        queues: BTreeMap<usize, (Queue, Event)>,
+        queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != self.queue_sizes.len() {
             return Err(anyhow!(
@@ -250,16 +249,15 @@ impl VirtioDevice for Fs {
 
         self.workers = queues
             .into_iter()
-            .map(|(idx, (queue, evt))| {
-                let mem = guest_mem.clone();
+            .map(|(idx, queue)| {
                 let server = server.clone();
                 let irq = interrupt.clone();
                 let socket = Arc::clone(&socket);
 
                 let worker =
                     WorkerThread::start(format!("v_fs:{}:{}", self.tag, idx), move |kill_evt| {
-                        let mut worker = Worker::new(mem, queue, server, irq, socket, slot);
-                        worker.run(evt, kill_evt, watch_resample_event)
+                        let mut worker = Worker::new(queue, server, irq, socket, slot);
+                        worker.run(kill_evt, watch_resample_event)
                     });
 
                 if watch_resample_event {

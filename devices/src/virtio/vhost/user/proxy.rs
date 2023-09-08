@@ -436,12 +436,7 @@ impl Worker {
     // - Process messages from the device over Virtio, from the sibling over a unix domain socket,
     //   from the main thread in this device over a tube and from the main crosvm process over a
     //   tube.
-    fn run(
-        &mut self,
-        rx_queue_evt: Event,
-        tx_queue_evt: Event,
-        kill_evt: Event,
-    ) -> Result<ExitReason> {
+    fn run(&mut self, kill_evt: Event) -> Result<ExitReason> {
         let fault_event = self
             .iommu
             .lock()
@@ -451,17 +446,17 @@ impl Worker {
         // Now that an export session has been started, we can export the virtqueues to
         // fetch the GuestAddresses corresponding to their IOVA-based config.
         self.rx_queue
-            .export_memory(&self.mem)
+            .export_memory()
             .context("failed to export rx_queue")?;
         self.tx_queue
-            .export_memory(&self.mem)
+            .export_memory()
             .context("failed to export tx_queue")?;
 
         // TODO(abhishekbh): Should interrupt.signal_config_changed be called here ?.
         let mut wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
             (&self.slave_req_helper, Token::SiblingSocket),
-            (&rx_queue_evt, Token::RxQueue),
-            (&tx_queue_evt, Token::TxQueue),
+            (self.rx_queue.event(), Token::RxQueue),
+            (self.tx_queue.event(), Token::TxQueue),
             (&kill_evt, Token::Kill),
             (&fault_event, Token::IommuFault),
         ])
@@ -496,7 +491,7 @@ impl Worker {
                         }
                     }
                     Token::RxQueue => {
-                        if let Err(e) = rx_queue_evt.wait() {
+                        if let Err(e) = self.rx_queue.event().wait() {
                             bail!("error reading rx queue Event: {}", e);
                         }
 
@@ -508,7 +503,7 @@ impl Worker {
                         }
                     }
                     Token::TxQueue => {
-                        if let Err(e) = tx_queue_evt.wait() {
+                        if let Err(e) = self.tx_queue.event().wait() {
                             bail!("error reading tx queue event: {}", e);
                         }
                         self.process_tx()
@@ -581,7 +576,7 @@ impl Worker {
                 ConnStatus::NoDataAvailable => return Ok(RxqStatus::Processed),
             };
 
-            let mut desc = match self.rx_queue.peek(&self.mem) {
+            let mut desc = match self.rx_queue.peek() {
                 Some(d) => d,
                 None => {
                     return Ok(RxqStatus::DescriptorsExhausted);
@@ -591,9 +586,9 @@ impl Worker {
             // If a sibling is disconnected, send 0-length data to the guest and return an error.
             if !is_connected {
                 // Send 0-length data
-                self.rx_queue.pop_peeked(&self.mem);
-                self.rx_queue.add_used(&self.mem, desc, 0 /* len */);
-                if !self.rx_queue.trigger_interrupt(&self.mem, &self.interrupt) {
+                self.rx_queue.pop_peeked();
+                self.rx_queue.add_used(desc, 0 /* len */);
+                if !self.rx_queue.trigger_interrupt(&self.interrupt) {
                     // This interrupt should always be injected. We'd rather fail
                     // fast if there is an error.
                     panic!("failed to send interrupt");
@@ -637,9 +632,9 @@ impl Worker {
             match bytes_written {
                 Ok(bytes_written) => {
                     // The driver is able to deal with a descriptor with 0 bytes written.
-                    self.rx_queue.pop_peeked(&self.mem);
-                    self.rx_queue.add_used(&self.mem, desc, bytes_written);
-                    if !self.rx_queue.trigger_interrupt(&self.mem, &self.interrupt) {
+                    self.rx_queue.pop_peeked();
+                    self.rx_queue.add_used(desc, bytes_written);
+                    if !self.rx_queue.trigger_interrupt(&self.interrupt) {
                         // This interrupt should always be injected. We'd rather fail
                         // fast if there is an error.
                         panic!("failed to send interrupt");
@@ -1033,7 +1028,7 @@ impl Worker {
     // Processes data from the device backend (via virtio Tx queue) and forward it to
     // the Vhost-user sibling over its socket connection.
     fn process_tx(&mut self) -> Result<()> {
-        while let Some(mut desc_chain) = self.tx_queue.pop(&self.mem) {
+        while let Some(mut desc_chain) = self.tx_queue.pop() {
             let reader = &mut desc_chain.reader;
             let expected_count = reader.available_bytes();
             let mut msg = vec![0; expected_count];
@@ -1067,8 +1062,8 @@ impl Worker {
             }
             .context("failed to foward message")?;
 
-            self.tx_queue.add_used(&self.mem, desc_chain, 0);
-            if !self.tx_queue.trigger_interrupt(&self.mem, &self.interrupt) {
+            self.tx_queue.add_used(desc_chain, 0);
+            if !self.tx_queue.trigger_interrupt(&self.interrupt) {
                 panic!("failed inject tx queue interrupt");
             }
         }
@@ -1255,8 +1250,6 @@ enum State {
         interrupt: Interrupt,
         rx_queue: Queue,
         tx_queue: Queue,
-        rx_queue_evt: Event,
-        tx_queue_evt: Event,
 
         iommu: Arc<Mutex<IpcMemoryMapper>>,
     },
@@ -1470,43 +1463,30 @@ impl VirtioVhostUser {
         let old_state: State = std::mem::replace(&mut *state, State::Invalid);
 
         // Retrieve values stored in the state value.
-        let (
-            vm_memory_client,
-            listener,
-            mem,
-            interrupt,
-            rx_queue,
-            tx_queue,
-            rx_queue_evt,
-            tx_queue_evt,
-            iommu,
-        ) = match old_state {
-            State::Activated {
-                vm_memory_client,
-                listener,
-                mem,
-                interrupt,
-                rx_queue,
-                tx_queue,
-                rx_queue_evt,
-                tx_queue_evt,
-                iommu,
-            } => (
-                vm_memory_client,
-                listener,
-                mem,
-                interrupt,
-                rx_queue,
-                tx_queue,
-                rx_queue_evt,
-                tx_queue_evt,
-                iommu,
-            ),
-            s => {
-                // Unreachable because we've checked the state at the beginning of this function.
-                unreachable!("invalid state: {}", s)
-            }
-        };
+        let (vm_memory_client, listener, mem, interrupt, rx_queue, tx_queue, iommu) =
+            match old_state {
+                State::Activated {
+                    vm_memory_client,
+                    listener,
+                    mem,
+                    interrupt,
+                    rx_queue,
+                    tx_queue,
+                    iommu,
+                } => (
+                    vm_memory_client,
+                    listener,
+                    mem,
+                    interrupt,
+                    rx_queue,
+                    tx_queue,
+                    iommu,
+                ),
+                s => {
+                    // Unreachable because we've checked the state at the beginning of this function.
+                    unreachable!("invalid state: {}", s)
+                }
+            };
 
         // Safe because a PCI bar is guaranteed to be allocated at this point.
         let io_pci_bar = self.io_pci_bar.expect("PCI bar unallocated");
@@ -1557,11 +1537,7 @@ impl VirtioVhostUser {
                 pending_unmap: None,
             };
 
-            let run_result = worker.run(
-                rx_queue_evt.try_clone().unwrap(),
-                tx_queue_evt.try_clone().unwrap(),
-                kill_evt,
-            );
+            let run_result = worker.run(kill_evt);
 
             if let Err(e) = worker.release_exported_regions() {
                 error!("failed to release exported memory: {:?}", e);
@@ -1609,8 +1585,6 @@ impl VirtioVhostUser {
                         interrupt,
                         rx_queue,
                         tx_queue,
-                        rx_queue_evt,
-                        tx_queue_evt,
                         iommu,
                     };
 
@@ -1771,14 +1745,14 @@ impl VirtioDevice for VirtioVhostUser {
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != NUM_PROXY_DEVICE_QUEUES {
             return Err(anyhow!("bad queue length: {}", queues.len()));
         }
 
-        let (rx_queue, rx_queue_evt) = queues.pop_first().unwrap().1;
-        let (tx_queue, tx_queue_evt) = queues.pop_first().unwrap().1;
+        let rx_queue = queues.pop_first().unwrap().1;
+        let tx_queue = queues.pop_first().unwrap().1;
 
         let mut state = self.state.lock();
         // Use `State::Invalid` as the intermediate state here.
@@ -1796,8 +1770,6 @@ impl VirtioDevice for VirtioVhostUser {
                     interrupt,
                     rx_queue,
                     tx_queue,
-                    rx_queue_evt,
-                    tx_queue_evt,
                     iommu: self.iommu.take().unwrap(),
                 };
             }

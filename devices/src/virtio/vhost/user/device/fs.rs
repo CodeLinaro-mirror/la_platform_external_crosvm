@@ -16,7 +16,6 @@ use argh::FromArgs;
 use base::error;
 use base::warn;
 use base::AsRawDescriptors;
-use base::Event;
 use base::RawDescriptor;
 use base::Tube;
 use cros_async::EventAsync;
@@ -50,7 +49,6 @@ const MAX_QUEUE_NUM: usize = 2; /* worker queue and high priority queue */
 
 async fn handle_fs_queue(
     queue: Rc<RefCell<virtio::Queue>>,
-    mem: GuestMemory,
     doorbell: Interrupt,
     kick_evt: EventAsync,
     server: Arc<fuse::Server<PassthroughFs>>,
@@ -64,7 +62,7 @@ async fn handle_fs_queue(
             error!("Failed to read kick event for fs queue: {}", e);
             break;
         }
-        if let Err(e) = process_fs_queue(&mem, &doorbell, &queue, &server, &tube, slot) {
+        if let Err(e) = process_fs_queue(&doorbell, &mut queue.borrow_mut(), &server, &tube, slot) {
             error!("Process FS queue failed: {}", e);
             break;
         }
@@ -179,15 +177,18 @@ impl VhostUserBackend for FsBackend {
         &mut self,
         idx: usize,
         queue: virtio::Queue,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         doorbell: Interrupt,
-        kick_evt: Event,
     ) -> anyhow::Result<()> {
         if self.workers[idx].is_some() {
             warn!("Starting new queue handler without stopping old handler");
             self.stop_queue(idx)?;
         }
 
+        let kick_evt = queue
+            .event()
+            .try_clone()
+            .context("failed to clone queue event")?;
         let kick_evt = EventAsync::new(kick_evt, &self.ex)
             .context("failed to create EventAsync for kick_evt")?;
         let (handle, registration) = AbortHandle::new_pair();
@@ -197,7 +198,6 @@ impl VhostUserBackend for FsBackend {
         let queue_task = self.ex.spawn_local(Abortable::new(
             handle_fs_queue(
                 queue.clone(),
-                mem,
                 doorbell,
                 kick_evt,
                 self.server.clone(),

@@ -11,7 +11,6 @@ use anyhow::bail;
 use anyhow::Context;
 use base::error;
 use base::warn;
-use base::Event;
 use cros_async::sync::RwLock as AsyncRwLock;
 use cros_async::EventAsync;
 use cros_async::Executor;
@@ -189,9 +188,8 @@ impl VhostUserBackend for SndBackend {
         &mut self,
         idx: usize,
         queue: virtio::Queue,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         doorbell: Interrupt,
-        kick_evt: Event,
     ) -> anyhow::Result<()> {
         if self.workers[idx].is_some() {
             warn!("Starting new queue handler without stopping old handler");
@@ -201,6 +199,10 @@ impl VhostUserBackend for SndBackend {
         // Safe because the executor is initialized in main() below.
         let ex = SND_EXECUTOR.get().expect("Executor not initialized");
 
+        let kick_evt = queue
+            .event()
+            .try_clone()
+            .context("failed to clone queue event")?;
         let mut kick_evt =
             EventAsync::new(kick_evt, ex).context("failed to create EventAsync for kick_evt")?;
         let (handle, registration) = AbortHandle::new_pair();
@@ -217,7 +219,6 @@ impl VhostUserBackend for SndBackend {
                     async move {
                         handle_ctrl_queue(
                             ex,
-                            &mem,
                             &streams,
                             &snd_data,
                             ctrl_queue,
@@ -240,14 +241,11 @@ impl VhostUserBackend for SndBackend {
                     (self.rx_send.clone(), self.rx_recv.take())
                 };
                 let mut recv = recv.ok_or_else(|| anyhow!("queue restart is not supported"))?;
-                let mem = Rc::new(mem);
-                let mem2 = Rc::clone(&mem);
                 let streams = Rc::clone(&self.streams);
                 let queue_pcm_queue = queue.clone();
                 let queue_task = ex.spawn_local(Abortable::new(
                     async move {
-                        handle_pcm_queue(&mem, &streams, send, queue_pcm_queue, &kick_evt, None)
-                            .await
+                        handle_pcm_queue(&streams, send, queue_pcm_queue, &kick_evt, None).await
                     },
                     registration,
                 ));
@@ -257,14 +255,8 @@ impl VhostUserBackend for SndBackend {
                 let queue_response_queue = queue.clone();
                 let response_queue_task = ex.spawn_local(Abortable::new(
                     async move {
-                        send_pcm_response_worker(
-                            &mem2,
-                            queue_response_queue,
-                            doorbell,
-                            &mut recv,
-                            None,
-                        )
-                        .await
+                        send_pcm_response_worker(queue_response_queue, doorbell, &mut recv, None)
+                            .await
                     },
                     registration2,
                 ));

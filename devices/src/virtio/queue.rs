@@ -18,6 +18,7 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use base::warn;
+use base::Event;
 use cros_async::AsyncError;
 use cros_async::EventAsync;
 use futures::channel::oneshot;
@@ -262,7 +263,7 @@ impl QueueConfig {
     }
 
     /// Convert the queue configuration into an active queue.
-    pub fn activate(&mut self) -> Result<Queue> {
+    pub fn activate(&mut self, mem: &GuestMemory, event: Event) -> Result<Queue> {
         if !self.ready {
             bail!("attempted to activate a non-ready queue");
         }
@@ -272,10 +273,12 @@ impl QueueConfig {
         }
         // If VIRTIO_F_RING_PACKED feature bit is set, create a packed queue, otherwise create a split queue
         let queue: Queue = if ((self.acked_features >> VIRTIO_F_RING_PACKED) & 1) != 0 {
-            let pq = PackedQueue::new(self).context("Failed to create a packed queue.")?;
+            let pq =
+                PackedQueue::new(self, mem, event).context("Failed to create a packed queue.")?;
             Queue::PackedVirtQueue(pq)
         } else {
-            let sq = SplitQueue::new(self).context("Failed to create a split queue.")?;
+            let sq =
+                SplitQueue::new(self, mem, event).context("Failed to create a split queue.")?;
             Queue::SplitVirtQueue(sq)
         };
 
@@ -390,25 +393,16 @@ pub enum Queue {
     PackedVirtQueue(PackedQueue),
 }
 
-/// This enum is used to specify the type of virtqueue (split or packed).
-pub enum QueueType {
-    /// Split Virtqueue type
-    Split,
-    /// Packed Virtqueue type
-    Packed,
-}
-
 impl Queue {
     /// Asynchronously read the next descriptor chain from the queue.
     /// Returns a `DescriptorChain` when it is `await`ed.
     pub async fn next_async(
         &mut self,
-        mem: &GuestMemory,
         eventfd: &mut EventAsync,
     ) -> std::result::Result<DescriptorChain, AsyncError> {
         loop {
             // Check if there are more descriptors available.
-            if let Some(chain) = self.pop(mem) {
+            if let Some(chain) = self.pop() {
                 return Ok(chain);
             }
             eventfd.next_val().await?;
@@ -416,10 +410,10 @@ impl Queue {
     }
 
     /// If a new DescriptorHead is available, returns one and removes it from the queue.
-    pub fn pop(&mut self, mem: &GuestMemory) -> Option<DescriptorChain> {
-        let descriptor_chain = self.peek(mem);
+    pub fn pop(&mut self) -> Option<DescriptorChain> {
+        let descriptor_chain = self.peek();
         if descriptor_chain.is_some() {
-            self.pop_peeked(mem);
+            self.pop_peeked();
         }
         descriptor_chain
     }
@@ -428,12 +422,11 @@ impl Queue {
     /// of waiting for the next descriptor.
     pub async fn next_async_interruptable(
         &mut self,
-        mem: &GuestMemory,
         queue_event: &mut EventAsync,
         mut stop_rx: &mut oneshot::Receiver<()>,
     ) -> std::result::Result<Option<DescriptorChain>, AsyncError> {
         select_biased! {
-            avail_desc_res = self.next_async(mem, queue_event).fuse() => {
+            avail_desc_res = self.next_async(queue_event).fuse() => {
                 Ok(Some(avail_desc_res?))
             }
             _ = stop_rx => Ok(None),
@@ -443,18 +436,24 @@ impl Queue {
     /// inject interrupt into guest on this queue
     /// return true: interrupt is injected into guest for this queue
     ///        false: interrupt isn't injected
-    pub fn trigger_interrupt(&mut self, mem: &GuestMemory, interrupt: &Interrupt) -> bool {
+    pub fn trigger_interrupt(&mut self, interrupt: &Interrupt) -> bool {
         match self {
-            Queue::SplitVirtQueue(sq) => sq.trigger_interrupt(mem, interrupt),
-            Queue::PackedVirtQueue(pq) => pq.trigger_interrupt(mem, interrupt),
+            Queue::SplitVirtQueue(sq) => sq.trigger_interrupt(interrupt),
+            Queue::PackedVirtQueue(pq) => pq.trigger_interrupt(interrupt),
         }
     }
 
     /// Restore queue from snapshot
-    pub fn restore(queue_type: QueueType, queue_value: serde_json::Value) -> anyhow::Result<Queue> {
-        match queue_type {
-            QueueType::Split => SplitQueue::restore(queue_value).map(Queue::SplitVirtQueue),
-            QueueType::Packed => PackedQueue::restore(queue_value).map(Queue::PackedVirtQueue),
+    pub fn restore(
+        queue_config: &QueueConfig,
+        queue_value: serde_json::Value,
+        mem: &GuestMemory,
+        event: Event,
+    ) -> anyhow::Result<Queue> {
+        if queue_config.acked_features & 1 << VIRTIO_F_RING_PACKED != 0 {
+            PackedQueue::restore(queue_value, mem, event).map(Queue::PackedVirtQueue)
+        } else {
+            SplitQueue::restore(queue_value, mem, event).map(Queue::SplitVirtQueue)
         }
     }
 
@@ -490,6 +489,12 @@ impl Queue {
     );
 
     define_queue_method!(
+        /// Get a reference to the queue's event.
+        event,
+        &Event,
+    );
+
+    define_queue_method!(
         /// Reset queue's counters.
         /// This method doesn't change the queue's metadata so it's reusable without initializing it
         /// again.
@@ -505,7 +510,6 @@ impl Queue {
         export_memory,
         Result<()>,
         mut,
-        mem: &GuestMemory
     );
 
     define_queue_method!(
@@ -521,7 +525,6 @@ impl Queue {
         peek,
         Option<DescriptorChain>,
         mut,
-        mem: &GuestMemory
     );
 
     define_queue_method!(
@@ -529,7 +532,6 @@ impl Queue {
         pop_peeked,
         (),
         mut,
-        _mem: &GuestMemory
     );
 
     define_queue_method!(
@@ -537,7 +539,6 @@ impl Queue {
         add_used,
         (),
         mut,
-        mem: &GuestMemory,
         desc_chain: DescriptorChain,
         len: u32
     );

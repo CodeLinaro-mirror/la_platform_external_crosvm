@@ -143,6 +143,7 @@ pub struct Vsock {
     guest_cid: u64,
     host_guid: Option<String>,
     features: u64,
+    acked_features: u64,
     worker_thread: Option<WorkerThread<Option<PausedQueues>>>,
 }
 
@@ -152,6 +153,7 @@ pub struct Vsock {
 struct VsockSnapshot {
     guest_cid: u64,
     features: u64,
+    acked_features: u64,
 }
 
 impl Vsock {
@@ -160,6 +162,7 @@ impl Vsock {
             guest_cid,
             host_guid,
             features: base_features,
+            acked_features: 0,
             worker_thread: None,
         })
     }
@@ -188,9 +191,9 @@ impl Vsock {
         interrupt: Interrupt,
         mut queues: VsockQueues,
     ) -> anyhow::Result<()> {
-        let (rx_queue, rx_queue_evt) = queues.rx;
-        let (tx_queue, tx_queue_evt) = queues.tx;
-        let (event_queue, event_queue_evt) = queues.event;
+        let rx_queue = queues.rx;
+        let tx_queue = queues.tx;
+        let event_queue = queues.event;
 
         let host_guid = self.host_guid.clone();
         let guest_cid = self.guest_cid;
@@ -198,15 +201,7 @@ impl Vsock {
             "userspace_virtio_vsock",
             move |kill_evt| {
                 let mut worker = Worker::new(mem, interrupt, host_guid, guest_cid);
-                let result = worker.run(
-                    rx_queue,
-                    tx_queue,
-                    event_queue,
-                    rx_queue_evt,
-                    tx_queue_evt,
-                    event_queue_evt,
-                    kill_evt,
-                );
+                let result = worker.run(rx_queue, tx_queue, event_queue, kill_evt);
 
                 match result {
                     Err(e) => {
@@ -244,14 +239,14 @@ impl VirtioDevice for Vsock {
     }
 
     fn ack_features(&mut self, value: u64) {
-        self.features &= value;
+        self.acked_features |= value;
     }
 
     fn activate(
         &mut self,
         mem: GuestMemory,
         interrupt: Interrupt,
-        mut queues: BTreeMap<usize, (Queue, Event)>,
+        mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
             return Err(anyhow!(
@@ -285,7 +280,7 @@ impl VirtioDevice for Vsock {
 
     fn virtio_wake(
         &mut self,
-        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, (Queue, Event)>)>,
+        queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         if let Some((mem, interrupt, queues)) = queues_state {
             self.start_worker(
@@ -303,6 +298,7 @@ impl VirtioDevice for Vsock {
         serde_json::to_value(VsockSnapshot {
             guest_cid: self.guest_cid,
             features: self.features,
+            acked_features: self.acked_features,
         })
         .context("failed to serialize vsock snapshot")
     }
@@ -318,10 +314,11 @@ impl VirtioDevice for Vsock {
         );
         anyhow::ensure!(
             self.features == vsock_snapshot.features,
-            "expected features to match, but they did not. Live: {}, snapshot: {}",
+            "vsock: expected features to match, but they did not. Live: {}, snapshot: {}",
             self.features,
             vsock_snapshot.features
         );
+        self.acked_features = vsock_snapshot.acked_features;
 
         Ok(())
     }
@@ -635,7 +632,7 @@ impl Worker {
         loop {
             // Run continuously until exit evt
             let mut avail_desc = match queue
-                .next_async_interruptable(&self.mem, &mut queue_evt, &mut stop_rx)
+                .next_async_interruptable(&mut queue_evt, &mut stop_rx)
                 .await
             {
                 Ok(Some(d)) => d,
@@ -677,8 +674,8 @@ impl Worker {
                 };
             }
 
-            queue.add_used(&self.mem, avail_desc, 0);
-            queue.trigger_interrupt(&self.mem, &self.interrupt);
+            queue.add_used(avail_desc, 0);
+            queue.trigger_interrupt(&self.interrupt);
         }
 
         Ok(queue)
@@ -1260,7 +1257,7 @@ impl Worker {
         queue_evt: &mut EventAsync,
         bytes: &[u8],
     ) -> Result<()> {
-        let mut avail_desc = match queue.next_async(&self.mem, queue_evt).await {
+        let mut avail_desc = match queue.next_async(queue_evt).await {
             Ok(d) => d,
             Err(e) => {
                 error!("vsock: Failed to read descriptor {}", e);
@@ -1282,8 +1279,8 @@ impl Worker {
 
         let bytes_written = writer.bytes_written() as u32;
         if bytes_written > 0 {
-            queue.add_used(&self.mem, avail_desc, bytes_written);
-            queue.trigger_interrupt(&self.mem, &self.interrupt);
+            queue.add_used(avail_desc, bytes_written);
+            queue.trigger_interrupt(&self.interrupt);
             Ok(())
         } else {
             error!("vsock: Failed to write bytes to queue");
@@ -1304,7 +1301,7 @@ impl Worker {
             // Log but don't act on events. They are reserved exclusively for guest migration events
             // resulting in CID resets, which we don't support.
             let mut avail_desc = match queue
-                .next_async_interruptable(&self.mem, &mut queue_evt, &mut stop_rx)
+                .next_async_interruptable(&mut queue_evt, &mut stop_rx)
                 .await
             {
                 Ok(Some(d)) => d,
@@ -1332,11 +1329,13 @@ impl Worker {
         rx_queue: Queue,
         tx_queue: Queue,
         event_queue: Queue,
-        rx_queue_evt: Event,
-        tx_queue_evt: Event,
-        event_queue_evt: Event,
         kill_evt: Event,
     ) -> Result<Option<PausedQueues>> {
+        let rx_queue_evt = rx_queue
+            .event()
+            .try_clone()
+            .map_err(VsockError::CloneDescriptor)?;
+
         // Note that this mutex won't ever be contended because the HandleExecutor is single
         // threaded. We need the mutex for compile time correctness, but technically it is not
         // actually providing mandatory locking, at least not at the moment. If we later use a
@@ -1364,8 +1363,14 @@ impl Worker {
 
             let (send, recv) = mpsc::channel(CHANNEL_SIZE);
 
-            let tx_evt_async =
-                EventAsync::new(tx_queue_evt, &ex).expect("Failed to set up the tx queue event");
+            let tx_evt_async = EventAsync::new(
+                tx_queue
+                    .event()
+                    .try_clone()
+                    .map_err(VsockError::CloneDescriptor)?,
+                &ex,
+            )
+            .expect("Failed to set up the tx queue event");
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
             let tx_handler = self.process_tx_queue(tx_queue, tx_evt_async, send, stop_rx);
             let tx_handler = tx_handler.fuse();
@@ -1377,8 +1382,14 @@ impl Worker {
             let packet_handler = packet_handler.fuse();
             pin_mut!(packet_handler);
 
-            let event_evt_async = EventAsync::new(event_queue_evt, &ex)
-                .expect("Failed to set up the event queue event");
+            let event_evt_async = EventAsync::new(
+                event_queue
+                    .event()
+                    .try_clone()
+                    .map_err(VsockError::CloneDescriptor)?,
+                &ex,
+            )
+            .expect("Failed to set up the event queue event");
             let stop_rx = create_stop_oneshot(&mut stop_queue_oneshots);
             let event_handler = self.process_event_queue(event_queue, event_evt_async, stop_rx);
             let event_handler = event_handler.fuse();
@@ -1452,14 +1463,14 @@ impl Worker {
 
 /// Queues & events for the vsock device.
 struct VsockQueues {
-    rx: (Queue, Event),
-    tx: (Queue, Event),
-    event: (Queue, Event),
+    rx: Queue,
+    tx: Queue,
+    event: Queue,
 }
 
-impl TryFrom<BTreeMap<usize, (Queue, Event)>> for VsockQueues {
+impl TryFrom<BTreeMap<usize, Queue>> for VsockQueues {
     type Error = anyhow::Error;
-    fn try_from(mut queues: BTreeMap<usize, (Queue, Event)>) -> result::Result<Self, Self::Error> {
+    fn try_from(mut queues: BTreeMap<usize, Queue>) -> result::Result<Self, Self::Error> {
         if queues.len() < 3 {
             anyhow::bail!(
                 "{} queues were found, but an activated vsock must have at 3 active queues.",
