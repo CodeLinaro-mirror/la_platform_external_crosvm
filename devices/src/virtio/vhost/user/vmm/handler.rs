@@ -18,21 +18,21 @@ use base::SafeDescriptor;
 use base::WorkerThread;
 use vm_control::VmMemorySource;
 use vm_memory::GuestMemory;
-use vm_memory::MemoryRegionInformation;
 use vmm_vhost::message::VhostUserConfigFlags;
 use vmm_vhost::message::VhostUserGpuMapMsg;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::message::VhostUserShmemMapMsg;
 use vmm_vhost::message::VhostUserShmemUnmapMsg;
-use vmm_vhost::message::VhostUserVirtioFeatures;
 use vmm_vhost::HandlerResult;
 use vmm_vhost::MasterReqHandler;
 use vmm_vhost::VhostUserMasterReqHandlerMut;
 use vmm_vhost::VhostUserMemoryRegionInfo;
 use vmm_vhost::VringConfigData;
+use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 
 use crate::virtio::vhost::user::vmm::handler::sys::create_backend_req_handler;
 use crate::virtio::vhost::user::vmm::handler::sys::SocketMaster;
+use crate::virtio::vhost::user::vmm::Connection;
 use crate::virtio::vhost::user::vmm::Error;
 use crate::virtio::vhost::user::vmm::Result;
 use crate::virtio::Interrupt;
@@ -42,12 +42,6 @@ use crate::virtio::SharedMemoryRegion;
 
 type BackendReqHandler = MasterReqHandler<Mutex<BackendReqHandlerImpl>>;
 
-fn set_features(vu: &mut SocketMaster, avail_features: u64, ack_features: u64) -> Result<u64> {
-    let features = avail_features & ack_features;
-    vu.set_features(features).map_err(Error::SetFeatures)?;
-    Ok(features)
-}
-
 pub struct VhostUserHandler {
     vu: SocketMaster,
     pub avail_features: u64,
@@ -56,27 +50,32 @@ pub struct VhostUserHandler {
     backend_req_handler: Option<BackendReqHandler>,
     // Shared memory region info. IPC result from backend is saved with outer Option.
     shmem_region: Option<Option<SharedMemoryRegion>>,
-    // On Windows, we need a backend pid to support backend requests.
-    #[cfg(windows)]
-    backend_pid: Option<u32>,
 }
 
 impl VhostUserHandler {
     /// Creates a `VhostUserHandler` instance with features and protocol features initialized.
-    fn new(
-        mut vu: SocketMaster,
+    pub fn new(
+        connection: Connection,
         allow_features: u64,
-        init_features: u64,
         allow_protocol_features: VhostUserProtocolFeatures,
-        #[cfg(windows)] backend_pid: Option<u32>,
     ) -> Result<Self> {
+        #[cfg(windows)]
+        let backend_pid = connection.target_pid();
+
+        let mut vu = SocketMaster::from_stream(connection);
+
         vu.set_owner().map_err(Error::SetOwner)?;
 
         let avail_features = allow_features & vu.get_features().map_err(Error::GetFeatures)?;
-        let acked_features = set_features(&mut vu, avail_features, init_features)?;
+        let mut acked_features = 0;
 
         let mut protocol_features = VhostUserProtocolFeatures::empty();
-        if acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() != 0 {
+        if avail_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0 {
+            // The vhost-user backend supports VHOST_USER_F_PROTOCOL_FEATURES; enable it.
+            vu.set_features(1 << VHOST_USER_F_PROTOCOL_FEATURES)
+                .map_err(Error::SetFeatures)?;
+            acked_features |= 1 << VHOST_USER_F_PROTOCOL_FEATURES;
+
             let avail_protocol_features = vu
                 .get_protocol_features()
                 .map_err(Error::GetProtocolFeatures)?;
@@ -110,8 +109,6 @@ impl VhostUserHandler {
             protocol_features,
             backend_req_handler,
             shmem_region: None,
-            #[cfg(windows)]
-            backend_pid,
         })
     }
 
@@ -134,11 +131,8 @@ impl VhostUserHandler {
 
     /// Enables a set of features.
     pub fn ack_features(&mut self, ack_features: u64) -> Result<()> {
-        let features = set_features(
-            &mut self.vu,
-            self.avail_features,
-            self.acked_features | ack_features,
-        )?;
+        let features = (ack_features & self.avail_features) | self.acked_features;
+        self.vu.set_features(features).map_err(Error::SetFeatures)?;
         self.acked_features = features;
         Ok(())
     }
@@ -177,28 +171,16 @@ impl VhostUserHandler {
 
     /// Sets the memory map regions so it can translate the vring addresses.
     pub fn set_mem_table(&mut self, mem: &GuestMemory) -> Result<()> {
-        let mut regions: Vec<VhostUserMemoryRegionInfo> = Vec::new();
-        mem.with_regions::<_, ()>(
-            |MemoryRegionInformation {
-                 guest_addr,
-                 size,
-                 host_addr,
-                 shm,
-                 shm_offset,
-                 ..
-             }| {
-                let region = VhostUserMemoryRegionInfo {
-                    guest_phys_addr: guest_addr.0,
-                    memory_size: size as u64,
-                    userspace_addr: host_addr as u64,
-                    mmap_offset: shm_offset,
-                    mmap_handle: shm.as_raw_descriptor(),
-                };
-                regions.push(region);
-                Ok(())
-            },
-        )
-        .unwrap(); // never fail
+        let regions: Vec<_> = mem
+            .regions()
+            .map(|region| VhostUserMemoryRegionInfo {
+                guest_phys_addr: region.guest_addr.0,
+                memory_size: region.size as u64,
+                userspace_addr: region.host_addr as u64,
+                mmap_offset: region.shm_offset,
+                mmap_handle: region.shm.as_raw_descriptor(),
+            })
+            .collect();
 
         self.vu
             .set_mem_table(regions.as_slice())
@@ -247,9 +229,14 @@ impl VhostUserHandler {
         self.vu
             .set_vring_kick(queue_index, queue.event())
             .map_err(Error::SetVringKick)?;
-        self.vu
-            .set_vring_enable(queue_index, true)
-            .map_err(Error::SetVringEnable)?;
+
+        // Per protocol documentation, `VHOST_USER_SET_VRING_ENABLE` should be sent only when
+        // `VHOST_USER_F_PROTOCOL_FEATURES` has been negotiated.
+        if self.acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0 {
+            self.vu
+                .set_vring_enable(queue_index, true)
+                .map_err(Error::SetVringEnable)?;
+        }
 
         Ok(())
     }
@@ -286,9 +273,11 @@ impl VhostUserHandler {
     /// Deactivates all vrings.
     pub fn reset(&mut self, queues_num: usize) -> Result<()> {
         for queue_index in 0..queues_num {
-            self.vu
-                .set_vring_enable(queue_index, false)
-                .map_err(Error::SetVringEnable)?;
+            if self.acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0 {
+                self.vu
+                    .set_vring_enable(queue_index, false)
+                    .map_err(Error::SetVringEnable)?;
+            }
             self.vu
                 .get_vring_base(queue_index)
                 .map_err(Error::GetVringBase)?;

@@ -86,7 +86,6 @@ use vmm_vhost::message::VhostUserShmemMapMsg;
 use vmm_vhost::message::VhostUserShmemMapMsgFlags;
 use vmm_vhost::message::VhostUserShmemUnmapMsg;
 use vmm_vhost::message::VhostUserSingleMemoryRegion;
-use vmm_vhost::message::VhostUserVirtioFeatures;
 use vmm_vhost::message::VhostUserVringAddrFlags;
 use vmm_vhost::message::VhostUserVringState;
 use vmm_vhost::Error as VhostError;
@@ -94,6 +93,7 @@ use vmm_vhost::Result as VhostResult;
 use vmm_vhost::Slave;
 use vmm_vhost::VhostUserMasterReqHandler;
 use vmm_vhost::VhostUserSlaveReqHandlerMut;
+use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
@@ -161,6 +161,7 @@ pub trait VhostUserBackend {
 
     /// Indicates that the backend should stop processing requests for virtio queue number `idx`.
     /// This method should return the queue passed to `start_queue` for the corresponding `idx`.
+    /// This method will only be called for queues that were previously started by `start_queue`.
     fn stop_queue(&mut self, idx: usize) -> anyhow::Result<Queue>;
 
     /// Resets the vhost-user backend.
@@ -459,7 +460,7 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
         // VHOST_USER_SET_VRING_ENABLE with parameter 1, or after it has been disabled by
         // VHOST_USER_SET_VRING_ENABLE with parameter 0.
         let acked_features = self.backend.acked_features();
-        let vring_enabled = VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() & acked_features != 0;
+        let vring_enabled = acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0;
         for v in &mut self.vrings {
             v.enabled = vring_enabled;
         }
@@ -542,21 +543,22 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
     }
 
     fn get_vring_base(&mut self, index: u32) -> VhostResult<VhostUserVringState> {
-        if index as usize >= self.vrings.len() {
-            return Err(VhostError::InvalidParam);
-        }
+        let vring = self
+            .vrings
+            .get_mut(index as usize)
+            .ok_or(VhostError::InvalidParam)?;
 
         // Quotation from vhost-user spec:
-        // Client must start ring upon receiving a kick (that is, detecting
-        // that file descriptor is readable) on the descriptor specified by
-        // VHOST_USER_SET_VRING_KICK, and stop ring upon receiving
-        // VHOST_USER_GET_VRING_BASE.
-        if let Err(e) = self.backend.stop_queue(index as usize) {
-            error!("Failed to stop queue in get_vring_base: {}", e);
-        }
+        // "The back-end must [...] stop ring upon receiving VHOST_USER_GET_VRING_BASE."
+        // We only call `queue.set_ready()` when starting the queue, so if the queue is ready, that
+        // means it is started and should be stopped.
+        if vring.queue.ready() {
+            if let Err(e) = self.backend.stop_queue(index as usize) {
+                error!("Failed to stop queue in get_vring_base: {:#}", e);
+            }
 
-        let vring = &mut self.vrings[index as usize];
-        vring.reset();
+            vring.reset();
+        }
 
         Ok(VhostUserVringState::new(
             index,
@@ -630,7 +632,7 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
 
         // This request should be handled only when VHOST_USER_F_PROTOCOL_FEATURES
         // has been negotiated.
-        if self.backend.acked_features() & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() == 0 {
+        if self.backend.acked_features() & 1 << VHOST_USER_F_PROTOCOL_FEATURES == 0 {
             return Err(VhostError::InvalidOperation);
         }
 
@@ -711,7 +713,12 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
     }
 
     fn sleep(&mut self) -> VhostResult<()> {
-        for (index, vring) in self.vrings.iter_mut().enumerate() {
+        for (index, vring) in self
+            .vrings
+            .iter_mut()
+            .enumerate()
+            .filter(|(_index, vring)| vring.queue.ready())
+        {
             match self.backend.stop_queue(index) {
                 Ok(queue) => vring.paused_queue = Some(queue),
                 Err(e) => return Err(VhostError::StopQueueError(e)),
@@ -949,25 +956,20 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use std::sync::mpsc::channel;
-    #[cfg(unix)]
     use std::sync::Barrier;
+    use std::sync::Mutex;
 
     use anyhow::anyhow;
     use anyhow::bail;
     use base::Event;
-    #[cfg(unix)]
-    use tempfile::Builder;
-    #[cfg(unix)]
-    use tempfile::TempDir;
-    use vmm_vhost::connection::Listener;
     use vmm_vhost::message::MasterReq;
     use vmm_vhost::SlaveReqHandler;
     use vmm_vhost::VhostUserSlaveReqHandler;
     use zerocopy::AsBytes;
     use zerocopy::FromBytes;
 
+    use super::sys::test_helpers;
     use super::*;
     use crate::virtio::vhost::user::vmm::VhostUserHandler;
 
@@ -994,7 +996,7 @@ mod tests {
             let mut active_queues = Vec::new();
             active_queues.resize_with(Self::MAX_QUEUE_NUM, Default::default);
             Self {
-                avail_features: VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits(),
+                avail_features: 1 << VHOST_USER_F_PROTOCOL_FEATURES,
                 acked_features: 0,
                 acked_protocol_features: VhostUserProtocolFeatures::empty(),
                 active_queues,
@@ -1069,24 +1071,11 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    fn temp_dir() -> TempDir {
-        Builder::new().prefix("/tmp/vhost_test").tempdir().unwrap()
-    }
-
-    #[cfg(unix)]
     #[test]
     fn test_vhost_user_activate() {
-        use std::os::unix::net::UnixStream;
-
-        use vmm_vhost::connection::socket::Listener as SocketListener;
-
         const QUEUES_NUM: usize = 2;
 
-        let dir = temp_dir();
-        let mut path = dir.path().to_owned();
-        path.push("sock");
-        let mut listener = SocketListener::new(&path, true).unwrap();
+        let (dev, vmm) = test_helpers::setup();
 
         let vmm_bar = Arc::new(Barrier::new(2));
         let dev_bar = vmm_bar.clone();
@@ -1097,17 +1086,12 @@ mod tests {
             // VMM side
             rx.recv().unwrap(); // Ensure the device is ready.
 
-            let allow_features = VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
-            let init_features = VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+            let allow_features = 1 << VHOST_USER_F_PROTOCOL_FEATURES;
             let allow_protocol_features = VhostUserProtocolFeatures::CONFIG;
-            let connection = UnixStream::connect(&path).unwrap();
-            let mut vmm_handler = VhostUserHandler::new_from_connection(
-                connection,
-                allow_features,
-                init_features,
-                allow_protocol_features,
-            )
-            .unwrap();
+            let connection = test_helpers::connect(vmm);
+
+            let mut vmm_handler =
+                VhostUserHandler::new(connection, allow_features, allow_protocol_features).unwrap();
 
             println!("read_config");
             let mut buf = vec![0; std::mem::size_of::<FakeConfig>()];
@@ -1145,7 +1129,7 @@ mod tests {
         });
 
         // Device side
-        let handler = std::sync::Mutex::new(DeviceRequestHandler::new(
+        let handler = Mutex::new(DeviceRequestHandler::new(
             Box::new(FakeBackend::new()),
             Box::new(VhostUserRegularOps),
         ));
@@ -1153,8 +1137,7 @@ mod tests {
         // Notify listener is ready.
         tx.send(()).unwrap();
 
-        let endpoint = listener.accept().unwrap().unwrap();
-        let mut req_handler = SlaveReqHandler::new(endpoint, handler);
+        let mut req_handler = test_helpers::listen(dev, handler);
 
         // VhostUserHandler::new()
         handle_request(&mut req_handler).expect("set_owner");
@@ -1189,34 +1172,8 @@ mod tests {
 
         match handle_request(&mut req_handler) {
             Err(VhostError::ClientExit) => (),
-            r => panic!("Err(ClientExit) was expected but {:?}", r),
-        }
-    }
-
-    pub(super) fn vmm_handler_send_requests(vmm_handler: &mut VhostUserHandler, queues_num: usize) {
-        println!("read_config");
-        let mut buf = vec![0; std::mem::size_of::<FakeConfig>()];
-        vmm_handler.read_config(0, &mut buf).unwrap();
-        // Check if the obtained config data is correct.
-        let config = FakeConfig::read_from(buf.as_bytes()).unwrap();
-        assert_eq!(config, FAKE_CONFIG_DATA);
-
-        println!("set_mem_table");
-        let mem = GuestMemory::new(&[(GuestAddress(0x0), 0x10000)]).unwrap();
-        vmm_handler.set_mem_table(&mem).unwrap();
-
-        for idx in 0..queues_num {
-            println!("activate_mem_table: queue_index={}", idx);
-            let mut queue = QueueConfig::new(0x10, 0);
-            queue.set_ready(true);
-            let queue = queue
-                .activate(&mem, Event::new().unwrap())
-                .expect("QueueConfig::activate");
-            let irqfd = Event::new().unwrap();
-
-            vmm_handler
-                .activate_vring(&mem, idx, &queue, &irqfd)
-                .unwrap();
+            Err(VhostError::TubeError(base::TubeError::Disconnected)) => (),
+            r => panic!("expected Err(ClientExit) or Err(TubeError) but got {:?}", r),
         }
     }
 
@@ -1225,33 +1182,5 @@ mod tests {
     ) -> Result<(), VhostError> {
         let (hdr, files) = handler.recv_header()?;
         handler.process_message(hdr, files)
-    }
-
-    pub(super) fn test_handle_requests<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>>(
-        req_handler: &mut SlaveReqHandler<S, E>,
-        queues_num: usize,
-    ) {
-        // VhostUserHandler::new()
-        handle_request(req_handler).expect("set_owner");
-        handle_request(req_handler).expect("get_features");
-        handle_request(req_handler).expect("set_features");
-        handle_request(req_handler).expect("get_protocol_features");
-        handle_request(req_handler).expect("set_protocol_features");
-
-        // VhostUserHandler::read_config()
-        handle_request(req_handler).expect("get_config");
-
-        // VhostUserHandler::set_mem_table()
-        handle_request(req_handler).expect("set_mem_table");
-
-        for _ in 0..queues_num {
-            // VhostUserHandler::activate_vring()
-            handle_request(req_handler).expect("set_vring_num");
-            handle_request(req_handler).expect("set_vring_addr");
-            handle_request(req_handler).expect("set_vring_base");
-            handle_request(req_handler).expect("set_vring_call");
-            handle_request(req_handler).expect("set_vring_kick");
-            handle_request(req_handler).expect("set_vring_enable");
-        }
     }
 }
