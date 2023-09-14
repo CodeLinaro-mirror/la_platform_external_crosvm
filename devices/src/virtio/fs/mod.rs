@@ -33,7 +33,6 @@ use crate::pci::PciBarRegionType;
 use crate::pci::PciCapability;
 use crate::virtio::copy_config;
 use crate::virtio::device_constants::fs::FS_MAX_TAG_LEN;
-use crate::virtio::device_constants::fs::QUEUE_SIZE;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::PciCapabilityType;
@@ -55,6 +54,8 @@ use fuse::Server;
 use passthrough::PassthroughFs;
 pub use worker::process_fs_queue;
 use worker::Worker;
+
+const QUEUE_SIZE: u16 = 1024;
 
 const FS_BAR_NUM: u8 = 4;
 const FS_BAR_OFFSET: u64 = 0;
@@ -226,7 +227,7 @@ impl VirtioDevice for Fs {
 
         // Set up shared memory for DAX.
         // TODO(b/176129399): Remove cfg! once DAX is supported on ARM.
-        if cfg!(any(target_arch = "x86", target_arch = "x86_64")) && use_dax {
+        if cfg!(target_arch = "x86_64") && use_dax {
             // Create the shared memory region now before we start processing requests.
             let request = FsMappingRequest::AllocateSharedMemoryRegion(
                 self.pci_bar.as_ref().cloned().expect("No pci_bar"),

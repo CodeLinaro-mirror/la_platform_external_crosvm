@@ -13,7 +13,7 @@ mod bus;
 #[cfg(feature = "stats")]
 mod bus_stats;
 pub mod cmos;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 mod debugcon;
 mod fw_cfg;
 mod i8042;
@@ -35,7 +35,7 @@ pub mod virtio;
 mod vtpm_proxy;
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
+    if #[cfg(target_arch = "x86_64")] {
         mod pit;
         pub use self::pit::{Pit, PitError};
         pub mod tsc;
@@ -77,10 +77,11 @@ pub use self::bus::HotPlugBus;
 pub use self::bus::HotPlugKey;
 #[cfg(feature = "stats")]
 pub use self::bus_stats::BusStatistics;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub use self::debugcon::Debugcon;
 pub use self::fw_cfg::Error as FwCfgError;
 pub use self::fw_cfg::FwCfgDevice;
+pub use self::fw_cfg::FwCfgItemType;
 pub use self::fw_cfg::FwCfgParameters;
 pub use self::fw_cfg::FW_CFG_BASE_PORT;
 pub use self::fw_cfg::FW_CFG_MAX_FILE_SLOTS;
@@ -89,12 +90,6 @@ pub use self::i8042::I8042Device;
 pub use self::irq_event::IrqEdgeEvent;
 pub use self::irq_event::IrqLevelEvent;
 pub use self::irqchip::*;
-#[cfg(feature = "audio")]
-pub use self::pci::Ac97Backend;
-#[cfg(feature = "audio")]
-pub use self::pci::Ac97Dev;
-#[cfg(feature = "audio")]
-pub use self::pci::Ac97Parameters;
 pub use self::pci::BarRange;
 pub use self::pci::CrosvmDeviceId;
 pub use self::pci::GpeScope;

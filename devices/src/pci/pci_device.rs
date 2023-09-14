@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use acpi_tables::sdt::SDT;
 use anyhow::bail;
 use base::error;
@@ -44,6 +44,7 @@ use crate::BusDevice;
 use crate::DeviceId;
 use crate::IrqLevelEvent;
 use crate::Suspendable;
+use crate::VirtioPciDevice;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -431,7 +432,7 @@ pub trait PciDevice: Send + Suspendable {
     /// Invoked when the device is sandboxed.
     fn on_device_sandboxed(&mut self) {}
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     fn generate_acpi(&mut self, sdts: Vec<SDT>) -> Option<Vec<SDT>> {
         Some(sdts)
     }
@@ -479,6 +480,11 @@ pub trait PciDevice: Send + Suspendable {
     /// Sets the IOMMU for the device if `supports_iommu()`
     fn set_iommu(&mut self, _iommu: IpcMemoryMapper) -> anyhow::Result<()> {
         bail!("Iommu not supported.");
+    }
+
+    // Used for bootorder
+    fn as_virtio_pci_device(&self) -> Option<&VirtioPciDevice> {
+        None
     }
 }
 
@@ -770,7 +776,7 @@ impl<T: PciDevice + ?Sized> PciDevice for Box<T> {
         (**self).on_device_sandboxed()
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     fn generate_acpi(&mut self, sdts: Vec<SDT>) -> Option<Vec<SDT>> {
         (**self).generate_acpi(sdts)
     }

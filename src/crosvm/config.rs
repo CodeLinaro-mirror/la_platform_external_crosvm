@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::__cpuid;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::__cpuid_count;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -13,18 +13,18 @@ use std::str::FromStr;
 
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::MsrAction;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::MsrConfig;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::MsrFilter;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::MsrRWType;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::MsrValueFrom;
 use arch::Pstore;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
 use arch::VcpuAffinity;
 use base::debug;
@@ -47,15 +47,11 @@ use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
 use devices::virtio::vhost::user::device::snd::sys::windows::SndSplitConfig;
 use devices::virtio::vsock::VsockConfig;
 use devices::virtio::NetParameters;
-#[cfg(feature = "audio")]
-use devices::Ac97Backend;
-#[cfg(feature = "audio")]
-use devices::Ac97Parameters;
 use devices::FwCfgParameters;
 use devices::PciAddress;
 use devices::PflashParameters;
 use devices::StubPciParameters;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use hypervisor::CpuHybridType;
 use hypervisor::ProtectionType;
 use jail::JailConfig;
@@ -65,17 +61,16 @@ use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
 use uuid::Uuid;
 use vm_control::BatteryType;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use x86_64::check_host_hybrid_support;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use x86_64::set_enable_pnp_data_msr_config;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use x86_64::CpuIdCall;
 
+pub(crate) use super::sys::HypervisorKind;
 #[cfg(unix)]
 use crate::crosvm::sys::config::SharedDir;
-
-pub(crate) use super::sys::HypervisorKind;
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
@@ -89,12 +84,12 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 const ONE_MB: u64 = 1 << 20;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 const MB_ALIGNED: u64 = ONE_MB - 1;
 // the max bus number is 256 and each bus occupy 1MB, so the max pcie cfg mmio size = 256M
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 const MAX_PCIE_ECAM_SIZE: u64 = ONE_MB * 256;
 
 // by default, if enabled, the balloon WS features will use 4 bins.
@@ -124,7 +119,7 @@ pub enum IrqChipKind {
 }
 
 /// The core types in hybrid architecture.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CpuCoreType {
@@ -144,7 +139,7 @@ pub struct CpuOptions {
     #[serde(default)]
     pub clusters: Vec<CpuSet>,
     /// Core Type of CPUs.
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub core_types: Option<CpuCoreType>,
 }
 
@@ -443,7 +438,7 @@ pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
         .collect()
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[derive(Deserialize, Serialize, serde_keyvalue::FromKeyValues)]
 #[serde(deny_unknown_fields)]
 struct UserspaceMsrOptions {
@@ -457,17 +452,17 @@ struct UserspaceMsrOptions {
     pub filter: MsrFilter,
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 fn default_msr_value_from() -> MsrValueFrom {
     MsrValueFrom::RWFromRunningCPU
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 fn default_msr_filter() -> MsrFilter {
     MsrFilter::Default
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub fn parse_userspace_msr_options(value: &str) -> Result<(u32, MsrConfig), String> {
     let options: UserspaceMsrOptions = from_key_values(value)?;
 
@@ -581,7 +576,7 @@ pub fn parse_plugin_mount_option(value: &str) -> Result<BindMount, String> {
     Ok(BindMount { src, dst, writable })
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 pub fn parse_memory_region(value: &str) -> Result<AddressRange, String> {
     let paras: Vec<&str> = value.split(',').collect();
     if paras.len() != 2 {
@@ -652,36 +647,6 @@ pub fn parse_bus_id_addr(v: &str) -> Result<(u8, u8, u16, u16), String> {
         }
         _ => Err(String::from("BUS_ID:ADDR:BUS_NUM:DEV_NUM")),
     }
-}
-
-#[cfg(feature = "audio")]
-pub fn parse_ac97_options(s: &str) -> Result<Ac97Parameters, String> {
-    let mut ac97_params: Ac97Parameters = Default::default();
-
-    let opts = s
-        .split(',')
-        .map(|frag| frag.split('='))
-        .map(|mut kv| (kv.next().unwrap_or(""), kv.next().unwrap_or("")));
-
-    for (k, v) in opts {
-        match k {
-            "backend" => {
-                ac97_params.backend = v
-                    .parse::<Ac97Backend>()
-                    .map_err(|e| invalid_value_err(v, e))?;
-            }
-            "capture" => {
-                ac97_params.capture = v
-                    .parse::<bool>()
-                    .map_err(|e| format!("invalid capture option: {}", e))?;
-            }
-            _ => {
-                super::sys::config::parse_ac97_options(&mut ac97_params, k, v)?;
-            }
-        }
-    }
-
-    Ok(ac97_params)
 }
 
 pub fn invalid_value_err<T: AsRef<str>, S: ToString>(value: T, expected: S) -> String {
@@ -826,10 +791,8 @@ mod serde_serial_params {
 #[derive(Serialize, Deserialize)]
 #[remain::sorted]
 pub struct Config {
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    #[cfg(all(target_arch = "x86_64", unix))]
     pub ac_adapter: bool,
-    #[cfg(feature = "audio")]
-    pub ac97_parameters: Vec<Ac97Parameters>,
     pub acpi_tables: Vec<PathBuf>,
     pub android_fstab: Option<PathBuf>,
     pub async_executor: Option<ExecutorKind>,
@@ -846,7 +809,7 @@ pub struct Config {
     pub block_vhost_user_tube: Vec<Tube>,
     #[cfg(windows)]
     pub broker_shutdown_event: Option<Event>,
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    #[cfg(all(target_arch = "x86_64", unix))]
     pub bus_lock_ratelimit: u64,
     #[cfg(unix)]
     pub coiommu_param: Option<devices::CoIommuParameters>,
@@ -919,9 +882,9 @@ pub struct Config {
     pub params: Vec<String>,
     #[cfg(feature = "pci-hotplug")]
     pub pci_hotplug_slots: Option<u8>,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub pci_low_start: Option<u64>,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub pcie_ecam: Option<AddressRange>,
     pub per_vm_core_scheduling: bool,
     pub pflash_parameters: Option<PflashParameters>,
@@ -956,9 +919,9 @@ pub struct Config {
     #[cfg(unix)]
     #[serde(skip)]
     pub shared_dirs: Vec<SharedDir>,
-    #[cfg(feature = "slirp-ring-capture")]
+    #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
     pub slirp_capture_file: Option<String>,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
     #[cfg(all(windows, feature = "audio"))]
     pub snd_split_config: Option<SndSplitConfig>,
@@ -977,12 +940,12 @@ pub struct Config {
     #[cfg(unix)]
     pub unmap_guest_memory_on_fork: bool,
     pub usb: bool,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub userspace_msr: BTreeMap<u32, MsrConfig>,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_cgroup_path: Option<PathBuf>,
     pub vcpu_count: Option<usize>,
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub vcpu_hybrid_type: BTreeMap<usize, CpuHybridType>, // CPU index -> hybrid type
     #[cfg(unix)]
     pub vfio: Vec<super::sys::config::VfioOption>,
@@ -1031,10 +994,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+            #[cfg(all(target_arch = "x86_64", unix))]
             ac_adapter: false,
-            #[cfg(feature = "audio")]
-            ac97_parameters: Vec::new(),
             acpi_tables: Vec::new(),
             android_fstab: None,
             async_executor: None,
@@ -1051,7 +1012,7 @@ impl Default for Config {
             block_vhost_user_tube: Vec::new(),
             #[cfg(windows)]
             broker_shutdown_event: None,
-            #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+            #[cfg(all(target_arch = "x86_64", unix))]
             bus_lock_ratelimit: 0,
             #[cfg(unix)]
             coiommu_param: None,
@@ -1132,9 +1093,9 @@ impl Default for Config {
             params: Vec::new(),
             #[cfg(feature = "pci-hotplug")]
             pci_hotplug_slots: None,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             pci_low_start: None,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             pcie_ecam: None,
             per_vm_core_scheduling: false,
             pflash_parameters: None,
@@ -1162,9 +1123,9 @@ impl Default for Config {
             service_pipe_name: None,
             #[cfg(unix)]
             shared_dirs: Vec::new(),
-            #[cfg(feature = "slirp-ring-capture")]
+            #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             slirp_capture_file: None,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             smbios: SmbiosOptions::default(),
             #[cfg(all(windows, feature = "audio"))]
             snd_split_config: None,
@@ -1183,12 +1144,12 @@ impl Default for Config {
             #[cfg(unix)]
             unmap_guest_memory_on_fork: false,
             usb: true,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             userspace_msr: BTreeMap::new(),
             vcpu_affinity: None,
             vcpu_cgroup_path: None,
             vcpu_count: None,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             vcpu_hybrid_type: BTreeMap::new(),
             #[cfg(unix)]
             vfio: Vec::new(),
@@ -1293,7 +1254,7 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         }
     } else {
         // TODO(b/215297064): Support generic cpuaffinity if there's a need.
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         if !cfg.userspace_msr.is_empty() {
             for (_, msr_config) in cfg.userspace_msr.iter() {
                 if msr_config.from == MsrValueFrom::RWFromRunningCPU {
@@ -1312,7 +1273,7 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
                 .to_string());
         }
     }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     if !cfg.vcpu_hybrid_type.is_empty() {
         if cfg.host_cpu_topology {
             return Err("`core-types` cannot be set with `host-cpu-topology`.".to_string());
@@ -1328,7 +1289,7 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
             }
         }
     }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     if cfg.enable_hwp && !cfg.host_cpu_topology {
         return Err("setting `enable-hwp` requires `host-cpu-topology` is set.".to_string());
     }
@@ -1340,11 +1301,11 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
             );
         }
 
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         set_enable_pnp_data_msr_config(&mut cfg.userspace_msr)
             .map_err(|e| format!("MSR can't be passed through {}", e))?;
     }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     if cfg.itmt {
         use std::collections::BTreeSet;
         // ITMT only works on the case each vCPU is 1:1 mapping to a pCPU.
@@ -1505,7 +1466,7 @@ mod tests {
             }
         );
 
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         {
             let res: CpuOptions = from_key_values("core-types=[atom=[1,3-7],core=[0,2]]").unwrap();
             assert_eq!(
@@ -1648,35 +1609,6 @@ mod tests {
 
         let res: MemOptions = from_key_values("size=0x4000").unwrap();
         assert_eq!(res.size, Some(16384));
-    }
-
-    #[cfg(feature = "audio_cras")]
-    #[test]
-    fn parse_ac97_vaild() {
-        parse_ac97_options("backend=cras").expect("parse should have succeded");
-    }
-
-    #[cfg(feature = "audio")]
-    #[test]
-    fn parse_ac97_null_vaild() {
-        parse_ac97_options("backend=null").expect("parse should have succeded");
-    }
-
-    #[cfg(feature = "audio_cras")]
-    #[test]
-    fn parse_ac97_capture_vaild() {
-        parse_ac97_options("backend=cras,capture=true").expect("parse should have succeded");
-    }
-
-    #[cfg(feature = "audio_cras")]
-    #[test]
-    fn parse_ac97_client_type() {
-        parse_ac97_options("backend=cras,capture=true,client_type=crosvm")
-            .expect("parse should have succeded");
-        parse_ac97_options("backend=cras,capture=true,client_type=arcvm")
-            .expect("parse should have succeded");
-        parse_ac97_options("backend=cras,capture=true,client_type=none")
-            .expect_err("parse should have failed");
     }
 
     #[test]
@@ -1998,7 +1930,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn parse_userspace_msr_options_test() {
         let (pass_cpu0_index, pass_cpu0_cfg) =

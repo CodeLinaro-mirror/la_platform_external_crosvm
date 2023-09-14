@@ -23,10 +23,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use arch::CpuSet;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::MsrConfig;
 use arch::Pstore;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
 use arch::VcpuAffinity;
 use argh::FromArgs;
@@ -47,14 +47,12 @@ use devices::virtio::GpuParameters;
 use devices::virtio::NetParameters;
 #[cfg(unix)]
 use devices::virtio::NetParametersMode;
-#[cfg(feature = "audio")]
-use devices::Ac97Parameters;
 use devices::FwCfgParameters;
 use devices::PflashParameters;
 use devices::SerialHardware;
 use devices::SerialParameters;
 use devices::StubPciParameters;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use hypervisor::CpuHybridType;
 use hypervisor::ProtectionType;
 use merge::vec::append;
@@ -75,21 +73,19 @@ use super::gpu_config::fixup_gpu_options;
 #[cfg(all(feature = "gpu", feature = "virgl_renderer_next"))]
 use super::sys::GpuRenderServerParameters;
 use crate::crosvm::config::from_key_values;
-#[cfg(feature = "audio")]
-use crate::crosvm::config::parse_ac97_options;
 use crate::crosvm::config::parse_bus_id_addr;
 use crate::crosvm::config::parse_cpu_affinity;
 use crate::crosvm::config::parse_cpu_capacity;
 use crate::crosvm::config::parse_dynamic_power_coefficient;
 use crate::crosvm::config::parse_fw_cfg_options;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use crate::crosvm::config::parse_memory_region;
 use crate::crosvm::config::parse_mmio_address_range;
 use crate::crosvm::config::parse_pflash_parameters;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::parse_plugin_mount_option;
 use crate::crosvm::config::parse_serial_options;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use crate::crosvm::config::parse_userspace_msr_options;
 use crate::crosvm::config::BatteryConfig;
 #[cfg(feature = "plugin")]
@@ -889,7 +885,7 @@ fn bool_default_true() -> bool {
 #[argh(subcommand, name = "run", description = "Start a new crosvm instance")]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct RunCommand {
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    #[cfg(all(target_arch = "x86_64", unix))]
     #[argh(switch)]
     #[serde(default)]
     #[merge(strategy = overwrite_option)]
@@ -897,28 +893,6 @@ pub struct RunCommand {
     /// It purpose is to emulate ACPI ACPI0003 device, replicate and propagate the
     /// ac adapter status from the host to the guest.
     pub ac_adapter: Option<bool>,
-
-    #[cfg(feature = "audio")]
-    #[argh(
-        option,
-        from_str_fn(parse_ac97_options),
-        arg_name = "[backend=BACKEND,capture=true,capture_effect=EFFECT,client_type=TYPE,shm-fd=FD,client-fd=FD,server-fd=FD]"
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = append)]
-    /// comma separated key=value pairs for setting up Ac97 devices.
-    /// Can be given more than once.
-    /// Possible key values:
-    ///     backend=(null, cras) - Where to route the audio
-    ///          device. If not provided, backend will default to
-    ///          null. `null` for /dev/null, cras for CRAS server.
-    ///     capture - Enable audio capture
-    ///     capture_effects - | separated effects to be enabled for
-    ///         recording. The only supported effect value now is
-    ///         EchoCancellation or aec.
-    ///     client_type - Set specific client type for cras backend.
-    ///     socket_type - Set specific socket type for cras backend.
-    pub ac97: Vec<Ac97Parameters>,
 
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1021,12 +995,18 @@ pub struct RunCommand {
     ///     packed-queue=BOOL - Use packed virtqueue
     ///         in block device. If false, use split virtqueue.
     ///         (default: false)
+    ///     bootindex=NUM - An index dictating the order that the
+    ///         firmware will consider devices to boot from.
+    ///         For example, if bootindex=2, then the BIOS
+    ///         will attempt to boot from the current device
+    ///         after failing to boot from the device with
+    ///         bootindex=1.
     block: Vec<DiskOptionWithId>,
 
     /// ratelimit enforced on detected bus locks in guest.
     /// The default value of the bus_lock_ratelimit is 0 per second,
     /// which means no limitation on the guest's bus locks.
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+    #[cfg(all(target_arch = "x86_64", unix))]
     #[argh(option)]
     pub bus_lock_ratelimit: Option<u64>,
 
@@ -1242,7 +1222,7 @@ pub struct RunCommand {
     ///        boundaries implicitly
     pub file_backed_mapping: Vec<FileBackedMappingParameters>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1261,11 +1241,11 @@ pub struct RunCommand {
     /// fw_cfg.
     /// Possible key values:
     ///     name - Name of the file in fw_cfg that will
-    ///      be associated with user-provided data
+    ///      be associated with provided data
     ///     path - Path to data that will be included in
-    ///      fw_cfg under filename
+    ///      fw_cfg under name
     ///     string - Alternative to path, data to be in
-    ///      included in fw_cfg under filename
+    ///      included in fw_cfg under name
     pub fw_cfg: Vec<FwCfgParameters>,
 
     #[cfg(feature = "gdb")]
@@ -1581,7 +1561,7 @@ pub struct RunCommand {
     /// don't use virtio-balloon device in the guest
     pub no_balloon: Option<bool>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1594,7 +1574,7 @@ pub struct RunCommand {
     /// don't create RNG device in the guest
     pub no_rng: Option<bool>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1613,7 +1593,7 @@ pub struct RunCommand {
     /// don't use usb devices in the guest
     pub no_usb: Option<bool>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(option, arg_name = "OEM_STRING")]
     #[serde(skip)] // Deprecated - use `smbios` instead.
     #[merge(strategy = append)]
@@ -1633,14 +1613,14 @@ pub struct RunCommand {
     /// number of hotplug slot count (default: None)
     pub pci_hotplug_slots: Option<u8>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(option, arg_name = "pci_low_mmio_start")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// the pci mmio start address below 4G
     pub pci_start: Option<u64>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(
         option,
         arg_name = "mmio_base,mmio_length",
@@ -2003,14 +1983,14 @@ pub struct RunCommand {
     /// path to a socket from where to read single touch input events (such as those from a touchscreen) and write status updates to, optionally followed by width and height (defaults to 800x1280)
     pub single_touch: Vec<TouchDeviceOption>,
 
-    #[cfg(feature = "slirp-ring-capture")]
+    #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// Redirects slirp network packets to the supplied log file rather than the current directory as `slirp_capture_packets.pcap`
+    /// redirects slirp network packets to the supplied log file rather than the current directory as `slirp_capture_packets.pcap`
     pub slirp_capture_file: Option<String>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(option, arg_name = "key=val,...")]
     #[serde(default)]
     #[merge(strategy = overwrite_option)]
@@ -2043,7 +2023,7 @@ pub struct RunCommand {
     /// path to the VioS server socket for setting up virtio-snd devices
     pub sound: Option<PathBuf>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(switch)]
     #[serde(skip)] // Deprecated - use `irq_chip` instead.
     #[merge(strategy = overwrite_option)]
@@ -2153,7 +2133,7 @@ pub struct RunCommand {
     /// (EXPERIMENTAL/FOR DEBUGGING) Use VM firmware, but allow host access to guest memory
     pub unprotected_vm_with_firmware: Option<PathBuf>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[argh(
         option,
         arg_name = "INDEX,type=TYPE,action=ACTION,[from=FROM],[filter=FILTER]",
@@ -2469,7 +2449,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.async_executor = cmd.async_executor;
 
-        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+        #[cfg(all(target_arch = "x86_64", unix))]
         if let Some(p) = cmd.bus_lock_ratelimit {
             cfg.bus_lock_ratelimit = p;
         }
@@ -2496,7 +2476,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                 }
             };
 
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             if let Some(cpu_types) = cpus.core_types {
                 for cpu in cpu_types.atom {
                     if cfg
@@ -2578,7 +2558,6 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         #[cfg(feature = "audio")]
         {
-            cfg.ac97_parameters = cmd.ac97;
             cfg.sound = cmd.sound;
         }
         cfg.vhost_user_snd = cmd.vhost_user_snd;
@@ -2724,7 +2703,7 @@ impl TryFrom<RunCommand> for super::config::Config {
             {
                 cfg.service_pipe_name = cmd.service_pipe_name;
             }
-            #[cfg(feature = "slirp-ring-capture")]
+            #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             {
                 cfg.slirp_capture_file = cmd.slirp_capture_file;
             }
@@ -2869,7 +2848,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.irq_chip = cmd.irqchip;
 
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         if cmd.split_irqchip.unwrap_or_default() {
             if cmd.irqchip.is_some() {
                 return Err("cannot use `--irqchip` and `--split-irqchip` together".to_string());
@@ -3131,7 +3110,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.battery_config = cmd.battery;
-        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), unix))]
+        #[cfg(all(target_arch = "x86_64", unix))]
         {
             cfg.ac_adapter = cmd.ac_adapter.unwrap_or_default();
         }
@@ -3143,7 +3122,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.host_cpu_topology = cmd.host_cpu_topology.unwrap_or_default();
 
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        #[cfg(target_arch = "x86_64")]
         {
             cfg.enable_hwp = cmd.enable_hwp.unwrap_or_default();
             cfg.force_s2idle = cmd.s2idle.unwrap_or_default();
@@ -3193,7 +3172,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.itmt = cmd.itmt.unwrap_or_default();
 
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         if cmd.enable_pnp_data.unwrap_or_default()
             && cmd.force_calibrated_tsc_leaf.unwrap_or_default()
         {
@@ -3205,7 +3184,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.enable_pnp_data = cmd.enable_pnp_data.unwrap_or_default();
 
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         {
             cfg.force_calibrated_tsc_leaf = cmd.force_calibrated_tsc_leaf.unwrap_or_default();
         }
