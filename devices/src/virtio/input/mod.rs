@@ -318,7 +318,7 @@ impl VirtioInputConfig {
         Ok(VirtioInputConfig::new(
             evdev::device_ids(source)?,
             evdev::name(source)?,
-            evdev::serial_name(source)?,
+            evdev::serial_name(source),
             evdev::properties(source)?,
             evdev::supported_events(source)?,
             evdev::abs_info(source),
