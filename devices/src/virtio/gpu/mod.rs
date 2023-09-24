@@ -28,6 +28,10 @@ use base::AsRawDescriptor;
 use base::Event;
 use base::EventToken;
 use base::RawDescriptor;
+#[cfg(windows)]
+use base::ReadNotifier;
+#[cfg(windows)]
+use base::RecvTube;
 use base::Result;
 use base::SafeDescriptor;
 use base::SendTube;
@@ -58,8 +62,8 @@ pub use self::protocol::virtio_gpu_config;
 pub use self::protocol::VIRTIO_GPU_F_CONTEXT_INIT;
 pub use self::protocol::VIRTIO_GPU_F_CREATE_GUEST_HANDLE;
 pub use self::protocol::VIRTIO_GPU_F_EDID;
+pub use self::protocol::VIRTIO_GPU_F_FENCE_PASSING;
 pub use self::protocol::VIRTIO_GPU_F_RESOURCE_BLOB;
-pub use self::protocol::VIRTIO_GPU_F_RESOURCE_SYNC;
 pub use self::protocol::VIRTIO_GPU_F_RESOURCE_UUID;
 pub use self::protocol::VIRTIO_GPU_F_VIRGL;
 pub use self::protocol::VIRTIO_GPU_SHM_ID_HOST_VISIBLE;
@@ -79,6 +83,8 @@ use super::SharedMemoryMapper;
 use super::SharedMemoryRegion;
 use super::VirtioDevice;
 use super::Writer;
+#[cfg(windows)]
+use vm_control::ModifyWaitContext;
 
 // First queue is for virtio gpu commands. Second queue is for cursor commands, which we expect
 // there to be fewer of.
@@ -221,12 +227,17 @@ fn build(
     external_blob: bool,
     #[cfg(windows)] wndproc_thread: &mut Option<WindowProcedureThread>,
     udmabuf: bool,
+    #[cfg(windows)] gpu_display_wait_descriptor_ctrl_wr: SendTube,
 ) -> Option<VirtioGpu> {
     let mut display_opt = None;
     for display_backend in display_backends {
         match display_backend.build(
             #[cfg(windows)]
             wndproc_thread,
+            #[cfg(windows)]
+            gpu_display_wait_descriptor_ctrl_wr
+                .try_clone()
+                .expect("failed to clone wait context ctrl channel"),
         ) {
             Ok(c) => {
                 display_opt = Some(c);
@@ -547,11 +558,24 @@ impl Frontend {
             }
             GpuCommand::CmdSubmit3d(info) => {
                 if reader.available_bytes() != 0 {
+                    let num_in_fences = info.num_in_fences.to_native() as usize;
                     let cmd_size = info.size.to_native() as usize;
                     let mut cmd_buf = vec![0; cmd_size];
+                    let mut fence_ids: Vec<u64> = Vec::with_capacity(num_in_fences);
+                    let ctx_id = info.hdr.ctx_id.to_native();
+
+                    for _ in 0..num_in_fences {
+                        match reader.read_obj::<Le64>() {
+                            Ok(fence_id) => {
+                                fence_ids.push(fence_id.to_native());
+                            }
+                            Err(_) => return Err(GpuResponse::ErrUnspec),
+                        }
+                    }
+
                     if reader.read_exact(&mut cmd_buf[..]).is_ok() {
                         self.virtio_gpu
-                            .submit_command(info.hdr.ctx_id.to_native(), &mut cmd_buf[..])
+                            .submit_command(ctx_id, &mut cmd_buf[..], &fence_ids[..])
                     } else {
                         Err(GpuResponse::ErrInvalidParameter)
                     }
@@ -765,6 +789,8 @@ enum WorkerToken {
         index: usize,
     },
     VirtioGpuPoll,
+    #[cfg(windows)]
+    DisplayDescriptorRequest,
 }
 
 struct EventManager<'a> {
@@ -820,6 +846,8 @@ struct Worker {
     resource_bridges: ResourceBridges,
     kill_evt: Event,
     state: Frontend,
+    #[cfg(windows)]
+    gpu_display_wait_descriptor_ctrl_rd: RecvTube,
 }
 
 impl Worker {
@@ -856,6 +884,11 @@ impl Worker {
             #[cfg(unix)]
             (&self.gpu_control_tube, WorkerToken::GpuControl),
             (&self.kill_evt, WorkerToken::Kill),
+            #[cfg(windows)]
+            (
+                self.gpu_display_wait_descriptor_ctrl_rd.get_read_notifier(),
+                WorkerToken::DisplayDescriptorRequest,
+            ),
         ]) {
             Ok(v) => v,
             Err(e) => {
@@ -936,6 +969,29 @@ impl Worker {
                         // We only need to process_display once-per-wake, regardless of how many
                         // WorkerToken::Display events are received.
                         display_available = true;
+                    }
+                    #[cfg(windows)]
+                    WorkerToken::DisplayDescriptorRequest => {
+                        if let Ok(req) = self
+                            .gpu_display_wait_descriptor_ctrl_rd
+                            .recv::<ModifyWaitContext>()
+                        {
+                            match req {
+                                ModifyWaitContext::Add(desc) => {
+                                    if let Err(e) =
+                                        event_manager.wait_ctx.add(&desc, WorkerToken::Display)
+                                    {
+                                        error!(
+                                            "failed to add extra descriptor from display \
+                                             to GPU worker wait context: {:?}",
+                                            e
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            error!("failed to receive ModifyWaitContext request.")
+                        }
                     }
                     #[cfg(unix)]
                     WorkerToken::GpuControl => {
@@ -1037,6 +1093,7 @@ impl DisplayBackend {
     fn build(
         &self,
         #[cfg(windows)] wndproc_thread: &mut Option<WindowProcedureThread>,
+        #[cfg(windows)] gpu_display_wait_descriptor_ctrl: SendTube,
     ) -> std::result::Result<GpuDisplay, GpuDisplayError> {
         match self {
             #[cfg(unix)]
@@ -1050,6 +1107,7 @@ impl DisplayBackend {
                     wndproc_thread,
                     /* win_metrics= */ None,
                     display_properties.clone(),
+                    gpu_display_wait_descriptor_ctrl,
                 ),
                 None => {
                     error!("wndproc_thread is none");
@@ -1092,6 +1150,15 @@ pub struct Gpu {
     base_features: u64,
     udmabuf: bool,
     rutabaga_server_descriptor: Option<SafeDescriptor>,
+    #[cfg(windows)]
+    /// Because the Windows GpuDisplay can't expose an epollfd, it has to inform the GPU worker which
+    /// descriptors to add to its wait context. That's what this Tube is used for (it is provided
+    /// to each display backend.
+    gpu_display_wait_descriptor_ctrl_wr: SendTube,
+    #[cfg(windows)]
+    /// The GPU worker uses this Tube to receive the descriptors that should be added to its wait
+    /// context.
+    gpu_display_wait_descriptor_ctrl_rd: Option<RecvTube>,
     capset_mask: u64,
     #[cfg(unix)]
     gpu_cgroup_path: Option<PathBuf>,
@@ -1141,9 +1208,7 @@ impl Gpu {
             GpuMode::ModeGfxstream => RutabagaComponentType::Gfxstream,
         };
 
-        // only allow virglrenderer to fork its own render server when crosvm sandboxing is disabled
-        let use_render_server = rutabaga_server_descriptor.is_some()
-            || gpu_parameters.allow_implicit_render_server_exec;
+        let use_render_server = rutabaga_server_descriptor.is_some();
 
         let rutabaga_wsi = match gpu_parameters.wsi {
             Some(GpuWsi::Vulkan) => RutabagaWsi::VulkanSwapchain,
@@ -1163,6 +1228,10 @@ impl Gpu {
             .set_use_external_blob(gpu_parameters.external_blob)
             .set_use_system_blob(gpu_parameters.system_blob)
             .set_use_render_server(use_render_server);
+
+        #[cfg(windows)]
+        let (gpu_display_wait_descriptor_ctrl_wr, gpu_display_wait_descriptor_ctrl_rd) =
+            Tube::directional_pair().expect("failed to create wait descriptor control pair.");
 
         Gpu {
             exit_evt_wrtube,
@@ -1184,6 +1253,10 @@ impl Gpu {
             base_features,
             udmabuf: gpu_parameters.udmabuf,
             rutabaga_server_descriptor,
+            #[cfg(windows)]
+            gpu_display_wait_descriptor_ctrl_wr,
+            #[cfg(windows)]
+            gpu_display_wait_descriptor_ctrl_rd: Some(gpu_display_wait_descriptor_ctrl_rd),
             capset_mask: gpu_parameters.capset_mask,
             #[cfg(unix)]
             gpu_cgroup_path: gpu_cgroup_path.cloned(),
@@ -1220,6 +1293,10 @@ impl Gpu {
             #[cfg(windows)]
             &mut self.wndproc_thread,
             self.udmabuf,
+            #[cfg(windows)]
+            self.gpu_display_wait_descriptor_ctrl_wr
+                .try_clone()
+                .expect("failed to clone wait context control channel"),
         )
         .map(|vgpu| Frontend::new(vgpu, fence_state))
     }
@@ -1335,12 +1412,15 @@ impl VirtioDevice for Gpu {
                 | 1 << VIRTIO_GPU_F_RESOURCE_UUID
                 | 1 << VIRTIO_GPU_F_RESOURCE_BLOB
                 | 1 << VIRTIO_GPU_F_CONTEXT_INIT
-                | 1 << VIRTIO_GPU_F_EDID
-                | 1 << VIRTIO_GPU_F_RESOURCE_SYNC;
+                | 1 << VIRTIO_GPU_F_EDID;
 
             if self.udmabuf {
                 virtio_gpu_features |= 1 << VIRTIO_GPU_F_CREATE_GUEST_HANDLE;
             }
+
+            // New experimental/unstable feature, not upstreamed.
+            // Safe to enable because guest must explicitly opt-in.
+            virtio_gpu_features |= 1 << VIRTIO_GPU_F_FENCE_PASSING;
         }
 
         self.base_features | virtio_gpu_features
@@ -1404,6 +1484,18 @@ impl VirtioDevice for Gpu {
         #[cfg(windows)]
         let mut wndproc_thread = self.wndproc_thread.take();
 
+        #[cfg(windows)]
+        let gpu_display_wait_descriptor_ctrl_wr = self
+            .gpu_display_wait_descriptor_ctrl_wr
+            .try_clone()
+            .expect("failed to clone wait context ctrl channel");
+
+        #[cfg(windows)]
+        let gpu_display_wait_descriptor_ctrl_rd = self
+            .gpu_display_wait_descriptor_ctrl_rd
+            .take()
+            .expect("failed to take gpu_display_wait_descriptor_ctrl_rd");
+
         #[cfg(unix)]
         let gpu_cgroup_path = self.gpu_cgroup_path.clone();
 
@@ -1452,6 +1544,8 @@ impl VirtioDevice for Gpu {
                 #[cfg(windows)]
                 &mut wndproc_thread,
                 udmabuf,
+                #[cfg(windows)]
+                gpu_display_wait_descriptor_ctrl_wr,
             ) {
                 Some(backend) => backend,
                 None => return,
@@ -1484,6 +1578,8 @@ impl VirtioDevice for Gpu {
                 resource_bridges,
                 kill_evt,
                 state: Frontend::new(virtio_gpu, fence_state),
+                #[cfg(windows)]
+                gpu_display_wait_descriptor_ctrl_rd,
             }
             .run()
         });
@@ -1624,7 +1720,10 @@ impl ResourceBridges {
 #[cfg(windows)]
 #[inline]
 pub fn start_wndproc_thread(
-    vm_tube: Option<Arc<Mutex<Tube>>>,
+    #[cfg(feature = "kiwi")] gpu_main_display_tube: Option<Tube>,
 ) -> anyhow::Result<WindowProcedureThread> {
-    WindowProcedureThread::start_thread(vm_tube)
+    WindowProcedureThread::start_thread(
+        #[cfg(feature = "kiwi")]
+        gpu_main_display_tube,
+    )
 }

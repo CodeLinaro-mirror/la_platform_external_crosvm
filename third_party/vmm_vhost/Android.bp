@@ -66,7 +66,10 @@ rust_library {
         "libthiserror",
         "libzerocopy",
     ],
-    proc_macros: ["libremain"],
+    proc_macros: [
+        "libenumn",
+        "libremain",
+    ],
 }
 
 rust_test {
@@ -100,5 +103,8 @@ rust_test {
         "libthiserror",
         "libzerocopy",
     ],
-    proc_macros: ["libremain"],
+    proc_macros: [
+        "libenumn",
+        "libremain",
+    ],
 }

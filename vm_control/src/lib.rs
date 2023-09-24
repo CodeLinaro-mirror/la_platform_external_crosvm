@@ -26,7 +26,6 @@ use hypervisor::MemRegion;
 #[cfg(feature = "balloon")]
 mod balloon_tube;
 pub mod client;
-pub mod display;
 pub mod sys;
 
 use std::collections::BTreeMap;
@@ -2202,6 +2201,13 @@ impl Display for VmResponse {
             DevicesState(status) => write!(f, "devices status: {:?}", status),
         }
     }
+}
+
+/// Enum that allows remote control of a wait context (used between the Windows GpuDisplay & the
+/// GPU worker).
+#[derive(Serialize, Deserialize)]
+pub enum ModifyWaitContext {
+    Add(#[serde(with = "with_as_descriptor")] Descriptor),
 }
 
 #[sorted]

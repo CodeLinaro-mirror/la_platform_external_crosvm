@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::marker::PhantomPinned;
 use std::os::raw::c_void;
 use std::pin::Pin;
@@ -16,6 +17,7 @@ use anyhow::Result;
 use base::debug;
 use base::error;
 use base::info;
+use base::Tube;
 use linux_input_sys::virtio_input_event;
 #[cfg(feature = "kiwi")]
 use vm_control::ServiceSendToGpu;
@@ -33,7 +35,9 @@ use crate::EventDeviceKind;
 /// The pointer to dispatcher will be stored with HWND using `SetPropW()` with the following name.
 pub(crate) const DISPATCHER_PROPERTY_NAME: &str = "PROP_WND_MSG_DISPATCHER";
 
-/// This class is used to dispatch display events to the guest device.
+/// This class is used to dispatch input events from the display to the guest input device. It is
+/// also used to receive events from the input device (e.g. guest) on behalf of the window so they
+/// can be routed back to the window for processing.
 #[derive(Clone)]
 pub struct DisplayEventDispatcher {
     event_devices: Rc<RefCell<BTreeMap<ObjectId, EventDevice>>>,
@@ -59,6 +63,25 @@ impl DisplayEventDispatcher {
         }
     }
 
+    pub fn read_from_device(
+        &self,
+        event_device_id: ObjectId,
+    ) -> Option<(EventDeviceKind, virtio_input_event)> {
+        if let Some(device) = self.event_devices.borrow_mut().get(&event_device_id) {
+            match device.recv_event_encoded() {
+                Ok(event) => return Some((device.kind(), event)),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return None,
+                Err(e) => error!("failed to read from event device: {:?}", e),
+            }
+        } else {
+            error!(
+                "notified to read from event device {:?} but do not have a device with that ID",
+                event_device_id
+            );
+        }
+        None
+    }
+
     fn import_event_device(&mut self, event_device_id: ObjectId, event_device: EventDevice) {
         info!("Importing {:?} (ID: {:?})", event_device, event_device_id);
         self.event_devices
@@ -80,6 +103,7 @@ impl Default for DisplayEventDispatcher {
 pub(crate) struct WindowMessageDispatcher<T: HandleWindowMessage> {
     message_processor: Option<WindowMessageProcessor<T>>,
     display_event_dispatcher: DisplayEventDispatcher,
+    gpu_main_display_tube: Option<Rc<Tube>>,
     // The dispatcher is pinned so that its address in the memory won't change, and it is always
     // safe to use the pointer to it stored in the window.
     _pinned_marker: PhantomPinned,
@@ -90,10 +114,14 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
     /// of the `Window` object, and drop it before the underlying window is completely gone.
     /// TODO(b/238680252): This should be good enough for supporting multi-windowing, but we should
     /// revisit it if we also want to manage some child windows of the crosvm window.
-    pub fn create(window: Window) -> Result<Pin<Box<Self>>> {
+    pub fn create(
+        window: Window,
+        gpu_main_display_tube: Option<Rc<Tube>>,
+    ) -> Result<Pin<Box<Self>>> {
         let mut dispatcher = Box::pin(Self {
             message_processor: Default::default(),
             display_event_dispatcher: DisplayEventDispatcher::new(),
+            gpu_main_display_tube,
             _pinned_marker: PhantomPinned,
         });
         dispatcher
@@ -103,8 +131,17 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
         Ok(dispatcher)
     }
 
+    #[cfg(feature = "kiwi")]
+    pub fn process_service_message(self: Pin<&mut Self>, message: &ServiceSendToGpu) {
+        // Safe because we won't move the dispatcher out of the returned mutable reference.
+        match unsafe { self.get_unchecked_mut().message_processor.as_mut() } {
+            Some(processor) => processor.handle_service_message(message),
+            None => error!("Cannot handle service message because there is no message processor!"),
+        }
+    }
+
     pub fn process_thread_message(self: Pin<&mut Self>, packet: &MessagePacket) {
-        // Safe because we won't move the dispatcher out of it.
+        // Safe because we won't move the dispatcher out of the returned mutable reference.
         unsafe {
             self.get_unchecked_mut()
                 .process_thread_message_internal(packet);
@@ -158,18 +195,6 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
             l_param,
         } = *packet;
         match msg {
-            #[cfg(feature = "kiwi")]
-            WM_USER_HANDLE_SERVICE_MESSAGE_INTERNAL => {
-                // Safe because the sender gives up the ownership and expects the receiver to
-                // destruct the message.
-                let message = unsafe { Box::from_raw(l_param as *mut ServiceSendToGpu) };
-                match &mut self.message_processor {
-                    Some(processor) => processor.handle_service_message(&*message),
-                    None => error!(
-                        "Cannot handle service message because there is no message processor!"
-                    ),
-                }
-            }
             WM_USER_HANDLE_DISPLAY_MESSAGE_INTERNAL => {
                 // Safe because the sender gives up the ownership and expects the receiver to
                 // destruct the message.
@@ -207,6 +232,25 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
                 self.display_event_dispatcher
                     .import_event_device(event_device_id, event_device);
             }
+            DisplaySendToWndProc::HandleEventDevice(event_device_id) => {
+                self.handle_event_device(event_device_id)
+            }
+        }
+    }
+
+    fn handle_event_device(&mut self, event_device_id: ObjectId) {
+        match &mut self.message_processor {
+            Some(processor) => {
+                if let Some((kind, event)) = self
+                    .display_event_dispatcher
+                    .read_from_device(event_device_id)
+                {
+                    processor.handle_event_device(kind, event);
+                }
+            }
+            None => {
+                error!("Cannot handle event device because there is no message processor!")
+            }
         }
     }
 
@@ -216,12 +260,16 @@ impl<T: HandleWindowMessage> WindowMessageDispatcher<T> {
         create_handler_func: CreateMessageHandlerFunction<T>,
     ) -> bool {
         match &mut self.message_processor {
-            Some(processor) => match processor
-                .create_message_handler(create_handler_func, self.display_event_dispatcher.clone())
-            {
-                Ok(_) => return true,
-                Err(e) => error!("Failed to create message handler: {:?}", e),
-            },
+            Some(processor) => {
+                let resources = MessageHandlerResources {
+                    display_event_dispatcher: self.display_event_dispatcher.clone(),
+                    gpu_main_display_tube: self.gpu_main_display_tube.clone(),
+                };
+                match processor.create_message_handler(create_handler_func, resources) {
+                    Ok(_) => return true,
+                    Err(e) => error!("Failed to create message handler: {:?}", e),
+                }
+            }
             None => {
                 error!("Cannot create message handler because there is no message processor!")
             }

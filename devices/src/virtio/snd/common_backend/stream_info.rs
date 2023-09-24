@@ -5,15 +5,19 @@
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use audio_streams::SampleFormat;
 use audio_streams::StreamEffect;
 use base::error;
+use cros_async::sync::Condvar;
 use cros_async::sync::RwLock as AsyncRwLock;
 use cros_async::Executor;
 use futures::channel::mpsc;
 use futures::Future;
 use futures::TryFutureExt;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::Error;
 use super::PcmResponse;
@@ -97,7 +101,21 @@ pub struct StreamInfo {
     pub status_mutex: Rc<AsyncRwLock<WorkerStatus>>,
     pub sender: Option<mpsc::UnboundedSender<DescriptorChain>>,
     worker_future: Option<Box<dyn Future<Output = Result<(), Error>> + Unpin>>,
+    release_signal: Option<Rc<(AsyncRwLock<bool>, Condvar)>>, // Signal worker on release
     ex: Option<Executor>, // Executor provided on `prepare()`. Used on `drop()`.
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StreamInfoSnapshot {
+    pub(crate) channels: u8,
+    pub(crate) format: SampleFormat,
+    pub(crate) frame_rate: u32,
+    buffer_bytes: usize,
+    pub(crate) period_bytes: usize,
+    direction: u8,  // VIRTIO_SND_D_*
+    pub state: u32, // VIRTIO_SND_R_PCM_SET_PARAMS -> VIRTIO_SND_R_PCM_STOP, or 0 (uninitialized)
+    effects: Vec<StreamEffect>,
+    pub just_reset: bool,
 }
 
 impl fmt::Debug for StreamInfo {
@@ -153,6 +171,7 @@ impl From<StreamInfoBuilder> for StreamInfo {
             status_mutex: Rc::new(AsyncRwLock::new(WorkerStatus::Pause)),
             sender: None,
             worker_future: None,
+            release_signal: None,
             ex: None,
         }
     }
@@ -291,12 +310,19 @@ impl StreamInfo {
         self.state = VIRTIO_SND_R_PCM_PREPARE;
 
         self.status_mutex = Rc::new(AsyncRwLock::new(WorkerStatus::Pause));
+        let period_dur = Duration::from_secs_f64(
+            self.period_bytes as f64 / frame_size as f64 / self.frame_rate as f64,
+        );
+        let release_signal = Rc::new((AsyncRwLock::new(false), Condvar::new()));
+        self.release_signal = Some(release_signal.clone());
         let f = start_pcm_worker(
             ex.clone(),
             stream,
             receiver,
             self.status_mutex.clone(),
             pcm_sender,
+            period_dur,
+            release_signal,
         );
         self.worker_future = Some(Box::new(ex.spawn_local(f).into_future()));
         self.ex = Some(ex.clone());
@@ -369,11 +395,44 @@ impl StreamInfo {
         if let Some(s) = self.sender.take() {
             s.close_channel();
         }
+
+        if let Some(release_signal) = self.release_signal.take() {
+            let (lock, cvar) = &*release_signal;
+            let mut signalled = lock.lock().await;
+            *signalled = true;
+            cvar.notify_all();
+        }
+
         if let Some(f) = self.worker_future.take() {
             f.await?;
         }
         self.ex.take(); // Remove ex as the worker is finished
         Ok(())
+    }
+
+    pub fn snapshot(&self) -> StreamInfoSnapshot {
+        StreamInfoSnapshot {
+            channels: self.channels,
+            format: self.format,
+            frame_rate: self.frame_rate,
+            buffer_bytes: self.buffer_bytes,
+            period_bytes: self.period_bytes,
+            direction: self.direction, // VIRTIO_SND_D_*
+            state: self.state, // VIRTIO_SND_R_PCM_SET_PARAMS -> VIRTIO_SND_R_PCM_STOP, or 0 (uninitialized)
+            effects: self.effects.clone(),
+            just_reset: self.just_reset,
+        }
+    }
+
+    pub fn restore(&mut self, state: &StreamInfoSnapshot) {
+        self.channels = state.channels;
+        self.format = state.format;
+        self.frame_rate = state.frame_rate;
+        self.buffer_bytes = state.buffer_bytes;
+        self.period_bytes = state.period_bytes;
+        self.direction = state.direction;
+        self.effects = state.effects.clone();
+        self.just_reset = state.just_reset;
     }
 }
 

@@ -193,8 +193,6 @@ use vm_memory::GuestMemory;
 use vm_memory::MemoryPolicy;
 use vm_memory::MemoryRegionOptions;
 #[cfg(target_arch = "x86_64")]
-use x86_64::msr::get_override_msr_list;
-#[cfg(target_arch = "x86_64")]
 use x86_64::X8664arch as Arch;
 
 use crate::crosvm::config::Config;
@@ -1150,6 +1148,9 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         }
     }
 
+    // if --enable-fw-cfg or --fw-cfg was given, we want to enable fw_cfg
+    let fw_cfg_enable = cfg.enable_fw_cfg || !cfg.fw_cfg_parameters.is_empty();
+
     Ok(VmComponents {
         #[cfg(target_arch = "x86_64")]
         ac_adapter: cfg.ac_adapter,
@@ -1159,6 +1160,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .checked_mul(1024 * 1024)
             .ok_or_else(|| anyhow!("requested memory size too large"))?,
         swiotlb,
+        fw_cfg_enable,
         bootorder_fw_cfg_blob: Vec::new(),
         vcpu_count: cfg.vcpu_count.unwrap_or(1),
         vcpu_affinity: cfg.vcpu_affinity.clone(),
@@ -1375,15 +1377,6 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
     if cfg.itmt {
         vm.set_platform_info_read_access(false)
             .context("failed to disable MSR_PLATFORM_INFO read access")?;
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    if !cfg.userspace_msr.is_empty() {
-        vm.enable_userspace_msr()
-            .context("failed to enable userspace MSR handling, do you have kernel 5.10 or later")?;
-        let msr_list = get_override_msr_list(&cfg.userspace_msr);
-        vm.set_msr_filter(msr_list)
-            .context("failed to set msr filter")?;
     }
 
     // Check that the VM was actually created in protected mode as expected.
@@ -1870,6 +1863,10 @@ where
 
     components.bootorder_fw_cfg_blob = bootorder_fw_cfg_blob;
 
+    // if the bootindex argument was given, we want to make sure that fw_cfg is enabled so the
+    // "bootorder" file can be accessed by the guest.
+    components.fw_cfg_enable |= components.bootorder_fw_cfg_blob.len() > 1;
+
     let (translate_response_senders, request_rx) = setup_virtio_access_platform(
         &mut sys_allocator,
         &mut iommu_attached_endpoints,
@@ -1963,6 +1960,8 @@ where
         simple_jail(&cfg.jail_config, "serial_device")?,
         #[cfg(target_arch = "x86_64")]
         simple_jail(&cfg.jail_config, "block_device")?,
+        #[cfg(target_arch = "x86_64")]
+        simple_jail(&cfg.jail_config, "fw_cfg_device")?,
         #[cfg(feature = "swap")]
         &mut swap_controller,
         guest_suspended_cvar.clone(),
@@ -2871,7 +2870,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             cfg.force_calibrated_tsc_leaf,
             cfg.host_cpu_topology,
             cfg.enable_hwp,
-            cfg.enable_pnp_data,
             cfg.no_smt,
             cfg.itmt,
             vcpu_hybrid_type,
@@ -2900,7 +2898,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             vcpu_affinity,
             linux.delay_rt,
             vcpu_thread_barrier.clone(),
-            linux.has_bios,
             (*linux.io_bus).clone(),
             (*linux.mmio_bus).clone(),
             vm_evt_wrtube
@@ -2919,8 +2916,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                         .context("failed to clone vcpu cgroup tasks file")?,
                 ),
             },
-            #[cfg(target_arch = "x86_64")]
-            cfg.userspace_msr.clone(),
             #[cfg(all(target_arch = "x86_64", unix))]
             bus_lock_ratelimit_ctrl,
             run_mode,

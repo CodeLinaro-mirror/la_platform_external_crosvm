@@ -26,6 +26,7 @@ PRODUCT_PACKAGES += \
     coiommu_device.policy \
     cras_audio_device.policy \
     fs_device.policy \
+    fw_cfg_device.policy \
     gpu_device.policy \
     gpu_render_server.policy \
     input_device.policy \
@@ -42,6 +43,7 @@ PRODUCT_PACKAGES += \
     tpm_device.policy \
     vfio_device.policy \
     vhost_net_device.policy \
+    vhost_scmi_device.policy \
     vhost_vsock_device.policy \
     video_device.policy \
     vios_audio_device.policy \
@@ -61,6 +63,7 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/etc/seccomp_policy/crosvm/coiommu_device.policy \
     system/etc/seccomp_policy/crosvm/cras_audio_device.policy \
     system/etc/seccomp_policy/crosvm/fs_device.policy \
+    system/etc/seccomp_policy/crosvm/fw_cfg_device.policy \
     system/etc/seccomp_policy/crosvm/gpu_device.policy \
     system/etc/seccomp_policy/crosvm/gpu_render_server.policy \
     system/etc/seccomp_policy/crosvm/input_device.policy \
@@ -77,6 +80,7 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/etc/seccomp_policy/crosvm/tpm_device.policy \
     system/etc/seccomp_policy/crosvm/vfio_device.policy \
     system/etc/seccomp_policy/crosvm/vhost_net_device.policy \
+    system/etc/seccomp_policy/crosvm/vhost_scmi_device.policy \
     system/etc/seccomp_policy/crosvm/vhost_vsock_device.policy \
     system/etc/seccomp_policy/crosvm/video_device.policy \
     system/etc/seccomp_policy/crosvm/vios_audio_device.policy \

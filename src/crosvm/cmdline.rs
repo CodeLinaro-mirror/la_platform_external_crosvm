@@ -23,8 +23,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use arch::CpuSet;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrConfig;
 use arch::Pstore;
 #[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
@@ -77,7 +75,6 @@ use crate::crosvm::config::parse_bus_id_addr;
 use crate::crosvm::config::parse_cpu_affinity;
 use crate::crosvm::config::parse_cpu_capacity;
 use crate::crosvm::config::parse_dynamic_power_coefficient;
-use crate::crosvm::config::parse_fw_cfg_options;
 #[cfg(target_arch = "x86_64")]
 use crate::crosvm::config::parse_memory_region;
 use crate::crosvm::config::parse_mmio_address_range;
@@ -85,8 +82,6 @@ use crate::crosvm::config::parse_pflash_parameters;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::parse_plugin_mount_option;
 use crate::crosvm::config::parse_serial_options;
-#[cfg(target_arch = "x86_64")]
-use crate::crosvm::config::parse_userspace_msr_options;
 use crate::crosvm::config::BatteryConfig;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::BindMount;
@@ -1181,14 +1176,16 @@ pub struct RunCommand {
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// expose HWP feature to the guest
-    pub enable_hwp: Option<bool>,
+    /// enable the fw_cfg device. If enabled, fw_cfg will automatically produce firmware
+    /// configuration files containing such information as bootorder and the memory location of
+    /// rsdp. If --fw-cfg is specified (see below), there is no need for this argument.
+    pub enable_fw_cfg: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// expose Power and Perfomance (PnP) data to guest and guest can show these PnP data
-    pub enable_pnp_data: Option<bool>,
+    /// expose HWP feature to the guest
+    pub enable_hwp: Option<bool>,
 
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1230,11 +1227,7 @@ pub struct RunCommand {
     /// doesn't require one.
     pub force_calibrated_tsc_leaf: Option<bool>,
 
-    #[argh(
-        option,
-        arg_name = "[name=NAME,path=PATH,string=STRING]",
-        from_str_fn(parse_fw_cfg_options)
-    )]
+    #[argh(option, arg_name = "name=NAME,(path=PATH|string=STRING)")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = append)]
     /// comma separated key=value pairs to specify data to pass to
@@ -1244,7 +1237,7 @@ pub struct RunCommand {
     ///      be associated with provided data
     ///     path - Path to data that will be included in
     ///      fw_cfg under name
-    ///     string - Alternative to path, data to be in
+    ///     string - Alternative to path, data to be
     ///      included in fw_cfg under name
     pub fw_cfg: Vec<FwCfgParameters>,
 
@@ -2133,24 +2126,6 @@ pub struct RunCommand {
     /// (EXPERIMENTAL/FOR DEBUGGING) Use VM firmware, but allow host access to guest memory
     pub unprotected_vm_with_firmware: Option<PathBuf>,
 
-    #[cfg(target_arch = "x86_64")]
-    #[argh(
-        option,
-        arg_name = "INDEX,type=TYPE,action=ACTION,[from=FROM],[filter=FILTER]",
-        from_str_fn(parse_userspace_msr_options)
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = append)]
-    /// userspace MSR handling. Takes INDEX of the MSR and how they
-    ///  are handled.
-    ///     type=(r|w|rw|wr) - read/write permission control.
-    ///     action=(pass|emu) - if the control of msr is effective
-    ///        on host.
-    ///     from=(cpu0) - source of msr value. if not set, the
-    ///        source is running CPU.
-    ///     filter=(yes|no) - if the msr is filtered in KVM.
-    pub userspace_msr: Vec<(u32, MsrConfig)>,
-
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -2712,6 +2687,12 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
         cfg.pstore = cmd.pstore;
 
+        cfg.enable_fw_cfg = if let Some(fw) = cmd.enable_fw_cfg {
+            fw
+        } else {
+            false
+        };
+
         cfg.fw_cfg_parameters = cmd.fw_cfg;
 
         #[cfg(unix)]
@@ -3138,12 +3119,6 @@ impl TryFrom<RunCommand> for super::config::Config {
                 );
                 cfg.smbios.oem_strings.extend_from_slice(&cmd.oem_strings);
             }
-
-            for (index, msr_config) in cmd.userspace_msr {
-                if cfg.userspace_msr.insert(index, msr_config).is_some() {
-                    return Err(String::from("msr must be unique"));
-                }
-            }
         }
 
         #[cfg(feature = "pci-hotplug")]
@@ -3171,18 +3146,6 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.dump_device_tree_blob = cmd.dump_device_tree_blob;
 
         cfg.itmt = cmd.itmt.unwrap_or_default();
-
-        #[cfg(target_arch = "x86_64")]
-        if cmd.enable_pnp_data.unwrap_or_default()
-            && cmd.force_calibrated_tsc_leaf.unwrap_or_default()
-        {
-            return Err(
-                "Only one of [enable_pnp_data,force_calibrated_tsc_leaf] can be specified"
-                    .to_string(),
-            );
-        }
-
-        cfg.enable_pnp_data = cmd.enable_pnp_data.unwrap_or_default();
 
         #[cfg(target_arch = "x86_64")]
         {

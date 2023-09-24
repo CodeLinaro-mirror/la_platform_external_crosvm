@@ -13,16 +13,6 @@ use std::str::FromStr;
 
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrAction;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrConfig;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrFilter;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrRWType;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrValueFrom;
 use arch::Pstore;
 #[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
@@ -63,8 +53,6 @@ use uuid::Uuid;
 use vm_control::BatteryType;
 #[cfg(target_arch = "x86_64")]
 use x86_64::check_host_hybrid_support;
-#[cfg(target_arch = "x86_64")]
-use x86_64::set_enable_pnp_data_msr_config;
 #[cfg(target_arch = "x86_64")]
 use x86_64::CpuIdCall;
 
@@ -438,67 +426,6 @@ pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
         .collect()
 }
 
-#[cfg(target_arch = "x86_64")]
-#[derive(Deserialize, Serialize, serde_keyvalue::FromKeyValues)]
-#[serde(deny_unknown_fields)]
-struct UserspaceMsrOptions {
-    pub index: u32,
-    #[serde(rename = "type")]
-    pub rw_type: MsrRWType,
-    pub action: MsrAction,
-    #[serde(default = "default_msr_value_from")]
-    pub from: MsrValueFrom,
-    #[serde(default = "default_msr_filter")]
-    pub filter: MsrFilter,
-}
-
-#[cfg(target_arch = "x86_64")]
-fn default_msr_value_from() -> MsrValueFrom {
-    MsrValueFrom::RWFromRunningCPU
-}
-
-#[cfg(target_arch = "x86_64")]
-fn default_msr_filter() -> MsrFilter {
-    MsrFilter::Default
-}
-
-#[cfg(target_arch = "x86_64")]
-pub fn parse_userspace_msr_options(value: &str) -> Result<(u32, MsrConfig), String> {
-    let options: UserspaceMsrOptions = from_key_values(value)?;
-
-    Ok((
-        options.index,
-        MsrConfig {
-            rw_type: options.rw_type,
-            action: options.action,
-            from: options.from,
-            filter: options.filter,
-        },
-    ))
-}
-
-pub fn validate_fw_cfg_parameters(params: &FwCfgParameters) -> Result<(), String> {
-    if params.name.is_none() && (params.string.is_some() || params.path.is_some()) {
-        return Err("Must give name of data to --fw-cfg".to_string());
-    }
-
-    if params.string.is_some() && params.path.is_some()
-        || params.name.is_some() && params.string.is_none() && params.path.is_none()
-    {
-        return Err("Provide exactly one of string or path args to --fw-cfg".to_string());
-    }
-
-    Ok(())
-}
-
-pub fn parse_fw_cfg_options(s: &str) -> Result<FwCfgParameters, String> {
-    let params: FwCfgParameters = from_key_values(s)?;
-
-    validate_fw_cfg_parameters(&params)?;
-
-    Ok(params)
-}
-
 pub fn validate_serial_parameters(params: &SerialParameters) -> Result<(), String> {
     if params.stdin && params.input.is_some() {
         return Err("Cannot specify both stdin and input options".to_string());
@@ -827,8 +754,8 @@ pub struct Config {
     pub display_window_mouse: bool,
     pub dump_device_tree_blob: Option<PathBuf>,
     pub dynamic_power_coefficient: BTreeMap<usize, u32>,
+    pub enable_fw_cfg: bool,
     pub enable_hwp: bool,
-    pub enable_pnp_data: bool,
     pub executable_path: Option<Executable>,
     #[cfg(windows)]
     pub exit_stats: bool,
@@ -940,8 +867,6 @@ pub struct Config {
     #[cfg(unix)]
     pub unmap_guest_memory_on_fork: bool,
     pub usb: bool,
-    #[cfg(target_arch = "x86_64")]
-    pub userspace_msr: BTreeMap<u32, MsrConfig>,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_cgroup_path: Option<PathBuf>,
     pub vcpu_count: Option<usize>,
@@ -1030,8 +955,8 @@ impl Default for Config {
             display_window_mouse: false,
             dump_device_tree_blob: None,
             dynamic_power_coefficient: BTreeMap::new(),
+            enable_fw_cfg: false,
             enable_hwp: false,
-            enable_pnp_data: false,
             executable_path: None,
             #[cfg(windows)]
             exit_stats: false,
@@ -1144,8 +1069,6 @@ impl Default for Config {
             #[cfg(unix)]
             unmap_guest_memory_on_fork: false,
             usb: true,
-            #[cfg(target_arch = "x86_64")]
-            userspace_msr: BTreeMap::new(),
             vcpu_affinity: None,
             vcpu_cgroup_path: None,
             vcpu_count: None,
@@ -1252,19 +1175,6 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
                 );
             }
         }
-    } else {
-        // TODO(b/215297064): Support generic cpuaffinity if there's a need.
-        #[cfg(target_arch = "x86_64")]
-        if !cfg.userspace_msr.is_empty() {
-            for (_, msr_config) in cfg.userspace_msr.iter() {
-                if msr_config.from == MsrValueFrom::RWFromRunningCPU {
-                    return Err(
-                        "`userspace-msr` must set `cpu0` if `host-cpu-topology` is not set"
-                            .to_string(),
-                    );
-                }
-            }
-        }
     }
     if cfg.virt_cpufreq {
         if !cfg.host_cpu_topology && (cfg.vcpu_affinity.is_none() || cfg.cpu_capacity.is_empty()) {
@@ -1292,18 +1202,6 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
     #[cfg(target_arch = "x86_64")]
     if cfg.enable_hwp && !cfg.host_cpu_topology {
         return Err("setting `enable-hwp` requires `host-cpu-topology` is set.".to_string());
-    }
-    if cfg.enable_pnp_data {
-        if !cfg.host_cpu_topology {
-            return Err(
-                "setting `enable_pnp_data` must require `host-cpu-topology` is set previously."
-                    .to_string(),
-            );
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        set_enable_pnp_data_msr_config(&mut cfg.userspace_msr)
-            .map_err(|e| format!("MSR can't be passed through {}", e))?;
     }
     #[cfg(target_arch = "x86_64")]
     if cfg.itmt {
@@ -1893,33 +1791,37 @@ mod tests {
     }
 
     #[test]
-    fn parse_fw_cfg_valid_no_params() {
-        assert!(TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(&[], &["--fw-cfg", "", "/dev/null"],)
-                .unwrap()
+    fn parse_fw_cfg_valid_path() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--fw-cfg", "name=bar,path=data.bin", "/dev/null"],
+            )
+            .unwrap(),
         )
-        .is_ok());
+        .unwrap();
+
+        assert_eq!(cfg.fw_cfg_parameters.len(), 1);
+        assert_eq!(cfg.fw_cfg_parameters[0].name, "bar".to_string());
+        assert_eq!(cfg.fw_cfg_parameters[0].string, None);
+        assert_eq!(cfg.fw_cfg_parameters[0].path, Some("data.bin".into()));
     }
 
     #[test]
     fn parse_fw_cfg_valid_string() {
-        assert!(TryInto::<Config>::try_into(
+        let cfg = TryInto::<Config>::try_into(
             crate::crosvm::cmdline::RunCommand::from_args(
                 &[],
                 &["--fw-cfg", "name=bar,string=foo", "/dev/null"],
             )
-            .unwrap()
+            .unwrap(),
         )
-        .is_ok());
-    }
+        .unwrap();
 
-    #[test]
-    fn parse_fw_cfg_invalid_both_string_and_path() {
-        assert!(crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &["--fw-cfg", "name=bar,string=foo,path=path/to/file",]
-        )
-        .is_err());
+        assert_eq!(cfg.fw_cfg_parameters.len(), 1);
+        assert_eq!(cfg.fw_cfg_parameters[0].name, "bar".to_string());
+        assert_eq!(cfg.fw_cfg_parameters[0].string, Some("foo".to_string()));
+        assert_eq!(cfg.fw_cfg_parameters[0].path, None);
     }
 
     #[test]
@@ -1928,46 +1830,6 @@ mod tests {
             crate::crosvm::cmdline::RunCommand::from_args(&[], &["--fw-cfg", "string=foo",])
                 .is_err()
         );
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn parse_userspace_msr_options_test() {
-        let (pass_cpu0_index, pass_cpu0_cfg) =
-            parse_userspace_msr_options("0x10,type=w,action=pass,filter=yes").unwrap();
-        assert_eq!(pass_cpu0_index, 0x10);
-        assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::WriteOnly);
-        assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
-        assert_eq!(pass_cpu0_cfg.filter, MsrFilter::Override);
-
-        let (pass_cpu0_index, pass_cpu0_cfg) =
-            parse_userspace_msr_options("0x10,type=r,action=pass,from=cpu0").unwrap();
-        assert_eq!(pass_cpu0_index, 0x10);
-        assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::ReadOnly);
-        assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
-        assert_eq!(pass_cpu0_cfg.from, MsrValueFrom::RWFromCPU0);
-
-        let (pass_cpus_index, pass_cpus_cfg) =
-            parse_userspace_msr_options("0x10,type=rw,action=pass").unwrap();
-        assert_eq!(pass_cpus_index, 0x10);
-        assert_eq!(pass_cpus_cfg.rw_type, MsrRWType::ReadWrite);
-        assert_eq!(pass_cpus_cfg.action, MsrAction::MsrPassthrough);
-        assert_eq!(pass_cpus_cfg.from, MsrValueFrom::RWFromRunningCPU);
-
-        let (pass_cpus_index, pass_cpus_cfg) =
-            parse_userspace_msr_options("0x10,type=rw,action=emu").unwrap();
-        assert_eq!(pass_cpus_index, 0x10);
-        assert_eq!(pass_cpus_cfg.rw_type, MsrRWType::ReadWrite);
-        assert_eq!(pass_cpus_cfg.action, MsrAction::MsrEmulate);
-        assert_eq!(pass_cpus_cfg.from, MsrValueFrom::RWFromRunningCPU);
-
-        assert!(parse_userspace_msr_options("0x10,action=none").is_err());
-        assert!(parse_userspace_msr_options("0x10,action=pass").is_err());
-        assert!(parse_userspace_msr_options("0x10,type=none").is_err());
-        assert!(parse_userspace_msr_options("0x10,type=rw").is_err());
-        assert!(parse_userspace_msr_options("0x10,type=w,action=pass,from=f").is_err());
-        assert!(parse_userspace_msr_options("0x10").is_err());
-        assert!(parse_userspace_msr_options("hoge").is_err());
     }
 
     #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
