@@ -50,10 +50,8 @@ VIRTIO_IDS_EXTRAS="
 //! from 63) are nonstandard and not defined by the virtio specification.
 
 // Added by virtio_sys/bindgen.sh - do not edit the generated file.
-// TODO(abhishekbh): Fix this after this device is accepted upstream.
-pub const VIRTIO_ID_VHOST_USER: u32 = 61;
 // TODO(b/236144983): Fix this id when an official virtio-id is assigned to this device.
-pub const VIRTIO_ID_PVCLOCK: u32 = 60;
+pub const VIRTIO_ID_PVCLOCK: u32 = 61;
 "
 
 bindgen_generate \
@@ -120,3 +118,23 @@ bindgen_generate \
     | replace_linux_int_types \
     | replace_linux_endian_types \
     > virtio_sys/src/virtio_vsock.rs
+
+VIRTIO_SCSI_EXTRA="// Added by virtio_sys/bindgen.sh
+use zerocopy::AsBytes;
+use zerocopy::FromBytes;"
+
+bindgen_generate \
+    --raw-line "${VIRTIO_SCSI_EXTRA}" \
+    --allowlist-var='VIRTIO_SCSI_.*' \
+    --allowlist-type='virtio_scsi_.*' \
+    --blocklist-type='virtio_scsi_cmd_req_pi' \
+    --blocklist-type='virtio_scsi_ctrl_.*' \
+    --with-derive-custom "virtio_scsi_config=FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_cmd_req=FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_cmd_resp=FromBytes,AsBytes" \
+    "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_scsi.h" \
+    -- \
+    -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
+    | replace_linux_int_types \
+    | replace_linux_endian_types \
+    > virtio_sys/src/virtio_scsi.rs

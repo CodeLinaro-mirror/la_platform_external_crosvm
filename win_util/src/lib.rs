@@ -56,11 +56,10 @@ pub use crate::dll_notification::*;
 #[macro_export]
 macro_rules! syscall_bail {
     ($details:expr) => {
-        ::anyhow::bail!(
-            "{} (Error code {})",
-            $details,
+        // SAFETY: Safe because GetLastError is thread safe and won't access the memory.
+        ::anyhow::bail!("{} (Error code {})", $details, unsafe {
             ::winapi::um::errhandlingapi::GetLastError()
-        )
+        })
     };
 }
 
@@ -193,7 +192,7 @@ pub fn duplicate_handle(hndl: RawHandle) -> io::Result<RawHandle> {
 
 /// Sets whether a handle is inheritable. Note that this only works on some types of handles,
 /// such as files, pipes, etc. See
-/// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-sethandleinformation#parameters
+/// <https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-sethandleinformation#parameters>
 /// for further details.
 pub fn set_handle_inheritance(hndl: RawHandle, inheritable: bool) -> io::Result<()> {
     // Safe because even if hndl is invalid, no unsafe memory access will result.

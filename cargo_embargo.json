@@ -29,6 +29,7 @@
     "cros_fuzz",
     "crosvm-fuzz",
     "crosvm_plugin",
+    "delegate",
     "e2e_tests",
     "ffmpeg",
     "fixture",

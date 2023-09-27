@@ -87,6 +87,7 @@ pub use self::queue::split_descriptor_chain::SplitDescriptorChain;
 pub use self::queue::Queue;
 pub use self::queue::QueueConfig;
 pub use self::rng::Rng;
+pub use self::scsi::Device as ScsiDevice;
 #[cfg(any(feature = "tpm", feature = "vtpm"))]
 pub use self::tpm::Tpm;
 #[cfg(any(feature = "tpm", feature = "vtpm"))]
@@ -173,7 +174,6 @@ pub enum DeviceType {
     Wl = virtio_ids::VIRTIO_ID_WL,
     Tpm = virtio_ids::VIRTIO_ID_TPM,
     Pvclock = virtio_ids::VIRTIO_ID_PVCLOCK,
-    VhostUser = virtio_ids::VIRTIO_ID_VHOST_USER,
 }
 
 /// Prints a string representation of the given virtio device type.
@@ -195,7 +195,6 @@ impl std::fmt::Display for DeviceType {
             DeviceType::Vsock => write!(f, "vsock"),
             DeviceType::Crypto => write!(f, "crypto"),
             DeviceType::Iommu => write!(f, "iommu"),
-            DeviceType::VhostUser => write!(f, "vhost-user"),
             DeviceType::Sound => write!(f, "snd"),
             DeviceType::Fs => write!(f, "fs"),
             DeviceType::Pmem => write!(f, "pmem"),
