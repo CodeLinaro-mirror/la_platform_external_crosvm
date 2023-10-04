@@ -2698,6 +2698,7 @@ dependencies = [
  "libc",
  "remain",
  "static_assertions",
+ "sync",
  "thiserror",
  "usb_sys",
  "zerocopy",
