@@ -8,6 +8,8 @@ includedir = ${prefix}/include/rutabaga_gfx
 
 UNAME := $(shell uname -s)
 
+GFXSTREAM_DEP = gfxstream_backend
+
 ifdef debug
   release :=
   target :=debug
@@ -20,6 +22,7 @@ else
   OUT = target/release
 endif
 
+# Remember to change ffi/build.rs if this changes.
 RUTABAGA_VERSION_MAJOR := 0
 SRC ?= src
 
@@ -31,22 +34,29 @@ ifeq ($(UNAME), Darwin)
 LIB_NAME := librutabaga_gfx_ffi.dylib
 endif
 
+gfxstream_feature :=
+ifeq ($(shell pkg-config --exists $(GFXSTREAM_DEP) && echo 1),1)
+    gfxstream_feature :=--features=gfxstream
+endif
+
 RUTABAGA_VERSION := $(RUTABAGA_VERSION_MAJOR).1.2
 
 all: build
 
 build:
-	cargo build --features=gfxstream $(release)
+	cargo build $(gfxstream_feature) $(release)
 
 install: build
 ifeq ($(UNAME), Linux)
-	install -D -m 755 -t $(DESTDIR)$(libdir) $(OUT)/$(LIB_NAME)
+	install -D -m 755 $(OUT)/$(LIB_NAME) $(DESTDIR)$(libdir)/$(LIB_NAME).$(RUTABAGA_VERSION)
 endif
 ifeq ($(UNAME), Darwin)
-        install_name_tool -id $(DESTDIR)$(libdir)/$(LIB_NAME) $(DESTDIR)$(libdir)/$(LIB_NAME)
+	install_name_tool -id $(DESTDIR)$(libdir)/$(LIB_NAME).$(RUTABAGA_VERSION) $(DESTDIR)$(libdir)/$(LIB_NAME)
 endif
-	ln -sf $(DESTDIR)$(libdir)/$(LIB_NAME) $(DESTDIR)$(libdir)/$(LIB_NAME).$(RUTABAGA_VERSION)
-	ln -sf $(DESTDIR)$(libdir)/$(LIB_NAME) $(DESTDIR)$(libdir)/$(LIB_NAME).$(RUTABAGA_VERSION_MAJOR)
+
+	ln -sf $(LIB_NAME).$(RUTABAGA_VERSION) $(DESTDIR)$(libdir)/$(LIB_NAME).$(RUTABAGA_VERSION_MAJOR)
+	ln -sf $(LIB_NAME).$(RUTABAGA_VERSION) $(DESTDIR)$(libdir)/$(LIB_NAME)
+
 ifeq ($(UNAME), Linux)
 	install -D -m 0644 $(SRC)/share/rutabaga_gfx_ffi.pc $(DESTDIR)$(libdir)/pkgconfig/rutabaga_gfx_ffi.pc
 	install -D -m 0644 $(SRC)/include/rutabaga_gfx_ffi.h $(DESTDIR)$(includedir)/rutabaga_gfx_ffi.h

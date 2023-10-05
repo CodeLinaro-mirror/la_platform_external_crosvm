@@ -116,7 +116,6 @@ pub use self::pci::PciVirtualConfigMmio;
 pub use self::pci::PreferredIrq;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci::ResourceCarrier;
-
 pub use self::pci::StubPciDevice;
 pub use self::pci::StubPciParameters;
 pub use self::pflash::Pflash;
@@ -164,7 +163,7 @@ cfg_if::cfg_if! {
         pub use self::proxy::Error as ProxyError;
         pub use self::proxy::ProxyDevice;
         #[cfg(feature = "usb")]
-        pub use self::usb::host_backend::host_backend_device_provider::HostBackendDeviceProvider;
+        pub use self::usb::backend::host_backend::host_backend_device_provider::HostBackendDeviceProvider;
         #[cfg(feature = "usb")]
         pub use self::usb::xhci::xhci_controller::XhciController;
         pub use self::vfio::VfioContainer;

@@ -96,7 +96,6 @@ use crate::crosvm::config::MemOptions;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFsOption;
 use crate::crosvm::config::VhostUserOption;
-use crate::crosvm::config::VvuOption;
 
 #[derive(FromArgs)]
 /// crosvm
@@ -1289,6 +1288,9 @@ pub struct RunCommand {
     ///     cache-size=SIZE - The maximum size of the shader cache.
     ///     pci-bar-size=SIZE - The size for the PCI BAR in bytes
     ///        (default 8gb).
+    ///     implicit-render-server[=true|=false] - If the render
+    ///        server process should be allowed to autostart
+    ///        (ignored when sandboxing is enabled)
     ///
     /// Possible key values for GpuDisplayParameters:
     ///     mode=(borderless_full_screen|windowed[width,height]) -
@@ -2116,7 +2118,7 @@ pub struct RunCommand {
     /// dangerous to access. Some systems, e.g. Android, have tools that fork processes and examine
     /// their memory. This flag effectively hides the guest memory from those tools.
     ///
-    /// Not compatible with sandboxing or vvu devices.
+    /// Not compatible with sandboxing.
     pub unmap_guest_memory_on_fork: Option<bool>,
 
     // Must be `Some` iff `protection_type == ProtectionType::UnprotectedWithFirmware`.
@@ -2329,21 +2331,6 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// enable the virtio-tpm connection to vtpm daemon
     pub vtpm_proxy: Option<bool>,
-
-    #[argh(
-        option,
-        arg_name = "SOCKET_PATH[,addr=DOMAIN:BUS:DEVICE.FUNCTION,uuid=UUID]"
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = append)]
-    /// socket path for the Virtio Vhost User proxy device.
-    /// Parameters
-    ///     addr=BUS:DEVICE.FUNCTION - PCI address that the proxy
-    ///        device will be allocated
-    ///        (default: automatically allocated)
-    ///     uuid=UUID - UUID which will be stored in VVU PCI config
-    ///        space that is readable from guest userspace
-    pub vvu_proxy: Vec<VvuOption>,
 
     #[cfg(unix)]
     #[argh(option, arg_name = "PATH[,name=NAME]", from_str_fn(parse_wayland_sock))]
@@ -3153,8 +3140,6 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.stub_pci_devices = cmd.stub_pci_device;
-
-        cfg.vvu_proxy = cmd.vvu_proxy;
 
         cfg.file_backed_mappings = cmd.file_backed_mapping;
 

@@ -36,7 +36,7 @@ python_binary_host {
 
 genrule_defaults {
     name: "crosvm_inline_seccomp_policy_x86_64",
-    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/net.policy) $(location x86_64/block.policy) $(location x86_64/vvu.policy) $(location x86_64/vhost_user.policy) $(location x86_64/vhost_vsock.policy) < $(in) | $(location detect_duplication) > $(out)",
+    cmd: "set -o pipefail; $(location policy-inliner.sh) $(location x86_64/common_device.policy) $(location x86_64/gpu_common.policy) $(location x86_64/serial.policy) $(location x86_64/net.policy) $(location x86_64/block.policy) $(location x86_64/vhost_user.policy) $(location x86_64/vhost_vsock.policy) < $(in) | $(location detect_duplication) > $(out)",
     tools: [
         "detect_duplication",
     ],
@@ -47,7 +47,6 @@ genrule_defaults {
         "x86_64/serial.policy",
         "x86_64/net.policy",
         "x86_64/block.policy",
-        "x86_64/vvu.policy",
         "x86_64/vhost_user.policy",
         "x86_64/vhost_vsock.policy",
     ],
@@ -352,44 +351,6 @@ prebuilt_etc {
     },
     target: {
         android_x86_64: {
-            enabled: false,
-        },
-        android_arm: {
-            enabled: false,
-        },
-        android_x86: {
-            enabled: false,
-        },
-        android_riscv64: {
-            enabled: false,
-        },
-    },
-}
-
-genrule {
-    name: "vvu_proxy_device.policy_inline_x86_64",
-    defaults: ["crosvm_inline_seccomp_policy_x86_64"],
-    out: ["vvu_proxy_device.policy"],
-    srcs: ["x86_64/vvu_proxy_device.policy"],
-}
-
-prebuilt_usr_share_host {
-    name: "vvu_proxy_device.policy_x86_64",
-    filename: "vvu_proxy_device.policy",
-    relative_install_path: "crosvm/x86_64-linux-gnu/seccomp",
-    src: ":vvu_proxy_device.policy_inline_x86_64",
-}
-
-prebuilt_etc {
-    name: "vvu_proxy_device.policy",
-    relative_install_path: "seccomp_policy/crosvm",
-    arch: {
-        x86_64: {
-            src: ":vvu_proxy_device.policy_inline_x86_64",
-        },
-    },
-    target: {
-        android_arm64: {
             enabled: false,
         },
         android_arm: {
@@ -883,44 +844,6 @@ prebuilt_etc {
 }
 
 genrule {
-    name: "serial_device_vvu.policy_inline_x86_64",
-    defaults: ["crosvm_inline_seccomp_policy_x86_64"],
-    out: ["serial_device_vvu.policy"],
-    srcs: ["x86_64/serial_device_vvu.policy"],
-}
-
-prebuilt_usr_share_host {
-    name: "serial_device_vvu.policy_x86_64",
-    filename: "serial_device_vvu.policy",
-    relative_install_path: "crosvm/x86_64-linux-gnu/seccomp",
-    src: ":serial_device_vvu.policy_inline_x86_64",
-}
-
-prebuilt_etc {
-    name: "serial_device_vvu.policy",
-    relative_install_path: "seccomp_policy/crosvm",
-    arch: {
-        x86_64: {
-            src: ":serial_device_vvu.policy_inline_x86_64",
-        },
-    },
-    target: {
-        android_arm64: {
-            enabled: false,
-        },
-        android_arm: {
-            enabled: false,
-        },
-        android_x86: {
-            enabled: false,
-        },
-        android_riscv64: {
-            enabled: false,
-        },
-    },
-}
-
-genrule {
     name: "xhci_device.policy_inline_x86_64",
     defaults: ["crosvm_inline_seccomp_policy_x86_64"],
     out: ["xhci_device.policy"],
@@ -1116,44 +1039,6 @@ prebuilt_etc {
         },
     },
     target: {
-        android_arm: {
-            enabled: false,
-        },
-        android_x86: {
-            enabled: false,
-        },
-        android_riscv64: {
-            enabled: false,
-        },
-    },
-}
-
-genrule {
-    name: "block_device_vvu.policy_inline_x86_64",
-    defaults: ["crosvm_inline_seccomp_policy_x86_64"],
-    out: ["block_device_vvu.policy"],
-    srcs: ["x86_64/block_device_vvu.policy"],
-}
-
-prebuilt_usr_share_host {
-    name: "block_device_vvu.policy_x86_64",
-    filename: "block_device_vvu.policy",
-    relative_install_path: "crosvm/x86_64-linux-gnu/seccomp",
-    src: ":block_device_vvu.policy_inline_x86_64",
-}
-
-prebuilt_etc {
-    name: "block_device_vvu.policy",
-    relative_install_path: "seccomp_policy/crosvm",
-    arch: {
-        x86_64: {
-            src: ":block_device_vvu.policy_inline_x86_64",
-        },
-    },
-    target: {
-        android_arm64: {
-            enabled: false,
-        },
         android_arm: {
             enabled: false,
         },
