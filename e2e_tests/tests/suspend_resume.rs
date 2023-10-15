@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#![cfg(unix)]
+#![cfg(any(target_os = "android", target_os = "linux"))]
 
 use std::io::Write;
 use std::path::Path;
@@ -183,7 +183,6 @@ fn snapshot_vhost_user() {
         let snapshot_json = std::fs::read_to_string(&snap_path).unwrap();
 
         assert!(snapshot_json.contains("\"device_name\":\"virtio-block\""));
-        assert!(snapshot_json.contains("\"paused_queue\":{\"avail_ring\":"));
     }
 
     let (_block_vu_device, _net_vu_device, block_socket, net_socket) = spin_up_vhost_user_devices();

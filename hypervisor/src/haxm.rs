@@ -35,10 +35,10 @@ mod win;
 #[cfg(windows)]
 use win::*;
 
-#[cfg(unix)]
-mod unix;
-#[cfg(unix)]
-use unix::*;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+mod linux;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+use linux::*;
 
 static USE_GHAXM: AtomicBool = AtomicBool::new(true);
 

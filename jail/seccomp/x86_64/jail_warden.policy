@@ -11,7 +11,8 @@ capget: 1
 capset: 1
 chdir: 1
 chroot: 1
-clone: 1
+# ANDROID: merged with entry in common_device.policy
+# clone: 1
 fchdir: 1
 getdents64: 1
 #ioctl: FIONBIO, SIOCGIFMTU, SIOCSIFFLAGS, SIOCGIFFLAGS, TCGETS, TUNSETIFF
@@ -26,10 +27,13 @@ ioctl: arg1 == 0x5421 || \
        arg1 == 0x400454d0 || \
        arg1 == 0xc018aa3f || \
        arg1 == 0xaa00
-madvise: 1
-mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+# ANDROID: merged with entry in common_device.policy
+# madvise: 1
+# ANDROID: merged with entry in common_device.policy
+# mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 mount: 1
-mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+# ANDROID: merged with entry in common_device.policy
+# mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 newfstatat: 1
 openat: 1
 pivot_root: 1
