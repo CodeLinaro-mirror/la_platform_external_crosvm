@@ -17,7 +17,7 @@ fn jail_config_default_pivot_root() -> PathBuf {
 pub struct JailConfig {
     #[serde(default = "jail_config_default_pivot_root")]
     pub pivot_root: PathBuf,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[serde(default)]
     pub seccomp_policy_dir: Option<PathBuf>,
     #[serde(default)]
@@ -28,7 +28,7 @@ impl Default for JailConfig {
     fn default() -> Self {
         JailConfig {
             pivot_root: jail_config_default_pivot_root(),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             seccomp_policy_dir: None,
             seccomp_log_failures: false,
         }
@@ -48,7 +48,7 @@ mod tests {
             config,
             JailConfig {
                 pivot_root: jail_config_default_pivot_root(),
-                #[cfg(any(target_os = "android", target_os = "linux"))]
+                #[cfg(unix)]
                 seccomp_policy_dir: None,
                 seccomp_log_failures: false,
             }
@@ -67,7 +67,7 @@ mod tests {
         );
 
         cfg_if::cfg_if! {
-            if #[cfg(any(target_os = "android", target_os = "linux"))] {
+            if #[cfg(unix)] {
                 let config: JailConfig =
                     from_key_values("seccomp-policy-dir=/path/to/seccomp/dir").unwrap();
                 assert_eq!(config, JailConfig {

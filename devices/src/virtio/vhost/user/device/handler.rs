@@ -51,13 +51,13 @@ use std::collections::BTreeMap;
 use std::convert::From;
 use std::fs::File;
 use std::num::Wrapping;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use anyhow::bail;
 use anyhow::Context;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use base::clear_fd_flags;
 use base::error;
 use base::Event;
@@ -360,7 +360,7 @@ impl VhostUserPlatformOps for VhostUserRegularOps {
         // Remove O_NONBLOCK from kick_fd. Otherwise, uring_executor will fails when we read
         // values via `next_val()` later.
         // This is only required (and can only be done) on Unix platforms.
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         if let Err(e) = clear_fd_flags(file.as_raw_fd(), libc::O_NONBLOCK) {
             error!("failed to remove O_NONBLOCK for kick fd: {}", e);
             return Err(VhostError::InvalidParam);
@@ -968,13 +968,12 @@ mod tests {
     use vmm_vhost::VhostUserSlaveReqHandler;
     use zerocopy::AsBytes;
     use zerocopy::FromBytes;
-    use zerocopy::FromZeroes;
 
     use super::sys::test_helpers;
     use super::*;
     use crate::virtio::vhost::user::vmm::VhostUserHandler;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, AsBytes, FromZeroes, FromBytes)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, AsBytes, FromBytes)]
     #[repr(C, packed(4))]
     struct FakeConfig {
         x: u32,

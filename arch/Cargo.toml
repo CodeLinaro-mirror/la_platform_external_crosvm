@@ -36,7 +36,7 @@ thiserror = "1.0.20"
 vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
 
-[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 minijail = "*" # provided by ebuild
 power_monitor = { path = "../power_monitor" }
 

@@ -9,11 +9,13 @@ arc_quota = ["dbus", "protobuf", "system_api"]
 audio = []
 audio_cras = ["libcras"]
 balloon = []
+chromeos = ["dbus", "protobuf", "system_api"]
 gpu = ["gpu_display"]
 gunyah = []
 libvda-stub = ["libvda/libvda-stub"]
 net = []
 geniezone = []
+tpm = ["tpm2"]
 usb = []
 vaapi = ["cros-codecs/vaapi", "downcast-rs", "crc32fast"]
 video-decoder = []
@@ -80,15 +82,16 @@ smallvec = "1.6.1"
 sync = { path = "../common/sync" }
 system_api = { path = "../system_api", optional = true }
 thiserror = "1.0.20"
+tpm2 = { path = "../tpm2", optional = true }
 cros_tracing = { path = "../cros_tracing" }
 swap = { path = "../swap" }
 vmm_vhost = { path = "../third_party/vmm_vhost", features = ["vmm", "device"] }
 virtio_sys = { path = "../virtio_sys" }
 vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
-zerocopy = { version = "0.7", features = ["derive"] }
+zerocopy = "0.6"
 
-[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 fuse = {path = "../fuse" }
 libcras = { version = "*", optional = true }
 minijail = "*"

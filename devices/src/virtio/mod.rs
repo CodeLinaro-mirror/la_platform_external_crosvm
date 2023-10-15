@@ -20,7 +20,7 @@ pub mod net;
 pub mod pvclock;
 mod queue;
 mod rng;
-#[cfg(feature = "vtpm")]
+#[cfg(any(feature = "tpm", feature = "vtpm"))]
 mod tpm;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 mod video;
@@ -88,9 +88,9 @@ pub use self::queue::Queue;
 pub use self::queue::QueueConfig;
 pub use self::rng::Rng;
 pub use self::scsi::Device as ScsiDevice;
-#[cfg(feature = "vtpm")]
+#[cfg(any(feature = "tpm", feature = "vtpm"))]
 pub use self::tpm::Tpm;
-#[cfg(feature = "vtpm")]
+#[cfg(any(feature = "tpm", feature = "vtpm"))]
 pub use self::tpm::TpmBackend;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 pub use self::video::VideoDevice;
@@ -105,14 +105,14 @@ pub use self::virtio_pci_device::VirtioPciDevice;
 pub use self::virtio_pci_device::VirtioPciShmCap;
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+    if #[cfg(unix)] {
         mod p9;
         mod pmem;
 
         pub mod wl;
         pub mod fs;
 
-        pub use self::iommu::sys::linux::vfio_wrapper;
+        pub use self::iommu::sys::unix::vfio_wrapper;
         #[cfg(feature = "net")]
         pub use self::net::VhostNetParameters;
         #[cfg(feature = "net")]
@@ -154,11 +154,15 @@ pub enum DeviceType {
     Console = virtio_ids::VIRTIO_ID_CONSOLE,
     Rng = virtio_ids::VIRTIO_ID_RNG,
     Balloon = virtio_ids::VIRTIO_ID_BALLOON,
+    Rpmsg = virtio_ids::VIRTIO_ID_RPMSG,
     Scsi = virtio_ids::VIRTIO_ID_SCSI,
     P9 = virtio_ids::VIRTIO_ID_9P,
+    RprocSerial = virtio_ids::VIRTIO_ID_RPROC_SERIAL,
+    Caif = virtio_ids::VIRTIO_ID_CAIF,
     Gpu = virtio_ids::VIRTIO_ID_GPU,
     Input = virtio_ids::VIRTIO_ID_INPUT,
     Vsock = virtio_ids::VIRTIO_ID_VSOCK,
+    Crypto = virtio_ids::VIRTIO_ID_CRYPTO,
     Iommu = virtio_ids::VIRTIO_ID_IOMMU,
     Sound = virtio_ids::VIRTIO_ID_SOUND,
     Fs = virtio_ids::VIRTIO_ID_FS,
@@ -181,11 +185,15 @@ impl std::fmt::Display for DeviceType {
             DeviceType::Console => write!(f, "console"),
             DeviceType::Rng => write!(f, "rng"),
             DeviceType::Balloon => write!(f, "balloon"),
+            DeviceType::Rpmsg => write!(f, "rpmsg"),
             DeviceType::Scsi => write!(f, "scsi"),
             DeviceType::P9 => write!(f, "9p"),
+            DeviceType::RprocSerial => write!(f, "rproc-serial"),
+            DeviceType::Caif => write!(f, "caif"),
             DeviceType::Input => write!(f, "input"),
             DeviceType::Gpu => write!(f, "gpu"),
             DeviceType::Vsock => write!(f, "vsock"),
+            DeviceType::Crypto => write!(f, "crypto"),
             DeviceType::Iommu => write!(f, "iommu"),
             DeviceType::Sound => write!(f, "snd"),
             DeviceType::Fs => write!(f, "fs"),

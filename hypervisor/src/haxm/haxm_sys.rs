@@ -22,7 +22,7 @@ mod win;
 #[cfg(windows)]
 pub use win::*;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 mod posix;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 pub use posix::*;

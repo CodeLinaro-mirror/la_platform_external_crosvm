@@ -711,7 +711,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[test]
     fn parse_gpu_options_and_gpu_display_options_multi_display_supported_on_unix() {
         {

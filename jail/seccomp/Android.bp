@@ -754,44 +754,6 @@ prebuilt_etc {
 }
 
 genrule {
-    name: "jail_warden.policy_inline_x86_64",
-    defaults: ["crosvm_inline_seccomp_policy_x86_64"],
-    out: ["jail_warden.policy"],
-    srcs: ["x86_64/jail_warden.policy"],
-}
-
-prebuilt_usr_share_host {
-    name: "jail_warden.policy_x86_64",
-    filename: "jail_warden.policy",
-    relative_install_path: "crosvm/x86_64-linux-gnu/seccomp",
-    src: ":jail_warden.policy_inline_x86_64",
-}
-
-prebuilt_etc {
-    name: "jail_warden.policy",
-    relative_install_path: "seccomp_policy/crosvm",
-    arch: {
-        x86_64: {
-            src: ":jail_warden.policy_inline_x86_64",
-        },
-    },
-    target: {
-        android_arm64: {
-            enabled: false,
-        },
-        android_arm: {
-            enabled: false,
-        },
-        android_x86: {
-            enabled: false,
-        },
-        android_riscv64: {
-            enabled: false,
-        },
-    },
-}
-
-genrule {
     name: "iommu_device.policy_inline_x86_64",
     defaults: ["crosvm_inline_seccomp_policy_x86_64"],
     out: ["iommu_device.policy"],
@@ -970,6 +932,58 @@ prebuilt_etc {
         },
         arm64: {
             src: ":rng_device.policy_inline_aarch64",
+        },
+    },
+    target: {
+        android_arm: {
+            enabled: false,
+        },
+        android_x86: {
+            enabled: false,
+        },
+        android_riscv64: {
+            enabled: false,
+        },
+    },
+}
+
+genrule {
+    name: "tpm_device.policy_inline_x86_64",
+    defaults: ["crosvm_inline_seccomp_policy_x86_64"],
+    out: ["tpm_device.policy"],
+    srcs: ["x86_64/tpm_device.policy"],
+}
+
+prebuilt_usr_share_host {
+    name: "tpm_device.policy_x86_64",
+    filename: "tpm_device.policy",
+    relative_install_path: "crosvm/x86_64-linux-gnu/seccomp",
+    src: ":tpm_device.policy_inline_x86_64",
+}
+
+genrule {
+    name: "tpm_device.policy_inline_aarch64",
+    defaults: ["crosvm_inline_seccomp_policy_aarch64"],
+    out: ["tpm_device.policy"],
+    srcs: ["aarch64/tpm_device.policy"],
+}
+
+prebuilt_usr_share_host {
+    name: "tpm_device.policy_aarch64",
+    filename: "tpm_device.policy",
+    relative_install_path: "crosvm/aarch64-linux-gnu/seccomp",
+    src: ":tpm_device.policy_inline_aarch64",
+}
+
+prebuilt_etc {
+    name: "tpm_device.policy",
+    relative_install_path: "seccomp_policy/crosvm",
+    arch: {
+        x86_64: {
+            src: ":tpm_device.policy_inline_x86_64",
+        },
+        arm64: {
+            src: ":tpm_device.policy_inline_aarch64",
         },
     },
     target: {

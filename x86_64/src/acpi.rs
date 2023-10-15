@@ -25,7 +25,6 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 pub struct AcpiDevResource {
     pub amls: Vec<u8>,
@@ -36,7 +35,7 @@ pub struct AcpiDevResource {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default, FromZeroes, FromBytes, AsBytes)]
+#[derive(Clone, Copy, Default, FromBytes, AsBytes)]
 struct GenericAddress {
     _space_id: u8,
     _bit_width: u8,
@@ -56,7 +55,7 @@ struct LocalApic {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, FromZeroes, FromBytes, AsBytes)]
+#[derive(Clone, Copy, Default, FromBytes, AsBytes)]
 struct Ioapic {
     _type: u8,
     _length: u8,
@@ -67,7 +66,7 @@ struct Ioapic {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default, FromZeroes, FromBytes, AsBytes)]
+#[derive(Clone, Copy, Default, FromBytes, AsBytes)]
 struct IoapicInterruptSourceOverride {
     _type: u8,
     _length: u8,
@@ -78,7 +77,7 @@ struct IoapicInterruptSourceOverride {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, FromZeroes, FromBytes, AsBytes)]
+#[derive(Clone, Copy, Default, FromBytes, AsBytes)]
 struct Localx2Apic {
     _type: u8,
     _length: u8,

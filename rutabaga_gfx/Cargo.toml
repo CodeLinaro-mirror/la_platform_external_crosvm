@@ -22,11 +22,10 @@ cfg-if = "1.0.0"
 libc = "0.2.116"
 remain = "0.2"
 thiserror = "1.0.23"
-zerocopy = { version = "0.7", features = ["derive"] }
-
+zerocopy = "0.6"
 log = "0.4"
 
-[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 nix = "0.26.1"
 
 [target.'cfg(windows)'.dependencies]

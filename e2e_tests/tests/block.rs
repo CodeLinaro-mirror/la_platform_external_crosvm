@@ -4,7 +4,7 @@
 
 //! Testing virtio-block.
 
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(unix)]
 
 use std::time;
 

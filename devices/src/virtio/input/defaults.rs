@@ -19,18 +19,10 @@ fn name_with_index(device_name: &[u8], idx: u32) -> Vec<u8> {
 
 /// Instantiates a VirtioInputConfig object with the default configuration for a trackpad. It
 /// supports touch, left button and right button events, as well as X and Y axis.
-pub fn new_trackpad_config(
-    idx: u32,
-    width: u32,
-    height: u32,
-    name: Option<&str>,
-) -> VirtioInputConfig {
-    let name = name
-        .map(|name| name.as_bytes().to_vec())
-        .unwrap_or(name_with_index(b"Crosvm Virtio Trackpad ", idx));
+pub fn new_trackpad_config(idx: u32, width: u32, height: u32) -> VirtioInputConfig {
     VirtioInputConfig::new(
         virtio_input_device_ids::new(0, 0, 0, 0),
-        name,
+        name_with_index(b"Crosvm Virtio Trackpad ", idx),
         name_with_index(b"virtio-trackpad-", idx),
         virtio_input_bitmap::new([0u8; 128]),
         default_trackpad_events(),
@@ -90,18 +82,10 @@ pub fn new_rotary_config(idx: u32) -> VirtioInputConfig {
 
 /// Instantiates a VirtioInputConfig object with the default configuration for a touchscreen (no
 /// multitouch support).
-pub fn new_single_touch_config(
-    idx: u32,
-    width: u32,
-    height: u32,
-    name: Option<&str>,
-) -> VirtioInputConfig {
-    let name = name
-        .map(|name| name.as_bytes().to_vec())
-        .unwrap_or(name_with_index(b"Crosvm Virtio Touchscreen ", idx));
+pub fn new_single_touch_config(idx: u32, width: u32, height: u32) -> VirtioInputConfig {
     VirtioInputConfig::new(
         virtio_input_device_ids::new(0, 0, 0, 0),
-        name,
+        name_with_index(b"Crosvm Virtio Touchscreen ", idx),
         name_with_index(b"virtio-touchscreen-", idx),
         virtio_input_bitmap::from_bits(&[INPUT_PROP_DIRECT]),
         default_touchscreen_events(),
@@ -111,21 +95,10 @@ pub fn new_single_touch_config(
 
 /// Instantiates a VirtioInputConfig object with the default configuration for a multitouch
 /// touchscreen.
-pub fn new_multi_touch_config(
-    idx: u32,
-    width: u32,
-    height: u32,
-    name: Option<&str>,
-) -> VirtioInputConfig {
-    let name = name
-        .map(|name| name.as_bytes().to_vec())
-        .unwrap_or(name_with_index(
-            b"Crosvm Virtio Multitouch Touchscreen ",
-            idx,
-        ));
+pub fn new_multi_touch_config(idx: u32, width: u32, height: u32) -> VirtioInputConfig {
     VirtioInputConfig::new(
         virtio_input_device_ids::new(0, 0, 0, 0),
-        name,
+        name_with_index(b"Crosvm Virtio Multitouch Touchscreen ", idx),
         name_with_index(b"virtio-touchscreen-", idx),
         virtio_input_bitmap::from_bits(&[INPUT_PROP_DIRECT]),
         default_multitouchscreen_events(),

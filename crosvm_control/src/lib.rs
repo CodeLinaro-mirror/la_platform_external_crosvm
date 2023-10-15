@@ -19,7 +19,7 @@ use std::ffi::CStr;
 use std::panic::catch_unwind;
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use std::time::Duration;
 
 use libc::c_char;
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn crosvm_client_balloon_vms(
 }
 
 /// See crosvm_client_balloon_vms.
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn crosvm_client_balloon_vms_wait_with_timeout(
     socket_path: *const c_char,
@@ -702,7 +702,7 @@ pub unsafe extern "C" fn crosvm_client_balloon_stats(
 ) -> bool {
     crosvm_client_balloon_stats_impl(
         socket_path,
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         None,
         stats,
         actual,
@@ -710,7 +710,7 @@ pub unsafe extern "C" fn crosvm_client_balloon_stats(
 }
 
 /// See crosvm_client_balloon_stats.
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn crosvm_client_balloon_stats_with_timeout(
     socket_path: *const c_char,
@@ -728,7 +728,7 @@ pub unsafe extern "C" fn crosvm_client_balloon_stats_with_timeout(
 
 fn crosvm_client_balloon_stats_impl(
     socket_path: *const c_char,
-    #[cfg(any(target_os = "android", target_os = "linux"))] timeout_ms: Option<Duration>,
+    #[cfg(unix)] timeout_ms: Option<Duration>,
     stats: *mut BalloonStatsFfi,
     actual: *mut u64,
 ) -> bool {
@@ -737,7 +737,7 @@ fn crosvm_client_balloon_stats_impl(
             let request = &VmRequest::BalloonCommand(BalloonControlCommand::Stats {});
             #[cfg(not(unix))]
             let resp = handle_request(request, socket_path);
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             let resp = handle_request_with_timeout(request, socket_path, timeout_ms);
             if let Ok(VmResponse::BalloonStats {
                 stats: ref balloon_stats,

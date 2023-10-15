@@ -19,7 +19,6 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 use crate::virtio::DescriptorChain;
 use crate::virtio::Interrupt;
@@ -76,7 +75,7 @@ pub struct SplitQueueSnapshot {
 }
 
 #[repr(C)]
-#[derive(AsBytes, FromZeroes, FromBytes)]
+#[derive(AsBytes, FromBytes)]
 struct virtq_used_elem {
     id: Le32,
     len: Le32,
@@ -525,7 +524,7 @@ mod tests {
     const BUFFER_OFFSET: u64 = 0x8000;
     const BUFFER_LEN: u32 = 0x400;
 
-    #[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
+    #[derive(Copy, Clone, Debug, FromBytes, AsBytes)]
     #[repr(C)]
     struct Avail {
         flags: Le16,
@@ -545,7 +544,7 @@ mod tests {
         }
     }
 
-    #[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
+    #[derive(Copy, Clone, Debug, FromBytes, AsBytes)]
     #[repr(C)]
     struct UsedElem {
         id: Le32,
@@ -561,7 +560,7 @@ mod tests {
         }
     }
 
-    #[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
+    #[derive(Copy, Clone, Debug, FromBytes, AsBytes)]
     #[repr(C, packed)]
     struct Used {
         flags: Le16,

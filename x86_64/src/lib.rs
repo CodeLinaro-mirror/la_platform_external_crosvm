@@ -60,7 +60,7 @@ use arch::VmImage;
 #[cfg(feature = "seccomp_trace")]
 use base::debug;
 use base::warn;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use base::AsRawDescriptors;
 use base::Event;
 use base::SendTube;
@@ -86,12 +86,12 @@ use devices::PciRoot;
 use devices::PciRootCommand;
 use devices::PciVirtualConfigMmio;
 use devices::Pflash;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use devices::ProxyDevice;
 use devices::Serial;
 use devices::SerialHardware;
 use devices::SerialParameters;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use devices::VirtualPmc;
 use devices::FW_CFG_BASE_PORT;
 use devices::FW_CFG_MAX_FILE_SLOTS;
@@ -121,7 +121,7 @@ use hypervisor::VmX86_64;
 use jail::read_jail_addr;
 #[cfg(windows)]
 use jail::FakeMinijailStub as Minijail;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use minijail::Minijail;
 use once_cell::sync::OnceCell;
 use rand::rngs::OsRng;
@@ -130,7 +130,7 @@ use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
@@ -142,7 +142,6 @@ use vm_memory::GuestMemoryError;
 use vm_memory::MemoryRegionOptions;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 use crate::bootparam::boot_params;
 use crate::cpuid::EDX_HYBRID_CPU_SHIFT;
@@ -160,7 +159,7 @@ pub enum Error {
     CloneEvent(base::Error),
     #[error("failed to clone IRQ chip: {0}")]
     CloneIrqChip(base::Error),
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to clone jail: {0}")]
     CloneJail(minijail::Error),
     #[error("unable to clone a Tube: {0}")]
@@ -193,7 +192,7 @@ pub enum Error {
     CreatePit(base::Error),
     #[error("unable to make PIT device: {0}")]
     CreatePitDevice(devices::PitError),
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("unable to create proxy device: {0}")]
     CreateProxyDevice(devices::ProxyError),
     #[error("unable to create serial devices: {0}")]
@@ -299,7 +298,7 @@ pub struct X8664arch;
 // Like `bootparam::setup_data` without the incomplete array field at the end, which allows us to
 // safely implement Copy, Clone
 #[repr(C)]
-#[derive(Copy, Clone, Default, FromZeroes, FromBytes, AsBytes)]
+#[derive(Copy, Clone, Default, FromBytes, AsBytes)]
 struct setup_data_hdr {
     pub next: u64,
     pub type_: u32,
@@ -685,9 +684,7 @@ impl arch::LinuxArch for X8664arch {
         pflash_jail: Option<Minijail>,
         fw_cfg_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
-        #[cfg(any(target_os = "android", target_os = "linux"))] guest_suspended_cvar: Option<
-            Arc<(Mutex<bool>, Condvar)>,
-        >,
+        #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -758,7 +755,6 @@ impl arch::LinuxArch for X8664arch {
         pci.lock().enable_pcie_cfg_mmio(pcie_cfg_mmio_range.start);
         let pci_cfg = PciConfigIo::new(
             pci.clone(),
-            components.break_linux_pci_config_io,
             vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
         );
         let pci_bus = Arc::new(Mutex::new(pci_cfg));
@@ -891,9 +887,9 @@ impl arch::LinuxArch for X8664arch {
             &mut resume_notify_devices,
             #[cfg(feature = "swap")]
             swap_controller,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             components.ac_adapter,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             guest_suspended_cvar,
             &pci_irqs,
         )?;
@@ -1033,7 +1029,7 @@ impl arch::LinuxArch for X8664arch {
             gdb: components.gdb,
             pm: Some(acpi_dev_resource.pm),
             root_config: pci,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             platform_devices: Vec::new(),
             hotplug_bus: BTreeMap::new(),
             devices_thread: None,
@@ -1095,7 +1091,7 @@ impl arch::LinuxArch for X8664arch {
     fn register_pci_device<V: VmX86_64, Vcpu: VcpuX86_64>(
         linux: &mut RunnableLinuxVm<V, Vcpu>,
         device: Box<dyn PciDevice>,
-        #[cfg(any(target_os = "android", target_os = "linux"))] minijail: Option<Minijail>,
+        #[cfg(unix)] minijail: Option<Minijail>,
         resources: &mut SystemAllocator,
         hp_control_tube: &mpsc::Sender<PciRootCommand>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
@@ -1103,7 +1099,7 @@ impl arch::LinuxArch for X8664arch {
         arch::configure_pci_device(
             linux,
             device,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             minijail,
             resources,
             hp_control_tube,
@@ -1527,12 +1523,12 @@ impl X8664arch {
         let start = FIRST_ADDR_PAST_32BITS - bios_size - size;
         let pflash_image = Box::new(pflash_image);
 
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         let fds = pflash_image.as_raw_descriptors();
 
         let pflash = Pflash::new(pflash_image, block_size).map_err(Error::SetupPflash)?;
         let pflash: Arc<Mutex<dyn BusDevice>> = match jail {
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             Some(jail) => Arc::new(Mutex::new(
                 ProxyDevice::new(
                     pflash,
@@ -1735,7 +1731,7 @@ impl X8664arch {
         };
 
         let fw_cfg: Arc<Mutex<dyn BusDevice>> = match fw_cfg_jail.as_ref() {
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             Some(jail) => {
                 let jail_clone = jail.try_clone().map_err(Error::CloneJail)?;
                 #[cfg(feature = "seccomp_trace")]
@@ -1872,10 +1868,8 @@ impl X8664arch {
         max_bus: u8,
         resume_notify_devices: &mut Vec<Arc<Mutex<dyn BusResumeDevice>>>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
-        #[cfg(any(target_os = "android", target_os = "linux"))] ac_adapter: bool,
-        #[cfg(any(target_os = "android", target_os = "linux"))] guest_suspended_cvar: Option<
-            Arc<(Mutex<bool>, Condvar)>,
-        >,
+        #[cfg(unix)] ac_adapter: bool,
+        #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         pci_irqs: &[(PciAddress, u32, PciInterruptPin)],
     ) -> Result<(acpi::AcpiDevResource, Option<BatControl>)> {
         // The AML data for the acpi devices
@@ -1883,12 +1877,12 @@ impl X8664arch {
 
         let bat_control = if let Some(battery_type) = battery.0 {
             match battery_type {
-                #[cfg(any(target_os = "android", target_os = "linux"))]
+                #[cfg(unix)]
                 BatteryType::Goldfish => {
                     let irq_num = resources.allocate_irq().ok_or(Error::CreateBatDevices(
                         arch::DeviceRegistrationError::AllocateIrq,
                     ))?;
-                    let (control_tube, _mmio_base) = arch::sys::linux::add_goldfish_battery(
+                    let (control_tube, _mmio_base) = arch::sys::unix::add_goldfish_battery(
                         &mut amls,
                         battery.1,
                         mmio_bus,
@@ -1932,7 +1926,7 @@ impl X8664arch {
 
         let pm_sci_evt = devices::IrqLevelEvent::new().map_err(Error::CreateEvent)?;
 
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         let acdc = if ac_adapter {
             // Allocate GPE for AC adapter notfication
             let gpe = resources.allocate_gpe().ok_or(Error::AllocateGpe)?;
@@ -1965,7 +1959,7 @@ impl X8664arch {
         let acdc = None;
 
         //Virtual PMC
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         if let Some(guest_suspended_cvar) = guest_suspended_cvar {
             let alloc = resources.get_anon_alloc();
             let mmio_base = resources
@@ -2186,7 +2180,7 @@ impl X8664arch {
                 .map_err(Error::CreateDebugconDevice)?;
 
             let con: Arc<Mutex<dyn BusDevice>> = match debugcon_jail.as_ref() {
-                #[cfg(any(target_os = "android", target_os = "linux"))]
+                #[cfg(unix)]
                 Some(jail) => {
                     let jail_clone = jail.try_clone().map_err(Error::CloneJail)?;
                     #[cfg(feature = "seccomp_trace")]

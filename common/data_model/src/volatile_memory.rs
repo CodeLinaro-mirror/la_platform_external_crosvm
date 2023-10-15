@@ -32,8 +32,7 @@ use remain::sorted;
 use thiserror::Error;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-
-use zerocopy::Ref;
+use zerocopy::LayoutVerified;
 
 use crate::IoBufMut;
 
@@ -303,7 +302,7 @@ impl<'a> VolatileSlice<'a> {
             unsafe {
                 write_volatile(
                     addr as *mut T,
-                    Ref::<_, T>::new(v.as_bytes()).unwrap().read(),
+                    LayoutVerified::<_, T>::new(v.as_bytes()).unwrap().read(),
                 );
                 addr = addr.add(size_of::<T>());
             }

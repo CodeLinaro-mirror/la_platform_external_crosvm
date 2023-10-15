@@ -8,32 +8,31 @@ use serde::Deserialize;
 use serde::Serialize;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 use crate::virtio::snd::constants::StatusCode;
 use crate::virtio::snd::constants::VIRTIO_SND_CHMAP_MAX_SIZE;
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_hdr {
     pub code: Le32,
 }
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_jack_hdr {
     pub hdr: virtio_snd_hdr,
     pub jack_id: Le32,
 }
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_event {
     pub hdr: virtio_snd_hdr,
     pub data: Le32,
 }
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_query_info {
     pub hdr: virtio_snd_hdr,
@@ -43,17 +42,7 @@ pub struct virtio_snd_query_info {
 }
 
 #[derive(
-    Copy,
-    Clone,
-    Default,
-    AsBytes,
-    FromZeroes,
-    FromBytes,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Debug,
+    Copy, Clone, Default, AsBytes, FromBytes, Serialize, Deserialize, PartialEq, Eq, Debug,
 )]
 #[repr(C)]
 pub struct virtio_snd_info {
@@ -61,17 +50,7 @@ pub struct virtio_snd_info {
 }
 
 #[derive(
-    Copy,
-    Clone,
-    Default,
-    AsBytes,
-    FromZeroes,
-    FromBytes,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Debug,
+    Copy, Clone, Default, AsBytes, FromBytes, Serialize, Deserialize, PartialEq, Eq, Debug,
 )]
 #[repr(C)]
 pub struct virtio_snd_pcm_info {
@@ -86,14 +65,14 @@ pub struct virtio_snd_pcm_info {
     pub padding: [u8; 5],
 }
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_pcm_hdr {
     pub hdr: virtio_snd_hdr,
     pub stream_id: Le32,
 }
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_pcm_set_params {
     pub hdr: virtio_snd_pcm_hdr,
@@ -106,13 +85,13 @@ pub struct virtio_snd_pcm_set_params {
     pub padding: u8,
 }
 
-#[derive(Copy, Clone, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_pcm_xfer {
     pub stream_id: Le32,
 }
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_pcm_status {
     pub status: Le32,
@@ -129,17 +108,7 @@ impl virtio_snd_pcm_status {
 }
 
 #[derive(
-    Copy,
-    Clone,
-    Default,
-    AsBytes,
-    FromZeroes,
-    FromBytes,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Debug,
+    Copy, Clone, Default, AsBytes, FromBytes, Serialize, Deserialize, PartialEq, Eq, Debug,
 )]
 #[repr(C)]
 pub struct virtio_snd_jack_info {
@@ -151,7 +120,7 @@ pub struct virtio_snd_jack_info {
     pub padding: [u8; 7],
 }
 
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct virtio_snd_jack_remap {
     pub hdr: virtio_snd_jack_hdr, /* .code = VIRTIO_SND_R_JACK_REMAP */
@@ -160,17 +129,7 @@ pub struct virtio_snd_jack_remap {
 }
 
 #[derive(
-    Copy,
-    Clone,
-    Default,
-    AsBytes,
-    FromZeroes,
-    FromBytes,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Debug,
+    Copy, Clone, Default, AsBytes, FromBytes, Serialize, Deserialize, PartialEq, Eq, Debug,
 )]
 #[repr(C)]
 pub struct virtio_snd_chmap_info {

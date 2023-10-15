@@ -4,9 +4,9 @@
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "android", target_os = "linux"))] {
-        pub(crate) mod linux;
+        pub(crate) mod unix;
         mod epoll_internal;
-        use linux as platform;
+        use unix as platform;
     } else if #[cfg(any(target_os = "fuchsia",target_os = "windows", target_os = "macos"))] {
         pub(crate) mod stub;
         use stub as platform;

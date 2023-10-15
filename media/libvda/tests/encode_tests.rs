@@ -4,7 +4,7 @@
 
 //! Integration tests using LibVDA fake encode implementation.
 
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(unix)]
 
 use libvda::encode::*;
 use libvda::*;

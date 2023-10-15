@@ -464,7 +464,7 @@ mod tests {
         // async-executor
         #[cfg(windows)]
         let (ex_kind, ex_kind_opt) = (ExecutorKind::Handle, "handle");
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         let (ex_kind, ex_kind_opt) = (ExecutorKind::Fd, "epoll");
         let params =
             from_block_arg(&format!("/some/path.img,async-executor={ex_kind_opt}")).unwrap();

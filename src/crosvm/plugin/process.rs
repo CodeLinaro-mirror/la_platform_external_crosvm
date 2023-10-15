@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![allow(deprecated)]
+
 use std::collections::hash_map::Entry;
 use std::collections::hash_map::HashMap;
 use std::collections::hash_map::VacantEntry;
@@ -31,7 +33,8 @@ use base::ScmSocket;
 use base::SharedMemory;
 use base::SharedMemoryUnix;
 use base::SIGRTMIN;
-use data_model::zerocopy_from_slice;
+// Wrapper types to make the kvm state structs DataInit
+use data_model::DataInit;
 use kvm::dirty_log_bitmap_size;
 use kvm::Datamatch;
 use kvm::IoeventAddress;
@@ -39,6 +42,10 @@ use kvm::IrqRoute;
 use kvm::IrqSource;
 use kvm::PicId;
 use kvm::Vm;
+use kvm_sys::kvm_clock_data;
+use kvm_sys::kvm_ioapic_state;
+use kvm_sys::kvm_pic_state;
+use kvm_sys::kvm_pit_state2;
 use libc::pid_t;
 use libc::waitpid;
 use libc::EINVAL;
@@ -57,20 +64,37 @@ use protobuf::Message;
 use protos::plugin::*;
 use sync::Mutex;
 use vm_memory::GuestAddress;
-use zerocopy::AsBytes;
 
 use super::*;
+#[derive(Copy, Clone)]
+struct VmPicState(kvm_pic_state);
+unsafe impl DataInit for VmPicState {}
+#[derive(Copy, Clone)]
+struct VmIoapicState(kvm_ioapic_state);
+unsafe impl DataInit for VmIoapicState {}
+#[derive(Copy, Clone)]
+struct VmPitState(kvm_pit_state2);
+unsafe impl DataInit for VmPitState {}
+#[derive(Copy, Clone)]
+struct VmClockState(kvm_clock_data);
+unsafe impl DataInit for VmClockState {}
 
 const CROSVM_SOCKET_ENV: &str = "CROSVM_SOCKET";
 
 fn get_vm_state(vm: &Vm, state_set: EnumOrUnknown<main_request::StateSet>) -> SysResult<Vec<u8>> {
     Ok(
         match state_set.enum_value().map_err(|_| SysError::new(EINVAL))? {
-            main_request::StateSet::PIC0 => vm.get_pic_state(PicId::Primary)?.as_bytes().to_vec(),
-            main_request::StateSet::PIC1 => vm.get_pic_state(PicId::Secondary)?.as_bytes().to_vec(),
-            main_request::StateSet::IOAPIC => vm.get_ioapic_state()?.as_bytes().to_vec(),
-            main_request::StateSet::PIT => vm.get_pit_state()?.as_bytes().to_vec(),
-            main_request::StateSet::CLOCK => vm.get_clock()?.as_bytes().to_vec(),
+            main_request::StateSet::PIC0 => VmPicState(vm.get_pic_state(PicId::Primary)?)
+                .as_slice()
+                .to_vec(),
+            main_request::StateSet::PIC1 => VmPicState(vm.get_pic_state(PicId::Secondary)?)
+                .as_slice()
+                .to_vec(),
+            main_request::StateSet::IOAPIC => {
+                VmIoapicState(vm.get_ioapic_state()?).as_slice().to_vec()
+            }
+            main_request::StateSet::PIT => VmPitState(vm.get_pit_state()?).as_slice().to_vec(),
+            main_request::StateSet::CLOCK => VmClockState(vm.get_clock()?).as_slice().to_vec(),
         },
     )
 }
@@ -83,21 +107,31 @@ fn set_vm_state(
     match state_set.enum_value().map_err(|_| SysError::new(EINVAL))? {
         main_request::StateSet::PIC0 => vm.set_pic_state(
             PicId::Primary,
-            zerocopy_from_slice(state).ok_or(SysError::new(EINVAL))?,
+            &VmPicState::from_slice(state)
+                .ok_or(SysError::new(EINVAL))?
+                .0,
         ),
         main_request::StateSet::PIC1 => vm.set_pic_state(
             PicId::Secondary,
-            zerocopy_from_slice(state).ok_or(SysError::new(EINVAL))?,
+            &VmPicState::from_slice(state)
+                .ok_or(SysError::new(EINVAL))?
+                .0,
         ),
-        main_request::StateSet::IOAPIC => {
-            vm.set_ioapic_state(zerocopy_from_slice(state).ok_or(SysError::new(EINVAL))?)
-        }
-        main_request::StateSet::PIT => {
-            vm.set_pit_state(zerocopy_from_slice(state).ok_or(SysError::new(EINVAL))?)
-        }
-        main_request::StateSet::CLOCK => {
-            vm.set_clock(zerocopy_from_slice(state).ok_or(SysError::new(EINVAL))?)
-        }
+        main_request::StateSet::IOAPIC => vm.set_ioapic_state(
+            &VmIoapicState::from_slice(state)
+                .ok_or(SysError::new(EINVAL))?
+                .0,
+        ),
+        main_request::StateSet::PIT => vm.set_pit_state(
+            &VmPitState::from_slice(state)
+                .ok_or(SysError::new(EINVAL))?
+                .0,
+        ),
+        main_request::StateSet::CLOCK => vm.set_clock(
+            &VmClockState::from_slice(state)
+                .ok_or(SysError::new(EINVAL))?
+                .0,
+        ),
     }
 }
 
@@ -507,7 +541,7 @@ impl Process {
     }
 
     fn handle_get_net_config(
-        tap: &net_util::sys::linux::Tap,
+        tap: &net_util::sys::unix::Tap,
         config: &mut main_response::GetNetConfig,
     ) -> SysResult<()> {
         // Log any NetError so that the cause can be found later, but extract and return the

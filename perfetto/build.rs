@@ -9,7 +9,7 @@ fn main() {
     #[cfg(windows)]
     main_windows();
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     main_unix();
 
     // TODO: enable once Perfetto is in third_party/perfetto.
@@ -37,7 +37,7 @@ fn main_windows() {
     */
 }
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 fn main_unix() {
     // TODO: enable once we have Perfetto libraries available on unix. We may
     // want to use a prebuilt here too, in which case this would be identical

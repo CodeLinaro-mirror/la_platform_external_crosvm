@@ -12,8 +12,7 @@ use std::slice::from_raw_parts_mut;
 
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-
-use zerocopy::Ref;
+use zerocopy::LayoutVerified;
 
 pub fn zerocopy_from_reader<R: io::Read, T: FromBytes>(mut read: R) -> io::Result<T> {
     // Allocate on the stack via `MaybeUninit` to ensure proper alignment.
@@ -29,16 +28,14 @@ pub fn zerocopy_from_reader<R: io::Read, T: FromBytes>(mut read: R) -> io::Resul
 }
 
 pub fn zerocopy_from_mut_slice<T: FromBytes + AsBytes>(data: &mut [u8]) -> Option<&mut T> {
-    let lv: Ref<&mut [u8], T> = Ref::new(data)?;
+    let lv: LayoutVerified<&mut [u8], T> = LayoutVerified::new(data)?;
     Some(lv.into_mut())
 }
 
 pub fn zerocopy_from_slice<T: FromBytes>(data: &[u8]) -> Option<&T> {
-    let lv: Ref<&[u8], T> = Ref::new(data)?;
+    let lv: LayoutVerified<&[u8], T> = LayoutVerified::new(data)?;
     Some(lv.into_ref())
 }
-
-// ANDROID(b/269356487): Delete this trait once android users are migrated to the zerocopy crate.
 
 /// Types for which it is safe to initialize from raw data.
 ///

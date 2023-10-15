@@ -13,7 +13,7 @@ use serde::Serialize;
 #[cfg(windows)]
 use win_util::ProcessType;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 pub enum ProcessType {}
 
 /// The reason a SimulatedException crash report is being requested.

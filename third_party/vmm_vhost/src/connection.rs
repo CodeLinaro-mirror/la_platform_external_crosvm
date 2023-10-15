@@ -3,10 +3,12 @@
 
 //! Common data structures for listener and endpoint.
 
+#![allow(deprecated)]
+
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+    if #[cfg(unix)] {
         pub mod socket;
-        mod linux;
+        mod unix;
     } else if #[cfg(windows)] {
         mod tube;
         pub use tube::TubeEndpoint;
@@ -21,6 +23,7 @@ use std::mem;
 use std::path::Path;
 
 use base::RawDescriptor;
+use data_model::DataInit;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 
@@ -183,7 +186,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
         hdr: &VhostUserMsgHeader<R>,
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
-        let mut iovs = [hdr.as_bytes()];
+        let mut iovs = [hdr.as_slice()];
         let bytes = self.send_iovec_all(&mut iovs[..], fds)?;
         if bytes != mem::size_of::<VhostUserMsgHeader<R>>() {
             return Err(Error::PartialMessage);
@@ -207,7 +210,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     ) -> Result<()> {
         // We send the header and the body separately here. This is necessary on Windows. Otherwise
         // the recv side cannot read the header independently (the transport is message oriented).
-        let mut bytes = self.send_iovec_all(&mut [hdr.as_bytes()], fds)?;
+        let mut bytes = self.send_iovec_all(&mut [hdr.as_slice()], fds)?;
         bytes += self.send_iovec_all(&mut [body.as_bytes()], None)?;
         if bytes != mem::size_of::<VhostUserMsgHeader<R>>() + mem::size_of::<T>() {
             return Err(Error::PartialMessage);
@@ -244,7 +247,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
 
         // We send the header and the body separately here. This is necessary on Windows. Otherwise
         // the recv side cannot read the header independently (the transport is message oriented).
-        let mut len = self.send_iovec_all(&mut [hdr.as_bytes()], fds)?;
+        let mut len = self.send_iovec_all(&mut [hdr.as_slice()], fds)?;
         len += self.send_iovec_all(&mut [body.as_bytes(), payload], None)?;
 
         if len != total {
@@ -333,7 +336,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     fn recv_header(&mut self) -> Result<(VhostUserMsgHeader<R>, Option<Vec<File>>)> {
         let mut hdr = VhostUserMsgHeader::default();
         let (bytes, files) = self.recv_into_bufs(
-            &mut [IoSliceMut::new(hdr.as_bytes_mut())],
+            &mut [IoSliceMut::new(hdr.as_mut_slice())],
             true, /* allow_fd */
         )?;
 
@@ -360,7 +363,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     ) -> Result<(VhostUserMsgHeader<R>, T, Option<Vec<File>>)> {
         let mut hdr = VhostUserMsgHeader::default();
         let mut body: T = Default::default();
-        let mut slices = [hdr.as_bytes_mut(), body.as_bytes_mut()];
+        let mut slices = [hdr.as_mut_slice(), body.as_bytes_mut()];
         let (bytes, files) = self.recv_into_bufs_all(&mut slices)?;
 
         let total = mem::size_of::<VhostUserMsgHeader<R>>() + mem::size_of::<T>();
@@ -391,7 +394,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
         buf: &mut [u8],
     ) -> Result<(VhostUserMsgHeader<R>, usize, Option<Vec<File>>)> {
         let mut hdr = VhostUserMsgHeader::default();
-        let mut slices = [hdr.as_bytes_mut(), buf];
+        let mut slices = [hdr.as_mut_slice(), buf];
         let (bytes, files) = self.recv_into_bufs_all(&mut slices)?;
 
         if bytes < mem::size_of::<VhostUserMsgHeader<R>>() {
@@ -418,7 +421,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
     ) -> Result<(VhostUserMsgHeader<R>, T, Vec<u8>, Option<Vec<File>>)> {
         let mut hdr = VhostUserMsgHeader::default();
         let mut body: T = Default::default();
-        let mut slices = [hdr.as_bytes_mut()];
+        let mut slices = [hdr.as_mut_slice()];
         let (bytes, files) = self.recv_into_bufs_all(&mut slices)?;
 
         if bytes < mem::size_of::<VhostUserMsgHeader<R>>() {
@@ -429,7 +432,7 @@ pub trait EndpointExt<R: Req>: Endpoint<R> {
 
         let payload_size = hdr.get_size() as usize - mem::size_of::<T>();
         let mut buf: Vec<u8> = vec![0; payload_size];
-        let mut slices = [body.as_bytes_mut(), buf.as_bytes_mut()];
+        let mut slices = [body.as_bytes_mut(), buf.as_mut_slice()];
         let (bytes, more_files) = self.recv_into_bufs_all(&mut slices)?;
         if bytes < hdr.get_size() as usize {
             return Err(Error::PartialMessage);
@@ -447,9 +450,9 @@ impl<R: Req, E: Endpoint<R> + ?Sized> EndpointExt<R> for E {}
 pub(crate) mod tests {
     use super::*;
     cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "android", target_os = "linux"))] {
+        if #[cfg(unix)] {
             #[cfg(feature = "vmm")]
-            pub(crate) use super::linux::tests::*;
+            pub(crate) use super::unix::tests::*;
         } else if #[cfg(windows)] {
             #[cfg(feature = "vmm")]
             pub(crate) use windows::tests::*;

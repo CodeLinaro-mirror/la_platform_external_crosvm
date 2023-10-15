@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // TODO(b/237714823): Currently, only kvm is enabled for this test once LUCI can run windows.
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(unix)]
 #![cfg(target_arch = "x86_64")]
 
 use base::MemoryMappingBuilder;
@@ -13,7 +13,7 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 fn test_kvm_remove_memory() {
     use hypervisor::kvm::*;
     test_remove_memory(|guest_mem| {

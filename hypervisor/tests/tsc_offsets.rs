@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // TODO(b/237714823): Currently, only kvm is enabled for this test once LUCI can run windows.
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(unix)]
 #![cfg(target_arch = "x86_64")]
 
 use std::arch::x86_64::_rdtsc;
@@ -28,7 +28,7 @@ macro_rules! assert_wrapping_close {
 }
 
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 fn test_kvm_tsc_offsets() {
     use hypervisor::kvm::*;
     test_tsc_offsets(|guest_mem| {

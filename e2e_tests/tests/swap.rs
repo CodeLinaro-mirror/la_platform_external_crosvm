@@ -4,7 +4,7 @@
 
 //! Testing vmm-swap
 
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(unix)]
 
 use std::time::Duration;
 use std::time::Instant;

@@ -4,7 +4,7 @@
 
 //! Integration tests using LibVDA fake decode implemenation.
 
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(unix)]
 
 use libvda::decode::*;
 use libvda::*;

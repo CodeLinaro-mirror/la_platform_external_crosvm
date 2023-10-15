@@ -12,6 +12,7 @@ path = "tests/process.rs"
 harness = false
 
 [features]
+chromeos = []
 proto_tube = ["protobuf"]
 seccomp_trace = []
 
@@ -35,14 +36,14 @@ smallvec = "1.6.1"
 tempfile = "3"
 thiserror = "1.0.20"
 uuid = { version = "1", features = ["v4"] }
-zerocopy = { version = "0.7", features = ["derive"] }
+zerocopy = "0.6"
 
 [dev-dependencies]
 libtest-mimic = "0.6"
 # ANDROID: uncomment when protos is fixed to work with cargo.
 # protos = { path = "../protos", features = ["composite-disk"] }
 
-[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 minijail = "*"
 
 [target.'cfg(windows)'.dependencies]

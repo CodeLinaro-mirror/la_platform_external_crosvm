@@ -13,7 +13,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 pub mod block {
     use super::*;
@@ -37,7 +36,7 @@ pub mod block {
     pub const VIRTIO_BLK_F_DISCARD: u32 = 13;
     pub const VIRTIO_BLK_F_WRITE_ZEROES: u32 = 14;
 
-    #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
+    #[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
     #[repr(C)]
     pub struct virtio_blk_geometry {
         cylinders: Le16,
@@ -45,7 +44,7 @@ pub mod block {
         sectors: u8,
     }
 
-    #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
+    #[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
     #[repr(C)]
     pub struct virtio_blk_topology {
         physical_block_exp: u8,
@@ -54,7 +53,7 @@ pub mod block {
         opt_io_size: Le32,
     }
 
-    #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
+    #[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
     #[repr(C, packed)]
     pub struct virtio_blk_config {
         pub capacity: Le64,
@@ -75,7 +74,7 @@ pub mod block {
         pub unused1: [u8; 3],
     }
 
-    #[derive(Copy, Clone, Debug, Default, FromZeroes, FromBytes, AsBytes)]
+    #[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
     #[repr(C)]
     pub(crate) struct virtio_blk_req_header {
         pub req_type: Le32,
@@ -83,7 +82,7 @@ pub mod block {
         pub sector: Le64,
     }
 
-    #[derive(Copy, Clone, Debug, Default, FromZeroes, FromBytes, AsBytes)]
+    #[derive(Copy, Clone, Debug, Default, FromBytes, AsBytes)]
     #[repr(C)]
     pub(crate) struct virtio_blk_discard_write_zeroes {
         pub sector: Le64,
@@ -115,7 +114,7 @@ pub mod gpu {
 
     pub const VIRTIO_GPU_SHM_ID_HOST_VISIBLE: u8 = 0x0001;
 
-    #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
+    #[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
     #[repr(C)]
     pub struct virtio_gpu_config {
         pub events_read: Le32,
@@ -129,17 +128,7 @@ pub mod snd {
     use super::*;
 
     #[derive(
-        Copy,
-        Clone,
-        Default,
-        AsBytes,
-        FromZeroes,
-        FromBytes,
-        Serialize,
-        Deserialize,
-        PartialEq,
-        Eq,
-        Debug,
+        Copy, Clone, Default, AsBytes, FromBytes, Serialize, Deserialize, PartialEq, Eq, Debug,
     )]
     #[repr(C, packed)]
     pub struct virtio_snd_config {
@@ -156,7 +145,6 @@ pub mod video {
     use serde_keyvalue::FromKeyValues;
     use zerocopy::AsBytes;
     use zerocopy::FromBytes;
-    use zerocopy::FromZeroes;
 
     pub const CMD_QUEUE_INDEX: usize = 0;
     pub const EVENT_QUEUE_INDEX: usize = 1;
@@ -230,7 +218,7 @@ pub mod video {
     }
 
     #[repr(C)]
-    #[derive(Debug, Default, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
+    #[derive(Debug, Default, Copy, Clone, FromBytes, AsBytes)]
     pub struct virtio_video_config {
         pub version: Le32,
         pub max_caps_length: Le32,

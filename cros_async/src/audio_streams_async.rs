@@ -7,30 +7,30 @@
 //! It implements the `AudioStreamsExecutor` trait for `Executor`, so it can be passed into
 //! the audio_streams API.
 use std::io::Result;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use std::os::windows::io::RawHandle;
 use std::time::Duration;
 
 use async_trait::async_trait;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use audio_streams::async_api::AsyncStream;
 use audio_streams::async_api::AudioStreamsExecutor;
 use audio_streams::async_api::EventAsyncWrapper;
 use audio_streams::async_api::ReadAsync;
 use audio_streams::async_api::ReadWriteAsync;
 use audio_streams::async_api::WriteAsync;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use base::Descriptor;
 #[cfg(windows)]
 use base::Event;
 #[cfg(windows)]
 use base::FromRawDescriptor;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use base::RawDescriptor;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use super::AsyncWrapper;
 use crate::EventAsync;
 use crate::IntoAsync;
@@ -82,7 +82,7 @@ impl EventAsyncWrapper for EventAsync {
 
 #[async_trait(?Send)]
 impl AudioStreamsExecutor for super::Executor {
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     fn async_unix_stream(&self, stream: UnixStream) -> Result<AsyncStream> {
         Ok(Box::new(IoSourceWrapper {
             source: self.async_from(AsyncWrapper::new(stream))?,
@@ -103,7 +103,7 @@ impl AudioStreamsExecutor for super::Executor {
         TimerAsync::sleep(self, dur).await.map_err(Into::into)
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     async fn wait_fd_readable(&self, fd: RawDescriptor) -> Result<()> {
         self.async_from(AsyncWrapper::new(Descriptor(fd)))?
             .wait_readable()

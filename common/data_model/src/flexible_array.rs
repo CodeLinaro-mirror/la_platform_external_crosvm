@@ -11,7 +11,9 @@ use std::mem::size_of;
 fn vec_with_size_in_bytes<T: Default>(size_in_bytes: usize) -> Vec<T> {
     let rounded_size = (size_in_bytes + size_of::<T>() - 1) / size_of::<T>();
     let mut v = Vec::with_capacity(rounded_size);
-    v.resize_with(rounded_size, T::default);
+    for _ in 0..rounded_size {
+        v.push(T::default())
+    }
     v
 }
 

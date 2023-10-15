@@ -25,6 +25,8 @@ pub mod pl030;
 pub mod pmc_virt;
 mod serial;
 pub mod serial_device;
+#[cfg(feature = "tpm")]
+mod software_tpm;
 mod suspendable;
 mod sys;
 mod virtcpufreq;
@@ -125,6 +127,8 @@ pub use self::serial_device::SerialDevice;
 pub use self::serial_device::SerialHardware;
 pub use self::serial_device::SerialParameters;
 pub use self::serial_device::SerialType;
+#[cfg(feature = "tpm")]
+pub use self::software_tpm::SoftwareTpm;
 pub use self::suspendable::DeviceState;
 pub use self::suspendable::Suspendable;
 pub use self::virtcpufreq::VirtCpufreq;
@@ -134,7 +138,7 @@ pub use self::virtio::VirtioPciDevice;
 pub use self::vtpm_proxy::VtpmProxy;
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+    if #[cfg(unix)] {
         mod platform;
         mod proxy;
         pub mod vmwdt;

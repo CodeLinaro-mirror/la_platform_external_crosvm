@@ -57,11 +57,11 @@ use x86_64::check_host_hybrid_support;
 use x86_64::CpuIdCall;
 
 pub(crate) use super::sys::HypervisorKind;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use crate::crosvm::sys::config::SharedDir;
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+    if #[cfg(unix)] {
         #[cfg(feature = "gpu")]
         use crate::crosvm::sys::GpuRenderServerParameters;
 
@@ -319,7 +319,6 @@ pub struct TouchDeviceOption {
     path: PathBuf,
     width: Option<u32>,
     height: Option<u32>,
-    name: Option<String>,
     default_width: u32,
     default_height: u32,
 }
@@ -330,7 +329,6 @@ impl TouchDeviceOption {
             path,
             width: None,
             height: None,
-            name: None,
             default_width: DEFAULT_TOUCH_DEVICE_WIDTH,
             default_height: DEFAULT_TOUCH_DEVICE_HEIGHT,
         }
@@ -369,16 +367,6 @@ impl TouchDeviceOption {
             self.height.unwrap_or(self.default_height),
         )
     }
-
-    /// Setter for the input device's name specified by the user.
-    pub fn set_name(&mut self, name: String) {
-        self.name.replace(name);
-    }
-
-    /// Getter for the input device's name
-    pub fn get_name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
 }
 
 impl FromStr for TouchDeviceOption {
@@ -392,9 +380,6 @@ impl FromStr for TouchDeviceOption {
         }
         if let Some(height) = it.next() {
             touch_spec.set_height(height.trim().parse().unwrap());
-        }
-        if let Some(name) = it.next() {
-            touch_spec.set_name(name.trim().to_string());
         }
         Ok(touch_spec)
     }
@@ -758,13 +743,11 @@ pub struct Config {
     pub block_control_tube: Vec<Tube>,
     #[cfg(windows)]
     pub block_vhost_user_tube: Vec<Tube>,
-    #[cfg(target_arch = "x86_64")]
-    pub break_linux_pci_config_io: bool,
     #[cfg(windows)]
     pub broker_shutdown_event: Option<Event>,
     #[cfg(all(target_arch = "x86_64", unix))]
     pub bus_lock_ratelimit: u64,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     pub coiommu_param: Option<devices::CoIommuParameters>,
     pub core_scheduling: bool,
     pub cpu_capacity: BTreeMap<usize, u32>, // CPU index -> capacity
@@ -815,7 +798,7 @@ pub struct Config {
     pub jail_config: Option<JailConfig>,
     #[cfg(windows)]
     pub kernel_log_file: Option<String>,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     pub lock_guest_memory: bool,
     #[cfg(windows)]
     pub log_file: Option<String>,
@@ -871,7 +854,7 @@ pub struct Config {
     pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
     #[cfg(windows)]
     pub service_pipe_name: Option<String>,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[serde(skip)]
     pub shared_dirs: Vec<SharedDir>,
     #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
@@ -881,6 +864,8 @@ pub struct Config {
     #[cfg(all(windows, feature = "audio"))]
     pub snd_split_config: Option<SndSplitConfig>,
     pub socket_path: Option<PathBuf>,
+    #[cfg(feature = "tpm")]
+    pub software_tpm: bool,
     #[cfg(feature = "audio")]
     pub sound: Option<PathBuf>,
     pub strict_balloon: bool,
@@ -890,7 +875,7 @@ pub struct Config {
     pub swiotlb: Option<u64>,
     #[cfg(target_os = "android")]
     pub task_profiles: Vec<String>,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     pub unmap_guest_memory_on_fork: bool,
     pub usb: bool,
     pub vcpu_affinity: Option<VcpuAffinity>,
@@ -898,14 +883,14 @@ pub struct Config {
     pub vcpu_count: Option<usize>,
     #[cfg(target_arch = "x86_64")]
     pub vcpu_hybrid_type: BTreeMap<usize, CpuHybridType>, // CPU index -> hybrid type
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     pub vfio: Vec<super::sys::config::VfioOption>,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     pub vfio_isolate_hotplug: bool,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     pub vhost_scmi: bool,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     pub vhost_scmi_device: PathBuf,
     pub vhost_user_blk: Vec<VhostUserOption>,
@@ -960,13 +945,11 @@ impl Default for Config {
             block_control_tube: Vec::new(),
             #[cfg(windows)]
             block_vhost_user_tube: Vec::new(),
-            #[cfg(target_arch = "x86_64")]
-            break_linux_pci_config_io: false,
             #[cfg(windows)]
             broker_shutdown_event: None,
             #[cfg(all(target_arch = "x86_64", unix))]
             bus_lock_ratelimit: 0,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             coiommu_param: None,
             core_scheduling: true,
             #[cfg(feature = "crash-report")]
@@ -1025,7 +1008,7 @@ impl Default for Config {
             },
             #[cfg(windows)]
             kernel_log_file: None,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             lock_guest_memory: false,
             #[cfg(windows)]
             log_file: None,
@@ -1075,7 +1058,7 @@ impl Default for Config {
             scsis: Vec::new(),
             #[cfg(windows)]
             service_pipe_name: None,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             shared_dirs: Vec::new(),
             #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             slirp_capture_file: None,
@@ -1084,6 +1067,8 @@ impl Default for Config {
             #[cfg(all(windows, feature = "audio"))]
             snd_split_config: None,
             socket_path: None,
+            #[cfg(feature = "tpm")]
+            software_tpm: false,
             #[cfg(feature = "audio")]
             sound: None,
             strict_balloon: false,
@@ -1093,7 +1078,7 @@ impl Default for Config {
             swiotlb: None,
             #[cfg(target_os = "android")]
             task_profiles: Vec::new(),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             unmap_guest_memory_on_fork: false,
             usb: true,
             vcpu_affinity: None,
@@ -1101,14 +1086,14 @@ impl Default for Config {
             vcpu_count: None,
             #[cfg(target_arch = "x86_64")]
             vcpu_hybrid_type: BTreeMap::new(),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             vfio: Vec::new(),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             vfio_isolate_hotplug: false,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
             vhost_scmi: false,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(unix)]
             #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
             vhost_scmi_device: PathBuf::from(VHOST_SCMI_PATH),
             vhost_user_blk: Vec::new(),
@@ -1277,7 +1262,7 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         return Err("'balloon_page_reporting' requires enabled balloon".to_string());
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     if cfg.lock_guest_memory && cfg.jail_config.is_none() {
         return Err("'lock-guest-memory' and 'disable-sandbox' are mutually exclusive".to_string());
     }

@@ -31,7 +31,6 @@ use remain::sorted;
 use thiserror::Error;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 use crate::AsyncDisk;
 use crate::DiskFile;
@@ -57,7 +56,7 @@ pub const SPARSE_HEADER_MAGIC: u32 = 0xed26ff3a;
 const MAJOR_VERSION: u16 = 1;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, AsBytes, FromZeroes, FromBytes)]
+#[derive(Clone, Copy, Debug, AsBytes, FromBytes)]
 struct SparseHeader {
     magic: Le32,          /* SPARSE_HEADER_MAGIC */
     major_version: Le16,  /* (0x1) - reject images with higher major versions */
@@ -78,7 +77,7 @@ const CHUNK_TYPE_DONT_CARE: u16 = 0xCAC3;
 const CHUNK_TYPE_CRC32: u16 = 0xCAC4;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, AsBytes, FromZeroes, FromBytes)]
+#[derive(Clone, Copy, Debug, AsBytes, FromBytes)]
 struct ChunkHeader {
     chunk_type: Le16, /* 0xCAC1 -> raw; 0xCAC2 -> fill; 0xCAC3 -> don't care */
     reserved1: u16,

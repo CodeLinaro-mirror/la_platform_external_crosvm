@@ -3,11 +3,11 @@
 // found in the LICENSE file.
 
 mod config;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 mod helpers;
 
 pub use crate::config::JailConfig;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 pub use crate::helpers::*;
 
 // TODO(b/268407006): We define Minijail as an empty struct as a stub for minijail::Minijail on

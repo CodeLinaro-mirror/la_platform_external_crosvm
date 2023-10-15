@@ -144,7 +144,6 @@ where
     let (pcibus_exit_evt_wrtube, _) = Tube::directional_pair().unwrap();
     let pci_bus = Arc::new(Mutex::new(PciConfigIo::new(
         pci.clone(),
-        false,
         pcibus_exit_evt_wrtube,
     )));
     io_bus.insert(pci_bus, 0xcf8, 0x8).unwrap();
@@ -215,7 +214,7 @@ where
         &mut resume_notify_devices,
         #[cfg(feature = "swap")]
         &mut None,
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         false,
         Default::default(),
         &pci_irqs,

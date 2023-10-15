@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
-        pub mod linux;
+    if #[cfg(unix)] {
+        pub mod unix;
     } else if #[cfg(windows)] {
         pub mod windows;
     }

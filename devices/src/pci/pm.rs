@@ -6,7 +6,6 @@
 
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 use crate::pci::PciCapability;
 use crate::pci::PciCapabilityID;
@@ -31,7 +30,7 @@ pub enum PciDevicePower {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, AsBytes, FromZeroes, FromBytes)]
+#[derive(Clone, Copy, AsBytes, FromBytes)]
 pub struct PciPmCap {
     _cap_vndr: u8,
     _cap_next: u8,

@@ -4,7 +4,7 @@
 
 //! Testing vsock.
 
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(unix)]
 
 use std::io::Write;
 use std::path::Path;

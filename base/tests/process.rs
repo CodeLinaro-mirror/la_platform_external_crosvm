@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 mod test {
     use std::thread;
     use std::time::Duration;
 
     use base::getpid;
-    use base::linux::process::fork_process;
+    use base::unix::process::fork_process;
     use base::AsRawDescriptor;
     use base::Tube;
     use minijail::Minijail;
@@ -108,27 +108,27 @@ fn main() {
     };
 
     let tests = vec![
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         libtest_mimic::Trial::test("pid_diff", move || {
             test::pid_diff();
             Ok(())
         }),
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         libtest_mimic::Trial::test("thread_name", move || {
             test::thread_name();
             Ok(())
         }),
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         libtest_mimic::Trial::test("thread_name_trimmed", move || {
             test::thread_name_trimmed();
             Ok(())
         }),
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         libtest_mimic::Trial::test("wait_for_success", move || {
             test::wait_for_success();
             Ok(())
         }),
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(unix)]
         libtest_mimic::Trial::test("wait_for_panic", move || {
             test::wait_for_panic();
             Ok(())

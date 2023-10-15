@@ -27,7 +27,6 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 use super::DescriptorChain;
 use crate::virtio::SplitDescriptorChain;
@@ -765,7 +764,7 @@ pub enum DescriptorType {
     Writable,
 }
 
-#[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
+#[derive(Copy, Clone, Debug, FromBytes, AsBytes)]
 #[repr(C)]
 struct virtq_desc {
     addr: Le64,

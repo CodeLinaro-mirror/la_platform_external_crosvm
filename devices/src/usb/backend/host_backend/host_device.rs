@@ -148,13 +148,7 @@ impl HostDevice {
                 ControlRequestDataPhaseTransferDirection::HostToDevice,
             ) => {
                 usb_trace!("handling set config");
-                match self.set_config() {
-                    Ok(status) => (status, 0),
-                    Err(e) => {
-                        error!("set config error: {}", e);
-                        (TransferStatus::Stalled, 0)
-                    }
-                }
+                (self.set_config()?, 0)
             }
             (
                 StandardControlRequest::SetInterface,
@@ -162,13 +156,7 @@ impl HostDevice {
                 ControlRequestDataPhaseTransferDirection::HostToDevice,
             ) => {
                 usb_trace!("handling set interface");
-                match self.set_interface() {
-                    Ok(status) => (status, 0),
-                    Err(e) => {
-                        error!("set interface error: {}", e);
-                        (TransferStatus::Stalled, 0)
-                    }
-                }
+                (self.set_interface()?, 0)
             }
             (
                 StandardControlRequest::ClearFeature,
@@ -176,13 +164,7 @@ impl HostDevice {
                 ControlRequestDataPhaseTransferDirection::HostToDevice,
             ) => {
                 usb_trace!("handling clear feature");
-                match self.clear_feature() {
-                    Ok(status) => (status, 0),
-                    Err(e) => {
-                        error!("clear feature error: {}", e);
-                        (TransferStatus::Stalled, 0)
-                    }
-                }
+                (self.clear_feature()?, 0)
             }
             (
                 StandardControlRequest::GetDescriptor,
@@ -197,13 +179,7 @@ impl HostDevice {
                         return Err(Error::MissingRequiredBuffer);
                     };
 
-                    match self.get_config_descriptor_filtered(buffer) {
-                        Ok((status, b)) => (status, b),
-                        Err(e) => {
-                            error!("get descriptor error: {}", e);
-                            (TransferStatus::Stalled, 0)
-                        }
-                    }
+                    self.get_config_descriptor_filtered(buffer)?
                 } else {
                     return Ok(false);
                 }
@@ -217,7 +193,6 @@ impl HostDevice {
         xhci_transfer
             .on_transfer_complete(&status, bytes_transferred)
             .map_err(Error::TransferComplete)?;
-
         Ok(true)
     }
 

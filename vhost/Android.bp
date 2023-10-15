@@ -32,13 +32,13 @@ rust_library {
 }
 
 rust_test {
-    name: "vhost_test_tests_linux",
+    name: "vhost_test_tests_unix",
     defaults: ["crosvm_inner_defaults"],
     host_supported: true,
-    crate_name: "linux",
+    crate_name: "unix",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/linux.rs"],
+    srcs: ["tests/unix.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {

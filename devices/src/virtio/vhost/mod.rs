@@ -9,7 +9,7 @@ use base::TubeError;
 use net_util::Error as TapError;
 use remain::sorted;
 use thiserror::Error;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(unix)]
 use vhost::Error as VhostError;
 
 mod control_socket;
@@ -18,7 +18,7 @@ pub mod user;
 pub use self::control_socket::*;
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+    if #[cfg(unix)] {
         #[cfg(feature = "net")]
         mod net;
         pub mod vsock;
@@ -71,7 +71,7 @@ pub enum Error {
     #[error("failed to set vnet header size: {0}")]
     TapSetVnetHdrSize(TapError),
     /// Get features failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to get features: {0}")]
     VhostGetFeatures(VhostError),
     /// Vhost IOTLB required but not supported.
@@ -84,51 +84,51 @@ pub enum Error {
     #[error("failed to read vhost event: {0}")]
     VhostIrqRead(SysError),
     /// Net set backend failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("net set backend failed: {0}")]
     VhostNetSetBackend(VhostError),
     /// Failed to open vhost device.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to open vhost device: {0}")]
     VhostOpen(VhostError),
     /// Set features failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set features: {0}")]
     VhostSetFeatures(VhostError),
     /// Set mem table failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set mem table: {0}")]
     VhostSetMemTable(VhostError),
     /// Set owner failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set owner: {0}")]
     VhostSetOwner(VhostError),
     /// Set vring addr failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set vring addr: {0}")]
     VhostSetVringAddr(VhostError),
     /// Set vring base failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set vring base: {0}")]
     VhostSetVringBase(VhostError),
     /// Set vring call failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set vring call: {0}")]
     VhostSetVringCall(VhostError),
     /// Set vring kick failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set vring kick: {0}")]
     VhostSetVringKick(VhostError),
     /// Set vring num failed.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set vring num: {0}")]
     VhostSetVringNum(VhostError),
     /// Failed to set CID for guest.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to set CID for guest: {0}")]
     VhostVsockSetCid(VhostError),
     /// Failed to start vhost-vsock driver.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(unix)]
     #[error("failed to start vhost-vsock driver: {0}")]
     VhostVsockStart(VhostError),
     #[error("queue missing vring base")]

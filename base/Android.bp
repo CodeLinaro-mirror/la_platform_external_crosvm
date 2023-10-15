@@ -65,47 +65,7 @@ rust_test {
             ],
         },
     },
-    shared_libs: ["libcap"], // specified in src/linux/capabilities.rs
-}
-
-rust_test {
-    name: "base_test_tests_linux_main",
-    defaults: ["crosvm_inner_defaults"],
-    host_supported: false, // Can't seem to access syslog in TH host tests.
-    crate_name: "linux",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    srcs: ["tests/linux/main.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libaudio_streams",
-        "libbase_rust",
-        "libcfg_if",
-        "libchrono",
-        "libdata_model",
-        "libenv_logger",
-        "liblibc",
-        "liblog_rust",
-        "libminijail_rust",
-        "libonce_cell",
-        "libserde",
-        "libserde_json",
-        "libsmallvec",
-        "libsync_rust",
-        "libtempfile",
-        "libthiserror",
-        "libuuid",
-        "libzerocopy",
-    ],
-    proc_macros: [
-        "libbase_event_token_derive",
-        "libremain",
-    ],
+    shared_libs: ["libcap"], // specified in src/unix/capabilities.rs
 }
 
 rust_test {
@@ -186,6 +146,46 @@ rust_test {
         "libbase_event_token_derive",
         "libremain",
     ],
+}
+
+rust_test {
+    name: "base_test_tests_unix_main",
+    defaults: ["crosvm_inner_defaults"],
+    host_supported: false, // Can't seem to access syslog in TH host tests.
+    crate_name: "unix",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
+    srcs: ["tests/unix/main.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
+    edition: "2021",
+    rustlibs: [
+        "libaudio_streams",
+        "libbase_rust",
+        "libcfg_if",
+        "libchrono",
+        "libdata_model",
+        "libenv_logger",
+        "liblibc",
+        "liblog_rust",
+        "libminijail_rust",
+        "libonce_cell",
+        "libserde",
+        "libserde_json",
+        "libsmallvec",
+        "libsync_rust",
+        "libtempfile",
+        "libthiserror",
+        "libuuid",
+        "libzerocopy",
+    ],
+    proc_macros: [
+        "libbase_event_token_derive",
+        "libremain",
+    ],
     target: {
         android: {
             rustlibs: ["libandroid_log_sys"],
@@ -204,7 +204,7 @@ rust_test {
             ],
         },
     },
-    shared_libs: ["libcap"], // specified in src/linux/capabilities.rs
+    shared_libs: ["libcap"], // specified in src/unix/capabilities.rs
 }
 
 rust_library {
@@ -258,7 +258,7 @@ rust_library {
             ],
         },
     },
-    shared_libs: ["libcap"], // specified in src/linux/capabilities.rs
+    shared_libs: ["libcap"], // specified in src/unix/capabilities.rs
     visibility: [
         "//packages/modules/Virtualization/virtualizationmanager",
         "//vendor:__subpackages__",

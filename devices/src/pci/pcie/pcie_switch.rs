@@ -4,15 +4,24 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use base::error;
+use resources::SystemAllocator;
+use sync::Mutex;
 
 use crate::bus::HotPlugBus;
 use crate::bus::HotPlugKey;
+use crate::pci::pci_configuration::PciCapabilityID;
+use crate::pci::pcie::pci_bridge::PciBridgeBusRange;
+use crate::pci::pcie::pcie_device::PcieCap;
+use crate::pci::pcie::pcie_device::PcieDevice;
 use crate::pci::pcie::pcie_port::PciePort;
-use crate::pci::pcie::pcie_port::PciePortVariant;
 use crate::pci::pcie::*;
+use crate::pci::pm::PciPmCap;
+use crate::pci::MsiConfig;
 use crate::pci::PciAddress;
+use crate::pci::PciCapability;
 use crate::pci::PciDeviceError;
 
 const PCIE_UP_DID: u16 = 0x3500;
@@ -34,7 +43,7 @@ impl PcieUpstreamPort {
                 primary_bus_num,
                 secondary_bus_num,
                 false,
-                PcieDevicePortType::UpstreamPort,
+                false,
             ),
             hotplugged,
             downstream_devices: BTreeMap::new(),
@@ -45,8 +54,7 @@ impl PcieUpstreamPort {
         pcie_host: PcieHostPort,
         hotplugged: bool,
     ) -> std::result::Result<Self, PciDeviceError> {
-        let pcie_port =
-            PciePort::new_from_host(pcie_host, false, PcieDevicePortType::UpstreamPort)?;
+        let pcie_port = PciePort::new_from_host(pcie_host, false, false)?;
         Ok(PcieUpstreamPort {
             pcie_port,
             hotplugged,
@@ -55,25 +63,67 @@ impl PcieUpstreamPort {
     }
 }
 
-impl PciePortVariant for PcieUpstreamPort {
-    fn get_pcie_port(&self) -> &PciePort {
-        &self.pcie_port
+impl PcieDevice for PcieUpstreamPort {
+    fn get_device_id(&self) -> u16 {
+        self.pcie_port.get_device_id()
     }
 
-    fn get_pcie_port_mut(&mut self) -> &mut PciePort {
-        &mut self.pcie_port
+    fn debug_label(&self) -> String {
+        self.pcie_port.debug_label()
     }
 
-    fn get_removed_devices_impl(&self) -> Vec<PciAddress> {
+    fn preferred_address(&self) -> Option<PciAddress> {
+        self.pcie_port.preferred_address()
+    }
+
+    fn allocate_address(
+        &mut self,
+        resources: &mut SystemAllocator,
+    ) -> std::result::Result<PciAddress, PciDeviceError> {
+        self.pcie_port.allocate_address(resources)
+    }
+
+    fn clone_interrupt(&mut self, msi_config: Arc<Mutex<MsiConfig>>) {
+        self.pcie_port.clone_interrupt(msi_config);
+    }
+
+    fn read_config(&self, reg_idx: usize, data: &mut u32) {
+        self.pcie_port.read_config(reg_idx, data);
+    }
+
+    fn write_config(&mut self, reg_idx: usize, offset: u64, data: &[u8]) {
+        self.pcie_port.write_config(reg_idx, offset, data);
+    }
+
+    fn get_caps(&self) -> Vec<Box<dyn PciCapability>> {
+        vec![
+            Box::new(PcieCap::new(PcieDevicePortType::UpstreamPort, false, 0)),
+            Box::new(PciPmCap::new()),
+        ]
+    }
+
+    fn set_capability_reg_idx(&mut self, id: PciCapabilityID, reg_idx: usize) {
+        self.pcie_port.set_capability_reg_idx(id, reg_idx);
+    }
+
+    fn get_bus_range(&self) -> Option<PciBridgeBusRange> {
+        self.pcie_port.get_bus_range()
+    }
+
+    fn get_removed_devices(&self) -> Vec<PciAddress> {
         Vec::new()
     }
 
-    fn hotplug_implemented_impl(&self) -> bool {
+    fn hotplug_implemented(&self) -> bool {
         false
     }
 
-    fn hotplugged_impl(&self) -> bool {
+    fn hotplugged(&self) -> bool {
         self.hotplugged
+    }
+
+    fn get_bridge_window_size(&self) -> (u64, u64) {
+        self.pcie_port.get_bridge_window_size()
     }
 }
 
@@ -152,7 +202,7 @@ impl PcieDownstreamPort {
                 primary_bus_num,
                 secondary_bus_num,
                 false,
-                PcieDevicePortType::DownstreamPort,
+                false,
             ),
             hotplugged,
             downstream_devices: BTreeMap::new(),
@@ -165,8 +215,7 @@ impl PcieDownstreamPort {
         pcie_host: PcieHostPort,
         hotplugged: bool,
     ) -> std::result::Result<Self, PciDeviceError> {
-        let pcie_port =
-            PciePort::new_from_host(pcie_host, true, PcieDevicePortType::DownstreamPort)?;
+        let pcie_port = PciePort::new_from_host(pcie_host, true, false)?;
         Ok(PcieDownstreamPort {
             pcie_port,
             hotplugged,
@@ -177,16 +226,54 @@ impl PcieDownstreamPort {
     }
 }
 
-impl PciePortVariant for PcieDownstreamPort {
-    fn get_pcie_port(&self) -> &PciePort {
-        &self.pcie_port
+impl PcieDevice for PcieDownstreamPort {
+    fn get_device_id(&self) -> u16 {
+        self.pcie_port.get_device_id()
     }
 
-    fn get_pcie_port_mut(&mut self) -> &mut PciePort {
-        &mut self.pcie_port
+    fn debug_label(&self) -> String {
+        self.pcie_port.debug_label()
     }
 
-    fn get_removed_devices_impl(&self) -> Vec<PciAddress> {
+    fn preferred_address(&self) -> Option<PciAddress> {
+        self.pcie_port.preferred_address()
+    }
+
+    fn allocate_address(
+        &mut self,
+        resources: &mut SystemAllocator,
+    ) -> std::result::Result<PciAddress, PciDeviceError> {
+        self.pcie_port.allocate_address(resources)
+    }
+
+    fn clone_interrupt(&mut self, msi_config: Arc<Mutex<MsiConfig>>) {
+        self.pcie_port.clone_interrupt(msi_config);
+    }
+
+    fn read_config(&self, reg_idx: usize, data: &mut u32) {
+        self.pcie_port.read_config(reg_idx, data);
+    }
+
+    fn write_config(&mut self, reg_idx: usize, offset: u64, data: &[u8]) {
+        self.pcie_port.write_config(reg_idx, offset, data);
+    }
+
+    fn get_caps(&self) -> Vec<Box<dyn PciCapability>> {
+        vec![
+            Box::new(PcieCap::new(PcieDevicePortType::DownstreamPort, true, 0)),
+            Box::new(PciPmCap::new()),
+        ]
+    }
+
+    fn set_capability_reg_idx(&mut self, id: PciCapabilityID, reg_idx: usize) {
+        self.pcie_port.set_capability_reg_idx(id, reg_idx);
+    }
+
+    fn get_bus_range(&self) -> Option<PciBridgeBusRange> {
+        self.pcie_port.get_bus_range()
+    }
+
+    fn get_removed_devices(&self) -> Vec<PciAddress> {
         if self.pcie_port.removed_downstream_valid() {
             self.removed_downstream.clone()
         } else {
@@ -194,12 +281,16 @@ impl PciePortVariant for PcieDownstreamPort {
         }
     }
 
-    fn hotplug_implemented_impl(&self) -> bool {
+    fn hotplug_implemented(&self) -> bool {
         false
     }
 
-    fn hotplugged_impl(&self) -> bool {
+    fn hotplugged(&self) -> bool {
         self.hotplugged
+    }
+
+    fn get_bridge_window_size(&self) -> (u64, u64) {
+        self.pcie_port.get_bridge_window_size()
     }
 }
 
