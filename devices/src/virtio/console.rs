@@ -5,7 +5,7 @@
 //! Legacy console device that uses a polling thread. This is kept because it is still used by
 //! Windows ; outside of this use-case, please use [[asynchronous::AsyncConsole]] instead.
 
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub mod asynchronous;
 mod sys;
 
@@ -41,6 +41,7 @@ use thiserror::Error as ThisError;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
+use zerocopy::FromZeroes;
 
 use crate::virtio::base_features;
 use crate::virtio::copy_config;
@@ -64,7 +65,7 @@ pub enum ConsoleError {
     RxDescriptorsExhausted,
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromBytes)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
 #[repr(C)]
 pub struct virtio_console_config {
     pub cols: Le16,
