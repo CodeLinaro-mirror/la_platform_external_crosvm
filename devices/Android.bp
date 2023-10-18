@@ -29,6 +29,7 @@ rust_test {
         "balloon",
         "geniezone",
         "gunyah",
+        "net",
         "usb",
     ],
     rustlibs: [
@@ -128,6 +129,7 @@ rust_test {
         "balloon",
         "geniezone",
         "gunyah",
+        "net",
         "usb",
     ],
     rustlibs: [
@@ -223,6 +225,7 @@ rust_library {
         "balloon",
         "geniezone",
         "gunyah",
+        "net",
         "usb",
     ],
     rustlibs: [

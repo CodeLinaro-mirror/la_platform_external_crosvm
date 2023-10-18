@@ -12,6 +12,7 @@
     "gdb",
     "geniezone",
     "gunyah",
+    "net",
     "qcow",
     "usb",
     // TODO: Enable these in the root crate instead. May be difficult because of host-vs-device

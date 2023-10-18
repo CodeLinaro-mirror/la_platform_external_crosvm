@@ -34,10 +34,12 @@ use devices::virtio::ipc_memory_mapper::create_ipc_mapper;
 use devices::virtio::ipc_memory_mapper::CreateIpcMapperRet;
 use devices::virtio::memory_mapper::BasicMemoryMapper;
 use devices::virtio::memory_mapper::MemoryMapperTrait;
+use devices::virtio::scsi::ScsiOption;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vfio_wrapper::VfioWrapper;
 use devices::virtio::vhost::user::vmm::VhostUserVirtioDevice;
+#[cfg(feature = "net")]
 use devices::virtio::vhost::user::NetBackend;
 use devices::virtio::vhost::user::VhostUserDevice;
 use devices::virtio::vhost::user::VhostUserVsockDevice;
@@ -45,8 +47,11 @@ use devices::virtio::vsock::VsockConfig;
 #[cfg(feature = "balloon")]
 use devices::virtio::BalloonMode;
 use devices::virtio::Console;
+#[cfg(feature = "net")]
 use devices::virtio::NetError;
+#[cfg(feature = "net")]
 use devices::virtio::NetParameters;
+#[cfg(feature = "net")]
 use devices::virtio::NetParametersMode;
 use devices::virtio::VirtioDevice;
 use devices::virtio::VirtioDeviceType;
@@ -60,14 +65,17 @@ use devices::VfioDevice;
 use devices::VfioDeviceType;
 use devices::VfioPciDevice;
 use devices::VfioPlatformDevice;
-#[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+#[cfg(feature = "vtpm")]
 use devices::VtpmProxy;
 use hypervisor::ProtectionType;
 use hypervisor::Vm;
 use jail::*;
 use minijail::Minijail;
+#[cfg(feature = "net")]
 use net_util::sys::unix::Tap;
+#[cfg(feature = "net")]
 use net_util::MacAddress;
+#[cfg(feature = "net")]
 use net_util::TapTCommon;
 use resources::Alloc;
 use resources::AllocOptions;
@@ -279,6 +287,18 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
         keep_rds.extend(block.keep_rds());
 
         Ok(block)
+    }
+}
+
+impl<'a> VirtioDeviceBuilder for &'a ScsiOption {
+    const NAME: &'static str = "scsi";
+
+    fn create_virtio_device(
+        self,
+        _protection_type: ProtectionType,
+    ) -> anyhow::Result<Box<dyn VirtioDevice>> {
+        // TODO(b/300042376): create a SCSI device.
+        bail!("SCSI device creation is not supported yet.")
     }
 }
 
@@ -502,7 +522,7 @@ pub fn create_software_tpm_device(
     })
 }
 
-#[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+#[cfg(feature = "vtpm")]
 pub fn create_vtpm_proxy_device(
     protection_type: ProtectionType,
     jail_config: &Option<JailConfig>,
@@ -735,6 +755,7 @@ pub fn create_balloon_device(
     })
 }
 
+#[cfg(feature = "net")]
 impl VirtioDeviceBuilder for &NetParameters {
     const NAME: &'static str = "net";
 
@@ -798,6 +819,7 @@ impl VirtioDeviceBuilder for &NetParameters {
 }
 
 /// Create a new tap interface based on NetParametersMode.
+#[cfg(feature = "net")]
 fn create_tap_for_net_device(
     mode: &NetParametersMode,
     multi_vq: bool,
@@ -1273,7 +1295,7 @@ pub fn create_pmem_device(
         GuestAddress(mapping_address),
         slot,
         arena_size,
-        Some(pmem_device_tube),
+        pmem_device_tube,
     )
     .context("failed to create pmem device")?;
 
