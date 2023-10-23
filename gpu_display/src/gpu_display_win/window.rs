@@ -198,18 +198,68 @@ impl SizeMoveLoopState {
     }
 }
 
-/// This class helps create and operate on a window using Windows APIs. The owner of `Window` object
-/// is responsible for:
+/// A trait for basic functionalities that are common to both message-only windows and GUI windows.
+/// Implementers must guarantee that when these functions are called, the underlying window object
+/// is still alive.
+pub(crate) trait BasicWindow {
+    /// # Safety
+    /// The returned handle should be used carefully, since it may have become invalid if it
+    /// outlives the window object.
+    unsafe fn handle(&self) -> HWND;
+
+    fn is_same_window(&self, hwnd: HWND) -> bool {
+        // Safe because we are just comparing handle values.
+        hwnd == unsafe { self.handle() }
+    }
+
+    /// Calls `SetPropW()` internally.
+    /// # Safety
+    /// The caller is responsible for keeping the data pointer valid until `remove_property()` is
+    /// called.
+    unsafe fn set_property(&self, property: &str, data: *mut c_void) -> Result<()> {
+        // Partially safe because the window object won't outlive the HWND, and failures are handled
+        // below. The caller is responsible for the rest of safety.
+        if SetPropW(self.handle(), win32_wide_string(property).as_ptr(), data) == 0 {
+            syscall_bail!("Failed to call SetPropW()");
+        }
+        Ok(())
+    }
+
+    /// Calls `RemovePropW()` internally.
+    fn remove_property(&self, property: &str) -> Result<()> {
+        // Safe because the window object won't outlive the HWND, and failures are handled below.
+        unsafe {
+            SetLastError(0);
+            RemovePropW(self.handle(), win32_wide_string(property).as_ptr());
+            if GetLastError() != 0 {
+                syscall_bail!("Failed to call RemovePropW()");
+            }
+        }
+        Ok(())
+    }
+
+    /// Calls `DestroyWindow()` internally.
+    fn destroy(&self) -> Result<()> {
+        // Safe because the window object won't outlive the HWND.
+        if unsafe { DestroyWindow(self.handle()) } == 0 {
+            syscall_bail!("Failed to call DestroyWindow()");
+        }
+        Ok(())
+    }
+}
+
+/// This class helps create and operate on a GUI window using Windows APIs. The owner of `GuiWindow`
+/// object is responsible for:
 /// (1) Calling `update_states()` when a new window message arrives.
-/// (2) Dropping the `Window` object before the underlying window is completely gone.
-pub struct Window {
+/// (2) Dropping the `GuiWindow` object before the underlying window is completely gone.
+pub struct GuiWindow {
     hwnd: HWND,
     size_move_loop_state: SizeMoveLoopState,
 }
 
-impl Window {
+impl GuiWindow {
     /// # Safety
-    /// The owner of `Window` object is responsible for dropping it before we finish processing
+    /// The owner of `GuiWindow` object is responsible for dropping it before we finish processing
     /// `WM_NCDESTROY`, because the window handle will become invalid afterwards.
     pub unsafe fn new(
         wnd_proc: WNDPROC,
@@ -219,17 +269,17 @@ impl Window {
         dw_style: DWORD,
         initial_window_size: &Size2D<i32, HostWindowSpace>,
     ) -> Result<Self> {
-        info!("Creating window");
+        info!("Creating GUI window");
         static CONTEXT_MESSAGE: &str = "When creating Window";
 
-        let hinstance = Self::get_current_module_handle();
+        let hinstance = get_current_module_handle();
         // If we fail to load any UI element below, use NULL to let the system use the default UI
         // rather than crash.
         let hicon = Self::load_custom_icon(hinstance, icon_resource_id).unwrap_or(null_mut());
         let hcursor = Self::load_system_cursor(IDC_ARROW).unwrap_or(null_mut());
         let hbrush_background = Self::create_opaque_black_brush().unwrap_or(null_mut());
 
-        Self::register_window_class(
+        register_window_class(
             wnd_proc,
             hinstance,
             class_name,
@@ -238,26 +288,19 @@ impl Window {
             hbrush_background,
         )
         .context(CONTEXT_MESSAGE)?;
-
-        let hwnd =
-            Self::create_sys_window(hinstance, class_name, title, dw_style, initial_window_size)
-                .context(CONTEXT_MESSAGE)?;
-
+        let hwnd = create_sys_window(
+            hinstance,
+            class_name,
+            title,
+            dw_style,
+            /* hwnd_parent */ null_mut(),
+            initial_window_size,
+        )
+        .context(CONTEXT_MESSAGE)?;
         Ok(Self {
             hwnd,
             size_move_loop_state: SizeMoveLoopState::new(),
         })
-    }
-
-    /// # Safety
-    /// The returned handle should be used carefully, since it may have become invalid if it
-    /// outlives the `Window` object.
-    pub unsafe fn handle(&self) -> HWND {
-        self.hwnd
-    }
-
-    pub fn is_same_window(&self, hwnd: HWND) -> bool {
-        hwnd == self.hwnd
     }
 
     pub fn update_states(&mut self, msg: UINT, w_param: WPARAM) {
@@ -278,36 +321,12 @@ impl Window {
         unsafe { IsWindow(self.hwnd) != 0 }
     }
 
-    /// Calls `SetPropW()` internally.
-    pub fn set_property(&self, property: &str, data: *mut c_void) -> Result<()> {
-        // Safe because `Window` object won't outlive the HWND, and failures are handled below.
-        unsafe {
-            if SetPropW(self.hwnd, win32_wide_string(property).as_ptr(), data) == 0 {
-                syscall_bail!("Failed to call SetPropW()");
-            }
-        }
-        Ok(())
-    }
-
-    /// Calls `RemovePropW()` internally.
-    pub fn remove_property(&self, property: &str) -> Result<()> {
-        // Safe because `Window` object won't outlive the HWND, and failures are handled below.
-        unsafe {
-            SetLastError(0);
-            RemovePropW(self.hwnd, win32_wide_string(property).as_ptr());
-            if GetLastError() != 0 {
-                syscall_bail!("Failed to call RemovePropW()");
-            }
-        }
-        Ok(())
-    }
-
     /// Updates the rectangle in the window's client area to which gfxstream renders.
     pub fn update_virtual_display_projection(
         &self,
         #[allow(unused)] projection_box: &Box2D<i32, HostWindowSpace>,
     ) {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         #[cfg(feature = "gfxstream")]
         unsafe {
             gfxstream_backend_setup_window(
@@ -324,7 +343,7 @@ impl Window {
 
     /// Calls `GetWindowLongPtrW()` internally.
     pub fn get_attribute(&self, index: i32) -> Result<isize> {
-        // Safe because `Window` object won't outlive the HWND, and failures are handled below.
+        // Safe because `GuiWindow` object won't outlive the HWND, and failures are handled below.
         unsafe {
             // GetWindowLongPtrW() may return zero if we haven't set that attribute before, so we
             // need to check if the error code is non-zero.
@@ -339,7 +358,7 @@ impl Window {
 
     /// Calls `SetWindowLongPtrW()` internally.
     pub fn set_attribute(&self, index: i32, value: isize) -> Result<()> {
-        // Safe because `Window` object won't outlive the HWND, and failures are handled below.
+        // Safe because `GuiWindow` object won't outlive the HWND, and failures are handled below.
         unsafe {
             // SetWindowLongPtrW() may return zero if the previous value of that attribute was zero,
             // so we need to check if the error code is non-zero.
@@ -355,7 +374,7 @@ impl Window {
     /// Calls `GetWindowRect()` internally.
     pub fn get_window_rect(&self) -> Result<Rect> {
         let mut rect: RECT = Default::default();
-        // Safe because `Window` object won't outlive the HWND, we know `rect` is valid, and
+        // Safe because `GuiWindow` object won't outlive the HWND, we know `rect` is valid, and
         // failures are handled below.
         unsafe {
             if GetWindowRect(self.hwnd, &mut rect) == 0 {
@@ -373,7 +392,7 @@ impl Window {
     /// Calls `GetClientRect()` internally.
     pub fn get_client_rect(&self) -> Result<Rect> {
         let mut rect: RECT = Default::default();
-        // Safe because `Window` object won't outlive the HWND, we know `rect` is valid, and
+        // Safe because `GuiWindow` object won't outlive the HWND, we know `rect` is valid, and
         // failures are handled below.
         unsafe {
             if GetClientRect(self.hwnd, &mut rect) == 0 {
@@ -401,7 +420,7 @@ impl Window {
     /// specified point to screen coordinates.
     pub fn client_to_screen(&self, point: &Point) -> Result<Point> {
         let mut point = point.to_sys_point();
-        // Safe because `Window` object won't outlive the HWND, we know `point` is valid, and
+        // Safe because `GuiWindow` object won't outlive the HWND, we know `point` is valid, and
         // failures are handled below.
         unsafe {
             if ClientToScreen(self.hwnd, &mut point) == 0 {
@@ -432,7 +451,7 @@ impl Window {
     /// Calls `MonitorFromWindow()` internally. If the window is not on any active display monitor,
     /// returns the handle to the closest one.
     pub fn get_nearest_monitor_handle(&self) -> HMONITOR {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) }
     }
 
@@ -445,13 +464,13 @@ impl Window {
 
     /// Calls `MonitorFromWindow()` internally.
     pub fn is_on_active_display(&self) -> bool {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe { !MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONULL).is_null() }
     }
 
     /// Calls `SetWindowPos()` internally.
     pub fn set_pos(&self, window_rect: &Rect, flags: u32) -> Result<()> {
-        // Safe because `Window` object won't outlive the HWND, and failures are handled below.
+        // Safe because `GuiWindow` object won't outlive the HWND, and failures are handled below.
         unsafe {
             if SetWindowPos(
                 self.hwnd,
@@ -483,7 +502,7 @@ impl Window {
     /// Calls `ShowWindow()` internally. Note that it is more preferable to call `set_pos()` with
     /// `SWP_SHOWWINDOW` since that would set the error code on failure.
     pub fn show(&self) {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe {
             ShowWindow(self.hwnd, SW_SHOW);
         }
@@ -491,7 +510,7 @@ impl Window {
 
     /// Calls `ShowWindow()` internally to restore a minimized window.
     pub fn restore(&self) {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe {
             ShowWindow(self.hwnd, SW_RESTORE);
         }
@@ -501,14 +520,14 @@ impl Window {
     /// is restored. For example, if we have switched from maximized to fullscreen, this function
     /// would still return true.
     pub fn was_maximized(&self) -> bool {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe { IsZoomed(self.hwnd) != 0 }
     }
 
     /// Calls `IsWindowVisible()` internally. We also require that the window size is nonzero to be
     /// considered visible.
     pub fn is_visible(&self) -> Result<bool> {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         if unsafe { IsWindowVisible(self.hwnd) } != 0 {
             let window_rect = self
                 .get_window_rect()
@@ -540,14 +559,14 @@ impl Window {
 
     /// Calls `IsIconic()` internally.
     pub fn is_minimized(&self) -> bool {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe { IsIconic(self.hwnd) != 0 }
     }
 
     /// Calls `SetForegroundWindow()` internally. `SetForegroundWindow()` may fail, for example,
     /// when the taskbar is in the foreground, hence this is a best-effort call.
     pub fn bring_to_foreground(&self) {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         if unsafe { SetForegroundWindow(self.hwnd) } == 0 {
             info!("Cannot bring the window to foreground.");
         }
@@ -563,7 +582,7 @@ impl Window {
             hRgnBlur: null_mut(),
             fTransitionOnMaximized: FALSE,
         };
-        // Safe because `Window` object won't outlive the HWND, we know `blur_behind` is valid,
+        // Safe because `GuiWindow` object won't outlive the HWND, we know `blur_behind` is valid,
         // and failures are handled below.
         let errno = unsafe { DwmEnableBlurBehindWindow(self.hwnd, &blur_behind) };
         match errno {
@@ -585,7 +604,7 @@ impl Window {
         dw_ex_style: u32,
     ) -> Result<Rect> {
         let mut window_rect: RECT = client_rect.to_sys_rect();
-        // Safe because `Window` object won't outlive the HWND, we know `window_rect` is valid,
+        // Safe because `GuiWindow` object won't outlive the HWND, we know `window_rect` is valid,
         // and failures are handled below.
         unsafe {
             if AdjustWindowRectExForDpi(
@@ -608,8 +627,8 @@ impl Window {
             length: mem::size_of::<WINDOWPLACEMENT>().try_into().unwrap(),
             ..Default::default()
         };
-        // Safe because `Window` object won't outlive the HWND, we know `window_placement` is valid,
-        // and failures are handled below.
+        // Safe because `GuiWindow` object won't outlive the HWND, we know `window_placement` is
+        // valid, and failures are handled below.
         unsafe {
             if GetWindowPlacement(self.hwnd, &mut window_placement) == 0 {
                 syscall_bail!("Failed to call GetWindowPlacement()");
@@ -624,7 +643,7 @@ impl Window {
 
     /// Calls `PostMessageW()` internally.
     pub fn post_message(&self, msg: UINT, w_param: WPARAM, l_param: LPARAM) -> Result<()> {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe {
             if PostMessageW(self.hwnd, msg, w_param, l_param) == 0 {
                 syscall_bail!("Failed to call PostMessageW()");
@@ -633,35 +652,10 @@ impl Window {
         Ok(())
     }
 
-    /// Calls `DestroyWindow()` internally.
-    pub fn destroy(&self) -> Result<()> {
-        // Safe because `Window` object won't outlive the HWND.
-        unsafe {
-            if DestroyWindow(self.hwnd) == 0 {
-                syscall_bail!("Failed to call DestroyWindow()");
-            }
-        }
-        Ok(())
-    }
-
     /// Calls `DefWindowProcW()` internally.
     pub fn default_process_message(&self, packet: &MessagePacket) -> LRESULT {
-        // Safe because `Window` object won't outlive the HWND.
+        // Safe because `GuiWindow` object won't outlive the HWND.
         unsafe { DefWindowProcW(self.hwnd, packet.msg, packet.w_param, packet.l_param) }
-    }
-
-    /// Calls `GetModuleHandleW()` internally.
-    fn get_current_module_handle() -> HMODULE {
-        // Safe because we handle failures below.
-        let hmodule = unsafe { GetModuleHandleW(null_mut()) };
-        if hmodule.is_null() {
-            // If it fails, we are in a very broken state and it doesn't make sense to keep running.
-            panic!(
-                "Failed to call GetModuleHandleW() for the current module (Error code {})",
-                unsafe { GetLastError() }
-            );
-        }
-        hmodule
     }
 
     /// Calls `LoadIconW()` internally.
@@ -699,78 +693,150 @@ impl Window {
             Ok(hobject as HBRUSH)
         }
     }
-
-    fn register_window_class(
-        wnd_proc: WNDPROC,
-        hinstance: HINSTANCE,
-        class_name: &str,
-        hicon: HICON,
-        hcursor: HCURSOR,
-        hbrush_background: HBRUSH,
-    ) -> Result<()> {
-        let class_name = win32_wide_string(class_name);
-        let window_class = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_OWNDC | CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: wnd_proc,
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hInstance: hinstance,
-            hIcon: hicon,
-            hCursor: hcursor,
-            hbrBackground: hbrush_background,
-            lpszMenuName: null_mut(),
-            lpszClassName: class_name.as_ptr(),
-            hIconSm: hicon,
-        };
-
-        // Safe because we know the lifetime of `window_class`, and we handle failures below.
-        unsafe {
-            if RegisterClassExW(&window_class) == 0 {
-                syscall_bail!("Failed to call RegisterClassExW()");
-            }
-            Ok(())
-        }
-    }
-
-    fn create_sys_window(
-        hinstance: HINSTANCE,
-        class_name: &str,
-        title: &str,
-        dw_style: DWORD,
-        initial_window_size: &Size2D<i32, HostWindowSpace>,
-    ) -> Result<HWND> {
-        // Safe because we handle failures below.
-        unsafe {
-            let hwnd = CreateWindowExW(
-                0,
-                win32_wide_string(class_name).as_ptr(),
-                win32_wide_string(title).as_ptr(),
-                dw_style,
-                0,
-                0,
-                initial_window_size.width,
-                initial_window_size.height,
-                null_mut(),
-                null_mut(),
-                hinstance,
-                null_mut(),
-            );
-            if hwnd.is_null() {
-                syscall_bail!("Failed to call CreateWindowExW()");
-            }
-            Ok(hwnd)
-        }
-    }
 }
 
-impl Drop for Window {
+impl Drop for GuiWindow {
     fn drop(&mut self) {
         // Safe because it is called from the same thread the created the window.
         if unsafe { IsWindow(self.hwnd) } == 0 {
             error!("The underlying HWND is invalid when Window is being dropped!")
         }
     }
+}
+
+impl BasicWindow for GuiWindow {
+    /// # Safety
+    /// The returned handle should be used carefully, since it may have become invalid if it
+    /// outlives the `GuiWindow` object.
+    unsafe fn handle(&self) -> HWND {
+        self.hwnd
+    }
+}
+
+/// A message-only window is always invisible, and is only responsible for sending and receiving
+/// messages. The owner of `MessageOnlyWindow` object is responsible for dropping it before the
+/// underlying window is completely gone.
+pub(crate) struct MessageOnlyWindow {
+    hwnd: HWND,
+}
+
+impl MessageOnlyWindow {
+    /// # Safety
+    /// The owner of `MessageOnlyWindow` object is responsible for dropping it before we finish
+    /// processing `WM_NCDESTROY`, because the window handle will become invalid afterwards.
+    pub unsafe fn new(wnd_proc: WNDPROC, class_name: &str, title: &str) -> Result<Self> {
+        info!("Creating message-only window");
+        static CONTEXT_MESSAGE: &str = "When creating MessageOnlyWindow";
+
+        let hinstance = get_current_module_handle();
+        register_window_class(
+            wnd_proc,
+            hinstance,
+            class_name,
+            /* hicon */ null_mut(),
+            /* hcursor */ null_mut(),
+            /* hbrush_background */ null_mut(),
+        )
+        .context(CONTEXT_MESSAGE)?;
+        let hwnd = create_sys_window(
+            hinstance,
+            class_name,
+            title,
+            /* dw_style */ 0,
+            HWND_MESSAGE,
+            /* initial_window_size */ &size2(0, 0),
+        )
+        .context(CONTEXT_MESSAGE)?;
+        Ok(Self { hwnd })
+    }
+}
+
+impl BasicWindow for MessageOnlyWindow {
+    /// # Safety
+    /// The returned handle should be used carefully, since it may have become invalid if it
+    /// outlives the `MessageOnlyWindow` object.
+    unsafe fn handle(&self) -> HWND {
+        self.hwnd
+    }
+}
+
+/// Calls `RegisterClassExW()` internally.
+fn register_window_class(
+    wnd_proc: WNDPROC,
+    hinstance: HINSTANCE,
+    class_name: &str,
+    hicon: HICON,
+    hcursor: HCURSOR,
+    hbrush_background: HBRUSH,
+) -> Result<()> {
+    let class_name = win32_wide_string(class_name);
+    let window_class = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: CS_OWNDC | CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: wnd_proc,
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: hinstance,
+        hIcon: hicon,
+        hCursor: hcursor,
+        hbrBackground: hbrush_background,
+        lpszMenuName: null_mut(),
+        lpszClassName: class_name.as_ptr(),
+        hIconSm: hicon,
+    };
+
+    // Safe because we know the lifetime of `window_class`, and we handle failures below.
+    if unsafe { RegisterClassExW(&window_class) } == 0 {
+        syscall_bail!("Failed to call RegisterClassExW()");
+    }
+    Ok(())
+}
+
+/// Calls `CreateWindowExW()` internally.
+fn create_sys_window(
+    hinstance: HINSTANCE,
+    class_name: &str,
+    title: &str,
+    dw_style: DWORD,
+    hwnd_parent: HWND,
+    initial_window_size: &Size2D<i32, HostWindowSpace>,
+) -> Result<HWND> {
+    // Safe because we handle failures below.
+    let hwnd = unsafe {
+        CreateWindowExW(
+            /* dwExStyle */ 0,
+            win32_wide_string(class_name).as_ptr(),
+            win32_wide_string(title).as_ptr(),
+            dw_style,
+            /* x */ 0,
+            /* y */ 0,
+            initial_window_size.width,
+            initial_window_size.height,
+            hwnd_parent,
+            /* hMenu */ null_mut(),
+            hinstance,
+            /* lpParam */ null_mut(),
+        )
+    };
+    if hwnd.is_null() {
+        syscall_bail!("Failed to call CreateWindowExW()");
+    }
+    info!("Created window {:p}", hwnd);
+    Ok(hwnd)
+}
+
+/// Calls `GetModuleHandleW()` internally.
+fn get_current_module_handle() -> HMODULE {
+    // Safe because we handle failures below.
+    let hmodule = unsafe { GetModuleHandleW(null_mut()) };
+    if hmodule.is_null() {
+        // If it fails, we are in a very broken state and it doesn't make sense to keep running.
+        panic!(
+            "Failed to call GetModuleHandleW() for the current module (Error code {})",
+            unsafe { GetLastError() }
+        );
+    }
+    hmodule
 }
 
 /// If the resolution/orientation of the monitor changes, or if the monitor is unplugged, this must

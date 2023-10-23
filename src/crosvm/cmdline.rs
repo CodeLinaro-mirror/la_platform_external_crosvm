@@ -81,6 +81,7 @@ use crate::crosvm::config::parse_pflash_parameters;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::parse_plugin_mount_option;
 use crate::crosvm::config::parse_serial_options;
+use crate::crosvm::config::parse_vhost_user_fs_option;
 use crate::crosvm::config::BatteryConfig;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::BindMount;
@@ -1849,7 +1850,7 @@ pub struct RunCommand {
     #[argh(option, arg_name = "PATH[,key=value[,key=value[,...]]]")]
     #[serde(default)]
     #[merge(strategy = append)]
-    /// parameters for setting up a SCSI disk.
+    /// (EXPERIMENTAL) parameters for setting up a SCSI disk.
     /// Valid keys:
     ///     path=PATH - Path to the disk image. Can be specified
     ///         without the key as the first argument.
@@ -2214,7 +2215,11 @@ pub struct RunCommand {
     /// path to a socket for vhost-user console
     pub vhost_user_console: Vec<VhostUserOption>,
 
-    #[argh(option, arg_name = "SOCKET_PATH:TAG")]
+    #[argh(
+        option,
+        arg_name = "[socket=]SOCKET_PATH,tag=TAG[,max-queue-size=NUM]",
+        from_str_fn(parse_vhost_user_fs_option)
+    )]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = append)]
     /// path to a socket path for vhost-user fs, and tag for the shared dir

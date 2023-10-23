@@ -139,29 +139,33 @@ pub struct MemOptions {
     pub size: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct VhostUserOption {
     pub socket: PathBuf,
+
+    /// Maximum number of entries per queue (default: 32768)
+    pub max_queue_size: Option<u16>,
 }
 
-impl FromStr for VhostUserOption {
-    type Err = <PathBuf as FromStr>::Err;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self { socket: s.parse()? })
-    }
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct VhostUserFsOption {
     pub socket: PathBuf,
     pub tag: String,
+
+    /// Maximum number of entries per queue (default: 32768)
+    pub max_queue_size: Option<u16>,
 }
 
-impl FromStr for VhostUserFsOption {
-    type Err = &'static str;
-
-    fn from_str(param: &str) -> Result<Self, Self::Err> {
+pub fn parse_vhost_user_fs_option(param: &str) -> Result<VhostUserFsOption, String> {
+    // Allow the previous `--vhost-user-fs /path/to/socket:fs-tag` format for compatibility.
+    // This will unfortunately prevent parsing of valid comma-separated FromKeyValues options that
+    // contain a ":" character (e.g. in a socket filename), but those were not supported in the old
+    // format either, so we can live with it until the deprecated format is removed.
+    // TODO(b/218223240): Remove support for the deprecated format (and use `FromKeyValues`
+    // directly instead of `from_str_fn`) once enough time has passed.
+    if param.contains(':') {
         // (socket:tag)
         let mut components = param.split(':');
         let socket = PathBuf::from(
@@ -174,7 +178,20 @@ impl FromStr for VhostUserFsOption {
             .ok_or("missing tag for `vhost-user-fs`")?
             .to_owned();
 
-        Ok(Self { socket, tag })
+        log::warn!(
+            "`--vhost-user-fs` with colon-separated options is deprecated; \
+            please use `--vhost-user-fs {},tag={}` instead",
+            socket.display(),
+            tag,
+        );
+
+        Ok(VhostUserFsOption {
+            socket,
+            tag,
+            max_queue_size: None,
+        })
+    } else {
+        from_key_values::<VhostUserFsOption>(param)
     }
 }
 
@@ -1851,5 +1868,74 @@ mod tests {
             let params: VideoDeviceConfig = from_key_values("vaapi").unwrap();
             assert_eq!(params.backend, VideoBackendType::Vaapi);
         }
+    }
+
+    #[test]
+    fn parse_vhost_user_option() {
+        let opt: VhostUserOption = from_key_values("/10mm").unwrap();
+        assert_eq!(opt.socket.to_str(), Some("/10mm"));
+        assert_eq!(opt.max_queue_size, None);
+
+        let opt: VhostUserOption = from_key_values("/10mm,max-queue-size=256").unwrap();
+        assert_eq!(opt.socket.to_str(), Some("/10mm"));
+        assert_eq!(opt.max_queue_size, Some(256));
+    }
+
+    #[test]
+    fn parse_vhost_user_fs_deprecated() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--vhost-user-fs", "my_socket:my_tag", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.vhost_user_fs.len(), 1);
+        let fs = &cfg.vhost_user_fs[0];
+        assert_eq!(fs.socket.to_str(), Some("my_socket"));
+        assert_eq!(fs.tag, "my_tag");
+        assert_eq!(fs.max_queue_size, None);
+    }
+
+    #[test]
+    fn parse_vhost_user_fs() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--vhost-user-fs", "my_socket,tag=my_tag", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.vhost_user_fs.len(), 1);
+        let fs = &cfg.vhost_user_fs[0];
+        assert_eq!(fs.socket.to_str(), Some("my_socket"));
+        assert_eq!(fs.tag, "my_tag");
+        assert_eq!(fs.max_queue_size, None);
+    }
+
+    #[test]
+    fn parse_vhost_user_fs_max_queue_size() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &[
+                    "--vhost-user-fs",
+                    "my_socket,tag=my_tag,max-queue-size=256",
+                    "/dev/null",
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.vhost_user_fs.len(), 1);
+        let fs = &cfg.vhost_user_fs[0];
+        assert_eq!(fs.socket.to_str(), Some("my_socket"));
+        assert_eq!(fs.tag, "my_tag");
+        assert_eq!(fs.max_queue_size, Some(256));
     }
 }

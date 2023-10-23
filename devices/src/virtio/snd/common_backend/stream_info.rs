@@ -10,6 +10,7 @@ use std::time::Duration;
 use audio_streams::SampleFormat;
 use audio_streams::StreamEffect;
 use base::error;
+use base::warn;
 use cros_async::sync::Condvar;
 use cros_async::sync::RwLock as AsyncRwLock;
 use cros_async::Executor;
@@ -204,7 +205,7 @@ impl StreamInfo {
         }
 
         // Only required for PREPARE -> SET_PARAMS
-        self.release_worker().await?;
+        self.release_worker().await;
 
         self.channels = params.channels;
         self.format = params.format;
@@ -244,20 +245,18 @@ impl StreamInfo {
         }
         self.just_reset = false;
         if self.state == VIRTIO_SND_R_PCM_PREPARE {
-            self.release_worker().await?;
+            self.release_worker().await;
         }
         let frame_size = self.channels as usize * self.format.sample_bytes();
         if self.period_bytes % frame_size != 0 {
             error!("period_bytes must be divisible by frame size");
             return Err(Error::OperationNotSupported);
         }
-        if self.stream_source.is_none() {
-            self.stream_source = Some(
-                self.stream_source_generator
-                    .generate()
-                    .map_err(Error::GenerateStreamSource)?,
-            );
-        }
+        self.stream_source = Some(
+            self.stream_source_generator
+                .generate()
+                .map_err(Error::GenerateStreamSource)?,
+        );
         let SysAsyncStreamObjects { stream, pcm_sender } = match self.direction {
             VIRTIO_SND_D_OUTPUT => {
                 let sys_async_stream = self.set_up_async_playback_stream(frame_size, ex).await?;
@@ -386,11 +385,11 @@ impl StreamInfo {
         }
         self.state = VIRTIO_SND_R_PCM_RELEASE;
         self.stream_source = None;
-        self.release_worker().await?;
+        self.release_worker().await;
         Ok(())
     }
 
-    async fn release_worker(&mut self) -> Result<(), Error> {
+    async fn release_worker(&mut self) {
         *self.status_mutex.lock().await = WorkerStatus::Quit;
         if let Some(s) = self.sender.take() {
             s.close_channel();
@@ -404,10 +403,11 @@ impl StreamInfo {
         }
 
         if let Some(f) = self.worker_future.take() {
-            f.await?;
+            f.await
+                .map_err(|error| warn!("Failure on releasing the worker_future: {}", error))
+                .ok();
         }
         self.ex.take(); // Remove ex as the worker is finished
-        Ok(())
     }
 
     pub fn snapshot(&self) -> StreamInfoSnapshot {
