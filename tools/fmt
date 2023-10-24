@@ -8,14 +8,16 @@
 #
 # Usage:
 #
-#    $ bin/fmt
+#    $ tools/fmt
 #
 # To print a diff and exit 1 if code is not formatted, but without changing any
 # files, use:
 #
-#    $ bin/fmt --check
+#    $ tools/fmt --check
 #
 
+from pathlib import Path
+import sys
 from impl.common import (
     CROSVM_ROOT,
     run_main,
@@ -27,6 +29,7 @@ from impl.common import (
 def main(check: bool = False, nightly: bool = False):
     chdir(CROSVM_ROOT)
     cmd(
+        Path(sys.executable),
         "./tools/presubmit format",
         "--fix" if not check else None,
         "--nightly-fmt" if nightly else None,

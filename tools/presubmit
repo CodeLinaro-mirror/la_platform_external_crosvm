@@ -16,6 +16,7 @@ from impl.common import (
     cmd,
     is_kiwi_repo,
     run_main,
+    parallel,
 )
 from impl.presubmit import Check, CheckContext, run_checks, Group
 
@@ -92,9 +93,11 @@ def check_rust_format(context: CheckContext):
         )
     else:
         rustfmt = cmd(cmd("rustup which rustfmt"))
-    return rustfmt.with_color_flag().with_args(
-        "--check" if not context.fix else "",
-        *context.modified_files,
+    # Windows doesn't accept very long arguments: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa#:~:text=The%20maximum%20length%20of%20this%20string%20is%2032%2C767%20characters%2C%20including%20the%20Unicode%20terminating%20null%20character.%20If%20lpApplicationName%20is%20NULL%2C%20the%20module%20name%20portion%20of%20lpCommandLine%20is%20limited%20to%20MAX_PATH%20characters.
+    return parallel(
+        *rustfmt.with_color_flag()
+        .with_args("--check" if not context.fix else "")
+        .foreach(context.modified_files, batch_size=10)
     )
 
 
@@ -149,12 +152,15 @@ def check_crosvm_unit_tests(platform: Platform):
     return check
 
 
-def check_crosvm_build(platform: Platform, features: Optional[str]):
+def check_crosvm_build(
+    platform: Platform, features: Optional[str] = None, no_default_features: bool = False
+):
     def check(_: CheckContext):
         return cmd(
             "./tools/run_tests --no-run --verbose --platform",
             platform,
             f"--features={features}" if features is not None else None,
+            "--no-default-features" if no_default_features else None,
         ).with_color_flag()
 
     check.__doc__ = f"Builds crosvm for {platform} with features {features}."
@@ -241,7 +247,11 @@ CHECKS: List[Check] = [
     Check(
         check_python_types,
         files=["tools/**.py"],
-        exclude=["tools/windows/*", "tools/contrib/memstats_chart/*"],
+        exclude=[
+            "tools/windows/*",
+            "tools/contrib/memstats_chart/*",
+            "tools/contrib/cros_tracing_analyser/*",
+        ],
         python_tools=True,
     ),
     Check(
@@ -268,6 +278,17 @@ CHECKS: List[Check] = [
             priority=True,
         )
         for platform in PLATFORMS
+    ),
+    *(
+        Check(
+            check_crosvm_build(platform, features="", no_default_features=True),
+            custom_name=f"crosvm_build_no_default_{platform}",
+            files=["**.rs"],
+            priority=True,
+        )
+        # TODO: b/260607247 crosvm does not compile with no-default-features on mingw64
+        for platform in PLATFORMS
+        if platform != "mingw64"
     ),
     *(
         Check(
@@ -449,7 +470,9 @@ GROUPS: List[Group] = [
                 f"crosvm_tests_{platform}",
                 f"clippy_{platform}",
                 f"crosvm_build_default_{platform}",
-            ],
+            ]
+            # TODO: b/260607247 crosvm does not compile with no-default-features on mingw64
+            + ([f"crosvm_build_no_default_{platform}"] if platform != "mingw64" else []),
         )
         for platform in PLATFORMS
     ),

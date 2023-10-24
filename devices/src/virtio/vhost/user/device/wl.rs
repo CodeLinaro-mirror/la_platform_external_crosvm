@@ -30,7 +30,7 @@ use hypervisor::ProtectionType;
 use rutabaga_gfx::RutabagaGralloc;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
-use vmm_vhost::message::VhostUserVirtioFeatures;
+use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 
 use crate::virtio::base_features;
 use crate::virtio::device_constants::wl::NUM_QUEUES;
@@ -123,7 +123,7 @@ impl WlBackend {
             | 1 << VIRTIO_WL_F_TRANS_FLAGS
             | 1 << VIRTIO_WL_F_SEND_FENCES
             | 1 << VIRTIO_WL_F_USE_SHMEM
-            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+            | 1 << VHOST_USER_F_PROTOCOL_FEATURES;
         WlBackend {
             ex: ex.clone(),
             wayland_paths: Some(wayland_paths),
@@ -361,10 +361,7 @@ pub fn parse_wayland_sock(value: &str) -> Result<(String, PathBuf), String> {
 pub struct Options {
     #[argh(option, arg_name = "PATH")]
     /// path to bind a listening vhost-user socket
-    socket: Option<String>,
-    #[argh(option, arg_name = "STRING")]
-    /// VFIO-PCI device name (e.g. '0000:00:07.0')
-    vfio: Option<String>,
+    socket: String,
     #[argh(option, from_str_fn(parse_wayland_sock), arg_name = "PATH[,name=NAME]")]
     /// path to one or more Wayland sockets. The unnamed socket is used for
     /// displaying virtual screens while the named ones are used for IPC
@@ -380,7 +377,6 @@ pub fn run_wl_device(opts: Options) -> anyhow::Result<()> {
     let Options {
         wayland_sock,
         socket,
-        vfio,
         resource_bridge,
     } = opts;
 
@@ -407,7 +403,7 @@ pub fn run_wl_device(opts: Options) -> anyhow::Result<()> {
 
     let ex = Executor::new().context("failed to create executor")?;
 
-    let listener = VhostUserListener::new_from_socket_or_vfio(&socket, &vfio, NUM_QUEUES, None)?;
+    let listener = VhostUserListener::new_socket(&socket, None)?;
 
     let backend = Box::new(WlBackend::new(&ex, wayland_paths, resource_bridge));
     // run_until() returns an Result<Result<..>> which the ? operator lets us flatten.

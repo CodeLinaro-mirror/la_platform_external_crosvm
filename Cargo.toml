@@ -67,7 +67,6 @@ members = [
     "libcras_stub",
     "linux_input_sys",
     "media/ffmpeg",
-    "media/libvda",
     "metrics",
     "net_sys",
     "net_util",
@@ -75,7 +74,6 @@ members = [
     "prebuilts",
     "protos",
     "proto_build_tools",
-    "qcow_utils",
     "resources",
     "rutabaga_gfx",
     "serde_keyvalue",
@@ -107,11 +105,14 @@ exclude = [
     "perfetto",
     "win_audio",
     "win_util",
+
+    # This crate depends on optional features and is compiled via dependencies when enabled.
+    "media/libvda",
 ]
 
 [features]
 ## Default features of crosvm. This selection is somewhat arbitrary for historical reasons.
-default = ["audio", "balloon", "config-file", "document-features", "gpu", "qcow", "usb", "libvda-stub", "slirp"]
+default = ["audio", "balloon", "config-file", "document-features", "gpu", "qcow", "usb", "libvda-stub", "net", "slirp"]
 
 ## Enables support for the Android [sparse image format](https://android.googlesource.com/platform/system/core/+/HEAD/libsparse/sparse_format.h)
 ## in the block device.
@@ -147,6 +148,9 @@ gdb = [
     "vm_control/gdb",
     "x86_64/gdb",
 ]
+
+## Enables virtio-net and vhost-user-net backend.
+net = ["devices/net"]
 
 ## Enables a panic handler that writes panic info to the `RUST_PANIC_SIG` memfd.
 panic-memfd = []
@@ -323,6 +327,7 @@ all-default = [
     "gfxstream",
     "gfxstream_stub",
     "libvda-stub",
+    "net",
     "panic-memfd",
     "power-monitor-powerd",
     "slirp",
@@ -366,6 +371,7 @@ all-armhf = [
     "default",
     "gdb",
     "libvda-stub",
+    "net",
     "tpm",
 ]
 
@@ -377,6 +383,7 @@ all-mingw64 = [
     "crash_report",
     "gpu",
     "haxm",
+    "net",
     "slirp",
     "stats",
 ]
@@ -441,7 +448,6 @@ swap = { path = "swap" }
 sync = { path = "common/sync" }
 tempfile = "3"
 thiserror = { version = "1.0.20" }
-uuid = { version = "1", features = [ "serde" ] }
 vm_control = { path = "vm_control" }
 acpi_tables = { path = "acpi_tables" }
 vm_memory = { path = "vm_memory" }

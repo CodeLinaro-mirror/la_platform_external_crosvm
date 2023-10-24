@@ -6,11 +6,11 @@ use std::sync::Weak;
 
 use anyhow::Result;
 use euclid::Size2D;
-use metrics::Metrics;
+use metrics::sys::windows::Metrics;
 
-use super::window::Window;
-use super::window_message_dispatcher::DisplayEventDispatcher;
+use super::window::GuiWindow;
 use super::window_message_processor::HandleWindowMessage;
+use super::window_message_processor::MessageHandlerResources;
 use super::DisplayProperties;
 use super::VirtualDisplaySpace;
 
@@ -18,11 +18,11 @@ pub struct NoopSurface {}
 
 impl NoopSurface {
     pub fn create(
-        _window: &Window,
+        _window: &GuiWindow,
         _virtual_display_size: &Size2D<i32, VirtualDisplaySpace>,
         _metrics: Option<Weak<Metrics>>,
         _display_properties: &DisplayProperties,
-        _display_event_dispatcher: DisplayEventDispatcher,
+        _resources: MessageHandlerResources,
     ) -> Result<Self> {
         Ok(Self {})
     }

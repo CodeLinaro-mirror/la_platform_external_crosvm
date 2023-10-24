@@ -27,9 +27,6 @@ mod msr_index;
 #[allow(clippy::all)]
 mod mpspec;
 
-#[cfg(unix)]
-pub mod msr;
-
 pub mod acpi;
 mod bzimage;
 pub mod cpuid;
@@ -57,11 +54,6 @@ use acpi_tables::sdt::SDT;
 use anyhow::Context;
 use arch::get_serial_cmdline;
 use arch::GetSerialCmdlineError;
-use arch::MsrAction;
-use arch::MsrConfig;
-use arch::MsrFilter;
-use arch::MsrRWType;
-use arch::MsrValueFrom;
 use arch::RunnableLinuxVm;
 use arch::VmComponents;
 use arch::VmImage;
@@ -89,6 +81,7 @@ use devices::PciAddress;
 use devices::PciConfigIo;
 use devices::PciConfigMmio;
 use devices::PciDevice;
+use devices::PciInterruptPin;
 use devices::PciRoot;
 use devices::PciRootCommand;
 use devices::PciVirtualConfigMmio;
@@ -152,7 +145,6 @@ use zerocopy::FromBytes;
 
 use crate::bootparam::boot_params;
 use crate::cpuid::EDX_HYBRID_CPU_SHIFT;
-use crate::msr_index::*;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -690,6 +682,7 @@ impl arch::LinuxArch for X8664arch {
         dump_device_tree_blob: Option<PathBuf>,
         debugcon_jail: Option<Minijail>,
         pflash_jail: Option<Minijail>,
+        fw_cfg_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
         #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
@@ -709,7 +702,6 @@ impl arch::LinuxArch for X8664arch {
         vm.set_tss_addr(tss_addr).map_err(Error::SetTssAddr)?;
 
         // Use IRQ info in ACPI if provided by the user.
-        let mut noirq = true;
         let mut mptable = true;
         let mut sci_irq = X86_64_SCI_IRQ;
 
@@ -721,9 +713,7 @@ impl arch::LinuxArch for X8664arch {
             .map_err(Error::ReservePcieCfgMmio)?;
 
         for sdt in components.acpi_sdts.iter() {
-            if sdt.is_signature(b"DSDT") || sdt.is_signature(b"APIC") {
-                noirq = false;
-            } else if sdt.is_signature(b"FACP") {
+            if sdt.is_signature(b"FACP") {
                 mptable = false;
                 let sci_irq_fadt: u16 = sdt.read(acpi::FADT_FIELD_SCI_INTERRUPT);
                 sci_irq = sci_irq_fadt.into();
@@ -810,11 +800,14 @@ impl arch::LinuxArch for X8664arch {
         // Event used to notify crosvm that guest OS is trying to suspend.
         let suspend_evt = Event::new().map_err(Error::CreateEvent)?;
 
-        if !components.fw_cfg_parameters.is_empty() {
+        if components.fw_cfg_enable {
             Self::setup_fw_cfg_device(
                 &io_bus,
                 components.fw_cfg_parameters.clone(),
                 components.bootorder_fw_cfg_blob.clone(),
+                fw_cfg_jail,
+                #[cfg(feature = "swap")]
+                swap_controller,
             )?;
         }
 
@@ -898,6 +891,7 @@ impl arch::LinuxArch for X8664arch {
             components.ac_adapter,
             #[cfg(unix)]
             guest_suspended_cvar,
+            &pci_irqs,
         )?;
 
         // Create customized SSDT table
@@ -949,10 +943,6 @@ impl arch::LinuxArch for X8664arch {
         .ok_or(Error::CreateAcpi)?;
 
         let mut cmdline = Self::get_base_linux_cmdline();
-
-        if noirq {
-            cmdline.insert_str("acpi=noirq").unwrap();
-        }
 
         get_serial_cmdline(&mut cmdline, serial_parameters, "io")
             .map_err(Error::GetSerialCmdline)?;
@@ -1027,7 +1017,6 @@ impl arch::LinuxArch for X8664arch {
             vcpu_init,
             no_smt: components.no_smt,
             irq_chip: irq_chip.try_box_clone().map_err(Error::CloneIrqChip)?,
-            has_bios: matches!(components.vm_image, VmImage::Bios(_)),
             io_bus,
             mmio_bus,
             pid_debug_label_map,
@@ -1056,7 +1045,6 @@ impl arch::LinuxArch for X8664arch {
         vcpu_init: VcpuInitX86_64,
         vcpu_id: usize,
         num_cpus: usize,
-        _has_bios: bool,
         cpu_config: Option<CpuConfigX86_64>,
     ) -> Result<()> {
         let cpu_config = match cpu_config {
@@ -1716,8 +1704,10 @@ impl X8664arch {
         io_bus: &devices::Bus,
         fw_cfg_parameters: Vec<FwCfgParameters>,
         bootorder_fw_cfg_blob: Vec<u8>,
+        fw_cfg_jail: Option<Minijail>,
+        #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
     ) -> Result<()> {
-        match devices::FwCfgDevice::new(FW_CFG_MAX_FILE_SLOTS, fw_cfg_parameters) {
+        let fw_cfg = match devices::FwCfgDevice::new(FW_CFG_MAX_FILE_SLOTS, fw_cfg_parameters) {
             Ok(mut device) => {
                 // this condition will only be true if the user specified at least one bootindex
                 // option on the command line. If none were specified, bootorder_fw_cfg_blob will
@@ -1733,13 +1723,44 @@ impl X8664arch {
                         return Err(Error::CreateFwCfgDevice(err));
                     }
                 }
-                io_bus
-                    .insert(Arc::new(Mutex::new(device)), FW_CFG_BASE_PORT, FW_CFG_WIDTH)
-                    .unwrap();
-                Ok(())
+                device
             }
-            Err(err) => Err(Error::CreateFwCfgDevice(err)),
-        }
+            Err(err) => {
+                return Err(Error::CreateFwCfgDevice(err));
+            }
+        };
+
+        let fw_cfg: Arc<Mutex<dyn BusDevice>> = match fw_cfg_jail.as_ref() {
+            #[cfg(unix)]
+            Some(jail) => {
+                let jail_clone = jail.try_clone().map_err(Error::CloneJail)?;
+                #[cfg(feature = "seccomp_trace")]
+                debug!(
+                    "seccomp_trace {{\"event\": \"minijail_clone\", \"src_jail_addr\": \"0x{:x}\", \"dst_jail_addr\": \"0x{:x}\"}}",
+                    read_jail_addr(jail),
+                    read_jail_addr(&jail_clone)
+                );
+                Arc::new(Mutex::new(
+                    ProxyDevice::new(
+                        fw_cfg,
+                        jail_clone,
+                        Vec::new(),
+                        #[cfg(feature = "swap")]
+                        swap_controller,
+                    )
+                    .map_err(Error::CreateProxyDevice)?,
+                ))
+            }
+            #[cfg(windows)]
+            Some(_) => unreachable!(),
+            None => Arc::new(Mutex::new(fw_cfg)),
+        };
+
+        io_bus
+            .insert(fw_cfg, FW_CFG_BASE_PORT, FW_CFG_WIDTH)
+            .map_err(Error::InsertBus)?;
+
+        Ok(())
     }
 
     /// Sets up the legacy x86 i8042/KBD platform device
@@ -1829,6 +1850,9 @@ impl X8664arch {
     /// * - `irq_chip` the IrqChip object for registering irq events
     /// * - `battery` indicate whether to create the battery
     /// * - `mmio_bus` the MMIO bus to add the devices to
+    /// * - `pci_irqs` IRQ assignment of PCI devices. Tuples of (PCI address,
+    ///               gsi, PCI interrupt pin). Note that this matches one of
+    ///               the return values of generate_pci_root.
     pub fn setup_acpi_devices(
         pci_root: Arc<Mutex<PciRoot>>,
         mem: &GuestMemory,
@@ -1846,6 +1870,7 @@ impl X8664arch {
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
         #[cfg(unix)] ac_adapter: bool,
         #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
+        pci_irqs: &[(PciAddress, u32, PciInterruptPin)],
     ) -> Result<(acpi::AcpiDevResource, Option<BatControl>)> {
         // The AML data for the acpi devices
         let mut amls = Vec::new();
@@ -1996,6 +2021,18 @@ impl X8664arch {
             crs_entries.push(entry);
         }
 
+        let prt_entries: Vec<aml::Package> = pci_irqs
+            .iter()
+            .map(|(pci_address, gsi, pci_intr_pin)| {
+                aml::Package::new(vec![
+                    &pci_address.acpi_adr(),
+                    &pci_intr_pin.to_mask(),
+                    &aml::ZERO,
+                    gsi,
+                ])
+            })
+            .collect();
+
         aml::Device::new(
             "_SB_.PC00".into(),
             vec![
@@ -2010,9 +2047,36 @@ impl X8664arch {
                     &aml::ResourceTemplate::new(crs_entries.iter().map(|b| b.as_ref()).collect()),
                 ),
                 &PciRootOSC {},
+                &aml::Name::new(
+                    "_PRT".into(),
+                    &aml::Package::new(prt_entries.iter().map(|p| p as &dyn Aml).collect()),
+                ),
             ],
         )
         .to_aml_bytes(&mut amls);
+
+        if let (Some(start), Some(len)) = (
+            u32::try_from(read_pcie_cfg_mmio().start).ok(),
+            read_pcie_cfg_mmio()
+                .len()
+                .and_then(|l| u32::try_from(l).ok()),
+        ) {
+            aml::Device::new(
+                "_SB_.MB00".into(),
+                vec![
+                    &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0C02")),
+                    &aml::Name::new(
+                        "_CRS".into(),
+                        &aml::ResourceTemplate::new(vec![&aml::Memory32Fixed::new(
+                            true, start, len,
+                        )]),
+                    ),
+                ],
+            )
+            .to_aml_bytes(&mut amls);
+        } else {
+            warn!("Failed to create ACPI MMCFG region reservation");
+        }
 
         let root_bus = pci_root.lock().get_root_bus();
         let addresses = root_bus.lock().get_downstream_devices();
@@ -2156,63 +2220,6 @@ pub enum MsrError {
     CpuUnSupport,
     #[error("msr must be unique: {0}")]
     MsrDuplicate(u32),
-}
-
-fn insert_msr(
-    msr_map: &mut BTreeMap<u32, MsrConfig>,
-    key: u32,
-    msr_config: MsrConfig,
-) -> std::result::Result<(), MsrError> {
-    if msr_map.insert(key, msr_config).is_some() {
-        Err(MsrError::MsrDuplicate(key))
-    } else {
-        Ok(())
-    }
-}
-
-fn insert_msrs(
-    msr_map: &mut BTreeMap<u32, MsrConfig>,
-    msrs: &[(u32, MsrRWType, MsrAction, MsrValueFrom, MsrFilter)],
-) -> std::result::Result<(), MsrError> {
-    for msr in msrs {
-        insert_msr(
-            msr_map,
-            msr.0,
-            MsrConfig {
-                rw_type: msr.1,
-                action: msr.2,
-                from: msr.3,
-                filter: msr.4,
-            },
-        )?;
-    }
-
-    Ok(())
-}
-
-pub fn set_enable_pnp_data_msr_config(
-    msr_map: &mut BTreeMap<u32, MsrConfig>,
-) -> std::result::Result<(), MsrError> {
-    let msrs = vec![
-        (
-            MSR_IA32_APERF,
-            MsrRWType::ReadOnly,
-            MsrAction::MsrPassthrough,
-            MsrValueFrom::RWFromRunningCPU,
-            MsrFilter::Default,
-        ),
-        (
-            MSR_IA32_MPERF,
-            MsrRWType::ReadOnly,
-            MsrAction::MsrPassthrough,
-            MsrValueFrom::RWFromRunningCPU,
-            MsrFilter::Default,
-        ),
-    ];
-
-    insert_msrs(msr_map, &msrs)?;
-
-    Ok(())
 }
 
 #[derive(Error, Debug)]

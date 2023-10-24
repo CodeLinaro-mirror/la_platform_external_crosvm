@@ -21,12 +21,9 @@ use vmm_vhost::message::MasterReq;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::Master;
 use vmm_vhost::MasterReqHandler;
-use vmm_vhost::VhostUserMaster;
 
 use crate::virtio::vhost::user::vmm::handler::BackendReqHandler;
 use crate::virtio::vhost::user::vmm::handler::BackendReqHandlerImpl;
-use crate::virtio::vhost::user::vmm::handler::VhostUserHandler;
-use crate::virtio::vhost::user::vmm::Connection;
 use crate::virtio::vhost::user::vmm::Error;
 use crate::virtio::vhost::user::vmm::Result as VhostResult;
 
@@ -34,26 +31,6 @@ use crate::virtio::vhost::user::vmm::Result as VhostResult;
 // platform.
 pub(in crate::virtio::vhost::user::vmm::handler) type SocketMaster =
     Master<TubeEndpoint<MasterReq>>;
-
-impl VhostUserHandler {
-    /// Creates a `VhostUserHandler` instance attached to the provided Connection
-    /// with features and protocol features initialized.
-    pub fn new_from_connection(
-        connection: Connection,
-        allow_features: u64,
-        init_features: u64,
-        allow_protocol_features: VhostUserProtocolFeatures,
-    ) -> VhostResult<Self> {
-        let backend_pid = connection.target_pid();
-        Self::new(
-            SocketMaster::from_stream(connection),
-            allow_features,
-            init_features,
-            allow_protocol_features,
-            backend_pid,
-        )
-    }
-}
 
 pub fn create_backend_req_handler(
     h: BackendReqHandlerImpl,

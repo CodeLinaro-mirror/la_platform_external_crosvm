@@ -4,10 +4,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-
 use std::io;
 use std::io::Write;
 use std::mem::size_of;
+#[cfg(windows)]
+use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::result;
@@ -60,6 +61,7 @@ use zerocopy::AsBytes;
 
 use crate::virtio::async_utils;
 use crate::virtio::block::sys::*;
+use crate::virtio::block::DiskOption;
 use crate::virtio::copy_config;
 use crate::virtio::device_constants::block::virtio_blk_config;
 use crate::virtio::device_constants::block::virtio_blk_discard_write_zeroes;
@@ -282,8 +284,8 @@ async fn process_one_request(
         Ok(()) => VIRTIO_BLK_S_OK,
         Err(e) => {
             match e.log_level() {
-                LogLevel::Debug => debug!("failed executing disk request: {}", e),
-                LogLevel::Error => error!("failed executing disk request: {}", e),
+                LogLevel::Debug => debug!("failed executing disk request: {:#}", e),
+                LogLevel::Error => error!("failed executing disk request: {:#}", e),
             }
             e.status()
         }
@@ -309,7 +311,7 @@ pub async fn process_one_chain(
     {
         Ok(len) => len,
         Err(e) => {
-            error!("block: failed to handle request: {}", e);
+            error!("block: failed to handle request: {:#}", e);
             0
         }
     };
@@ -346,7 +348,7 @@ async fn handle_queue(
             res = evt_future => {
                 evt_future.set(evt.next_val().fuse());
                 if let Err(e) = res {
-                    error!("Failed to read the next queue event: {}", e);
+                    error!("Failed to read the next queue event: {:#}", e);
                     continue;
                 }
             }
@@ -408,7 +410,7 @@ async fn handle_command_tube(
                             match &request.lock().deref() {
                                 VhostBackendReqConnectionState::Connected(frontend) => {
                                     if let Err(e) = frontend.send_config_changed() {
-                                        error!("Failed to notify config change: {}", e);
+                                        error!("Failed to notify config change: {:#}", e);
                                     }
                                 }
                                 VhostBackendReqConnectionState::NoConnection => {
@@ -440,14 +442,14 @@ async fn resize(disk_state: &AsyncRwLock<DiskState>, new_size: u64) -> DiskContr
     info!("Resizing block device to {} bytes", new_size);
 
     if let Err(e) = disk_state.disk_image.set_len(new_size) {
-        error!("Resizing disk failed! {}", e);
+        error!("Resizing disk failed! {:#}", e);
         return DiskControlResult::Err(SysError::new(libc::EIO));
     }
 
     // Allocate new space if the disk image is not sparse.
     if !disk_state.sparse {
         if let Err(e) = disk_state.disk_image.allocate(0, new_size) {
-            error!("Allocating disk space after resize failed! {}", e);
+            error!("Allocating disk space after resize failed! {:#}", e);
             return DiskControlResult::Err(SysError::new(libc::EIO));
         }
     }
@@ -657,18 +659,20 @@ impl BlockAsync {
     pub fn new(
         base_features: u64,
         disk_image: Box<dyn DiskFile>,
-        read_only: bool,
-        sparse: bool,
-        packed_queue: bool,
-        block_size: u32,
-        multiple_workers: bool,
-        id: Option<BlockId>,
+        disk_option: &DiskOption,
         control_tube: Option<Tube>,
         queue_size: Option<u16>,
-        executor_kind: Option<ExecutorKind>,
         num_queues: Option<u16>,
-        boot_index: Option<usize>,
     ) -> SysResult<BlockAsync> {
+        let read_only = disk_option.read_only;
+        let sparse = disk_option.sparse;
+        let block_size = disk_option.block_size;
+        let packed_queue = disk_option.packed_queue;
+        let id = disk_option.id;
+        let multiple_workers = disk_option.multiple_workers;
+        let executor_kind = disk_option.async_executor;
+        let boot_index = disk_option.bootindex;
+
         if block_size % SECTOR_SIZE as u32 != 0 {
             error!(
                 "Block size {} is not a multiple of {}.",
@@ -1046,7 +1050,7 @@ impl VirtioDevice for BlockAsync {
                         queue,
                         interrupt: interrupt.clone(),
                     })
-                    .unwrap_or_else(|_| panic!("worker channel closed early"));
+                    .expect("worker channel closed early");
             }
 
             let worker_thread = WorkerThread::start("virtio_blk", move |kill_evt| {
@@ -1057,7 +1061,7 @@ impl VirtioDevice for BlockAsync {
                     .map(|c| AsyncTube::new(&ex, c).expect("failed to create async tube"));
                 let async_image = match disk_image.to_async_disk(&ex) {
                     Ok(d) => d,
-                    Err(e) => panic!("Failed to create async disk {}", e),
+                    Err(e) => panic!("Failed to create async disk {:#}", e),
                 };
                 let disk_state = Rc::new(AsyncRwLock::new(DiskState {
                     disk_image: async_image,
@@ -1090,7 +1094,7 @@ impl VirtioDevice for BlockAsync {
                     })
                     .expect("run_until failed")
                 {
-                    error!("{}", err_string);
+                    error!("{:#}", err_string);
                 }
 
                 let disk_state = match Rc::try_unwrap(disk_state) {
@@ -1136,7 +1140,7 @@ impl VirtioDevice for BlockAsync {
             let (response_tx, response_rx) = oneshot::channel();
             worker_tx
                 .unbounded_send(WorkerCmd::StopQueue { index, response_tx })
-                .unwrap_or_else(|_| panic!("worker channel closed early"));
+                .expect("worker channel closed early");
             let queue = cros_async::block_on(async {
                 response_rx
                     .await
@@ -1206,6 +1210,7 @@ mod tests {
     use vm_memory::GuestAddress;
 
     use super::*;
+    use crate::suspendable_virtio_tests;
     use crate::virtio::base_features;
     use crate::virtio::descriptor_utils::create_descriptor_chain;
     use crate::virtio::descriptor_utils::DescriptorType;
@@ -1219,22 +1224,8 @@ mod tests {
         f.set_len(0x1000).unwrap();
 
         let features = base_features(ProtectionType::Unprotected);
-        let b = BlockAsync::new(
-            features,
-            Box::new(f),
-            true,
-            false,
-            false,
-            512,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let disk_option = DiskOption::default();
+        let b = BlockAsync::new(features, Box::new(f), &disk_option, None, None, None).unwrap();
         let mut num_sectors = [0u8; 4];
         b.read_config(0, &mut num_sectors);
         // size is 0x1000, so num_sectors is 8 (4096/512).
@@ -1251,22 +1242,12 @@ mod tests {
         f.set_len(0x1000).unwrap();
 
         let features = base_features(ProtectionType::Unprotected);
-        let b = BlockAsync::new(
-            features,
-            Box::new(f),
-            true,
-            false,
-            false,
-            4096,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let disk_option = DiskOption {
+            block_size: 4096,
+            sparse: false,
+            ..Default::default()
+        };
+        let b = BlockAsync::new(features, Box::new(f), &disk_option, None, None, None).unwrap();
         let mut blk_size = [0u8; 4];
         b.read_config(20, &mut blk_size);
         // blk_size should be 4096 (0x1000).
@@ -1283,22 +1264,8 @@ mod tests {
         {
             let f = File::create(&path).unwrap();
             let features = base_features(ProtectionType::Unprotected);
-            let b = BlockAsync::new(
-                features,
-                Box::new(f),
-                false,
-                true,
-                false,
-                512,
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+            let disk_option = DiskOption::default();
+            let b = BlockAsync::new(features, Box::new(f), &disk_option, None, None, None).unwrap();
             // writable device should set VIRTIO_BLK_F_FLUSH + VIRTIO_BLK_F_DISCARD
             // + VIRTIO_BLK_F_WRITE_ZEROES + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE
             // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_BLK_F_MQ + VIRTIO_RING_F_EVENT_IDX
@@ -1309,22 +1276,11 @@ mod tests {
         {
             let f = File::create(&path).unwrap();
             let features = base_features(ProtectionType::Unprotected);
-            let b = BlockAsync::new(
-                features,
-                Box::new(f),
-                false,
-                false,
-                false,
-                512,
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+            let disk_option = DiskOption {
+                sparse: false,
+                ..Default::default()
+            };
+            let b = BlockAsync::new(features, Box::new(f), &disk_option, None, None, None).unwrap();
             // writable device should set VIRTIO_F_FLUSH + VIRTIO_BLK_F_RO
             // + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE + VIRTIO_BLK_F_SEG_MAX
             // + VIRTIO_BLK_F_MQ + VIRTIO_RING_F_EVENT_IDX
@@ -1335,22 +1291,11 @@ mod tests {
         {
             let f = File::create(&path).unwrap();
             let features = base_features(ProtectionType::Unprotected);
-            let b = BlockAsync::new(
-                features,
-                Box::new(f),
-                true,
-                true,
-                false,
-                512,
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+            let disk_option = DiskOption {
+                read_only: true,
+                ..Default::default()
+            };
+            let b = BlockAsync::new(features, Box::new(f), &disk_option, None, None, None).unwrap();
             // read-only device should set VIRTIO_BLK_F_RO
             // + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE + VIRTIO_BLK_F_SEG_MAX
             // + VIRTIO_BLK_F_MQ + VIRTIO_RING_F_EVENT_IDX
@@ -1367,22 +1312,8 @@ mod tests {
 
         // Default case
         let f = File::create(&path).unwrap();
-        let b = BlockAsync::new(
-            features,
-            Box::new(f),
-            false,
-            true,
-            false,
-            512,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let disk_option = DiskOption::default();
+        let b = BlockAsync::new(features, Box::new(f), &disk_option, None, None, None).unwrap();
         assert_eq!(
             [DEFAULT_QUEUE_SIZE; DEFAULT_NUM_QUEUES as usize],
             b.queue_max_sizes()
@@ -1390,20 +1321,14 @@ mod tests {
 
         // Single queue of size 128
         let f = File::create(&path).unwrap();
+        let disk_option = DiskOption::default();
         let b = BlockAsync::new(
             features,
             Box::new(f),
-            false,
-            false,
-            false,
-            512,
-            false,
-            None,
+            &disk_option,
             None,
             Some(128),
-            None,
             Some(1),
-            None,
         )
         .unwrap();
         assert_eq!([128; 1], b.queue_max_sizes());
@@ -1648,21 +1573,26 @@ mod tests {
         let mem = GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
             .expect("Creating guest memory failed.");
 
+        // Create a control tube.
+        // NOTE: We don't want to drop the vmm half of the tube. That would cause the worker thread
+        // will immediately fail, which isn't what we want to test in this case.
+        let (_control_tube, control_tube_device) = Tube::pair().unwrap();
+
         // Create a BlockAsync to test
         let features = base_features(ProtectionType::Unprotected);
         let id = b"Block serial number\0";
+        let disk_option = DiskOption {
+            read_only: true,
+            id: Some(*id),
+            sparse: false,
+            multiple_workers: enables_multiple_workers,
+            ..Default::default()
+        };
         let mut b = BlockAsync::new(
             features,
             disk_image.try_clone().unwrap(),
-            true,
-            false,
-            false,
-            512,
-            enables_multiple_workers,
-            Some(*id),
-            Some(Tube::pair().unwrap().0),
-            None,
-            None,
+            &disk_option,
+            Some(control_tube_device),
             None,
             None,
         )
@@ -1767,18 +1697,15 @@ mod tests {
 
         // Create a BlockAsync to test
         let features = base_features(ProtectionType::Unprotected);
+        let disk_option = DiskOption {
+            multiple_workers: enables_multiple_workers,
+            ..Default::default()
+        };
         let mut b = BlockAsync::new(
             features,
             disk_image.try_clone().unwrap(),
-            false,
-            false,
-            false,
-            512,
-            enables_multiple_workers,
-            None,
+            &disk_option,
             Some(control_tube_device),
-            None,
-            None,
             None,
             None,
         )
@@ -1848,7 +1775,6 @@ mod tests {
         assert_eq!(
             interrupt
                     .get_interrupt_evt()
-                    .unwrap()
                     // Wait a bit until the blk signals the interrupt
                     .wait_timeout(Duration::from_millis(300)),
             Ok(base::EventWaitResult::Signaled),
@@ -1877,17 +1803,11 @@ mod tests {
 
         // Create a BlockAsync to test with single worker thread
         let features = base_features(ProtectionType::Unprotected);
+        let disk_option = DiskOption::default();
         let mut b = BlockAsync::new(
             features,
             disk_image.try_clone().unwrap(),
-            true,
-            false,
-            false,
-            512,
-            false, // run with single worker thread
-            None,
-            None,
-            None,
+            &disk_option,
             None,
             None,
             None,
@@ -1919,10 +1839,13 @@ mod tests {
 
         // Create a BlockAsync to test with multiple worker threads
         let features = base_features(ProtectionType::Unprotected);
-        let mut b = BlockAsync::new(
-            features, disk_image, true, false, false, 512, true, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let disk_option = DiskOption {
+            read_only: true,
+            sparse: false,
+            multiple_workers: true,
+            ..DiskOption::default()
+        };
+        let mut b = BlockAsync::new(features, disk_image, &disk_option, None, None, None).unwrap();
 
         // activate should succeed
         let mut q0 = QueueConfig::new(DEFAULT_QUEUE_SIZE, 0);
@@ -1946,4 +1869,43 @@ mod tests {
 
         assert_eq!(b.worker_threads.len(), 2, "2 threads should be spawned.");
     }
+
+    struct BlockContext {}
+
+    fn modify_device(_block_context: &mut BlockContext, b: &mut BlockAsync) {
+        b.avail_features = !b.avail_features;
+    }
+
+    fn create_device() -> (BlockContext, BlockAsync) {
+        // Create an empty disk image
+        let f = tempfile().unwrap();
+        f.set_len(0x1000).unwrap();
+        let disk_image: Box<dyn DiskFile> = Box::new(f);
+
+        // Create a BlockAsync to test
+        let features = base_features(ProtectionType::Unprotected);
+        let id = b"Block serial number\0";
+        let disk_option = DiskOption {
+            read_only: true,
+            id: Some(*id),
+            sparse: false,
+            multiple_workers: true,
+            ..Default::default()
+        };
+        (
+            BlockContext {},
+            BlockAsync::new(
+                features,
+                disk_image.try_clone().unwrap(),
+                &disk_option,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[cfg(unix)]
+    suspendable_virtio_tests!(asyncblock, create_device, 2, modify_device);
 }

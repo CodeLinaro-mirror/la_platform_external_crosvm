@@ -29,6 +29,7 @@ use crosvm::config::Config;
 use devices::virtio::vhost::user::device::run_block_device;
 #[cfg(feature = "gpu")]
 use devices::virtio::vhost::user::device::run_gpu_device;
+#[cfg(feature = "net")]
 use devices::virtio::vhost::user::device::run_net_device;
 #[cfg(feature = "audio")]
 use devices::virtio::vhost::user::device::run_snd_device;
@@ -59,6 +60,8 @@ use vm_control::client::do_gpu_display_remove;
 use vm_control::client::do_modify_battery;
 #[cfg(feature = "pci-hotplug")]
 use vm_control::client::do_net_add;
+#[cfg(feature = "pci-hotplug")]
+use vm_control::client::do_net_remove;
 use vm_control::client::do_swap_status;
 use vm_control::client::do_usb_attach;
 use vm_control::client::do_usb_detach;
@@ -74,8 +77,6 @@ use vm_control::BalloonControlCommand;
 use vm_control::DiskControlCommand;
 use vm_control::HotPlugDeviceInfo;
 use vm_control::HotPlugDeviceType;
-#[cfg(feature = "pci-hotplug")]
-use vm_control::NetControlCommand;
 use vm_control::RestoreCommand;
 use vm_control::SnapshotCommand;
 use vm_control::SwapCommand;
@@ -324,8 +325,10 @@ fn modify_virtio_net(cmd: cmdline::VirtioNetCommand) -> std::result::Result<(), 
             info!("Tap device {} plugged to PCI bus {}", &c.tap_name, bus_num);
         }
         cmdline::VirtioNetSubCommand::RemoveTap(c) => {
-            let request = VmRequest::HotPlugNetCommand(NetControlCommand::RemoveTap(c.bus));
-            vms_request(&request, c.socket_path)?;
+            do_net_remove(c.bus, &c.socket_path).map_err(|e| {
+                error!("Tap device remove failed: {:?}", &e);
+            })?;
+            info!("Tap device removed from PCI bus {}", &c.bus);
         }
     };
 
@@ -487,6 +490,7 @@ fn start_device(opts: cmdline::DeviceCommand) -> std::result::Result<(), ()> {
             CrossPlatformDevicesCommands::Block(cfg) => run_block_device(cfg),
             #[cfg(feature = "gpu")]
             CrossPlatformDevicesCommands::Gpu(cfg) => run_gpu_device(cfg),
+            #[cfg(feature = "net")]
             CrossPlatformDevicesCommands::Net(cfg) => run_net_device(cfg),
             #[cfg(feature = "audio")]
             CrossPlatformDevicesCommands::Snd(cfg) => run_snd_device(cfg),

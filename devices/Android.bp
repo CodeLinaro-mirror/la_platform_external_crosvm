@@ -29,6 +29,7 @@ rust_test {
         "balloon",
         "geniezone",
         "gunyah",
+        "net",
         "usb",
     ],
     rustlibs: [
@@ -77,7 +78,6 @@ rust_test {
         "libtempfile",
         "libthiserror",
         "libusb_util",
-        "libuuid",
         "libvfio_sys",
         "libvhost",
         "libvirtio_sys",
@@ -129,6 +129,7 @@ rust_test {
         "balloon",
         "geniezone",
         "gunyah",
+        "net",
         "usb",
     ],
     rustlibs: [
@@ -178,7 +179,6 @@ rust_test {
         "libtempfile",
         "libthiserror",
         "libusb_util",
-        "libuuid",
         "libvfio_sys",
         "libvhost",
         "libvirtio_sys",
@@ -225,6 +225,7 @@ rust_library {
         "balloon",
         "geniezone",
         "gunyah",
+        "net",
         "usb",
     ],
     rustlibs: [
@@ -269,7 +270,6 @@ rust_library {
         "libsync_rust",
         "libthiserror",
         "libusb_util",
-        "libuuid",
         "libvfio_sys",
         "libvhost",
         "libvirtio_sys",

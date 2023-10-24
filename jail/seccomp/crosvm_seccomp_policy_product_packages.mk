@@ -22,10 +22,10 @@ PRODUCT_PACKAGES += \
     battery.policy \
     block_device.policy \
     block_device_vhost_user.policy \
-    block_device_vvu.policy \
     coiommu_device.policy \
     cras_audio_device.policy \
     fs_device.policy \
+    fw_cfg_device.policy \
     gpu_device.policy \
     gpu_render_server.policy \
     input_device.policy \
@@ -36,17 +36,16 @@ PRODUCT_PACKAGES += \
     rng_device.policy \
     serial_device.policy \
     serial_device_vhost_user.policy \
-    serial_device_vvu.policy \
     snd_cras_device.policy \
     snd_null_device.policy \
     tpm_device.policy \
     vfio_device.policy \
     vhost_net_device.policy \
+    vhost_scmi_device.policy \
     vhost_vsock_device.policy \
     video_device.policy \
     vios_audio_device.policy \
     vtpm_proxy_device.policy \
-    vvu_proxy_device.policy \
     wl_device.policy \
     xhci_device.policy \
 
@@ -57,10 +56,10 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/etc/seccomp_policy/crosvm/battery.policy \
     system/etc/seccomp_policy/crosvm/block_device.policy \
     system/etc/seccomp_policy/crosvm/block_device_vhost_user.policy \
-    system/etc/seccomp_policy/crosvm/block_device_vvu.policy \
     system/etc/seccomp_policy/crosvm/coiommu_device.policy \
     system/etc/seccomp_policy/crosvm/cras_audio_device.policy \
     system/etc/seccomp_policy/crosvm/fs_device.policy \
+    system/etc/seccomp_policy/crosvm/fw_cfg_device.policy \
     system/etc/seccomp_policy/crosvm/gpu_device.policy \
     system/etc/seccomp_policy/crosvm/gpu_render_server.policy \
     system/etc/seccomp_policy/crosvm/input_device.policy \
@@ -71,16 +70,15 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
     system/etc/seccomp_policy/crosvm/rng_device.policy \
     system/etc/seccomp_policy/crosvm/serial_device.policy \
     system/etc/seccomp_policy/crosvm/serial_device_vhost_user.policy \
-    system/etc/seccomp_policy/crosvm/serial_device_vvu.policy \
     system/etc/seccomp_policy/crosvm/snd_cras_device.policy \
     system/etc/seccomp_policy/crosvm/snd_null_device.policy \
     system/etc/seccomp_policy/crosvm/tpm_device.policy \
     system/etc/seccomp_policy/crosvm/vfio_device.policy \
     system/etc/seccomp_policy/crosvm/vhost_net_device.policy \
+    system/etc/seccomp_policy/crosvm/vhost_scmi_device.policy \
     system/etc/seccomp_policy/crosvm/vhost_vsock_device.policy \
     system/etc/seccomp_policy/crosvm/video_device.policy \
     system/etc/seccomp_policy/crosvm/vios_audio_device.policy \
     system/etc/seccomp_policy/crosvm/vtpm_proxy_device.policy \
-    system/etc/seccomp_policy/crosvm/vvu_proxy_device.policy \
     system/etc/seccomp_policy/crosvm/wl_device.policy \
     system/etc/seccomp_policy/crosvm/xhci_device.policy \

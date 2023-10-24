@@ -88,7 +88,9 @@ use base::WaitContext;
 use base::WorkerThread;
 use data_model::*;
 #[cfg(feature = "minigbm")]
-use libc::{EBADF, EINVAL};
+use libc::EBADF;
+#[cfg(feature = "minigbm")]
+use libc::EINVAL;
 use remain::sorted;
 use resources::address_allocator::AddressAllocator;
 use resources::AddressRange;
@@ -824,7 +826,7 @@ impl WlVfd {
         let (offset, desc, reqs) = vm.allocate_and_register_gpu_memory(width, height, format)?;
         let mut vfd = WlVfd::default();
         let vfd_shm =
-            SharedMemory::from_safe_descriptor(desc, Some(reqs.size)).map_err(WlError::NewAlloc)?;
+            SharedMemory::from_safe_descriptor(desc, reqs.size).map_err(WlError::NewAlloc)?;
 
         let mut desc = GpuMemoryDesc::default();
         for i in 0..3 {
@@ -2053,5 +2055,22 @@ impl VirtioDevice for Wl {
                 Ok(())
             }
         }
+    }
+
+    // ANDROID: Add empty implementations for successful snapshot taking. Change to full
+    // implementation as part of b/266514618
+    // virtio-wl is not used, but is created. As such, virtio_snapshot/restore will be called when
+    // cuttlefish attempts to take a snapshot.
+    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            data == serde_json::Value::Null,
+            "unexpected snapshot data: should be null, got {}",
+            data,
+        );
+        Ok(())
     }
 }

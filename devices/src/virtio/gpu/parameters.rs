@@ -16,6 +16,7 @@ use vm_control::gpu::DisplayParameters;
 
 use super::GpuMode;
 use super::GpuWsi;
+use crate::PciAddress;
 
 mod serde_capset_mask {
     use super::*;
@@ -61,12 +62,14 @@ pub struct GpuParameters {
     pub udmabuf: bool,
     pub cache_path: Option<String>,
     pub cache_size: Option<String>,
+    pub pci_address: Option<PciAddress>,
     pub pci_bar_size: u64,
     #[serde(rename = "context-types", with = "serde_capset_mask")]
     pub capset_mask: u64,
     // enforce that blob resources MUST be exportable as file descriptors
     pub external_blob: bool,
     pub system_blob: bool,
+    #[serde(rename = "implicit-render-server")]
     pub allow_implicit_render_server_exec: bool,
 }
 
@@ -85,6 +88,7 @@ impl Default for GpuParameters {
             wsi: None,
             cache_path: None,
             cache_size: None,
+            pci_address: None,
             pci_bar_size: (1 << 33),
             udmabuf: false,
             capset_mask: 0,

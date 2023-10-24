@@ -17,7 +17,6 @@ pub(crate) mod pci_hotplug_helpers;
 pub(crate) mod pci_hotplug_manager;
 mod vcpu;
 
-use devices::virtio::VirtioDevice;
 use std::cmp::max;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -94,15 +93,14 @@ use devices::virtio::BalloonMode;
 use devices::virtio::NetParameters;
 #[cfg(feature = "pci-hotplug")]
 use devices::virtio::NetParametersMode;
+use devices::virtio::VirtioDevice;
+use devices::virtio::VirtioDeviceType;
 use devices::virtio::VirtioTransportType;
 use devices::Bus;
 use devices::BusDeviceObj;
 use devices::CoIommuDev;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-#[cfg(feature = "geniezone")]
-use devices::GeniezoneKernelIrqChip;
 #[cfg(feature = "usb")]
-use devices::HostBackendDeviceProvider;
+use devices::DeviceProvider;
 #[cfg(target_arch = "x86_64")]
 use devices::HotPlugBus;
 #[cfg(target_arch = "x86_64")]
@@ -110,9 +108,6 @@ use devices::HotPlugKey;
 use devices::IommuDevType;
 use devices::IrqEventIndex;
 use devices::IrqEventSource;
-use devices::KvmKernelIrqChip;
-#[cfg(target_arch = "x86_64")]
-use devices::KvmSplitIrqChip;
 #[cfg(feature = "pci-hotplug")]
 use devices::NetResourceCarrier;
 #[cfg(target_arch = "x86_64")]
@@ -143,18 +138,6 @@ use devices::VirtioPciDevice;
 use devices::XhciController;
 #[cfg(feature = "gpu")]
 use gpu::*;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-#[cfg(feature = "geniezone")]
-use hypervisor::geniezone::Geniezone;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-#[cfg(feature = "geniezone")]
-use hypervisor::geniezone::GeniezoneVcpu;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-#[cfg(feature = "geniezone")]
-use hypervisor::geniezone::GeniezoneVm;
-use hypervisor::kvm::Kvm;
-use hypervisor::kvm::KvmVcpu;
-use hypervisor::kvm::KvmVm;
 #[cfg(target_arch = "riscv64")]
 use hypervisor::CpuConfigRiscv64;
 #[cfg(target_arch = "x86_64")]
@@ -193,8 +176,6 @@ use vm_memory::GuestMemory;
 use vm_memory::MemoryPolicy;
 use vm_memory::MemoryRegionOptions;
 #[cfg(target_arch = "x86_64")]
-use x86_64::msr::get_override_msr_list;
-#[cfg(target_arch = "x86_64")]
 use x86_64::X8664arch as Arch;
 
 use crate::crosvm::config::Config;
@@ -219,9 +200,6 @@ const GENIEZONE_PATH: &str = "/dev/gzvm";
 #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
 static GUNYAH_PATH: &str = "/dev/gunyah";
 
-#[cfg(all(feature = "pci-hotplug", not(target_arch = "x86_64")))]
-compile_error!("pci-hotplug is only supported on x86-64 architecture");
-
 fn create_virtio_devices(
     cfg: &Config,
     vm: &mut impl Vm,
@@ -235,24 +213,12 @@ fn create_virtio_devices(
     fs_device_tubes: &mut Vec<Tube>,
     #[cfg(feature = "gpu")] gpu_control_tube: Tube,
     #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
-    vvu_proxy_device_tubes: &mut Vec<Tube>,
-    vvu_proxy_max_sibling_mem_size: u64,
     #[cfg(feature = "registered_events")] registered_evt_q: &SendTube,
 ) -> DeviceResult<Vec<VirtioDeviceStub>> {
     let mut devs = Vec::new();
 
     for opt in &cfg.vhost_user_gpu {
         devs.push(create_vhost_user_gpu_device(cfg.protection_type, opt)?);
-    }
-
-    for opt in &cfg.vvu_proxy {
-        devs.push(create_vvu_proxy_device(
-            cfg.protection_type,
-            &cfg.jail_config,
-            opt,
-            vvu_proxy_device_tubes.remove(0),
-            vvu_proxy_max_sibling_mem_size,
-        )?);
     }
 
     #[cfg(any(feature = "gpu", feature = "video-decoder", feature = "video-encoder"))]
@@ -385,6 +351,10 @@ fn create_virtio_devices(
         );
     }
 
+    for scsi in &cfg.scsis {
+        devs.push(scsi.create_virtio_device_and_jail(cfg.protection_type, &cfg.jail_config)?);
+    }
+
     for blk in &cfg.vhost_user_blk {
         devs.push(create_vhost_user_block_device(cfg.protection_type, blk)?);
     }
@@ -423,7 +393,7 @@ fn create_virtio_devices(
         }
     }
 
-    #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+    #[cfg(feature = "vtpm")]
     {
         if cfg.vtpm_proxy {
             devs.push(create_vtpm_proxy_device(
@@ -531,6 +501,7 @@ fn create_virtio_devices(
         )?);
     }
 
+    #[cfg(feature = "net")]
     for opt in &cfg.net {
         let dev = opt.create_virtio_device_and_jail(cfg.protection_type, &cfg.jail_config)?;
         devs.push(dev);
@@ -698,11 +669,9 @@ fn create_devices(
     disk_device_tubes: &mut Vec<Tube>,
     pmem_device_tubes: &mut Vec<Tube>,
     fs_device_tubes: &mut Vec<Tube>,
-    #[cfg(feature = "usb")] usb_provider: HostBackendDeviceProvider,
+    #[cfg(feature = "usb")] usb_provider: DeviceProvider,
     #[cfg(feature = "gpu")] gpu_control_tube: Tube,
     #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
-    vvu_proxy_device_tubes: &mut Vec<Tube>,
-    vvu_proxy_max_sibling_mem_size: u64,
     iova_max_addr: &mut Option<u64>,
     #[cfg(feature = "registered_events")] registered_evt_q: &SendTube,
 ) -> DeviceResult<Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>> {
@@ -832,8 +801,6 @@ fn create_devices(
         gpu_control_tube,
         #[cfg(feature = "gpu")]
         render_server_fd,
-        vvu_proxy_device_tubes,
-        vvu_proxy_max_sibling_mem_size,
         #[cfg(feature = "registered_events")]
         registered_evt_q,
     )?;
@@ -847,7 +814,7 @@ fn create_devices(
 
                 let shared_memory_tube = if stub.dev.get_shared_memory_region().is_some() {
                     let (host_tube, device_tube) =
-                        Tube::pair().context("failed to create VVU proxy tube")?;
+                        Tube::pair().context("failed to create shared memory tube")?;
                     vm_memory_control_tubes.push(VmMemoryTube {
                         tube: host_tube,
                         expose_with_viommu: stub.dev.expose_shmem_descriptors_with_viommu(),
@@ -887,7 +854,10 @@ fn create_devices(
     #[cfg(feature = "usb")]
     if cfg.usb {
         // Create xhci controller.
-        let usb_controller = Box::new(XhciController::new(vm.get_memory().clone(), usb_provider));
+        let usb_controller = Box::new(XhciController::new(
+            vm.get_memory().clone(),
+            Box::new(usb_provider),
+        ));
         devices.push((
             usb_controller,
             simple_jail(&cfg.jail_config, "xhci_device")?,
@@ -1150,6 +1120,9 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         }
     }
 
+    // if --enable-fw-cfg or --fw-cfg was given, we want to enable fw_cfg
+    let fw_cfg_enable = cfg.enable_fw_cfg || !cfg.fw_cfg_parameters.is_empty();
+
     Ok(VmComponents {
         #[cfg(target_arch = "x86_64")]
         ac_adapter: cfg.ac_adapter,
@@ -1159,6 +1132,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             .checked_mul(1024 * 1024)
             .ok_or_else(|| anyhow!("requested memory size too large"))?,
         swiotlb,
+        fw_cfg_enable,
         bootorder_fw_cfg_blob: Vec::new(),
         vcpu_count: cfg.vcpu_count.unwrap_or(1),
         vcpu_affinity: cfg.vcpu_affinity.clone(),
@@ -1305,6 +1279,11 @@ fn create_guest_memory(
 
 #[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
 fn run_gz(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> Result<ExitState> {
+    use devices::GeniezoneKernelIrqChip;
+    use hypervisor::geniezone::Geniezone;
+    use hypervisor::geniezone::GeniezoneVcpu;
+    use hypervisor::geniezone::GeniezoneVm;
+
     let device_path = device_path.unwrap_or(Path::new(GENIEZONE_PATH));
     let gzvm = Geniezone::new_with_path(device_path)
         .with_context(|| format!("failed to open GenieZone device {}", device_path.display()))?;
@@ -1353,6 +1332,13 @@ fn run_gz(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> 
 }
 
 fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> Result<ExitState> {
+    use devices::KvmKernelIrqChip;
+    #[cfg(target_arch = "x86_64")]
+    use devices::KvmSplitIrqChip;
+    use hypervisor::kvm::Kvm;
+    use hypervisor::kvm::KvmVcpu;
+    use hypervisor::kvm::KvmVm;
+
     let device_path = device_path.unwrap_or(Path::new(KVM_PATH));
     let kvm = Kvm::new_with_path(device_path)
         .with_context(|| format!("failed to open KVM device {}", device_path.display()))?;
@@ -1375,15 +1361,6 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
     if cfg.itmt {
         vm.set_platform_info_read_access(false)
             .context("failed to disable MSR_PLATFORM_INFO read access")?;
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    if !cfg.userspace_msr.is_empty() {
-        vm.enable_userspace_msr()
-            .context("failed to enable userspace MSR handling, do you have kernel 5.10 or later")?;
-        let msr_list = get_override_msr_list(&cfg.userspace_msr);
-        vm.set_msr_filter(msr_list)
-            .context("failed to set msr filter")?;
     }
 
     // Check that the VM was actually created in protected mode as expected.
@@ -1459,7 +1436,9 @@ fn run_gunyah(
     components: VmComponents,
 ) -> Result<ExitState> {
     use devices::GunyahIrqChip;
-    use hypervisor::gunyah::{Gunyah, GunyahVcpu, GunyahVm};
+    use hypervisor::gunyah::Gunyah;
+    use hypervisor::gunyah::GunyahVcpu;
+    use hypervisor::gunyah::GunyahVm;
 
     let device_path = device_path.unwrap_or(Path::new(GUNYAH_PATH));
     let gunyah = Gunyah::new_with_path(device_path)
@@ -1587,6 +1566,12 @@ where
         Some(swap_controller) => Some(swap_controller.create_device_helper()?),
         None => None,
     };
+    // pci-hotplug is only implemented for x86_64 for now, attempting to use it on other platform
+    // would crash.
+    #[cfg(all(feature = "pci-hotplug", not(target_arch = "x86_64")))]
+    if cfg.pci_hotplug_slots.is_some() {
+        bail!("pci-hotplug is not implemented for non x86_64 architecture");
+    }
     // hotplug_manager must be created before vm is started since it forks jail warden process.
     #[cfg(feature = "pci-hotplug")]
     let mut hotplug_manager = if cfg.pci_hotplug_slots.is_some() {
@@ -1606,7 +1591,7 @@ where
 
     #[cfg(feature = "usb")]
     let (usb_control_tube, usb_provider) =
-        HostBackendDeviceProvider::new().context("failed to create usb provider")?;
+        DeviceProvider::new().context("failed to create usb provider")?;
 
     // Masking signals is inherently dangerous, since this can persist across clones/execs. Do this
     // before any jailed devices have been spawned, so that we can catch any of them that fail very
@@ -1719,17 +1704,6 @@ where
         fs_device_tubes.push(fs_device_tube);
     }
 
-    let mut vvu_proxy_device_tubes = Vec::new();
-    for _ in 0..cfg.vvu_proxy.len() {
-        let (vvu_proxy_host_tube, vvu_proxy_device_tube) =
-            Tube::pair().context("failed to create VVU proxy tube")?;
-        vm_memory_control_tubes.push(VmMemoryTube {
-            tube: vvu_proxy_host_tube,
-            expose_with_viommu: false,
-        });
-        vvu_proxy_device_tubes.push(vvu_proxy_device_tube);
-    }
-
     let (vm_evt_wrtube, vm_evt_rdtube) =
         Tube::directional_pair().context("failed to create vm event tube")?;
 
@@ -1803,8 +1777,6 @@ where
         gpu_control_device_tube,
         #[cfg(feature = "gpu")]
         render_server_fd,
-        &mut vvu_proxy_device_tubes,
-        components.memory_size,
         &mut iova_max_addr,
         #[cfg(feature = "registered_events")]
         &reg_evt_wrtube,
@@ -1869,6 +1841,10 @@ where
     bootorder_fw_cfg_blob.push(0);
 
     components.bootorder_fw_cfg_blob = bootorder_fw_cfg_blob;
+
+    // if the bootindex argument was given, we want to make sure that fw_cfg is enabled so the
+    // "bootorder" file can be accessed by the guest.
+    components.fw_cfg_enable |= components.bootorder_fw_cfg_blob.len() > 1;
 
     let (translate_response_senders, request_rx) = setup_virtio_access_platform(
         &mut sys_allocator,
@@ -1963,6 +1939,8 @@ where
         simple_jail(&cfg.jail_config, "serial_device")?,
         #[cfg(target_arch = "x86_64")]
         simple_jail(&cfg.jail_config, "block_device")?,
+        #[cfg(target_arch = "x86_64")]
+        simple_jail(&cfg.jail_config, "fw_cfg_device")?,
         #[cfg(feature = "swap")]
         &mut swap_controller,
         guest_suspended_cvar.clone(),
@@ -2871,7 +2849,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             cfg.force_calibrated_tsc_leaf,
             cfg.host_cpu_topology,
             cfg.enable_hwp,
-            cfg.enable_pnp_data,
             cfg.no_smt,
             cfg.itmt,
             vcpu_hybrid_type,
@@ -2900,7 +2877,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             vcpu_affinity,
             linux.delay_rt,
             vcpu_thread_barrier.clone(),
-            linux.has_bios,
             (*linux.io_bus).clone(),
             (*linux.mmio_bus).clone(),
             vm_evt_wrtube
@@ -2919,8 +2895,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                         .context("failed to clone vcpu cgroup tasks file")?,
                 ),
             },
-            #[cfg(target_arch = "x86_64")]
-            cfg.userspace_msr.clone(),
             #[cfg(all(target_arch = "x86_64", unix))]
             bus_lock_ratelimit_ctrl,
             run_mode,
@@ -3182,9 +3156,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 Token::VmControl { id } => {
                     #[cfg(target_arch = "x86_64")]
                     let mut add_tubes = Vec::new();
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
                     let mut add_irq_control_tubes = Vec::new();
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
                     let mut add_vm_memory_control_tubes = Vec::new();
                     if let Some(socket) = control_tubes.get(&id) {
                         match socket {
@@ -3290,11 +3264,14 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                         #[cfg(feature = "balloon")]
                                         VmRequest::BalloonCommand(cmd) => {
                                             if let Some(tube) = balloon_tube.as_mut() {
-                                                let Some((r, key)) = tube.send_cmd(cmd, Some(id)) else {
+                                                let Some((r, key)) = tube.send_cmd(cmd, Some(id))
+                                                else {
                                                     continue;
                                                 };
                                                 if key != id {
-                                                    let Some(TaggedControlTube::Vm(tube)) = control_tubes.get(&key) else {
+                                                    let Some(TaggedControlTube::Vm(tube)) =
+                                                        control_tubes.get(&key)
+                                                    else {
                                                         continue;
                                                     };
                                                     if let Err(e) = tube.send(&r) {
@@ -3470,13 +3447,13 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             .context("failed to add hotplug vfio-pci descriptor to wait context")?;
                         control_tubes.insert(id, socket);
                     }
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
                     if !add_irq_control_tubes.is_empty() {
                         irq_handler_control.send(&IrqHandlerRequest::AddIrqControlTubes(
                             add_irq_control_tubes,
                         ))?;
                     }
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
                     if !add_vm_memory_control_tubes.is_empty() {
                         vm_memory_handler_control.send(
                             &VmMemoryHandlerRequest::AddControlTubes(add_vm_memory_control_tubes),
@@ -4045,7 +4022,7 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
     base::syslog::push_descriptors(&mut keep_rds);
     cros_tracing::push_descriptors!(&mut keep_rds);
 
-    let jail_type = VhostUserListener::get_virtio_transport_type(vhost);
+    let jail_type = VirtioDeviceType::VhostUser;
 
     // Create a jail from the configuration. If the configuration is `None`, `create_jail` will also
     // return `None` so fall back to an empty (i.e. non-constrained) Minijail.
@@ -4253,6 +4230,7 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
     }
 
     // Create network devices.
+    #[cfg(feature = "net")]
     for (i, params) in opts.net.iter().enumerate() {
         add_device(i, &params.device, &params.vhost, &jail, &mut devices_jails)?;
     }

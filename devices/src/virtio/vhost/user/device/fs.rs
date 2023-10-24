@@ -28,7 +28,7 @@ pub use sys::start_device as run_fs_device;
 use virtio_sys::virtio_fs::virtio_fs_config;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
-use vmm_vhost::message::VhostUserVirtioFeatures;
+use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 use zerocopy::AsBytes;
 
 use crate::virtio;
@@ -91,7 +91,7 @@ impl FsBackend {
         fs_tag[..tag.len()].copy_from_slice(tag.as_bytes());
 
         let avail_features = virtio::base_features(ProtectionType::Unprotected)
-            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+            | 1 << VHOST_USER_F_PROTOCOL_FEATURES;
 
         // Use default passthroughfs config
         let fs = PassthroughFs::new(tag, cfg.unwrap_or_default())?;
@@ -227,10 +227,7 @@ impl VhostUserBackend for FsBackend {
 pub struct Options {
     #[argh(option, arg_name = "PATH")]
     /// path to a vhost-user socket
-    socket: Option<String>,
-    #[argh(option, arg_name = "STRING")]
-    /// VFIO-PCI device name (e.g. '0000:00:07.0')
-    vfio: Option<String>,
+    socket: String,
     #[argh(option, arg_name = "TAG")]
     /// the virtio-fs tag
     tag: String,

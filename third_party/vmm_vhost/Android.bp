@@ -52,7 +52,6 @@ rust_library {
     features: [
         "default",
         "device",
-        "vfio-device",
         "vmm",
     ],
     rustlibs: [
@@ -66,7 +65,10 @@ rust_library {
         "libthiserror",
         "libzerocopy",
     ],
-    proc_macros: ["libremain"],
+    proc_macros: [
+        "libenumn",
+        "libremain",
+    ],
 }
 
 rust_test {
@@ -86,7 +88,6 @@ rust_test {
     features: [
         "default",
         "device",
-        "vfio-device",
         "vmm",
     ],
     rustlibs: [
@@ -100,5 +101,8 @@ rust_test {
         "libthiserror",
         "libzerocopy",
     ],
-    proc_macros: ["libremain"],
+    proc_macros: [
+        "libenumn",
+        "libremain",
+    ],
 }

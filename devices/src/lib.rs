@@ -31,7 +31,7 @@ mod suspendable;
 mod sys;
 mod virtcpufreq;
 pub mod virtio;
-#[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+#[cfg(feature = "vtpm")]
 mod vtpm_proxy;
 
 cfg_if::cfg_if! {
@@ -116,7 +116,6 @@ pub use self::pci::PciVirtualConfigMmio;
 pub use self::pci::PreferredIrq;
 #[cfg(feature = "pci-hotplug")]
 pub use self::pci::ResourceCarrier;
-
 pub use self::pci::StubPciDevice;
 pub use self::pci::StubPciParameters;
 pub use self::pflash::Pflash;
@@ -135,7 +134,7 @@ pub use self::suspendable::Suspendable;
 pub use self::virtcpufreq::VirtCpufreq;
 pub use self::virtio::VirtioMmioDevice;
 pub use self::virtio::VirtioPciDevice;
-#[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+#[cfg(feature = "vtpm")]
 pub use self::vtpm_proxy::VtpmProxy;
 
 cfg_if::cfg_if! {
@@ -164,7 +163,7 @@ cfg_if::cfg_if! {
         pub use self::proxy::Error as ProxyError;
         pub use self::proxy::ProxyDevice;
         #[cfg(feature = "usb")]
-        pub use self::usb::host_backend::host_backend_device_provider::HostBackendDeviceProvider;
+        pub use self::usb::backend::device_provider::DeviceProvider;
         #[cfg(feature = "usb")]
         pub use self::usb::xhci::xhci_controller::XhciController;
         pub use self::vfio::VfioContainer;
@@ -429,6 +428,7 @@ async fn handle_command_tube(
                                 .context("failed to reply to sleep command")?;
                         }
                         Err(e) => {
+                            error!("failed to sleep: {:#}", e);
                             command_tube
                                 .send(VmResponse::ErrString(e.to_string()))
                                 .await
@@ -451,7 +451,7 @@ async fn handle_command_tube(
                         );
                         if let Err(e) = snapshot_handler(path.as_path(), &guest_memory, buses).await
                         {
-                            error!("failed to snapshot: {}", e);
+                            error!("failed to snapshot: {:#}", e);
                             command_tube
                                 .send(VmResponse::ErrString(e.to_string()))
                                 .await
@@ -472,7 +472,7 @@ async fn handle_command_tube(
                             restore_handler(path.as_path(), &guest_memory, &[&*io_bus, &*mmio_bus])
                                 .await
                         {
-                            error!("failed to restore: {}", e);
+                            error!("failed to restore: {:#}", e);
                             command_tube
                                 .send(VmResponse::ErrString(e.to_string()))
                                 .await

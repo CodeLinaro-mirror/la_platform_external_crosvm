@@ -81,16 +81,16 @@ use devices::virtio::vhost::user::device::snd::sys::windows::SndBackendConfig;
 use devices::virtio::vhost::user::device::snd::sys::windows::SndSplitConfig;
 #[cfg(feature = "audio")]
 use devices::virtio::vhost::user::device::snd::sys::windows::SndVmmConfig;
-#[cfg(feature = "slirp")]
+#[cfg(feature = "net")]
 use devices::virtio::vhost::user::device::NetBackendConfig;
 #[cfg(feature = "gpu")]
 use gpu_display::EventDevice;
 use metrics::protos::event_details::EmulatorChildProcessExitDetails;
 use metrics::protos::event_details::RecordDetails;
 use metrics::MetricEventType;
-#[cfg(feature = "slirp")]
+#[cfg(all(feature = "net", feature = "slirp"))]
 use net_util::slirp::sys::windows::SlirpStartupConfig;
-#[cfg(feature = "slirp")]
+#[cfg(all(feature = "net", feature = "slirp"))]
 use net_util::slirp::sys::windows::SLIRP_BUFFER_SIZE;
 use serde::Deserialize;
 use serde::Serialize;
@@ -609,7 +609,7 @@ fn run_internal(mut cfg: Config) -> Result<()> {
         &process_invariants,
     )?;
 
-    #[cfg(feature = "slirp")]
+    #[cfg(all(feature = "net", feature = "slirp"))]
     let (_slirp_child, _net_children) = start_up_net_backend(
         &mut main_child,
         &mut children,
@@ -706,17 +706,18 @@ fn run_internal(mut cfg: Config) -> Result<()> {
     {
         let broker_metrics = metrics_tube_pair(&mut metric_tubes)?;
         metrics::initialize(broker_metrics);
-        let use_vulkan = if cfg!(feature = "gpu") {
-            match &cfg.gpu_parameters {
-                Some(params) => Some(params.use_vulkan),
-                None => {
-                    warn!("No GPU parameters set on crosvm config.");
-                    None
-                }
+
+        #[cfg(feature = "gpu")]
+        let use_vulkan = match &cfg.gpu_parameters {
+            Some(params) => Some(params.use_vulkan),
+            None => {
+                warn!("No GPU parameters set on crosvm config.");
+                None
             }
-        } else {
-            None
         };
+        #[cfg(not(feature = "gpu"))]
+        let use_vulkan = None;
+
         anti_tamper::setup_common_metric_invariants(
             &cfg.product_version,
             &cfg.product_channel,
@@ -1335,7 +1336,7 @@ where
     Ok((process_id, Box::new(UnsandboxedChild(proc))))
 }
 
-#[cfg(feature = "slirp")]
+#[cfg(all(feature = "net", feature = "slirp"))]
 fn start_up_net_backend(
     main_child: &mut ChildProcess,
     children: &mut HashMap<u32, ChildCleanup>,

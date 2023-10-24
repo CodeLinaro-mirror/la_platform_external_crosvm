@@ -4,8 +4,6 @@
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {
-        use std::net;
-
         use base::RawDescriptor;
         use devices::virtio::vhost::user::device::parse_wayland_sock;
 
@@ -23,8 +21,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use arch::CpuSet;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrConfig;
 use arch::Pstore;
 #[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
@@ -35,6 +31,7 @@ use cros_async::ExecutorKind;
 use devices::virtio::block::DiskOption;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 use devices::virtio::device_constants::video::VideoDeviceConfig;
+use devices::virtio::scsi::ScsiOption;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vhost::user::device;
@@ -43,9 +40,9 @@ use devices::virtio::vsock::VsockConfig;
 use devices::virtio::GpuDisplayParameters;
 #[cfg(feature = "gpu")]
 use devices::virtio::GpuParameters;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net"))]
 use devices::virtio::NetParameters;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net"))]
 use devices::virtio::NetParametersMode;
 use devices::FwCfgParameters;
 use devices::PflashParameters;
@@ -77,7 +74,6 @@ use crate::crosvm::config::parse_bus_id_addr;
 use crate::crosvm::config::parse_cpu_affinity;
 use crate::crosvm::config::parse_cpu_capacity;
 use crate::crosvm::config::parse_dynamic_power_coefficient;
-use crate::crosvm::config::parse_fw_cfg_options;
 #[cfg(target_arch = "x86_64")]
 use crate::crosvm::config::parse_memory_region;
 use crate::crosvm::config::parse_mmio_address_range;
@@ -85,8 +81,7 @@ use crate::crosvm::config::parse_pflash_parameters;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::parse_plugin_mount_option;
 use crate::crosvm::config::parse_serial_options;
-#[cfg(target_arch = "x86_64")]
-use crate::crosvm::config::parse_userspace_msr_options;
+use crate::crosvm::config::parse_vhost_user_fs_option;
 use crate::crosvm::config::BatteryConfig;
 #[cfg(feature = "plugin")]
 use crate::crosvm::config::BindMount;
@@ -101,7 +96,6 @@ use crate::crosvm::config::MemOptions;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFsOption;
 use crate::crosvm::config::VhostUserOption;
-use crate::crosvm::config::VvuOption;
 
 #[derive(FromArgs)]
 /// crosvm
@@ -539,6 +533,7 @@ pub enum CrossPlatformDevicesCommands {
     Block(device::BlockOptions),
     #[cfg(feature = "gpu")]
     Gpu(device::GpuOptions),
+    #[cfg(feature = "net")]
     Net(device::NetOptions),
     #[cfg(feature = "audio")]
     Snd(device::SndOptions),
@@ -1181,14 +1176,16 @@ pub struct RunCommand {
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// expose HWP feature to the guest
-    pub enable_hwp: Option<bool>,
+    /// enable the fw_cfg device. If enabled, fw_cfg will automatically produce firmware
+    /// configuration files containing such information as bootorder and the memory location of
+    /// rsdp. If --fw-cfg is specified (see below), there is no need for this argument.
+    pub enable_fw_cfg: Option<bool>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
-    /// expose Power and Perfomance (PnP) data to guest and guest can show these PnP data
-    pub enable_pnp_data: Option<bool>,
+    /// expose HWP feature to the guest
+    pub enable_hwp: Option<bool>,
 
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -1230,11 +1227,7 @@ pub struct RunCommand {
     /// doesn't require one.
     pub force_calibrated_tsc_leaf: Option<bool>,
 
-    #[argh(
-        option,
-        arg_name = "[name=NAME,path=PATH,string=STRING]",
-        from_str_fn(parse_fw_cfg_options)
-    )]
+    #[argh(option, arg_name = "name=NAME,(path=PATH|string=STRING)")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = append)]
     /// comma separated key=value pairs to specify data to pass to
@@ -1244,7 +1237,7 @@ pub struct RunCommand {
     ///      be associated with provided data
     ///     path - Path to data that will be included in
     ///      fw_cfg under name
-    ///     string - Alternative to path, data to be in
+    ///     string - Alternative to path, data to be
     ///      included in fw_cfg under name
     pub fw_cfg: Vec<FwCfgParameters>,
 
@@ -1294,8 +1287,13 @@ pub struct RunCommand {
     ///     cache-path=PATH - The path to the virtio-gpu device
     ///        shader cache.
     ///     cache-size=SIZE - The maximum size of the shader cache.
+    ///     pci-address=ADDR - The PCI bus, device, and function
+    ///        numbers, e.g. "00:01.0"
     ///     pci-bar-size=SIZE - The size for the PCI BAR in bytes
     ///        (default 8gb).
+    ///     implicit-render-server[=true|=false] - If the render
+    ///        server process should be allowed to autostart
+    ///        (ignored when sandboxing is enabled)
     ///
     /// Possible key values for GpuDisplayParameters:
     ///     mode=(borderless_full_screen|windowed[width,height]) -
@@ -1369,12 +1367,12 @@ pub struct RunCommand {
     /// string representation of the host guid in registry format, for namespacing vsock connections.
     pub host_guid: Option<String>,
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "net"))]
     #[argh(option, arg_name = "IP")]
     #[serde(skip)] // Deprecated - use `net` instead.
     #[merge(strategy = overwrite_option)]
     /// IP address to assign to host tap interface
-    pub host_ip: Option<net::Ipv4Addr>,
+    pub host_ip: Option<std::net::Ipv4Addr>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -1455,7 +1453,7 @@ pub struct RunCommand {
     /// path to the logs directory used for crosvm processes. Logs will be sent to stderr if unset, and stderr/stdout will be uncaptured
     pub logs_directory: Option<String>,
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "net"))]
     #[argh(option, arg_name = "MAC", long = "mac")]
     #[serde(skip)] // Deprecated - use `net` instead.
     #[merge(strategy = overwrite_option)]
@@ -1494,7 +1492,7 @@ pub struct RunCommand {
     /// path to a socket from where to read multi touch input events (such as those from a touchscreen) and write status updates to, optionally followed by width and height (defaults to 800x1280)
     pub multi_touch: Vec<TouchDeviceOption>,
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "net"))]
     #[argh(
         option,
         arg_name = "(tap-name=TAP_NAME,mac=MAC_ADDRESS|tap-fd=TAP_FD,mac=MAC_ADDRESS|host-ip=IP,netmask=NETMASK,mac=MAC_ADDRESS),vhost-net=VHOST_NET,vq-pairs=N"
@@ -1541,19 +1539,19 @@ pub struct RunCommand {
     /// netmask and mac must be specified.
     pub net: Vec<NetParameters>,
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "net"))]
     #[argh(option, arg_name = "N")]
     #[serde(skip)] // Deprecated - use `net` instead.
     #[merge(strategy = overwrite_option)]
     /// virtio net virtual queue pairs. (default: 1)
     pub net_vq_pairs: Option<u16>,
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "net"))]
     #[argh(option, arg_name = "NETMASK")]
     #[serde(skip)] // Deprecated - use `net` instead.
     #[merge(strategy = overwrite_option)]
     /// netmask for VM subnet
-    pub netmask: Option<net::Ipv4Addr>,
+    pub netmask: Option<std::net::Ipv4Addr>,
 
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -1849,6 +1847,20 @@ pub struct RunCommand {
     /// routines to perform full guest suspension/resumption
     pub s2idle: Option<bool>,
 
+    #[argh(option, arg_name = "PATH[,key=value[,key=value[,...]]]")]
+    #[serde(default)]
+    #[merge(strategy = append)]
+    /// (EXPERIMENTAL) parameters for setting up a SCSI disk.
+    /// Valid keys:
+    ///     path=PATH - Path to the disk image. Can be specified
+    ///         without the key as the first argument.
+    ///     block_size=BYTES - Set the reported block size of the
+    ///        disk (default: 512)
+    ///     ro=BOOL - Whether the block should be read-only.
+    ///         (default: false)
+    // TODO(b/300580119): Add O_DIRECT and sparse file support.
+    scsi_block: Vec<ScsiOption>,
+
     #[cfg(unix)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
@@ -2123,7 +2135,7 @@ pub struct RunCommand {
     /// dangerous to access. Some systems, e.g. Android, have tools that fork processes and examine
     /// their memory. This flag effectively hides the guest memory from those tools.
     ///
-    /// Not compatible with sandboxing or vvu devices.
+    /// Not compatible with sandboxing.
     pub unmap_guest_memory_on_fork: Option<bool>,
 
     // Must be `Some` iff `protection_type == ProtectionType::UnprotectedWithFirmware`.
@@ -2132,24 +2144,6 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// (EXPERIMENTAL/FOR DEBUGGING) Use VM firmware, but allow host access to guest memory
     pub unprotected_vm_with_firmware: Option<PathBuf>,
-
-    #[cfg(target_arch = "x86_64")]
-    #[argh(
-        option,
-        arg_name = "INDEX,type=TYPE,action=ACTION,[from=FROM],[filter=FILTER]",
-        from_str_fn(parse_userspace_msr_options)
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = append)]
-    /// userspace MSR handling. Takes INDEX of the MSR and how they
-    ///  are handled.
-    ///     type=(r|w|rw|wr) - read/write permission control.
-    ///     action=(pass|emu) - if the control of msr is effective
-    ///        on host.
-    ///     from=(cpu0) - source of msr value. if not set, the
-    ///        source is running CPU.
-    ///     filter=(yes|no) - if the msr is filtered in KVM.
-    pub userspace_msr: Vec<(u32, MsrConfig)>,
 
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -2221,7 +2215,11 @@ pub struct RunCommand {
     /// path to a socket for vhost-user console
     pub vhost_user_console: Vec<VhostUserOption>,
 
-    #[argh(option, arg_name = "SOCKET_PATH:TAG")]
+    #[argh(
+        option,
+        arg_name = "[socket=]SOCKET_PATH,tag=TAG[,max-queue-size=NUM]",
+        from_str_fn(parse_vhost_user_fs_option)
+    )]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = append)]
     /// path to a socket path for vhost-user fs, and tag for the shared dir
@@ -2348,27 +2346,12 @@ pub struct RunCommand {
     ///         use (Linux only). Defaults to /dev/vhost-vsock.
     pub vsock: Option<VsockConfig>,
 
-    #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+    #[cfg(feature = "vtpm")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// enable the virtio-tpm connection to vtpm daemon
     pub vtpm_proxy: Option<bool>,
-
-    #[argh(
-        option,
-        arg_name = "SOCKET_PATH[,addr=DOMAIN:BUS:DEVICE.FUNCTION,uuid=UUID]"
-    )]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = append)]
-    /// socket path for the Virtio Vhost User proxy device.
-    /// Parameters
-    ///     addr=BUS:DEVICE.FUNCTION - PCI address that the proxy
-    ///        device will be allocated
-    ///        (default: automatically allocated)
-    ///     uuid=UUID - UUID which will be stored in VVU PCI config
-    ///        space that is readable from guest userspace
-    pub vvu_proxy: Vec<VvuOption>,
 
     #[cfg(unix)]
     #[argh(option, arg_name = "PATH[,name=NAME]", from_str_fn(parse_wayland_sock))]
@@ -2670,6 +2653,8 @@ impl TryFrom<RunCommand> for super::config::Config {
         // Pass the sorted disks to the VM config.
         cfg.disks = disks.into_iter().map(|d| d.disk_option).collect();
 
+        cfg.scsis = cmd.scsi_block;
+
         for (mut pmem, read_only) in cmd
             .pmem_device
             .into_iter()
@@ -2711,6 +2696,12 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.product_version = cmd.product_version;
         }
         cfg.pstore = cmd.pstore;
+
+        cfg.enable_fw_cfg = if let Some(fw) = cmd.enable_fw_cfg {
+            fw
+        } else {
+            false
+        };
 
         cfg.fw_cfg_parameters = cmd.fw_cfg;
 
@@ -2832,7 +2823,7 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.software_tpm = cmd.software_tpm.unwrap_or_default();
         }
 
-        #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+        #[cfg(feature = "vtpm")]
         {
             cfg.vtpm_proxy = cmd.vtpm_proxy.unwrap_or_default();
         }
@@ -2927,12 +2918,10 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
         }
 
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "net"))]
         {
             use devices::virtio::VhostNetParameters;
             use devices::virtio::VHOST_NET_DEFAULT_PATH;
-
-            cfg.shared_dirs = cmd.shared_dir;
 
             cfg.net = cmd.net;
 
@@ -3040,6 +3029,11 @@ impl TryFrom<RunCommand> for super::config::Config {
                     }
                 }
             }
+        }
+
+        #[cfg(unix)]
+        {
+            cfg.shared_dirs = cmd.shared_dir;
 
             cfg.coiommu_param = cmd.coiommu;
 
@@ -3138,12 +3132,6 @@ impl TryFrom<RunCommand> for super::config::Config {
                 );
                 cfg.smbios.oem_strings.extend_from_slice(&cmd.oem_strings);
             }
-
-            for (index, msr_config) in cmd.userspace_msr {
-                if cfg.userspace_msr.insert(index, msr_config).is_some() {
-                    return Err(String::from("msr must be unique"));
-                }
-            }
         }
 
         #[cfg(feature = "pci-hotplug")]
@@ -3173,25 +3161,11 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.itmt = cmd.itmt.unwrap_or_default();
 
         #[cfg(target_arch = "x86_64")]
-        if cmd.enable_pnp_data.unwrap_or_default()
-            && cmd.force_calibrated_tsc_leaf.unwrap_or_default()
-        {
-            return Err(
-                "Only one of [enable_pnp_data,force_calibrated_tsc_leaf] can be specified"
-                    .to_string(),
-            );
-        }
-
-        cfg.enable_pnp_data = cmd.enable_pnp_data.unwrap_or_default();
-
-        #[cfg(target_arch = "x86_64")]
         {
             cfg.force_calibrated_tsc_leaf = cmd.force_calibrated_tsc_leaf.unwrap_or_default();
         }
 
         cfg.stub_pci_devices = cmd.stub_pci_device;
-
-        cfg.vvu_proxy = cmd.vvu_proxy;
 
         cfg.file_backed_mappings = cmd.file_backed_mapping;
 

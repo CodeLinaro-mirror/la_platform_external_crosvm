@@ -7,19 +7,12 @@ pub mod vmm;
 
 use std::fmt::Debug;
 
-pub use self::device::*;
-
-cfg_if::cfg_if! {
-    if #[cfg(unix)] {
-        pub mod proxy;
-        pub use self::proxy::*;
-    } else if #[cfg(windows)] {}
-}
-
 use argh::FromArgValue;
 use serde::Deserialize;
 use serde_keyvalue::ErrorKind;
 use serde_keyvalue::KeyValueDeserializer;
+
+pub use self::device::*;
 
 /// Extends any device configuration with a mandatory extra "vhost" parameter to specify the socket
 /// or PCI device to use in order to communicate with a vhost client.

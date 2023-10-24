@@ -13,16 +13,6 @@ use std::str::FromStr;
 
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrAction;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrConfig;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrFilter;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrRWType;
-#[cfg(target_arch = "x86_64")]
-use arch::MsrValueFrom;
 use arch::Pstore;
 #[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
@@ -37,6 +27,7 @@ use devices::virtio::block::DiskOption;
 use devices::virtio::device_constants::video::VideoDeviceConfig;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::GpuParameters;
+use devices::virtio::scsi::ScsiOption;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
 #[cfg(all(windows, feature = "gpu"))]
@@ -46,9 +37,9 @@ use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
 #[cfg(all(windows, feature = "audio"))]
 use devices::virtio::vhost::user::device::snd::sys::windows::SndSplitConfig;
 use devices::virtio::vsock::VsockConfig;
+#[cfg(feature = "net")]
 use devices::virtio::NetParameters;
 use devices::FwCfgParameters;
-use devices::PciAddress;
 use devices::PflashParameters;
 use devices::StubPciParameters;
 #[cfg(target_arch = "x86_64")]
@@ -59,12 +50,9 @@ use resources::AddressRange;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
-use uuid::Uuid;
 use vm_control::BatteryType;
 #[cfg(target_arch = "x86_64")]
 use x86_64::check_host_hybrid_support;
-#[cfg(target_arch = "x86_64")]
-use x86_64::set_enable_pnp_data_msr_config;
 #[cfg(target_arch = "x86_64")]
 use x86_64::CpuIdCall;
 
@@ -151,29 +139,33 @@ pub struct MemOptions {
     pub size: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct VhostUserOption {
     pub socket: PathBuf,
+
+    /// Maximum number of entries per queue (default: 32768)
+    pub max_queue_size: Option<u16>,
 }
 
-impl FromStr for VhostUserOption {
-    type Err = <PathBuf as FromStr>::Err;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self { socket: s.parse()? })
-    }
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct VhostUserFsOption {
     pub socket: PathBuf,
     pub tag: String,
+
+    /// Maximum number of entries per queue (default: 32768)
+    pub max_queue_size: Option<u16>,
 }
 
-impl FromStr for VhostUserFsOption {
-    type Err = &'static str;
-
-    fn from_str(param: &str) -> Result<Self, Self::Err> {
+pub fn parse_vhost_user_fs_option(param: &str) -> Result<VhostUserFsOption, String> {
+    // Allow the previous `--vhost-user-fs /path/to/socket:fs-tag` format for compatibility.
+    // This will unfortunately prevent parsing of valid comma-separated FromKeyValues options that
+    // contain a ":" character (e.g. in a socket filename), but those were not supported in the old
+    // format either, so we can live with it until the deprecated format is removed.
+    // TODO(b/218223240): Remove support for the deprecated format (and use `FromKeyValues`
+    // directly instead of `from_str_fn`) once enough time has passed.
+    if param.contains(':') {
         // (socket:tag)
         let mut components = param.split(':');
         let socket = PathBuf::from(
@@ -186,16 +178,21 @@ impl FromStr for VhostUserFsOption {
             .ok_or("missing tag for `vhost-user-fs`")?
             .to_owned();
 
-        Ok(Self { socket, tag })
-    }
-}
+        log::warn!(
+            "`--vhost-user-fs` with colon-separated options is deprecated; \
+            please use `--vhost-user-fs {},tag={}` instead",
+            socket.display(),
+            tag,
+        );
 
-/// Options for virtio-vhost-user proxy device.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, serde_keyvalue::FromKeyValues)]
-pub struct VvuOption {
-    pub socket: PathBuf,
-    pub addr: Option<PciAddress>,
-    pub uuid: Option<Uuid>,
+        Ok(VhostUserFsOption {
+            socket,
+            tag,
+            max_queue_size: None,
+        })
+    } else {
+        from_key_values::<VhostUserFsOption>(param)
+    }
 }
 
 /// A bind mount for directories in the plugin process.
@@ -436,67 +433,6 @@ pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
             })
         })
         .collect()
-}
-
-#[cfg(target_arch = "x86_64")]
-#[derive(Deserialize, Serialize, serde_keyvalue::FromKeyValues)]
-#[serde(deny_unknown_fields)]
-struct UserspaceMsrOptions {
-    pub index: u32,
-    #[serde(rename = "type")]
-    pub rw_type: MsrRWType,
-    pub action: MsrAction,
-    #[serde(default = "default_msr_value_from")]
-    pub from: MsrValueFrom,
-    #[serde(default = "default_msr_filter")]
-    pub filter: MsrFilter,
-}
-
-#[cfg(target_arch = "x86_64")]
-fn default_msr_value_from() -> MsrValueFrom {
-    MsrValueFrom::RWFromRunningCPU
-}
-
-#[cfg(target_arch = "x86_64")]
-fn default_msr_filter() -> MsrFilter {
-    MsrFilter::Default
-}
-
-#[cfg(target_arch = "x86_64")]
-pub fn parse_userspace_msr_options(value: &str) -> Result<(u32, MsrConfig), String> {
-    let options: UserspaceMsrOptions = from_key_values(value)?;
-
-    Ok((
-        options.index,
-        MsrConfig {
-            rw_type: options.rw_type,
-            action: options.action,
-            from: options.from,
-            filter: options.filter,
-        },
-    ))
-}
-
-pub fn validate_fw_cfg_parameters(params: &FwCfgParameters) -> Result<(), String> {
-    if params.name.is_none() && (params.string.is_some() || params.path.is_some()) {
-        return Err("Must give name of data to --fw-cfg".to_string());
-    }
-
-    if params.string.is_some() && params.path.is_some()
-        || params.name.is_some() && params.string.is_none() && params.path.is_none()
-    {
-        return Err("Provide exactly one of string or path args to --fw-cfg".to_string());
-    }
-
-    Ok(())
-}
-
-pub fn parse_fw_cfg_options(s: &str) -> Result<FwCfgParameters, String> {
-    let params: FwCfgParameters = from_key_values(s)?;
-
-    validate_fw_cfg_parameters(&params)?;
-
-    Ok(params)
 }
 
 pub fn validate_serial_parameters(params: &SerialParameters) -> Result<(), String> {
@@ -827,8 +763,8 @@ pub struct Config {
     pub display_window_mouse: bool,
     pub dump_device_tree_blob: Option<PathBuf>,
     pub dynamic_power_coefficient: BTreeMap<usize, u32>,
+    pub enable_fw_cfg: bool,
     pub enable_hwp: bool,
-    pub enable_pnp_data: bool,
     pub executable_path: Option<Executable>,
     #[cfg(windows)]
     pub exit_stats: bool,
@@ -873,6 +809,7 @@ pub struct Config {
     pub mmio_address_ranges: Vec<AddressRange>,
     #[cfg(target_arch = "aarch64")]
     pub mte: bool,
+    #[cfg(feature = "net")]
     pub net: Vec<NetParameters>,
     #[cfg(windows)]
     pub net_vhost_user_tube: Option<Tube>,
@@ -912,6 +849,7 @@ pub struct Config {
     pub restore_path: Option<PathBuf>,
     pub rng: bool,
     pub rt_cpus: CpuSet,
+    pub scsis: Vec<ScsiOption>,
     #[serde(with = "serde_serial_params")]
     pub serial_parameters: BTreeMap<(SerialHardware, u8), SerialParameters>,
     #[cfg(windows)]
@@ -940,8 +878,6 @@ pub struct Config {
     #[cfg(unix)]
     pub unmap_guest_memory_on_fork: bool,
     pub usb: bool,
-    #[cfg(target_arch = "x86_64")]
-    pub userspace_msr: BTreeMap<u32, MsrConfig>,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_cgroup_path: Option<PathBuf>,
     pub vcpu_count: Option<usize>,
@@ -984,9 +920,8 @@ pub struct Config {
     pub virtio_switches: Vec<PathBuf>,
     pub virtio_trackpad: Vec<TouchDeviceOption>,
     pub vsock: Option<VsockConfig>,
-    #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+    #[cfg(feature = "vtpm")]
     pub vtpm_proxy: bool,
-    pub vvu_proxy: Vec<VvuOption>,
     pub wayland_socket_paths: BTreeMap<String, PathBuf>,
     pub x_display: Option<String>,
 }
@@ -1030,8 +965,8 @@ impl Default for Config {
             display_window_mouse: false,
             dump_device_tree_blob: None,
             dynamic_power_coefficient: BTreeMap::new(),
+            enable_fw_cfg: false,
             enable_hwp: false,
-            enable_pnp_data: false,
             executable_path: None,
             #[cfg(windows)]
             exit_stats: false,
@@ -1084,6 +1019,7 @@ impl Default for Config {
             mmio_address_ranges: Vec::new(),
             #[cfg(target_arch = "aarch64")]
             mte: false,
+            #[cfg(feature = "net")]
             net: Vec::new(),
             #[cfg(windows)]
             net_vhost_user_tube: None,
@@ -1119,6 +1055,7 @@ impl Default for Config {
             rng: true,
             rt_cpus: Default::default(),
             serial_parameters: BTreeMap::new(),
+            scsis: Vec::new(),
             #[cfg(windows)]
             service_pipe_name: None,
             #[cfg(unix)]
@@ -1144,8 +1081,6 @@ impl Default for Config {
             #[cfg(unix)]
             unmap_guest_memory_on_fork: false,
             usb: true,
-            #[cfg(target_arch = "x86_64")]
-            userspace_msr: BTreeMap::new(),
             vcpu_affinity: None,
             vcpu_cgroup_path: None,
             vcpu_count: None,
@@ -1187,9 +1122,8 @@ impl Default for Config {
             virtio_snds: Vec::new(),
             virtio_switches: Vec::new(),
             virtio_trackpad: Vec::new(),
-            #[cfg(all(feature = "vtpm", target_arch = "x86_64"))]
+            #[cfg(feature = "vtpm")]
             vtpm_proxy: false,
-            vvu_proxy: Vec::new(),
             wayland_socket_paths: BTreeMap::new(),
             x_display: None,
         }
@@ -1252,19 +1186,6 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
                 );
             }
         }
-    } else {
-        // TODO(b/215297064): Support generic cpuaffinity if there's a need.
-        #[cfg(target_arch = "x86_64")]
-        if !cfg.userspace_msr.is_empty() {
-            for (_, msr_config) in cfg.userspace_msr.iter() {
-                if msr_config.from == MsrValueFrom::RWFromRunningCPU {
-                    return Err(
-                        "`userspace-msr` must set `cpu0` if `host-cpu-topology` is not set"
-                            .to_string(),
-                    );
-                }
-            }
-        }
     }
     if cfg.virt_cpufreq {
         if !cfg.host_cpu_topology && (cfg.vcpu_affinity.is_none() || cfg.cpu_capacity.is_empty()) {
@@ -1292,18 +1213,6 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
     #[cfg(target_arch = "x86_64")]
     if cfg.enable_hwp && !cfg.host_cpu_topology {
         return Err("setting `enable-hwp` requires `host-cpu-topology` is set.".to_string());
-    }
-    if cfg.enable_pnp_data {
-        if !cfg.host_cpu_topology {
-            return Err(
-                "setting `enable_pnp_data` must require `host-cpu-topology` is set previously."
-                    .to_string(),
-            );
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        set_enable_pnp_data_msr_config(&mut cfg.userspace_msr)
-            .map_err(|e| format!("MSR can't be passed through {}", e))?;
     }
     #[cfg(target_arch = "x86_64")]
     if cfg.itmt {
@@ -1893,33 +1802,37 @@ mod tests {
     }
 
     #[test]
-    fn parse_fw_cfg_valid_no_params() {
-        assert!(TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(&[], &["--fw-cfg", "", "/dev/null"],)
-                .unwrap()
+    fn parse_fw_cfg_valid_path() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--fw-cfg", "name=bar,path=data.bin", "/dev/null"],
+            )
+            .unwrap(),
         )
-        .is_ok());
+        .unwrap();
+
+        assert_eq!(cfg.fw_cfg_parameters.len(), 1);
+        assert_eq!(cfg.fw_cfg_parameters[0].name, "bar".to_string());
+        assert_eq!(cfg.fw_cfg_parameters[0].string, None);
+        assert_eq!(cfg.fw_cfg_parameters[0].path, Some("data.bin".into()));
     }
 
     #[test]
     fn parse_fw_cfg_valid_string() {
-        assert!(TryInto::<Config>::try_into(
+        let cfg = TryInto::<Config>::try_into(
             crate::crosvm::cmdline::RunCommand::from_args(
                 &[],
                 &["--fw-cfg", "name=bar,string=foo", "/dev/null"],
             )
-            .unwrap()
+            .unwrap(),
         )
-        .is_ok());
-    }
+        .unwrap();
 
-    #[test]
-    fn parse_fw_cfg_invalid_both_string_and_path() {
-        assert!(crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &["--fw-cfg", "name=bar,string=foo,path=path/to/file",]
-        )
-        .is_err());
+        assert_eq!(cfg.fw_cfg_parameters.len(), 1);
+        assert_eq!(cfg.fw_cfg_parameters[0].name, "bar".to_string());
+        assert_eq!(cfg.fw_cfg_parameters[0].string, Some("foo".to_string()));
+        assert_eq!(cfg.fw_cfg_parameters[0].path, None);
     }
 
     #[test]
@@ -1928,46 +1841,6 @@ mod tests {
             crate::crosvm::cmdline::RunCommand::from_args(&[], &["--fw-cfg", "string=foo",])
                 .is_err()
         );
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn parse_userspace_msr_options_test() {
-        let (pass_cpu0_index, pass_cpu0_cfg) =
-            parse_userspace_msr_options("0x10,type=w,action=pass,filter=yes").unwrap();
-        assert_eq!(pass_cpu0_index, 0x10);
-        assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::WriteOnly);
-        assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
-        assert_eq!(pass_cpu0_cfg.filter, MsrFilter::Override);
-
-        let (pass_cpu0_index, pass_cpu0_cfg) =
-            parse_userspace_msr_options("0x10,type=r,action=pass,from=cpu0").unwrap();
-        assert_eq!(pass_cpu0_index, 0x10);
-        assert_eq!(pass_cpu0_cfg.rw_type, MsrRWType::ReadOnly);
-        assert_eq!(pass_cpu0_cfg.action, MsrAction::MsrPassthrough);
-        assert_eq!(pass_cpu0_cfg.from, MsrValueFrom::RWFromCPU0);
-
-        let (pass_cpus_index, pass_cpus_cfg) =
-            parse_userspace_msr_options("0x10,type=rw,action=pass").unwrap();
-        assert_eq!(pass_cpus_index, 0x10);
-        assert_eq!(pass_cpus_cfg.rw_type, MsrRWType::ReadWrite);
-        assert_eq!(pass_cpus_cfg.action, MsrAction::MsrPassthrough);
-        assert_eq!(pass_cpus_cfg.from, MsrValueFrom::RWFromRunningCPU);
-
-        let (pass_cpus_index, pass_cpus_cfg) =
-            parse_userspace_msr_options("0x10,type=rw,action=emu").unwrap();
-        assert_eq!(pass_cpus_index, 0x10);
-        assert_eq!(pass_cpus_cfg.rw_type, MsrRWType::ReadWrite);
-        assert_eq!(pass_cpus_cfg.action, MsrAction::MsrEmulate);
-        assert_eq!(pass_cpus_cfg.from, MsrValueFrom::RWFromRunningCPU);
-
-        assert!(parse_userspace_msr_options("0x10,action=none").is_err());
-        assert!(parse_userspace_msr_options("0x10,action=pass").is_err());
-        assert!(parse_userspace_msr_options("0x10,type=none").is_err());
-        assert!(parse_userspace_msr_options("0x10,type=rw").is_err());
-        assert!(parse_userspace_msr_options("0x10,type=w,action=pass,from=f").is_err());
-        assert!(parse_userspace_msr_options("0x10").is_err());
-        assert!(parse_userspace_msr_options("hoge").is_err());
     }
 
     #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
@@ -1998,17 +1871,71 @@ mod tests {
     }
 
     #[test]
-    fn parse_vvu() {
-        assert_eq!(
-            from_key_values::<VvuOption>(
-                "/tmp/vvu-sock,addr=05:2.1,uuid=23546c3d-962d-4ebc-94d9-4acf50996944"
+    fn parse_vhost_user_option() {
+        let opt: VhostUserOption = from_key_values("/10mm").unwrap();
+        assert_eq!(opt.socket.to_str(), Some("/10mm"));
+        assert_eq!(opt.max_queue_size, None);
+
+        let opt: VhostUserOption = from_key_values("/10mm,max-queue-size=256").unwrap();
+        assert_eq!(opt.socket.to_str(), Some("/10mm"));
+        assert_eq!(opt.max_queue_size, Some(256));
+    }
+
+    #[test]
+    fn parse_vhost_user_fs_deprecated() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--vhost-user-fs", "my_socket:my_tag", "/dev/null"],
             )
             .unwrap(),
-            VvuOption {
-                socket: PathBuf::from("/tmp/vvu-sock"),
-                addr: Some(PciAddress::new(0, 0x05, 0x02, 1).unwrap()),
-                uuid: Some(Uuid::parse_str("23546c3d-962d-4ebc-94d9-4acf50996944").unwrap()),
-            }
-        );
+        )
+        .unwrap();
+
+        assert_eq!(cfg.vhost_user_fs.len(), 1);
+        let fs = &cfg.vhost_user_fs[0];
+        assert_eq!(fs.socket.to_str(), Some("my_socket"));
+        assert_eq!(fs.tag, "my_tag");
+        assert_eq!(fs.max_queue_size, None);
+    }
+
+    #[test]
+    fn parse_vhost_user_fs() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &["--vhost-user-fs", "my_socket,tag=my_tag", "/dev/null"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.vhost_user_fs.len(), 1);
+        let fs = &cfg.vhost_user_fs[0];
+        assert_eq!(fs.socket.to_str(), Some("my_socket"));
+        assert_eq!(fs.tag, "my_tag");
+        assert_eq!(fs.max_queue_size, None);
+    }
+
+    #[test]
+    fn parse_vhost_user_fs_max_queue_size() {
+        let cfg = TryInto::<Config>::try_into(
+            crate::crosvm::cmdline::RunCommand::from_args(
+                &[],
+                &[
+                    "--vhost-user-fs",
+                    "my_socket,tag=my_tag,max-queue-size=256",
+                    "/dev/null",
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.vhost_user_fs.len(), 1);
+        let fs = &cfg.vhost_user_fs[0];
+        assert_eq!(fs.socket.to_str(), Some("my_socket"));
+        assert_eq!(fs.tag, "my_tag");
+        assert_eq!(fs.max_queue_size, Some(256));
     }
 }

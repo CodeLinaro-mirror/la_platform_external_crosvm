@@ -17,7 +17,13 @@ pub use self::descriptor::InterfaceDescriptorTree;
 #[cfg(unix)]
 pub use self::device::Device;
 #[cfg(unix)]
+pub use self::device::DmaBuffer;
+#[cfg(unix)]
 pub use self::device::Transfer;
+#[cfg(unix)]
+pub use self::device::TransferBuffer;
+#[cfg(unix)]
+pub use self::device::TransferHandle;
 #[cfg(unix)]
 pub use self::device::TransferStatus;
 pub use self::error::Error;
