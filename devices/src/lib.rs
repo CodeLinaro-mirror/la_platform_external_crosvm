@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::Context;
+use base::debug;
 use base::error;
 use base::info;
 use base::Tube;
@@ -228,12 +229,13 @@ pub fn create_devices_worker_thread(
 fn sleep_devices(bus: &Bus) -> anyhow::Result<()> {
     match bus.sleep_devices() {
         Ok(_) => {
-            info!("Devices slept successfully");
+            debug!("Devices slept successfully on {:?} Bus", bus.get_bus_type());
             Ok(())
         }
         Err(e) => Err(anyhow!(
-            "Failed to sleep all devices: {}. Waking up sleeping devices.",
-            e
+            "Failed to sleep all devices: {} on {:?} Bus.",
+            e,
+            bus.get_bus_type(),
         )),
     }
 }
@@ -241,52 +243,47 @@ fn sleep_devices(bus: &Bus) -> anyhow::Result<()> {
 fn wake_devices(bus: &Bus) {
     match bus.wake_devices() {
         Ok(_) => {
-            info!("Devices awoken successfully");
+            debug!(
+                "Devices awoken successfully on {:?} Bus",
+                bus.get_bus_type()
+            );
         }
         Err(e) => {
             // Some devices may have slept. Eternally.
             // Recovery - impossible.
             // Shut down VM.
             panic!(
-                "Failed to wake devices: {}. VM panicked to avoid unexpected behavior",
-                e
+                "Failed to wake devices: {} on {:?} Bus. VM panicked to avoid unexpected behavior",
+                e,
+                bus.get_bus_type(),
             )
         }
     }
 }
 
-/// `SleepGuard` sends the devices on all of the provided buses to sleep when it is created and
-/// wakes them all up when it is dropped.
-///
-/// This allows snapshot and restore operations to be executed while the `BusDevice`s attached to
-/// the buses are stopped so that the VM state will not change during the snapshot process.
-struct SleepGuard<'a> {
-    buses: &'a [&'a Bus],
-}
-
-impl<'a> SleepGuard<'a> {
-    pub fn new(buses: &'a [&'a Bus]) -> anyhow::Result<Self> {
-        for bus in buses {
-            if let Err(e) = sleep_devices(bus) {
-                // Failing to sleep could mean a single device failing to sleep.
-                // Wake up devices to resume functionality of the VM.
-                for bus in buses {
-                    wake_devices(bus);
-                }
-
-                return Err(e);
+fn sleep_buses(buses: &[&Bus]) -> anyhow::Result<()> {
+    for bus in buses {
+        if let Err(e) = sleep_devices(bus) {
+            error!(
+                "Failed to sleep all devices on {:?} bus: {}",
+                bus.get_bus_type(),
+                e
+            );
+            // Failing to sleep could mean a single device failing to sleep.
+            // Wake up devices to resume functionality of the VM.
+            for bus in buses {
+                info!("Waking devices on {:?} bus.", bus.get_bus_type());
+                wake_devices(bus);
             }
+            return Err(e);
         }
-
-        Ok(SleepGuard { buses })
     }
+    Ok(())
 }
 
-impl<'a> Drop for SleepGuard<'a> {
-    fn drop(&mut self) {
-        for bus in self.buses {
-            wake_devices(bus);
-        }
+fn wake_buses(buses: &[&Bus]) {
+    for bus in buses {
+        wake_devices(bus);
     }
 }
 
@@ -296,12 +293,19 @@ fn snapshot_devices(
 ) -> anyhow::Result<()> {
     match bus.snapshot_devices(add_snapshot) {
         Ok(_) => {
-            info!("Devices snapshot successfully");
+            debug!(
+                "Devices snapshot successfully for {:?} Bus",
+                bus.get_bus_type()
+            );
             Ok(())
         }
         Err(e) => {
             // If snapshot fails, wake devices and return error
-            error!("failed to snapshot devices: {}", e);
+            error!(
+                "failed to snapshot devices: {:#} on {:?} Bus",
+                e,
+                bus.get_bus_type()
+            );
             Err(e)
         }
     }
@@ -313,12 +317,19 @@ fn restore_devices(
 ) -> anyhow::Result<()> {
     match bus.restore_devices(devices_map) {
         Ok(_) => {
-            info!("Devices restore successfully");
+            debug!(
+                "Devices restore successfully for {:?} Bus",
+                bus.get_bus_type()
+            );
             Ok(())
         }
         Err(e) => {
             // If restore fails, wake devices and return error
-            error!("failed to restore devices: {:#}", e);
+            error!(
+                "failed to restore devices: {:#} on {:?} Bus",
+                e,
+                bus.get_bus_type()
+            );
             Err(e)
         }
     }
@@ -410,29 +421,41 @@ async fn handle_command_tube(
     mmio_bus: Arc<Bus>,
 ) -> anyhow::Result<()> {
     let buses = &[&*io_bus, &*mmio_bus];
-    let mut _sleep_guard = None;
+
+    // We assume devices are awake. This is safe because if the VM starts the
+    // sleeping state, run_control will ask us to sleep devices.
+    let mut devices_state = DevicesState::Wake;
+
     loop {
         match command_tube.next().await {
             Ok(command) => {
                 match command {
-                    DeviceControlCommand::SleepDevices => match SleepGuard::new(buses) {
-                        Ok(guard) => {
-                            _sleep_guard = Some(guard);
-                            command_tube
-                                .send(VmResponse::Ok)
-                                .await
-                                .context("failed to reply to sleep command")?;
+                    DeviceControlCommand::SleepDevices => {
+                        if let DevicesState::Wake = devices_state {
+                            match sleep_buses(buses) {
+                                Ok(()) => {
+                                    devices_state = DevicesState::Sleep;
+                                }
+                                Err(e) => {
+                                    error!("failed to sleep: {:#}", e);
+                                    command_tube
+                                        .send(VmResponse::ErrString(e.to_string()))
+                                        .await
+                                        .context("failed to send response.")?;
+                                    continue;
+                                }
+                            }
                         }
-                        Err(e) => {
-                            error!("failed to sleep: {:#}", e);
-                            command_tube
-                                .send(VmResponse::ErrString(e.to_string()))
-                                .await
-                                .context("failed to send response.")?;
-                        }
-                    },
+                        command_tube
+                            .send(VmResponse::Ok)
+                            .await
+                            .context("failed to reply to sleep command")?;
+                    }
                     DeviceControlCommand::WakeDevices => {
-                        _sleep_guard = None;
+                        if let DevicesState::Sleep = devices_state {
+                            wake_buses(buses);
+                            devices_state = DevicesState::Wake;
+                        }
                         command_tube
                             .send(VmResponse::Ok)
                             .await
@@ -442,7 +465,7 @@ async fn handle_command_tube(
                         snapshot_path: path,
                     } => {
                         assert!(
-                            _sleep_guard.is_some(),
+                            matches!(devices_state, DevicesState::Sleep),
                             "devices must be sleeping to snapshot"
                         );
                         if let Err(e) = snapshot_handler(path.as_path(), &guest_memory, buses).await
@@ -461,7 +484,7 @@ async fn handle_command_tube(
                     }
                     DeviceControlCommand::RestoreDevices { restore_path: path } => {
                         assert!(
-                            _sleep_guard.is_some(),
+                            matches!(devices_state, DevicesState::Sleep),
                             "devices must be sleeping to restore"
                         );
                         if let Err(e) =
@@ -481,13 +504,8 @@ async fn handle_command_tube(
                             .context("Failed to send response")?;
                     }
                     DeviceControlCommand::GetDevicesState => {
-                        let state = if _sleep_guard.is_some() {
-                            DevicesState::Sleep
-                        } else {
-                            DevicesState::Wake
-                        };
                         command_tube
-                            .send(VmResponse::DevicesState(state))
+                            .send(VmResponse::DevicesState(devices_state.clone()))
                             .await
                             .context("failed to send response")?;
                     }
