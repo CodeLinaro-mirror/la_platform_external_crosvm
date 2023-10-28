@@ -11,6 +11,51 @@ package {
 }
 
 rust_test {
+    name: "hypervisor_test_src_lib",
+    defaults: ["crosvm_inner_defaults"],
+    host_supported: true,
+    crate_name: "hypervisor",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
+    srcs: ["src/lib.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: false,
+    },
+    edition: "2021",
+    features: [
+        "gdb",
+        "gdbstub",
+        "gdbstub_arch",
+        "geniezone",
+        "gunyah",
+    ],
+    rustlibs: [
+        "libanyhow",
+        "libbase_rust",
+        "libbit_field",
+        "libbitflags",
+        "libcros_fdt",
+        "libdata_model",
+        "libdowncast_rs",
+        "libfnv",
+        "libgdbstub",
+        "libgdbstub_arch",
+        "libkvm",
+        "libkvm_sys",
+        "liblibc",
+        "libmemoffset",
+        "libonce_cell",
+        "libserde",
+        "libserde_json",
+        "libsync_rust",
+        "libvm_memory",
+    ],
+    proc_macros: ["libenumn"],
+}
+
+rust_test {
     name: "hypervisor_test_tests_dirty_log",
     defaults: ["crosvm_inner_defaults"],
     host_supported: true,

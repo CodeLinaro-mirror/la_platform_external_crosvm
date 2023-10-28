@@ -66,20 +66,10 @@
   "module_blocklist": [
     // TODO: These are all for workspace_excludes package. Maybe use the option to
     // also block all blueprint modules for excluded packages.
-    "liblibva",
     "libprebuilts",
     "libproto_build_tools",
-    "libva_test_src_lib",
-    "proto_build_tools_test_src_lib",
     // Flaky with ENOMEM. We don't use io_uring yet, so turning it off for now.
-    "io_uring_test_tests_uring",
-    // TODO: these were disabled because we thought they were empty. try to enable them
-    "bit_field_derive_test_bit_field_derive",
-    "crosvm_test_tests_plugins",
-    "hypervisor_test_src_lib",
-    "hypervisor_test_tests_mmio_fetch_memory",
-    "metrics_test_src_lib",
-    "wire_format_derive_test_src_lib"
+    "io_uring_test_tests_uring"
   ],
   "module_visibility": {
     "crosvm": [
@@ -144,6 +134,10 @@
       ]
     },
     "base_event_token_derive": {
+      // TODO: This is a proc macro crate. Should disable device tests by default for them.
+      "device_supported": false
+    },
+    "bit_field_derive": {
       // TODO: This is a proc macro crate. Should disable device tests by default for them.
       "device_supported": false
     },
@@ -214,6 +208,10 @@
     },
     "vm_control": {
       "add_module_block": "vm_control/cargo2android.bp.patch"
+    },
+    "wire_format_derive": {
+      // TODO: This is a proc macro crate. Should disable device tests by default for them.
+      "device_supported": false
     },
     "x86_64": {
       "no_presubmit": true,
