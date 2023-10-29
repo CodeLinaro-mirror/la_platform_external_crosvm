@@ -40,6 +40,7 @@ rust_library {
         "libkernel_cmdline",
         "libkernel_loader",
         "liblibc",
+        "libmemoffset",
         "libminijail_rust",
         "libonce_cell",
         "librand",
@@ -98,6 +99,7 @@ rust_test {
         "libkernel_cmdline",
         "libkernel_loader",
         "liblibc",
+        "libmemoffset",
         "libminijail_rust",
         "libonce_cell",
         "librand",
@@ -156,6 +158,7 @@ rust_test {
         "libkernel_cmdline",
         "libkernel_loader",
         "liblibc",
+        "libmemoffset",
         "libminijail_rust",
         "libonce_cell",
         "librand",
@@ -182,13 +185,13 @@ rust_test {
 }
 
 rust_test {
-    name: "x86_64_test_tests_unix",
+    name: "x86_64_test_tests_linux",
     defaults: ["crosvm_inner_defaults"],
     host_supported: true,
-    crate_name: "unix",
+    crate_name: "linux",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/unix.rs"],
+    srcs: ["tests/linux.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -215,6 +218,7 @@ rust_test {
         "libkernel_cmdline",
         "libkernel_loader",
         "liblibc",
+        "libmemoffset",
         "libminijail_rust",
         "libonce_cell",
         "librand",

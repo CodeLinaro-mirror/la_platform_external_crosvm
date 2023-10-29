@@ -48,6 +48,7 @@ use virtio_sys::virtio_net::VIRTIO_NET_OK;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
+use zerocopy::FromZeroes;
 
 use super::copy_config;
 use super::DeviceType;
@@ -63,7 +64,7 @@ use super::VirtioDevice;
 pub(crate) const MAX_BUFFER_SIZE: usize = 65562;
 const QUEUE_SIZE: u16 = 256;
 
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub static VHOST_NET_DEFAULT_PATH: &str = "/dev/vhost-net";
 
 pub(crate) use sys::process_rx;
@@ -97,7 +98,7 @@ pub enum NetError {
     #[error("failed to read control message header: {0}")]
     ReadCtrlHeader(io::Error),
     /// There are no more available descriptors to receive into.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[error("no rx descriptors available")]
     RxDescriptorsExhausted,
     /// Failure creating the Slirp loop.
@@ -144,7 +145,7 @@ pub enum NetError {
     #[error("failed to write control message ack: {0}")]
     WriteAck(io::Error),
     /// Writing to a buffer in the guest failed.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[error("failed to write to guest buffer: {0}")]
     WriteBuffer(io::Error),
 }
@@ -170,12 +171,12 @@ pub enum NetParametersMode {
     },
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn vhost_net_device_path_default() -> PathBuf {
     PathBuf::from(VHOST_NET_DEFAULT_PATH)
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct VhostNetParameters {
@@ -183,7 +184,7 @@ pub struct VhostNetParameters {
     pub device: PathBuf,
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 impl Default for VhostNetParameters {
     fn default() -> Self {
         Self {
@@ -200,7 +201,7 @@ pub struct NetParameters {
     pub vq_pairs: Option<u16>,
     // Style-guide asks to refrain against #[cfg] directives in structs, this is an exception due
     // to the fact this struct is used for argument parsing.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub vhost_net: Option<VhostNetParameters>,
     #[serde(default)]
     pub packed_queue: bool,
@@ -214,7 +215,7 @@ impl FromStr for NetParameters {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, AsBytes, FromBytes)]
+#[derive(Debug, Clone, Copy, AsBytes, FromZeroes, FromBytes)]
 pub struct virtio_net_ctrl_hdr {
     pub class: u8,
     pub cmd: u8,
@@ -242,7 +243,7 @@ pub fn virtio_features_to_tap_offload(features: u64) -> c_uint {
     tap_offloads
 }
 
-#[derive(Debug, Clone, Copy, Default, AsBytes, FromBytes)]
+#[derive(Debug, Clone, Copy, Default, AsBytes, FromZeroes, FromBytes)]
 #[repr(C)]
 pub struct VirtioNetConfig {
     mac: [u8; 6],
@@ -400,7 +401,7 @@ where
                 self.overlapped_wrapper.get_h_event_ref().unwrap(),
                 Token::RxTap,
             ),
-            #[cfg(unix)]
+            #[cfg(any(target_os = "android", target_os = "linux"))]
             (self.tap.get_read_notifier(), Token::RxTap),
             (self.rx_queue.event(), Token::RxQueue),
             (self.tx_queue.event(), Token::TxQueue),
@@ -905,7 +906,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                #[cfg(unix)]
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {
@@ -920,7 +921,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                #[cfg(unix)]
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {
@@ -935,7 +936,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                #[cfg(unix)]
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapFd {
@@ -950,7 +951,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                #[cfg(unix)]
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapFd {
@@ -968,7 +969,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                #[cfg(unix)]
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::RawConfig {
@@ -988,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     fn params_from_key_values_vhost_net() {
         let params = from_net_arg(
             "vhost-net=[device=/dev/foo],\
@@ -1060,7 +1061,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                #[cfg(unix)]
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {
@@ -1075,7 +1076,7 @@ mod tests {
         assert_eq!(
             params,
             NetParameters {
-                #[cfg(unix)]
+                #[cfg(any(target_os = "android", target_os = "linux"))]
                 vhost_net: None,
                 vq_pairs: None,
                 mode: NetParametersMode::TapName {

@@ -5,7 +5,8 @@
 @frequency ./common_device.frequency
 brk: 1
 clock_gettime: 1
-clone: arg0 & CLONE_THREAD
+# ANDROID: modified to 1 because of duplicate error with jail_warden
+clone: 1
 clone3: 1
 close: 1
 dup2: 1
@@ -28,11 +29,14 @@ io_uring_register: 1
 io_uring_enter: 1
 kill: 1
 lseek: 1
-madvise: arg2 == MADV_DONTNEED || arg2 == MADV_DONTDUMP || arg2 == MADV_REMOVE || arg2 == MADV_MERGEABLE || arg2 == MADV_FREE
+# ANDROID: modified to 1 because of duplicate error with jail_warden
+madvise: 1
 membarrier: 1
 memfd_create: 1
-mmap: arg2 in ~PROT_EXEC
-mprotect: arg2 in ~PROT_EXEC
+# ANDROID: added PROT_WRITE because of duplicate error with jail_warden
+mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+# ANDROID: added PROT_WRITE because of duplicate error with jail_warden
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
 mremap: 1
 munmap: 1
 nanosleep: 1

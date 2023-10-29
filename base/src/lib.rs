@@ -75,10 +75,10 @@ pub use write_zeroes::WriteZeroesAt;
 // TODO(b/233233301): reorganize platform specific exports under platform
 // namespaces instead of exposing them directly in base::.
 cfg_if::cfg_if! {
-    if #[cfg(unix)] {
-        pub use sys::unix;
+    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+        pub use sys::linux;
 
-        pub use unix::net;
+        pub use linux::net;
 
         // File related exports.
         pub use platform::{FileFlags, get_max_open_files};
