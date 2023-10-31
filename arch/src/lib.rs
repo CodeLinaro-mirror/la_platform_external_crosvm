@@ -51,7 +51,7 @@ use devices::PciInterruptPin;
 use devices::PciRoot;
 use devices::PciRootCommand;
 use devices::PreferredIrq;
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::ProxyDevice;
 use devices::SerialHardware;
 use devices::SerialParameters;
@@ -62,7 +62,7 @@ use hypervisor::IoEventAddress;
 use hypervisor::Vm;
 #[cfg(windows)]
 use jail::FakeMinijailStub as Minijail;
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use minijail::Minijail;
 use remain::sorted;
 #[cfg(target_arch = "x86_64")]
@@ -78,7 +78,7 @@ pub use serial::get_serial_cmdline;
 pub use serial::set_default_serial_parameters;
 pub use serial::GetSerialCmdlineError;
 pub use serial::SERIAL_ADDR;
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
@@ -317,6 +317,8 @@ pub struct VmComponents {
     pub acpi_sdts: Vec<SDT>,
     pub android_fstab: Option<File>,
     pub bootorder_fw_cfg_blob: Vec<u8>,
+    #[cfg(target_arch = "x86_64")]
+    pub break_linux_pci_config_io: bool,
     pub cpu_capacity: BTreeMap<usize, u32>,
     pub cpu_clusters: Vec<CpuSet>,
     pub cpu_frequencies: BTreeMap<usize, Vec<u32>>,
@@ -371,7 +373,7 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub mmio_bus: Arc<Bus>,
     pub no_smt: bool,
     pub pid_debug_label_map: BTreeMap<u32, String>,
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub platform_devices: Vec<Arc<Mutex<dyn BusDevice>>>,
     pub pm: Option<Arc<Mutex<dyn PmResource + Send>>>,
     /// Devices to be notified before the system resumes from the S3 suspended state.
@@ -458,7 +460,9 @@ pub trait LinuxArch {
         #[cfg(target_arch = "x86_64")] pflash_jail: Option<Minijail>,
         #[cfg(target_arch = "x86_64")] fw_cfg_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
-        #[cfg(unix)] guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
+        #[cfg(any(target_os = "android", target_os = "linux"))] guest_suspended_cvar: Option<
+            Arc<(Mutex<bool>, Condvar)>,
+        >,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmArch,
@@ -491,7 +495,7 @@ pub trait LinuxArch {
     fn register_pci_device<V: VmArch, Vcpu: VcpuArch>(
         linux: &mut RunnableLinuxVm<V, Vcpu>,
         device: Box<dyn PciDevice>,
-        #[cfg(unix)] minijail: Option<Minijail>,
+        #[cfg(any(target_os = "android", target_os = "linux"))] minijail: Option<Minijail>,
         resources: &mut SystemAllocator,
         hp_control_tube: &mpsc::Sender<PciRootCommand>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
@@ -567,14 +571,14 @@ pub enum DeviceRegistrationError {
     #[error("Allocating IRQ number")]
     AllocateIrq,
     /// Could not allocate IRQ resource for the device.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[error("Allocating IRQ resource: {0}")]
     AllocateIrqResource(devices::vfio::VfioError),
     /// Broken pci topology
     #[error("pci topology is broken")]
     BrokenPciTopology,
     /// Unable to clone a jail for the device.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[error("failed to clone jail: {0}")]
     CloneJail(minijail::Error),
     /// Appending to kernel command line failed.
@@ -613,11 +617,11 @@ pub enum DeviceRegistrationError {
     /// Failed to insert device into PCI root.
     #[error("failed to insert device into PCI root: {0}")]
     PciRootAddDevice(PciDeviceError),
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Failed to initialize proxy device for jailed device.
     #[error("failed to create proxy device: {0}")]
     ProxyDeviceCreation(devices::ProxyError),
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     /// Failed to register battery device.
     #[error("failed to register battery device to VM: {0}")]
     RegisterBattery(devices::BatteryError),
@@ -642,7 +646,7 @@ pub enum DeviceRegistrationError {
 pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
     linux: &mut RunnableLinuxVm<V, Vcpu>,
     mut device: Box<dyn PciDevice>,
-    #[cfg(unix)] jail: Option<Minijail>,
+    #[cfg(any(target_os = "android", target_os = "linux"))] jail: Option<Minijail>,
     resources: &mut SystemAllocator,
     hp_control_tube: &mpsc::Sender<PciRootCommand>,
     #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
@@ -702,7 +706,7 @@ pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
         .register_device_capabilities()
         .map_err(DeviceRegistrationError::RegisterDeviceCapabilities)?;
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     let arced_dev: Arc<Mutex<dyn BusDevice>> = if let Some(jail) = jail {
         let proxy = ProxyDevice::new(
             device,
@@ -727,7 +731,7 @@ pub fn configure_pci_device<V: VmArch, Vcpu: VcpuArch>(
         Arc::new(Mutex::new(device))
     };
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     hp_control_tube
         .send(PciRootCommand::Add(pci_address, arced_dev.clone()))
         .map_err(DeviceRegistrationError::RegisterDevice)?;
@@ -766,7 +770,7 @@ pub fn generate_virtio_mmio_bus(
     #[cfg(target_arch = "x86_64")]
     let mut sdts = sdts;
     for dev_value in devices.into_iter() {
-        #[cfg(unix)]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         let (mut device, jail) = dev_value;
         #[cfg(windows)]
         let (mut device, _) = dev_value;
@@ -803,7 +807,7 @@ pub fn generate_virtio_mmio_bus(
                 .ok_or(DeviceRegistrationError::GenerateAcpi)?;
         }
 
-        #[cfg(unix)]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         let arced_dev: Arc<Mutex<dyn BusDevice>> = if let Some(jail) = jail {
             let proxy = ProxyDevice::new(
                 device,
@@ -1086,7 +1090,7 @@ pub fn generate_pci_root(
     let mut amls = BTreeMap::new();
     let mut gpe_scope_amls = BTreeMap::new();
     for (dev_idx, dev_value) in devices {
-        #[cfg(unix)]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         let (mut device, jail) = dev_value;
         #[cfg(windows)]
         let (mut device, _) = dev_value;
@@ -1119,7 +1123,7 @@ pub fn generate_pci_root(
         }
         let gpe_nr = device.set_gpe(resources);
 
-        #[cfg(unix)]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         let arced_dev: Arc<Mutex<dyn BusDevice>> = if let Some(jail) = jail {
             let proxy = ProxyDevice::new(
                 device,
