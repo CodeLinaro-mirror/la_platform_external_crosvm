@@ -53,9 +53,4 @@ rust_library {
         "libzerocopy",
     ],
     proc_macros: ["libremain"],
-    visibility: [
-        "//external/libchromeos-rs",
-        "//packages/modules/Virtualization/apkdmverity",
-        "//packages/modules/Virtualization/libs/devicemapper",
-    ],
 }
