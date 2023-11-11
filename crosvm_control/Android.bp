@@ -13,7 +13,6 @@ package {
 rust_ffi_shared {
     name: "libcrosvm_control_shared",
     defaults: ["crosvm_inner_defaults"],
-    stem: "libcrosvm_control",
     host_supported: true,
     crate_name: "crosvm_control",
     cargo_env_compat: true,
@@ -36,7 +35,6 @@ rust_ffi_shared {
 rust_ffi_static {
     name: "libcrosvm_control_static",
     defaults: ["crosvm_inner_defaults"],
-    stem: "libcrosvm_control",
     host_supported: true,
     crate_name: "crosvm_control",
     cargo_env_compat: true,
