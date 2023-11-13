@@ -10,26 +10,6 @@ package {
     default_applicable_licenses: ["external_crosvm_license"],
 }
 
-rust_test {
-    name: "broker_ipc_product_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
-    host_supported: true,
-    crate_name: "broker_ipc_product",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libanyhow",
-        "libserde",
-    ],
-}
-
 rust_library {
     name: "libbroker_ipc_product",
     defaults: ["crosvm_inner_defaults"],

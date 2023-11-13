@@ -21,20 +21,3 @@ rust_library {
     edition: "2021",
     rustlibs: ["libserde"],
 }
-
-rust_test {
-    name: "vm_control_product_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
-    host_supported: true,
-    crate_name: "vm_control_product",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    rustlibs: ["libserde"],
-}

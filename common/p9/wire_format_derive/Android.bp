@@ -24,3 +24,23 @@ rust_proc_macro {
         "libsyn",
     ],
 }
+
+rust_test_host {
+    name: "wire_format_derive_test_src_lib",
+    defaults: ["crosvm_inner_defaults"],
+    crate_name: "wire_format_derive",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.0",
+    srcs: ["src/lib.rs"],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
+    edition: "2015",
+    rustlibs: [
+        "libproc_macro2",
+        "libquote",
+        "libsyn",
+    ],
+}

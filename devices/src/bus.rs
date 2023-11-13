@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::Context;
+use base::debug;
 use base::error;
 use remain::sorted;
 use serde::Deserialize;
@@ -342,17 +343,24 @@ pub struct Bus {
     access_id: usize,
     #[cfg(feature = "stats")]
     pub stats: Arc<Mutex<BusStatistics>>,
+    bus_type: BusType,
 }
 
 impl Bus {
     /// Constructs an a bus with an empty address space.
-    pub fn new() -> Bus {
+    pub fn new(bus_type: BusType) -> Bus {
         Bus {
             devices: Arc::new(Mutex::new(BTreeMap::new())),
             access_id: 0,
             #[cfg(feature = "stats")]
             stats: Arc::new(Mutex::new(BusStatistics::new())),
+            bus_type,
         }
+    }
+
+    /// Gets the bus type
+    pub fn get_bus_type(&self) -> BusType {
+        self.bus_type
     }
 
     /// Sets the id that will be used for BusAccessInfo.
@@ -401,10 +409,12 @@ impl Bus {
             match device_entry {
                 BusDeviceEntry::OuterSync(dev) => {
                     let mut dev = (*dev).lock();
+                    debug!("Sleep on device: {}", dev.debug_label());
                     dev.sleep()
                         .with_context(|| format!("failed to sleep {}", dev.debug_label()))?;
                 }
                 BusDeviceEntry::InnerSync(dev) => {
+                    debug!("Sleep on device: {}", dev.debug_label());
                     dev.sleep_sync()
                         .with_context(|| format!("failed to sleep {}", dev.debug_label()))?;
                 }
@@ -418,10 +428,12 @@ impl Bus {
             match device_entry {
                 BusDeviceEntry::OuterSync(dev) => {
                     let mut dev = dev.lock();
+                    debug!("Wake on device: {}", dev.debug_label());
                     dev.wake()
                         .with_context(|| format!("failed to wake {}", dev.debug_label()))?;
                 }
                 BusDeviceEntry::InnerSync(dev) => {
+                    debug!("Wake on device: {}", dev.debug_label());
                     dev.wake_sync()
                         .with_context(|| format!("failed to wake {}", dev.debug_label()))?;
                 }
@@ -438,17 +450,21 @@ impl Bus {
             match device_entry {
                 BusDeviceEntry::OuterSync(dev) => {
                     let dev = dev.lock();
+                    debug!("Snapshot on device: {}", dev.debug_label());
                     add_snapshot(
                         u32::from(dev.device_id()),
                         dev.snapshot()
                             .with_context(|| format!("failed to snapshot {}", dev.debug_label()))?,
                     )
                 }
-                BusDeviceEntry::InnerSync(dev) => add_snapshot(
-                    u32::from(dev.device_id()),
-                    dev.snapshot_sync()
-                        .with_context(|| format!("failed to snapshot {}", dev.debug_label()))?,
-                ),
+                BusDeviceEntry::InnerSync(dev) => {
+                    debug!("Snapshot on device: {}", dev.debug_label());
+                    add_snapshot(
+                        u32::from(dev.device_id()),
+                        dev.snapshot_sync()
+                            .with_context(|| format!("failed to snapshot {}", dev.debug_label()))?,
+                    )
+                }
             }
         }
         Ok(())
@@ -467,19 +483,21 @@ impl Bus {
             match device_entry {
                 BusDeviceEntry::OuterSync(dev) => {
                     let mut dev = dev.lock();
+                    debug!("Restore on device: {}", dev.debug_label());
                     let snapshot = pop_snapshot(dev.device_id()).ok_or_else(|| {
-                        anyhow!("missing snapshot for device {:?}", dev.debug_label())
+                        anyhow!("missing snapshot for device {}", dev.debug_label())
                     })?;
                     dev.restore(snapshot).with_context(|| {
-                        format!("restore failed for device {:?}", dev.debug_label())
+                        format!("restore failed for device {}", dev.debug_label())
                     })?;
                 }
                 BusDeviceEntry::InnerSync(dev) => {
+                    debug!("Restore on device: {}", dev.debug_label());
                     let snapshot = pop_snapshot(dev.device_id()).ok_or_else(|| {
-                        anyhow!("missing snapshot for device {:?}", dev.debug_label())
+                        anyhow!("missing snapshot for device {}", dev.debug_label())
                     })?;
                     dev.restore_sync(snapshot).with_context(|| {
-                        format!("restore failed for device {:?}", dev.debug_label())
+                        format!("restore failed for device {}", dev.debug_label())
                     })?;
                 }
             }
@@ -702,7 +720,7 @@ impl Bus {
 
 impl Default for Bus {
     fn default() -> Self {
-        Self::new()
+        Self::new(BusType::Io)
     }
 }
 
@@ -808,7 +826,7 @@ mod tests {
 
     #[test]
     fn bus_insert() {
-        let bus = Bus::new();
+        let bus = Bus::new(BusType::Io);
         let dummy = Arc::new(Mutex::new(DummyDevice));
         assert!(bus.insert(dummy.clone(), 0x10, 0).is_err());
         assert!(bus.insert(dummy.clone(), 0x10, 0x10).is_ok());
@@ -825,7 +843,7 @@ mod tests {
 
     #[test]
     fn bus_insert_full_addr() {
-        let bus = Bus::new();
+        let bus = Bus::new(BusType::Io);
         let dummy = Arc::new(Mutex::new(DummyDevice));
         assert!(bus.insert(dummy.clone(), 0x10, 0).is_err());
         assert!(bus.insert(dummy.clone(), 0x10, 0x10).is_ok());
@@ -842,7 +860,7 @@ mod tests {
 
     #[test]
     fn bus_read_write() {
-        let bus = Bus::new();
+        let bus = Bus::new(BusType::Io);
         let dummy = Arc::new(Mutex::new(DummyDevice));
         assert!(bus.insert(dummy, 0x10, 0x10).is_ok());
         assert!(bus.read(0x10, &mut [0, 0, 0, 0]));
@@ -859,7 +877,7 @@ mod tests {
 
     #[test]
     fn bus_read_write_values() {
-        let bus = Bus::new();
+        let bus = Bus::new(BusType::Io);
         let dummy = Arc::new(Mutex::new(ConstantDevice {
             uses_full_addr: false,
         }));
@@ -876,7 +894,7 @@ mod tests {
 
     #[test]
     fn bus_read_write_full_addr_values() {
-        let bus = Bus::new();
+        let bus = Bus::new(BusType::Io);
         let dummy = Arc::new(Mutex::new(ConstantDevice {
             uses_full_addr: true,
         }));

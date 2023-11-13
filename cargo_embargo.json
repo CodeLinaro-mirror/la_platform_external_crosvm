@@ -66,51 +66,10 @@
   "module_blocklist": [
     // TODO: These are all for workspace_excludes package. Maybe use the option to
     // also block all blueprint modules for excluded packages.
-    "liblibva",
     "libprebuilts",
     "libproto_build_tools",
-    "libva_test_src_lib",
-    "proto_build_tools_test_src_lib",
     // Flaky with ENOMEM. We don't use io_uring yet, so turning it off for now.
-    "io_uring_test_tests_uring",
-    // These are all tests that cargo2android.py ignored, probably because the
-    // `cargo test` run reported 0 tests.
-    // TODO: replicate the empty test detection if this list is annoying to maintain.
-    "aarch64_test_src_lib",
-    "anti_tamper_test_src_lib",
-    "argh_helpers_test_src_lib",
-    "balloon_control_test_src_lib",
-    "bit_field_derive_test_bit_field_derive",
-    "bit_field_test_src_lib",
-    "broker_ipc_test_src_lib",
-    "crash_report_test_src_lib",
-    "cros_tracing_test_src_lib",
-    "crosvm_cli_test_src_lib",
-    "crosvm_control_test_src_lib",
-    "crosvm_test_tests_plugins",
-    "gpu_display_test_examples_simple",
-    "gpu_display_test_examples_simple_open",
-    "gpu_display_test_src_lib",
-    "hypervisor_test_src_lib",
-    "hypervisor_test_tests_mmio_fetch_memory",
-    "io_uring_test_src_lib",
-    "kvm_sys_test_src_lib",
-    "kvm_test_src_lib",
-    "libcras_test_src_libcras",
-    "linux_input_sys_test_src_lib",
-    "metrics_test_src_lib",
-    "net_sys_test_src_lib",
-    "power_monitor_test_src_lib",
-    "prebuilts_test_src_lib",
-    "protos_test_src_lib",
-    "serde_keyvalue_derive_test_src_lib",
-    "sync_test_src_lib",
-    "usb_sys_test_src_lib",
-    "vfio_sys_test_src_lib",
-    "vhost_test_src_lib",
-    "virtio_sys_test_src_lib",
-    "wire_format_derive_test_src_lib",
-    "wire_format_derive_test_wire_format_derive"
+    "io_uring_test_tests_uring"
   ],
   "module_visibility": {
     "crosvm": [
@@ -175,6 +134,10 @@
       ]
     },
     "base_event_token_derive": {
+      // TODO: This is a proc macro crate. Should disable device tests by default for them.
+      "device_supported": false
+    },
+    "bit_field_derive": {
       // TODO: This is a proc macro crate. Should disable device tests by default for them.
       "device_supported": false
     },
@@ -245,6 +208,10 @@
     },
     "vm_control": {
       "add_module_block": "vm_control/cargo2android.bp.patch"
+    },
+    "wire_format_derive": {
+      // TODO: This is a proc macro crate. Should disable device tests by default for them.
+      "device_supported": false
     },
     "x86_64": {
       "no_presubmit": true,
