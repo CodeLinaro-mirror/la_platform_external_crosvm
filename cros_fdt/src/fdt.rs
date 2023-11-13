@@ -9,10 +9,11 @@ use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::ffi::CString;
 use std::io;
-use std::mem::size_of_val;
 
 use remain::sorted;
 use thiserror::Error as ThisError;
+
+use crate::propval::ToFdtPropval;
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -25,8 +26,8 @@ pub enum Error {
     FdtGuestMemoryWriteError,
     #[error("I/O error reading FDT parameters code={0}")]
     FdtIoError(io::Error),
-    #[error("Strings cannot contain NUL")]
-    InvalidString,
+    #[error("Invalid string value {}", .0)]
+    InvalidString(String),
     #[error("Attempted to end a node that was not the most recent")]
     OutOfOrderEndNode,
     #[error("Properties may not be added after a node has been ended")]
@@ -62,12 +63,12 @@ const FDT_END: u32 = 0x00000009;
 /// # fn main() -> cros_fdt::Result<()> {
 /// let mut fdt = Fdt::new(&[]);
 /// let root_node = fdt.begin_node("")?;
-/// fdt.property_string("compatible", "linux,dummy-virt")?;
-/// fdt.property_u32("#address-cells", 0x2)?;
-/// fdt.property_u32("#size-cells", 0x2)?;
+/// fdt.set_prop("compatible", "linux,dummy-virt")?;
+/// fdt.set_prop("#address-cells", 0x2u32)?;
+/// fdt.set_prop("#size-cells", 0x2u32)?;
 /// let chosen_node = fdt.begin_node("chosen")?;
-/// fdt.property_u32("linux,pci-probe-only", 1)?;
-/// fdt.property_string("bootargs", "panic=-1 console=hvc0 root=/dev/vda")?;
+/// fdt.set_prop("linux,pci-probe-only", 1u32)?;
+/// fdt.set_prop("bootargs", "panic=-1 console=hvc0 root=/dev/vda")?;
 /// fdt.end_node(chosen_node)?;
 /// fdt.end_node(root_node)?;
 /// let dtb = fdt.finish()?;
@@ -186,7 +187,7 @@ impl Fdt {
     ///
     /// `name` - name of the node; must not contain any NUL bytes.
     pub fn begin_node(&mut self, name: &str) -> Result<FdtNode> {
-        let name_cstr = CString::new(name).map_err(|_| Error::InvalidString)?;
+        let name_cstr = CString::new(name).map_err(|_| Error::InvalidString(name.into()))?;
         self.append_u32(FDT_BEGIN_NODE);
         self.data.extend(name_cstr.to_bytes_with_nul());
         self.align(4);
@@ -228,12 +229,16 @@ impl Fdt {
     ///
     /// `name` - name of the property; must not contain any NUL bytes.
     /// `val` - value of the property (raw byte array).
-    pub fn property(&mut self, name: &str, val: &[u8]) -> Result<()> {
+    pub fn set_prop<T>(&mut self, name: &str, val: T) -> Result<()>
+    where
+        T: ToFdtPropval,
+    {
         if self.node_ended {
             return Err(Error::PropertyAfterEndNode);
         }
 
-        let name_cstr = CString::new(name).map_err(|_| Error::InvalidString)?;
+        let name_cstr = CString::new(name).map_err(|_| Error::InvalidString(name.into()))?;
+        let val = val.to_propval()?;
 
         let len = val
             .len()
@@ -244,58 +249,9 @@ impl Fdt {
         self.append_u32(FDT_PROP);
         self.append_u32(len);
         self.append_u32(nameoff);
-        self.data.extend_from_slice(val);
+        self.data.extend_from_slice(&val);
         self.align(4);
         Ok(())
-    }
-
-    /// Write an empty property.
-    pub fn property_null(&mut self, name: &str) -> Result<()> {
-        self.property(name, &[])
-    }
-
-    /// Write a string property.
-    pub fn property_string(&mut self, name: &str, val: &str) -> Result<()> {
-        let cstr_value = CString::new(val).map_err(|_| Error::InvalidString)?;
-        self.property(name, cstr_value.to_bytes_with_nul())
-    }
-
-    /// Write a stringlist property.
-    pub fn property_string_list(&mut self, name: &str, values: &[&str]) -> Result<()> {
-        let mut bytes = Vec::new();
-        for &s in values {
-            let cstr = CString::new(s).map_err(|_| Error::InvalidString)?;
-            bytes.extend_from_slice(cstr.to_bytes_with_nul());
-        }
-        self.property(name, &bytes)
-    }
-
-    /// Write a 32-bit unsigned integer property.
-    pub fn property_u32(&mut self, name: &str, val: u32) -> Result<()> {
-        self.property(name, &val.to_be_bytes())
-    }
-
-    /// Write a 64-bit unsigned integer property.
-    pub fn property_u64(&mut self, name: &str, val: u64) -> Result<()> {
-        self.property(name, &val.to_be_bytes())
-    }
-
-    /// Write a property containing an array of 32-bit unsigned integers.
-    pub fn property_array_u32(&mut self, name: &str, cells: &[u32]) -> Result<()> {
-        let mut arr = Vec::with_capacity(size_of_val(cells));
-        for &c in cells {
-            arr.extend(c.to_be_bytes());
-        }
-        self.property(name, &arr)
-    }
-
-    /// Write a property containing an array of 64-bit unsigned integers.
-    pub fn property_array_u64(&mut self, name: &str, cells: &[u64]) -> Result<()> {
-        let mut arr = Vec::with_capacity(size_of_val(cells));
-        for &c in cells {
-            arr.extend(c.to_be_bytes());
-        }
-        self.property(name, &arr)
     }
 
     /// Finish writing the Devicetree Blob (DTB).
@@ -433,7 +389,7 @@ mod tests {
     fn prop_null() {
         let mut fdt = Fdt::new(&[]);
         let root_node = fdt.begin_node("").unwrap();
-        fdt.property_null("null").unwrap();
+        fdt.set_prop("null", ()).unwrap();
         fdt.end_node(root_node).unwrap();
         assert_eq!(
             fdt.finish().unwrap(),
@@ -468,7 +424,7 @@ mod tests {
     fn prop_u32() {
         let mut fdt = Fdt::new(&[]);
         let root_node = fdt.begin_node("").unwrap();
-        fdt.property_u32("u32", 0x12345678).unwrap();
+        fdt.set_prop("u32", 0x12345678u32).unwrap();
         fdt.end_node(root_node).unwrap();
         assert_eq!(
             fdt.finish().unwrap(),
@@ -504,15 +460,14 @@ mod tests {
     fn all_props() {
         let mut fdt = Fdt::new(&[]);
         let root_node = fdt.begin_node("").unwrap();
-        fdt.property_null("null").unwrap();
-        fdt.property_u32("u32", 0x12345678).unwrap();
-        fdt.property_u64("u64", 0x1234567887654321).unwrap();
-        fdt.property_string("str", "hello").unwrap();
-        fdt.property_string_list("strlst", &["hi", "bye"]).unwrap();
-        fdt.property_array_u32("arru32", &[0x12345678, 0xAABBCCDD])
+        fdt.set_prop("arru32", &[0x12345678u32, 0xAABBCCDDu32])
             .unwrap();
-        fdt.property_array_u64("arru64", &[0x1234567887654321])
-            .unwrap();
+        fdt.set_prop("arru64", &[0x1234567887654321u64]).unwrap();
+        fdt.set_prop("null", ()).unwrap();
+        fdt.set_prop("str", "hello").unwrap();
+        fdt.set_prop("strlst", &["hi", "bye"]).unwrap();
+        fdt.set_prop("u32", 0x12345678u32).unwrap();
+        fdt.set_prop("u64", 0x1234567887654321u64).unwrap();
         fdt.end_node(root_node).unwrap();
         assert_eq!(
             fdt.finish().unwrap(),
@@ -533,47 +488,47 @@ mod tests {
                 0x00, 0x00, 0x00, 0x00, // 0034: rsvmap terminator (size = 0 low)
                 0x00, 0x00, 0x00, 0x01, // 0038: FDT_BEGIN_NODE
                 0x00, 0x00, 0x00, 0x00, // 003C: node name ("") + padding
-                0x00, 0x00, 0x00, 0x03, // 0040: FDT_PROP (null)
-                0x00, 0x00, 0x00, 0x00, // 0044: prop len (0)
-                0x00, 0x00, 0x00, 0x00, // 0048: prop nameoff (0)
-                0x00, 0x00, 0x00, 0x03, // 004C: FDT_PROP (u32)
-                0x00, 0x00, 0x00, 0x04, // 0050: prop len (4)
-                0x00, 0x00, 0x00, 0x05, // 0054: prop nameoff (0x05)
-                0x12, 0x34, 0x56, 0x78, // 0058: prop u32 value (0x12345678)
-                0x00, 0x00, 0x00, 0x03, // 005C: FDT_PROP (u64)
-                0x00, 0x00, 0x00, 0x08, // 0060: prop len (8)
-                0x00, 0x00, 0x00, 0x09, // 0064: prop nameoff (0x09)
-                0x12, 0x34, 0x56, 0x78, // 0068: prop u64 value high (0x12345678)
-                0x87, 0x65, 0x43, 0x21, // 006C: prop u64 value low (0x87654321)
-                0x00, 0x00, 0x00, 0x03, // 0070: FDT_PROP (string)
-                0x00, 0x00, 0x00, 0x06, // 0074: prop len (6)
-                0x00, 0x00, 0x00, 0x0D, // 0078: prop nameoff (0x0D)
-                b'h', b'e', b'l', b'l', // 007C: prop str value ("hello") + padding
-                b'o', 0x00, 0x00, 0x00, // 0080: "o\0" + padding
-                0x00, 0x00, 0x00, 0x03, // 0084: FDT_PROP (string list)
-                0x00, 0x00, 0x00, 0x07, // 0088: prop len (7)
-                0x00, 0x00, 0x00, 0x11, // 008C: prop nameoff (0x11)
-                b'h', b'i', 0x00, b'b', // 0090: prop value ("hi", "bye")
-                b'y', b'e', 0x00, 0x00, // 0094: "ye\0" + padding
-                0x00, 0x00, 0x00, 0x03, // 0098: FDT_PROP (u32 array)
-                0x00, 0x00, 0x00, 0x08, // 009C: prop len (8)
-                0x00, 0x00, 0x00, 0x18, // 00A0: prop nameoff (0x18)
-                0x12, 0x34, 0x56, 0x78, // 00A4: prop value 0
-                0xAA, 0xBB, 0xCC, 0xDD, // 00A8: prop value 1
-                0x00, 0x00, 0x00, 0x03, // 00AC: FDT_PROP (u64 array)
+                0x00, 0x00, 0x00, 0x03, // 0040: FDT_PROP (u32 array)
+                0x00, 0x00, 0x00, 0x08, // 0044: prop len (8)
+                0x00, 0x00, 0x00, 0x00, // 0048: prop nameoff (0x00)
+                0x12, 0x34, 0x56, 0x78, // 004C: prop value 0
+                0xAA, 0xBB, 0xCC, 0xDD, // 0050: prop value 1
+                0x00, 0x00, 0x00, 0x03, // 0054: FDT_PROP (u64 array)
+                0x00, 0x00, 0x00, 0x08, // 0058: prop len (8)
+                0x00, 0x00, 0x00, 0x07, // 005C: prop nameoff (0x07)
+                0x12, 0x34, 0x56, 0x78, // 0060: prop u64 value 0 high
+                0x87, 0x65, 0x43, 0x21, // 0064: prop u64 value 0 low
+                0x00, 0x00, 0x00, 0x03, // 0068: FDT_PROP (null)
+                0x00, 0x00, 0x00, 0x00, // 006C: prop len (0)
+                0x00, 0x00, 0x00, 0x0E, // 0070: prop nameoff (0x0e)
+                0x00, 0x00, 0x00, 0x03, // 0074: FDT_PROP (string)
+                0x00, 0x00, 0x00, 0x06, // 0078: prop len (6)
+                0x00, 0x00, 0x00, 0x13, // 007C: prop nameoff (0x13)
+                b'h', b'e', b'l', b'l', // 0080: prop str value ("hello") + padding
+                b'o', 0x00, 0x00, 0x00, // 0084: "o\0" + padding
+                0x00, 0x00, 0x00, 0x03, // 0088: FDT_PROP (string list)
+                0x00, 0x00, 0x00, 0x07, // 008C: prop len (7)
+                0x00, 0x00, 0x00, 0x17, // 0090: prop nameoff (0x17)
+                b'h', b'i', 0x00, b'b', // 0094: prop value ("hi", "bye")
+                b'y', b'e', 0x00, 0x00, // 0098: "ye\0" + padding
+                0x00, 0x00, 0x00, 0x03, // 009C: FDT_PROP (u32)
+                0x00, 0x00, 0x00, 0x04, // 00A0: prop len (4)
+                0x00, 0x00, 0x00, 0x1E, // 00A4: prop nameoff (0x1E)
+                0x12, 0x34, 0x56, 0x78, // 00A8: prop u32 value (0x12345678)
+                0x00, 0x00, 0x00, 0x03, // 00AC: FDT_PROP (u64)
                 0x00, 0x00, 0x00, 0x08, // 00B0: prop len (8)
-                0x00, 0x00, 0x00, 0x1f, // 00B4: prop nameoff (0x1F)
-                0x12, 0x34, 0x56, 0x78, // 00B8: prop u64 value 0 high
-                0x87, 0x65, 0x43, 0x21, // 00BC: prop u64 value 0 low
+                0x00, 0x00, 0x00, 0x22, // 00B4: prop nameoff (0x22)
+                0x12, 0x34, 0x56, 0x78, // 00B8: prop u64 value high (0x12345678)
+                0x87, 0x65, 0x43, 0x21, // 00BC: prop u64 value low (0x87654321)
                 0x00, 0x00, 0x00, 0x02, // 00C0: FDT_END_NODE
                 0x00, 0x00, 0x00, 0x09, // 00C4: FDT_END
-                b'n', b'u', b'l', b'l', 0x00, // 00C8: strings + 0x00: "null""
-                b'u', b'3', b'2', 0x00, // 00CD: strings + 0x05: "u32"
-                b'u', b'6', b'4', 0x00, // 00D1: strings + 0x09: "u64"
-                b's', b't', b'r', 0x00, // 00D5: strings + 0x0D: "str"
-                b's', b't', b'r', b'l', b's', b't', 0x00, // 00D9: strings + 0x11: "strlst"
-                b'a', b'r', b'r', b'u', b'3', b'2', 0x00, // 00E0: strings + 0x18: "arru32"
-                b'a', b'r', b'r', b'u', b'6', b'4', 0x00, // 00E7: strings + 0x1F: "arru64"
+                b'a', b'r', b'r', b'u', b'3', b'2', 0x00, // 00C8: strings + 0x00: "arru32"
+                b'a', b'r', b'r', b'u', b'6', b'4', 0x00, // 00CF: strings + 0x07: "arru64"
+                b'n', b'u', b'l', b'l', 0x00, // 00D6: strings + 0x0E: "null"
+                b's', b't', b'r', 0x00, // 00DB: strings + 0x13: "str"
+                b's', b't', b'r', b'l', b's', b't', 0x00, // 00DF: strings + 0x17: "strlst"
+                b'u', b'3', b'2', 0x00, // 00E6: strings + 0x1E: "u32"
+                b'u', b'6', b'4', 0x00, // 00EA: strings + 0x22: "u64"
             ]
         );
     }
@@ -582,9 +537,9 @@ mod tests {
     fn nested_nodes() {
         let mut fdt = Fdt::new(&[]);
         let root_node = fdt.begin_node("").unwrap();
-        fdt.property_u32("abc", 0x13579024).unwrap();
+        fdt.set_prop("abc", 0x13579024u32).unwrap();
         let nested_node = fdt.begin_node("nested").unwrap();
-        fdt.property_u32("def", 0x12121212).unwrap();
+        fdt.set_prop("def", 0x12121212u32).unwrap();
         fdt.end_node(nested_node).unwrap();
         fdt.end_node(root_node).unwrap();
         assert_eq!(
@@ -630,10 +585,10 @@ mod tests {
     fn prop_name_string_reuse() {
         let mut fdt = Fdt::new(&[]);
         let root_node = fdt.begin_node("").unwrap();
-        fdt.property_u32("abc", 0x13579024).unwrap();
+        fdt.set_prop("abc", 0x13579024u32).unwrap();
         let nested_node = fdt.begin_node("nested").unwrap();
-        fdt.property_u32("def", 0x12121212).unwrap();
-        fdt.property_u32("abc", 0x12121212).unwrap(); // This should reuse the "abc" string.
+        fdt.set_prop("abc", 0x12121212u32).unwrap(); // This should reuse the "abc" string.
+        fdt.set_prop("def", 0x12121212u32).unwrap();
         fdt.end_node(nested_node).unwrap();
         fdt.end_node(root_node).unwrap();
         assert_eq!(
@@ -664,11 +619,11 @@ mod tests {
                 b'e', b'd', 0x00, 0x00, // 0058: "ed\0" + pad
                 0x00, 0x00, 0x00, 0x03, // 005C: FDT_PROP
                 0x00, 0x00, 0x00, 0x04, // 0060: prop len (4)
-                0x00, 0x00, 0x00, 0x04, // 0064: prop nameoff (0x04)
+                0x00, 0x00, 0x00, 0x00, // 0064: prop nameoff (0x00 - reuse)
                 0x12, 0x12, 0x12, 0x12, // 0068: prop u32 value (0x12121212)
                 0x00, 0x00, 0x00, 0x03, // 006C: FDT_PROP
                 0x00, 0x00, 0x00, 0x04, // 0070: prop len (4)
-                0x00, 0x00, 0x00, 0x00, // 0074: prop nameoff (0x00 - reuse)
+                0x00, 0x00, 0x00, 0x04, // 0074: prop nameoff (0x04)
                 0x12, 0x12, 0x12, 0x12, // 0078: prop u32 value (0x12121212)
                 0x00, 0x00, 0x00, 0x02, // 007C: FDT_END_NODE ("nested")
                 0x00, 0x00, 0x00, 0x02, // 0080: FDT_END_NODE ("")
@@ -689,14 +644,14 @@ mod tests {
     #[test]
     fn invalid_prop_name_nul() {
         let mut fdt = Fdt::new(&[]);
-        fdt.property_u32("abc\0def", 0)
+        fdt.set_prop("abc\0def", 0u32)
             .expect_err("property name with embedded NUL");
     }
 
     #[test]
     fn invalid_prop_string_value_nul() {
         let mut fdt = Fdt::new(&[]);
-        fdt.property_string("mystr", "abc\0def")
+        fdt.set_prop("mystr", "abc\0def")
             .expect_err("string property value with embedded NUL");
     }
 
@@ -704,7 +659,7 @@ mod tests {
     fn invalid_prop_string_list_value_nul() {
         let mut fdt = Fdt::new(&[]);
         let strs = ["test", "abc\0def"];
-        fdt.property_string_list("mystr", &strs)
+        fdt.set_prop("mystr", &strs)
             .expect_err("stringlist property value with embedded NUL");
     }
 
@@ -712,11 +667,11 @@ mod tests {
     fn invalid_prop_after_end_node() {
         let mut fdt = Fdt::new(&[]);
         let _root_node = fdt.begin_node("").unwrap();
-        fdt.property_u32("ok_prop", 1234).unwrap();
+        fdt.set_prop("ok_prop", 1234u32).unwrap();
         let nested_node = fdt.begin_node("mynode").unwrap();
-        fdt.property_u32("ok_nested_prop", 5678).unwrap();
+        fdt.set_prop("ok_nested_prop", 5678u32).unwrap();
         fdt.end_node(nested_node).unwrap();
-        fdt.property_u32("bad_prop_after_end_node", 1357)
+        fdt.set_prop("bad_prop_after_end_node", 1357u32)
             .expect_err("property after end_node");
     }
 
@@ -724,7 +679,7 @@ mod tests {
     fn invalid_end_node_out_of_order() {
         let mut fdt = Fdt::new(&[]);
         let root_node = fdt.begin_node("").unwrap();
-        fdt.property_u32("ok_prop", 1234).unwrap();
+        fdt.set_prop("ok_prop", 1234u32).unwrap();
         let _nested_node = fdt.begin_node("mynode").unwrap();
         fdt.end_node(root_node)
             .expect_err("end node while nested node is open");
@@ -734,9 +689,9 @@ mod tests {
     fn invalid_finish_while_node_open() {
         let mut fdt = Fdt::new(&[]);
         let _root_node = fdt.begin_node("").unwrap();
-        fdt.property_u32("ok_prop", 1234).unwrap();
+        fdt.set_prop("ok_prop", 1234u32).unwrap();
         let _nested_node = fdt.begin_node("mynode").unwrap();
-        fdt.property_u32("ok_nested_prop", 5678).unwrap();
+        fdt.set_prop("ok_nested_prop", 5678u32).unwrap();
         fdt.finish().expect_err("finish without ending all nodes");
     }
 }
