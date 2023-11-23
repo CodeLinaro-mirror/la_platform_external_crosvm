@@ -84,11 +84,6 @@
       // For QCOM's crosvm fork.
       "//vendor:__subpackages__"
     ],
-    "libdata_model": [
-      "//external/libchromeos-rs",
-      "//packages/modules/Virtualization/apkdmverity",
-      "//packages/modules/Virtualization/libs/devicemapper"
-    ],
     "libdevices": [
       // For QCOM's crosvm fork.
       "//vendor:__subpackages__"
