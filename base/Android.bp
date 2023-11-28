@@ -210,7 +210,6 @@ rust_test {
 rust_library {
     name: "libbase_rust",
     defaults: ["crosvm_inner_defaults"],
-    stem: "libbase",
     host_supported: true,
     crate_name: "base",
     cargo_env_compat: true,
