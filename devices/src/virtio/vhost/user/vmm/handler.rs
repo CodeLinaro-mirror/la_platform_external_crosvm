@@ -13,7 +13,7 @@ use vmm_vhost::message::{
 };
 use vmm_vhost::{
     connection::socket::Endpoint as SocketEndpoint, Master, VhostBackend, VhostUserMaster,
-    VhostUserMemoryRegionInfo, VringConfigData,
+    VhostUserMemoryRegionInfo, VringConfigData, VHOST_USER_F_PROTOCOL_FEATURES,
 };
 
 use crate::virtio::vhost::user::vmm::{Error, Result};
@@ -241,11 +241,12 @@ impl VhostUserHandler {
         self.vu
             .set_vring_kick(queue_index, queue_evt)
             .map_err(Error::SetVringKick)?;
-       // TODO: TO implement set_vring-enable in vhost-usr-qti backend code to support latest
-       // vhost-user Protocol  
-        /*self.vu
-            .set_vring_enable(queue_index, true)
-            .map_err(Error::SetVringEnable)?;*/
+
+        if self.acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0 {
+            self.vu
+                .set_vring_enable(queue_index, true)
+                .map_err(Error::SetVringEnable)?;
+        }
 
         Ok(())
     }
@@ -280,9 +281,11 @@ impl VhostUserHandler {
     /// Deactivates all vrings.
     pub fn reset(&mut self, queues_num: usize) -> Result<()> {
         for queue_index in 0..queues_num {
-            self.vu
-                .set_vring_enable(queue_index, false)
-                .map_err(Error::SetVringEnable)?;
+            if self.acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0 {
+                self.vu
+                    .set_vring_enable(queue_index, false)
+                    .map_err(Error::SetVringEnable)?;
+            }
             self.vu
                 .get_vring_base(queue_index)
                 .map_err(Error::GetVringBase)?;
