@@ -11,7 +11,6 @@
 mod async_utils;
 mod balloon;
 mod descriptor_utils;
-mod input;
 mod interrupt;
 mod iommu;
 mod p9;
@@ -27,6 +26,7 @@ mod virtio_pci_common_config;
 mod virtio_pci_device;
 pub mod wl;
 
+pub mod input;
 pub mod block;
 pub mod console;
 pub mod fs;

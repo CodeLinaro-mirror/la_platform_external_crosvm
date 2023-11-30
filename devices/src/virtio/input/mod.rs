@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 #[allow(dead_code)]
-mod constants;
+pub mod constants;
 mod defaults;
 mod evdev;
 mod event_source;
