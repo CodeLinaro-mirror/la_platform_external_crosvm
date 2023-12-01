@@ -99,6 +99,7 @@ const TYPE_MAC80211_HWSIM: u32 = 29;
 const TYPE_VIDEO_ENC: u32 = 30;
 const TYPE_VIDEO_DEC: u32 = 31;
 const TYPE_SCMI: u32 = 32;
+const TYPE_I2C_ADAPTER: u32 = 34;
 // Additional types invented by crosvm
 const MAX_VIRTIO_DEVICE_ID: u32 = 63;
 const TYPE_WL: u32 = MAX_VIRTIO_DEVICE_ID;

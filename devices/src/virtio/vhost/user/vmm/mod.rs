@@ -23,6 +23,7 @@ mod worker;
 mod hab;
 mod scmi;
 mod glink_cma;
+mod i2c;
 
 pub use self::block::*;
 pub use self::console::*;
@@ -39,6 +40,7 @@ pub use self::wl::*;
 pub use self::hab::*;
 pub use self::scmi::*;
 pub use self::glink_cma::*;
+pub use self::i2c::*;
 
 use remain::sorted;
 use thiserror::Error as ThisError;
