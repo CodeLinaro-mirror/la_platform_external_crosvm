@@ -43,7 +43,7 @@ if [ ! "$REUSE" ]; then
 fi
 
 set -x
-cargo_embargo --cfg cargo_embargo.json $REUSE --cargo-bin "$CARGO_BIN"
+cargo_embargo $REUSE --cargo-bin "$CARGO_BIN" generate cargo_embargo.json
 set +x
 
 if [ ! "$REUSE" ]; then
