@@ -34,6 +34,10 @@ use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vhost::user::device::gpu::sys::windows::GpuBackendConfig;
 #[cfg(all(windows, feature = "gpu"))]
 use devices::virtio::vhost::user::device::gpu::sys::windows::GpuVmmConfig;
+#[cfg(all(windows, feature = "gpu"))]
+use devices::virtio::vhost::user::device::gpu::sys::windows::InputEventSplitConfig;
+#[cfg(all(windows, feature = "gpu"))]
+use devices::virtio::vhost::user::device::gpu::sys::windows::WindowProcedureThreadSplitConfig;
 #[cfg(all(windows, feature = "audio"))]
 use devices::virtio::vhost::user::device::snd::sys::windows::SndSplitConfig;
 use devices::virtio::vsock::VsockConfig;
@@ -810,6 +814,8 @@ pub struct Config {
     pub hypervisor: Option<HypervisorKind>,
     pub init_memory: Option<u64>,
     pub initrd_path: Option<PathBuf>,
+    #[cfg(all(windows, feature = "gpu"))]
+    pub input_event_split_config: Option<InputEventSplitConfig>,
     pub irq_chip: Option<IrqChipKind>,
     pub itmt: bool,
     pub jail_config: Option<JailConfig>,
@@ -938,6 +944,8 @@ pub struct Config {
     #[cfg(feature = "vtpm")]
     pub vtpm_proxy: bool,
     pub wayland_socket_paths: BTreeMap<String, PathBuf>,
+    #[cfg(all(windows, feature = "gpu"))]
+    pub window_procedure_thread_split_config: Option<WindowProcedureThreadSplitConfig>,
     pub x_display: Option<String>,
 }
 
@@ -1016,6 +1024,8 @@ impl Default for Config {
             hypervisor: None,
             init_memory: None,
             initrd_path: None,
+            #[cfg(all(windows, feature = "gpu"))]
+            input_event_split_config: None,
             irq_chip: None,
             itmt: false,
             jail_config: if !cfg!(feature = "default-no-sandbox") {
@@ -1140,6 +1150,8 @@ impl Default for Config {
             #[cfg(feature = "vtpm")]
             vtpm_proxy: false,
             wayland_socket_paths: BTreeMap::new(),
+            #[cfg(windows)]
+            window_procedure_thread_split_config: None,
             x_display: None,
         }
     }

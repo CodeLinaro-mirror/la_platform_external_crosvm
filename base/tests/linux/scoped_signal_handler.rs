@@ -20,18 +20,18 @@ use std::thread::spawn;
 use std::time::Duration;
 use std::time::Instant;
 
-use base::platform::gettid;
-use base::platform::kill;
-use base::platform::scoped_signal_handler::Error;
-use base::platform::scoped_signal_handler::Result;
-use base::platform::Error as ErrnoError;
-use base::platform::Pid;
+use base::linux::gettid;
+use base::linux::kill;
+use base::linux::scoped_signal_handler::Error;
+use base::linux::scoped_signal_handler::Result;
+use base::linux::Error as ErrnoError;
 use base::sys::clear_signal_handler;
 use base::sys::has_default_signal_handler;
 use base::sys::wait_for_interrupt;
 use base::sys::ScopedSignalHandler;
 use base::sys::Signal;
 use base::sys::SignalHandler;
+use base::Pid;
 use libc::sigaction;
 
 const TEST_SIGNAL: Signal = Signal::User1;

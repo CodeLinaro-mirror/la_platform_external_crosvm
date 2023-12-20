@@ -34,6 +34,8 @@ use base::ReadNotifier;
 use base::Tube;
 use euclid::size2;
 use once_cell::sync::OnceCell;
+use serde::Deserialize;
+use serde::Serialize;
 use sync::Mutex;
 #[cfg(feature = "kiwi")]
 use vm_control::ServiceSendToGpu;
@@ -231,9 +233,18 @@ pub struct WindowProcedureThread<T: HandleWindowMessage> {
 }
 
 impl<T: HandleWindowMessage> WindowProcedureThread<T> {
-    pub fn start_thread(
-        #[cfg(feature = "kiwi")] gpu_main_display_tube: Option<Tube>,
-    ) -> Result<Self> {
+    pub fn builder() -> WindowProcedureThreadBuilder<T> {
+        // We don't implement Default for WindowProcedureThreadBuilder so that the builder function
+        // is the only way to create WindowProcedureThreadBuilder.
+        WindowProcedureThreadBuilder::<T> {
+            display_tube: None,
+            #[cfg(feature = "kiwi")]
+            ime_tube: None,
+            _marker: Default::default(),
+        }
+    }
+
+    fn start_thread(gpu_main_display_tube: Option<Tube>) -> Result<Self> {
         let (message_router_handle_sender, message_router_handle_receiver) = channel();
         let message_loop_state = Arc::new(AtomicI32::new(MessageLoopState::NotStarted as i32));
         let thread_terminated_event = Event::new().unwrap();
@@ -243,8 +254,6 @@ impl<T: HandleWindowMessage> WindowProcedureThread<T> {
             .try_clone()
             .map_err(|e| anyhow!("Failed to clone thread_terminated_event: {}", e))?;
 
-        #[cfg(not(feature = "kiwi"))]
-        let gpu_main_display_tube = None;
         let thread = match ThreadBuilder::new()
             .name("gpu_display_wndproc".into())
             .spawn(move || {
@@ -367,7 +376,6 @@ impl<T: HandleWindowMessage> WindowProcedureThread<T> {
         mut message_dispatcher: Pin<Box<WindowMessageDispatcher<T>>>,
         gpu_main_display_tube: Option<Rc<Tube>>,
     ) -> MessageLoopState {
-        #[cfg_attr(not(feature = "kiwi"), allow(unused_mut))]
         let mut msg_wait_ctx = MsgWaitContext::new();
         if let Some(tube) = &gpu_main_display_tube {
             if let Err(e) = msg_wait_ctx.add(tube.get_read_notifier(), Token::ServiceMessage) {
@@ -623,6 +631,46 @@ impl<T: HandleWindowMessage> Drop for WindowProcedureThread<T> {
 // Since `WindowProcedureThread` does not hold anything that cannot be transferred between threads,
 // we can implement `Send` for it.
 unsafe impl<T: HandleWindowMessage> Send for WindowProcedureThread<T> {}
+
+#[derive(Deserialize, Serialize)]
+pub struct WindowProcedureThreadBuilder<T: HandleWindowMessage> {
+    display_tube: Option<Tube>,
+    #[cfg(feature = "kiwi")]
+    ime_tube: Option<Tube>,
+    // We use fn(T) -> T here so that this struct is still Send + Sync regardless of whether T is
+    // Send + Sync. See details of this pattern at
+    // https://doc.rust-lang.org/nomicon/phantom-data.html#table-of-phantomdata-patterns.
+    _marker: PhantomData<fn(T) -> T>,
+}
+
+impl<T: HandleWindowMessage> WindowProcedureThreadBuilder<T> {
+    pub fn set_display_tube(&mut self, display_tube: Option<Tube>) -> &mut Self {
+        self.display_tube = display_tube;
+        self
+    }
+
+    #[cfg(feature = "kiwi")]
+    pub fn set_ime_tube(&mut self, ime_tube: Option<Tube>) -> &mut Self {
+        self.ime_tube = ime_tube;
+        self
+    }
+
+    /// This function creates the window procedure thread and windows.
+    ///
+    /// We have seen third-party DLLs hooking into window creation. They may have deep call stack,
+    /// and they may not be well tested against late window creation, which may lead to stack
+    /// overflow. Hence, this should be called as early as possible when the VM is booting.
+    pub fn start_thread(self) -> Result<WindowProcedureThread<T>> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "kiwi")] {
+                let ime_tube = self.ime_tube.ok_or_else(|| anyhow!("The ime tube is not set."))?;
+                WindowProcedureThread::<T>::start_thread(self.display_tube, ime_tube)
+            } else {
+                WindowProcedureThread::<T>::start_thread(None)
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

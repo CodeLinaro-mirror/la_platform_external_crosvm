@@ -146,8 +146,8 @@
       // Keep cargo2android from adding ISA specific deps so that we can add them
       // correctly via patches.
       "dep_blocklist": [
-        "libx86_64_rust",
-        "libaarch64_rust"
+        "libx86_64",
+        "libaarch64"
       ],
       "patch": "patches/Android.bp.patch"
     },

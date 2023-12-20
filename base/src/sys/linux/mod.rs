@@ -106,8 +106,7 @@ pub use priority::*;
 pub use sched::*;
 pub use scoped_signal_handler::*;
 pub use shm::MemfdSeals;
-pub use shm::SharedMemory;
-pub use shm::Unix as SharedMemoryUnix;
+pub use shm::SharedMemoryLinux;
 pub use signal::*;
 pub use signalfd::Error as SignalFdError;
 pub use signalfd::*;
@@ -140,7 +139,7 @@ macro_rules! syscall {
     ($e:expr) => {{
         let res = $e;
         if res < 0 {
-            $crate::platform::errno_result()
+            $crate::linux::errno_result()
         } else {
             Ok(res)
         }
@@ -351,7 +350,7 @@ pub fn wait_for_pid<A: AsRawPid>(pid: A, options: c_int) -> Result<(Option<Pid>,
 /// ```
 /// fn reap_children() {
 ///     loop {
-///         match base::platform::reap_child() {
+///         match base::linux::reap_child() {
 ///             Ok(0) => println!("no children ready to reap"),
 ///             Ok(pid) => {
 ///                 println!("reaped {}", pid);
