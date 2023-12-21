@@ -21,7 +21,6 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libbase_rust",
-        "libdata_model",
         "liblibc",
         "libsync_rust",
         "libthiserror",

@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use base::error;
 use base::pagesize;
+use base::Protection;
 use data_model::zerocopy_from_reader;
 use zerocopy::AsBytes;
 
@@ -96,14 +97,14 @@ pub trait Mapper {
     /// * `size` - Size of memory region in bytes.
     /// * `fd` - File descriptor to mmap from.
     /// * `file_offset` - Offset in bytes from the beginning of `fd` to start the mmap.
-    /// * `prot` - Protection (e.g. `libc::PROT_READ`) of the memory region.
+    /// * `prot` - Protection of the memory region.
     fn map(
         &self,
         mem_offset: u64,
         size: usize,
         fd: &dyn AsRawFd,
         file_offset: u64,
-        prot: u32,
+        prot: Protection,
     ) -> io::Result<()>;
 
     /// Unmaps `size` bytes at `offset` bytes from the start of the memory region. `offset` must be
@@ -122,7 +123,7 @@ impl<'a, M: Mapper> Mapper for &'a M {
         size: usize,
         fd: &dyn AsRawFd,
         file_offset: u64,
-        prot: u32,
+        prot: Protection,
     ) -> io::Result<()> {
         (**self).map(mem_offset, size, fd, file_offset, prot)
     }
@@ -208,6 +209,7 @@ impl<F: FileSystem + Sync> Server<F> {
             Some(Opcode::ChromeOsTmpfile) => self.chromeos_tmpfile(in_header, r, w),
             Some(Opcode::SetUpMapping) => self.set_up_mapping(in_header, r, w, mapper),
             Some(Opcode::RemoveMapping) => self.remove_mapping(in_header, r, w, mapper),
+            Some(Opcode::OpenAtomic) => self.open_atomic(in_header, r, w),
             None => reply_error(
                 io::Error::from_raw_os_error(libc::ENOSYS),
                 in_header.unique,
@@ -1102,8 +1104,8 @@ impl<F: FileSystem + Sync> Server<F> {
         let parent = in_header.nodeid.into();
         let name = dir_entry.name.to_bytes();
         let entry = if name == b"." || name == b".." {
-            // Don't do lookups on the current directory or the parent directory. Safe because
-            // this only contains integer fields and any value is valid.
+            // Don't do lookups on the current directory or the parent directory.
+            // SAFETY: struct only contains integer fields and any value is valid.
             let mut attr = unsafe { MaybeUninit::<libc::stat64>::zeroed().assume_init() };
             attr.st_ino = dir_entry.ino;
             attr.st_mode = dir_entry.type_;
@@ -1623,6 +1625,68 @@ impl<F: FileSystem + Sync> Server<F> {
 
         match self.fs.remove_mapping(&msgs, mapper) {
             Ok(()) => reply_ok(None::<u8>, None, in_header.unique, w),
+            Err(e) => reply_error(e, in_header.unique, w),
+        }
+    }
+
+    fn open_atomic<R: Reader, W: Writer>(
+        &self,
+        in_header: InHeader,
+        mut r: R,
+        w: W,
+    ) -> Result<usize> {
+        let CreateIn {
+            flags, mode, umask, ..
+        } = zerocopy_from_reader(&mut r).map_err(Error::DecodeMessage)?;
+
+        let buflen = (in_header.len as usize)
+            .checked_sub(size_of::<InHeader>())
+            .and_then(|l| l.checked_sub(size_of::<CreateIn>()))
+            .ok_or(Error::InvalidHeaderLength)?;
+
+        let mut buf = vec![0; buflen];
+
+        r.read_exact(&mut buf).map_err(Error::DecodeMessage)?;
+
+        let mut iter = buf.split_inclusive(|&c| c == b'\0');
+        let name = iter
+            .next()
+            .ok_or(Error::MissingParameter)
+            .and_then(bytes_to_cstr)?;
+
+        match self.fs.atomic_open(
+            Context::from(in_header),
+            in_header.nodeid.into(),
+            name,
+            mode,
+            flags,
+            umask,
+        ) {
+            Ok((entry, handle, opts)) => {
+                let entry_out = EntryOut {
+                    nodeid: entry.inode,
+                    generation: entry.generation,
+                    entry_valid: entry.entry_timeout.as_secs(),
+                    attr_valid: entry.attr_timeout.as_secs(),
+                    entry_valid_nsec: entry.entry_timeout.subsec_nanos(),
+                    attr_valid_nsec: entry.attr_timeout.subsec_nanos(),
+                    attr: entry.attr.into(),
+                };
+                let open_out = OpenOut {
+                    fh: handle.map(Into::into).unwrap_or(0),
+                    open_flags: opts.bits(),
+                    ..Default::default()
+                };
+
+                // open_out passed the `data` argument, but the two out structs are independent
+                // This is a hack to return two out stucts in one fuse reply
+                reply_ok(
+                    Some(entry_out),
+                    Some(open_out.as_bytes()),
+                    in_header.unique,
+                    w,
+                )
+            }
             Err(e) => reply_error(e, in_header.unique, w),
         }
     }

@@ -2,14 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::io;
-use std::io::Read;
-use std::io::Write;
-
-use libc::c_int;
-use libc::c_uint;
 use libc::c_void;
-use remain::sorted;
 use win_util::create_file_mapping;
 use win_util::duplicate_handle;
 use winapi::um::winnt::PAGE_READWRITE;
@@ -21,50 +14,11 @@ use crate::FromRawDescriptor;
 use crate::MappedRegion;
 use crate::MemoryMapping as CrateMemoryMapping;
 use crate::MemoryMappingBuilder;
+use crate::MmapError as Error;
+use crate::MmapResult as Result;
 use crate::Protection;
 use crate::RawDescriptor;
 use crate::SafeDescriptor;
-
-#[sorted]
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("`add_fd_mapping` is unsupported")]
-    AddFdMappingIsUnsupported,
-    #[error("requested memory out of range")]
-    InvalidAddress,
-    #[error("invalid argument provided when creating mapping")]
-    InvalidArgument,
-    #[error("requested offset is out of range of off_t")]
-    InvalidOffset,
-    #[error("requested memory range spans past the end of the region: offset={0} count={1} region_size={2}")]
-    InvalidRange(usize, usize, usize),
-    #[error("requested memory is not page aligned")]
-    NotPageAligned,
-    #[error("failed to read from file to memory: {0}")]
-    ReadToMemory(#[source] io::Error),
-    #[error("`remove_mapping` is unsupported")]
-    RemoveMappingIsUnsupported,
-    #[error("system call failed while creating the mapping: {0}")]
-    StdSyscallFailed(io::Error),
-    #[error("mmap related system call failed: {0}")]
-    SystemCallFailed(#[source] super::Error),
-    #[error("failed to write from memory to file: {0}")]
-    WriteFromMemory(#[source] io::Error),
-}
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl From<c_uint> for Protection {
-    fn from(f: c_uint) -> Self {
-        Protection::from(f as c_int)
-    }
-}
-
-impl From<Protection> for c_uint {
-    fn from(p: Protection) -> c_uint {
-        let i: c_int = p.into();
-        i as c_uint
-    }
-}
 
 /// Validates that `offset`..`offset+range_size` lies within the bounds of a memory mapping of
 /// `mmap_size` bytes.  Also checks for any overflow.
@@ -180,24 +134,6 @@ unsafe impl MappedRegion for MemoryMapping {
 }
 
 impl CrateMemoryMapping {
-    pub fn read_to_memory<F: Read>(
-        &self,
-        mem_offset: usize,
-        src: &mut F,
-        count: usize,
-    ) -> Result<()> {
-        self.mapping.read_to_memory(mem_offset, src, count)
-    }
-
-    pub fn write_from_memory<F: Write>(
-        &self,
-        mem_offset: usize,
-        dst: &mut F,
-        count: usize,
-    ) -> Result<()> {
-        self.mapping.write_from_memory(mem_offset, dst, count)
-    }
-
     pub fn from_raw_ptr(addr: RawDescriptor, size: usize) -> Result<CrateMemoryMapping> {
         MemoryMapping::from_raw_ptr(addr, size).map(|mapping| CrateMemoryMapping {
             mapping,
@@ -302,11 +238,10 @@ impl<'a> MemoryMappingBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use data_model::VolatileMemory;
-    use data_model::VolatileMemoryError;
-
     use super::*;
     use crate::SharedMemory;
+    use crate::VolatileMemory;
+    use crate::VolatileMemoryError;
 
     // get_slice() and other methods are only available on crate::MemoryMapping.
     fn to_crate_mmap(mapping: MemoryMapping) -> crate::MemoryMapping {

@@ -26,7 +26,8 @@ mod test {
         let shm = create_shared_memory("test", 3 * pagesize());
         let uffd = create_uffd_for_test();
         let base_addr = shm.base_addr();
-        let regions = [base_addr..(base_addr + 3 * pagesize())];
+        let region = base_addr..(base_addr + 3 * pagesize());
+        let regions = [region];
         let (tube_main, tube_child) = Tube::pair().unwrap();
         let pid = unsafe { libc::fork() };
         if pid == 0 {
@@ -54,7 +55,8 @@ mod test {
         let shm = create_shared_memory("test", 3 * pagesize());
         let uffd = create_uffd_for_test();
         let base_addr = shm.base_addr();
-        let regions = [base_addr..(base_addr + 3 * pagesize())];
+        let region = base_addr..(base_addr + 3 * pagesize());
+        let regions = [region];
         let (tube_main, tube_child) = Tube::pair().unwrap();
         let pid = unsafe { libc::fork() };
         if pid == 0 {
@@ -94,14 +96,26 @@ fn main() {
     let tests = vec![
         #[cfg(all(unix, feature = "enable"))]
         libtest_mimic::Trial::test("register_region_skip_obsolete_process", move || {
-            test::register_region_skip_obsolete_process();
+            base::test_utils::call_test_with_sudo("register_region_skip_obsolete_process_impl");
             Ok(())
         }),
         #[cfg(all(unix, feature = "enable"))]
         libtest_mimic::Trial::test("unregister_region_skip_obsolete_process", move || {
-            test::unregister_region_skip_obsolete_process();
+            base::test_utils::call_test_with_sudo("unregister_region_skip_obsolete_process_impl");
             Ok(())
         }),
+        #[cfg(all(unix, feature = "enable"))]
+        libtest_mimic::Trial::test("register_region_skip_obsolete_process_impl", move || {
+            test::register_region_skip_obsolete_process();
+            Ok(())
+        })
+        .with_ignored_flag(true),
+        #[cfg(all(unix, feature = "enable"))]
+        libtest_mimic::Trial::test("unregister_region_skip_obsolete_process_impl", move || {
+            test::unregister_region_skip_obsolete_process();
+            Ok(())
+        })
+        .with_ignored_flag(true),
     ];
     libtest_mimic::run(&args, tests).exit();
 }

@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use base::AsRawDescriptor;
 use base::RawDescriptor;
-use data_model::VolatileSlice;
+use base::VolatileSlice;
 use libc::shmat;
 use libc::shmctl;
 use libc::shmdt;
@@ -536,6 +536,7 @@ impl DisplayT for DisplayX {
                     let events = vec![virtio_input_event::key(
                         linux_keycode,
                         key.type_ == xlib::KeyPress as i32,
+                        false,
                     )];
 
                     return Some(GpuDisplayEvents {

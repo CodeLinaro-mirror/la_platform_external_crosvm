@@ -25,14 +25,10 @@ rust_test {
     },
     edition: "2021",
     rustlibs: [
-        "libcfg_if",
-        "liblibc",
         "libserde",
         "libstatic_assertions",
-        "libthiserror",
         "libzerocopy",
     ],
-    proc_macros: ["libremain"],
 }
 
 rust_library {
@@ -45,12 +41,8 @@ rust_library {
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
-        "libcfg_if",
-        "liblibc",
         "libserde",
         "libstatic_assertions",
-        "libthiserror",
         "libzerocopy",
     ],
-    proc_macros: ["libremain"],
 }

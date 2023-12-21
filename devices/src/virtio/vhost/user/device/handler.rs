@@ -38,11 +38,11 @@
 //!
 // Implementation note:
 // This code lets us take advantage of the vmm_vhost low level implementation of the vhost user
-// protocol. DeviceRequestHandler implements the VhostUserSlaveReqHandlerMut trait from vmm_vhost,
+// protocol. DeviceRequestHandler implements the VhostUserSlaveReqHandler trait from vmm_vhost,
 // and includes some common code for setting up guest memory and managing partially configured
 // vrings. DeviceRequestHandler::run watches the vhost-user socket and then calls handle_request()
 // when it becomes readable. handle_request() reads and parses the message and then calls one of the
-// VhostUserSlaveReqHandlerMut trait methods. These dispatch back to the supplied VhostUserBackend
+// VhostUserSlaveReqHandler trait methods. These dispatch back to the supplied VhostUserBackend
 // implementation (this is what our devices implement).
 
 pub(super) mod sys;
@@ -69,13 +69,12 @@ use base::SharedMemory;
 use cros_async::TaskHandle;
 use serde::Deserialize;
 use serde::Serialize;
+use sync::Mutex;
 use thiserror::Error as ThisError;
 use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::MemoryRegion;
-use vmm_vhost::connection::Endpoint;
-use vmm_vhost::message::SlaveReq;
 use vmm_vhost::message::VhostSharedMemoryRegion;
 use vmm_vhost::message::VhostUserConfigFlags;
 use vmm_vhost::message::VhostUserGpuMapMsg;
@@ -88,11 +87,13 @@ use vmm_vhost::message::VhostUserShmemUnmapMsg;
 use vmm_vhost::message::VhostUserSingleMemoryRegion;
 use vmm_vhost::message::VhostUserVringAddrFlags;
 use vmm_vhost::message::VhostUserVringState;
+use vmm_vhost::Connection;
 use vmm_vhost::Error as VhostError;
 use vmm_vhost::Result as VhostResult;
 use vmm_vhost::Slave;
+use vmm_vhost::SlaveReq;
 use vmm_vhost::VhostUserMasterReqHandler;
-use vmm_vhost::VhostUserSlaveReqHandlerMut;
+use vmm_vhost::VhostUserSlaveReqHandler;
 use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 
 use crate::virtio::Interrupt;
@@ -418,7 +419,7 @@ impl DeviceRequestHandler {
     }
 }
 
-impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
+impl VhostUserSlaveReqHandler for DeviceRequestHandler {
     fn set_owner(&mut self) -> VhostResult<()> {
         if self.owned {
             return Err(VhostError::InvalidOperation);
@@ -666,7 +667,7 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
         Ok(())
     }
 
-    fn set_slave_req_fd(&mut self, ep: Box<dyn Endpoint<SlaveReq>>) {
+    fn set_slave_req_fd(&mut self, ep: Connection<SlaveReq>) {
         let conn = VhostBackendReqConnection::new(
             Slave::new(ep),
             self.backend.get_shared_memory_region().map(|r| r.id),
@@ -721,7 +722,10 @@ impl VhostUserSlaveReqHandlerMut for DeviceRequestHandler {
         {
             match self.backend.stop_queue(index) {
                 Ok(queue) => vring.paused_queue = Some(queue),
-                Err(e) => return Err(VhostError::StopQueueError(e)),
+                Err(e) => {
+                    error!("failed to stop queue index {}: {:#}", index, e);
+                    return Err(VhostError::StopQueueError(e));
+                }
             }
         }
         self.backend
@@ -817,7 +821,7 @@ pub enum VhostBackendReqConnectionState {
 
 /// Keeps track of Vhost user backend request connection.
 pub struct VhostBackendReqConnection {
-    conn: Slave,
+    conn: Arc<Mutex<Slave>>,
     shmem_info: Option<ShmemInfo>,
 }
 
@@ -833,12 +837,16 @@ impl VhostBackendReqConnection {
             shmid,
             mapped_regions: BTreeMap::new(),
         });
-        Self { conn, shmem_info }
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+            shmem_info,
+        }
     }
 
     /// Send `VHOST_USER_CONFIG_CHANGE_MSG` to the frontend
     pub fn send_config_changed(&self) -> anyhow::Result<()> {
         self.conn
+            .lock()
             .handle_config_change()
             .context("Could not send config change message")?;
         Ok(())
@@ -859,7 +867,7 @@ impl VhostBackendReqConnection {
 }
 
 struct VhostShmemMapper {
-    conn: Slave,
+    conn: Arc<Mutex<Slave>>,
     shmem_info: ShmemInfo,
 }
 
@@ -893,6 +901,7 @@ impl SharedMemoryMapper for VhostShmemMapper {
                         driver_uuid,
                     );
                     self.conn
+                        .lock()
                         .gpu_map(&msg, &descriptor)
                         .context("failed to map memory")?;
                     size
@@ -919,6 +928,7 @@ impl SharedMemoryMapper for VhostShmemMapper {
             let msg =
                 VhostUserShmemMapMsg::new(self.shmem_info.shmid, offset, fd_offset, size, flags);
             self.conn
+                .lock()
                 .shmem_map(&msg, &descriptor)
                 .context("failed to map memory")?;
             size
@@ -936,6 +946,7 @@ impl SharedMemoryMapper for VhostShmemMapper {
             .context("unknown offset")?;
         let msg = VhostUserShmemUnmapMsg::new(self.shmem_info.shmid, offset, size);
         self.conn
+            .lock()
             .shmem_unmap(&msg)
             .context("failed to map memory")
             .map(|_| ())
@@ -958,12 +969,10 @@ pub enum Error {
 mod tests {
     use std::sync::mpsc::channel;
     use std::sync::Barrier;
-    use std::sync::Mutex;
 
     use anyhow::anyhow;
     use anyhow::bail;
     use base::Event;
-    use vmm_vhost::message::MasterReq;
     use vmm_vhost::SlaveReqHandler;
     use vmm_vhost::VhostUserSlaveReqHandler;
     use zerocopy::AsBytes;
@@ -1130,10 +1139,8 @@ mod tests {
         });
 
         // Device side
-        let handler = Mutex::new(DeviceRequestHandler::new(
-            Box::new(FakeBackend::new()),
-            Box::new(VhostUserRegularOps),
-        ));
+        let handler =
+            DeviceRequestHandler::new(Box::new(FakeBackend::new()), Box::new(VhostUserRegularOps));
 
         // Notify listener is ready.
         tx.send(()).unwrap();
@@ -1177,8 +1184,8 @@ mod tests {
         }
     }
 
-    fn handle_request<S: VhostUserSlaveReqHandler, E: Endpoint<MasterReq>>(
-        handler: &mut SlaveReqHandler<S, E>,
+    fn handle_request<S: VhostUserSlaveReqHandler>(
+        handler: &mut SlaveReqHandler<S>,
     ) -> Result<(), VhostError> {
         let (hdr, files) = handler.recv_header()?;
         handler.process_message(hdr, files)

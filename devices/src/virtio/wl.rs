@@ -38,7 +38,6 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::fs::File;
 use std::io;
-use std::io::IoSliceMut;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -84,9 +83,11 @@ use base::ScmSocket;
 use base::SharedMemory;
 use base::Tube;
 use base::TubeError;
+use base::VolatileMemoryError;
 use base::WaitContext;
 use base::WorkerThread;
-use data_model::*;
+use data_model::Le32;
+use data_model::Le64;
 #[cfg(feature = "minigbm")]
 use libc::EBADF;
 #[cfg(feature = "minigbm")]
@@ -766,7 +767,7 @@ impl<'a> WlResp<'a> {
 
 #[derive(Default)]
 struct WlVfd {
-    socket: Option<UnixStream>,
+    socket: Option<ScmSocket<UnixStream>>,
     guest_shared_memory: Option<SharedMemory>,
     remote_pipe: Option<File>,
     local_pipe: Option<(u32 /* flags */, File)>,
@@ -800,7 +801,7 @@ impl WlVfd {
     fn connect<P: AsRef<Path>>(path: P) -> WlResult<WlVfd> {
         let socket = UnixStream::connect(path).map_err(WlError::SocketConnect)?;
         let mut vfd = WlVfd::default();
-        vfd.socket = Some(socket);
+        vfd.socket = Some(socket.try_into().map_err(WlError::SocketConnect)?);
         Ok(vfd)
     }
 
@@ -973,7 +974,7 @@ impl WlVfd {
     fn send(&mut self, rds: &[RawDescriptor], data: &mut Reader) -> WlResult<WlResp> {
         if let Some(socket) = &self.socket {
             socket
-                .send_with_fds(&data.get_remaining(), rds)
+                .send_vectored_with_fds(&data.get_remaining(), rds)
                 .map_err(WlError::SendVfd)?;
             // All remaining data in `data` is now considered consumed.
             data.consume(::std::usize::MAX);
@@ -995,29 +996,21 @@ impl WlVfd {
     fn recv(&mut self, in_file_queue: &mut Vec<File>) -> WlResult<Vec<u8>> {
         if let Some(socket) = self.socket.take() {
             let mut buf = vec![0; IN_BUFFER_LEN];
-            let mut fd_buf = [0; VIRTWL_SEND_MAX_ALLOCS];
             // If any errors happen, the socket will get dropped, preventing more reading.
-            let (len, file_count) = socket
-                .recv_with_fds(IoSliceMut::new(&mut buf), &mut fd_buf)
+            let (len, descriptors) = socket
+                .recv_with_fds(&mut buf, VIRTWL_SEND_MAX_ALLOCS)
                 .map_err(WlError::RecvVfd)?;
             // If any data gets read, the put the socket back for future recv operations.
-            if len != 0 || file_count != 0 {
+            if len != 0 || !descriptors.is_empty() {
                 buf.truncate(len);
                 buf.shrink_to_fit();
                 self.socket = Some(socket);
-                // Safe because the first file_counts fds from recv_with_fds are owned by us and
-                // valid.
-                in_file_queue.extend(
-                    fd_buf[..file_count]
-                        .iter()
-                        .map(|&descriptor| unsafe { File::from_raw_descriptor(descriptor) }),
-                );
+                in_file_queue.extend(descriptors.into_iter().map(File::from));
                 return Ok(buf);
             }
             Ok(Vec::new())
         } else if let Some((flags, mut local_pipe)) = self.local_pipe.take() {
-            let mut buf = Vec::new();
-            buf.resize(IN_BUFFER_LEN, 0);
+            let mut buf = vec![0; IN_BUFFER_LEN];
             let len = local_pipe.read(&mut buf[..]).map_err(WlError::ReadPipe)?;
             if len != 0 {
                 buf.truncate(len);
@@ -2062,7 +2055,7 @@ impl VirtioDevice for Wl {
     // implementation as part of b/266514618
     // virtio-wl is not used, but is created. As such, virtio_snapshot/restore will be called when
     // cuttlefish attempts to take a snapshot.
-    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+    fn virtio_snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::Value::Null)
     }
 

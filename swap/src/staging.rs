@@ -13,9 +13,9 @@ use base::MemoryMapping;
 use base::MemoryMappingBuilder;
 use base::MmapError;
 use base::SharedMemory;
-use data_model::VolatileMemory;
-use data_model::VolatileMemoryError;
-use data_model::VolatileSlice;
+use base::VolatileMemory;
+use base::VolatileMemoryError;
+use base::VolatileSlice;
 use thiserror::Error as ThisError;
 
 use crate::pagesize::pages_to_bytes;
@@ -285,7 +285,7 @@ mod tests {
         }
 
         let page = staging_memory.page_content(0).unwrap().unwrap();
-        let result = unsafe { std::slice::from_raw_parts(page.as_ptr() as *const u8, page.size()) };
+        let result = unsafe { std::slice::from_raw_parts(page.as_ptr(), page.size()) };
         assert_eq!(result, &vec![1; pagesize()]);
     }
 

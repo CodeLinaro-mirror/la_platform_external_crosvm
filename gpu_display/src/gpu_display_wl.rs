@@ -5,7 +5,6 @@
 //! Crate for displaying simple surfaces and GPU buffers over wayland.
 
 extern crate base;
-extern crate data_model;
 
 #[path = "dwl.rs"]
 mod dwl;
@@ -27,7 +26,7 @@ use base::MemoryMapping;
 use base::MemoryMappingBuilder;
 use base::RawDescriptor;
 use base::SharedMemory;
-use data_model::VolatileMemory;
+use base::VolatileMemory;
 use dwl::*;
 use linux_input_sys::virtio_input_event;
 
@@ -296,7 +295,7 @@ impl DisplayT for DisplayWl {
             DWL_EVENT_TYPE_KEYBOARD_KEY => {
                 let linux_keycode = event.params[0] as u16;
                 let pressed = event.params[1] == DWL_KEYBOARD_KEY_STATE_PRESSED;
-                let events = vec![virtio_input_event::key(linux_keycode, pressed)];
+                let events = vec![virtio_input_event::key(linux_keycode, pressed, false)];
                 Some(GpuDisplayEvents {
                     events,
                     device_type: EventDeviceKind::Keyboard,

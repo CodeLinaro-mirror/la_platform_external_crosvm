@@ -15,6 +15,7 @@ use std::thread;
 use std::time;
 
 use base::pagesize;
+use base::test_utils::call_test_with_sudo;
 use base::MappedRegion;
 use base::MemoryMappingBuilder;
 use base::SharedMemory;
@@ -29,6 +30,12 @@ const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
 #[test]
 fn create_success() {
+    call_test_with_sudo("create_success_impl")
+}
+
+#[ignore = "Only to be called by create_success"]
+#[test]
+fn create_success_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 6 * pagesize() as u64).unwrap();
@@ -51,6 +58,12 @@ fn create_success() {
 
 #[test]
 fn create_partially_overlap() {
+    call_test_with_sudo("create_partially_overlap_impl")
+}
+
+#[ignore = "Only to be called by create_partially_overlap"]
+#[test]
+fn create_partially_overlap_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 3 * pagesize() as u64).unwrap();
@@ -88,18 +101,20 @@ fn create_partially_overlap() {
 
 #[test]
 fn create_invalid_range() {
+    call_test_with_sudo("create_invalid_range_impl")
+}
+
+#[ignore = "Only to be called by create_invalid_range"]
+#[test]
+fn create_invalid_range_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 6 * pagesize() as u64).unwrap();
     let shm = create_shared_memory("shm", 6 * pagesize());
     let base_addr = shm.base_addr();
+    let region = base_addr..(base_addr - pagesize());
 
-    let result = PageHandler::create(
-        &file,
-        &staging_shmem,
-        &[base_addr..(base_addr - pagesize())],
-        worker.channel.clone(),
-    );
+    let result = PageHandler::create(&file, &staging_shmem, &[region], worker.channel.clone());
 
     assert!(result.is_err());
     worker.close();
@@ -117,13 +132,20 @@ fn wait_thread_with_timeout<T>(join_handle: thread::JoinHandle<T>, timeout_milli
 
 #[test]
 fn handle_page_fault_zero_success() {
+    call_test_with_sudo("handle_page_fault_zero_success_impl")
+}
+
+#[ignore = "Only to be called by handle_page_fault_zero_success"]
+#[test]
+fn handle_page_fault_zero_success_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 3 * pagesize() as u64).unwrap();
     let uffd = create_uffd_for_test();
     let shm = create_shared_memory("shm", 3 * pagesize());
     let base_addr = shm.base_addr();
-    let regions = [base_addr..(base_addr + 3 * pagesize())];
+    let region = base_addr..(base_addr + 3 * pagesize());
+    let regions = [region];
     let page_handler =
         PageHandler::create(&file, &staging_shmem, &regions, worker.channel.clone()).unwrap();
     unsafe { register_regions(&regions, array::from_ref(&uffd)) }.unwrap();
@@ -156,13 +178,20 @@ fn handle_page_fault_zero_success() {
 
 #[test]
 fn handle_page_fault_invalid_address() {
+    call_test_with_sudo("handle_page_fault_invalid_address_impl")
+}
+
+#[ignore = "Only to be called by handle_page_fault_invalid_address"]
+#[test]
+fn handle_page_fault_invalid_address_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 3 * pagesize() as u64).unwrap();
     let uffd = create_uffd_for_test();
     let shm = create_shared_memory("shm", 3 * pagesize());
     let base_addr = shm.base_addr();
-    let regions = [base_addr..(base_addr + 3 * pagesize())];
+    let region = base_addr..(base_addr + 3 * pagesize());
+    let regions = [region];
     let page_handler =
         PageHandler::create(&file, &staging_shmem, &regions, worker.channel.clone()).unwrap();
     unsafe { register_regions(&regions, array::from_ref(&uffd)) }.unwrap();
@@ -184,13 +213,20 @@ fn handle_page_fault_invalid_address() {
 
 #[test]
 fn handle_page_fault_duplicated_page_fault() {
+    call_test_with_sudo("handle_page_fault_duplicated_page_fault_impl")
+}
+
+#[ignore = "Only to be called by handle_page_fault_duplicated_page_fault"]
+#[test]
+fn handle_page_fault_duplicated_page_fault_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 3 * pagesize() as u64).unwrap();
     let uffd = create_uffd_for_test();
     let shm = create_shared_memory("shm", 3 * pagesize());
     let base_addr = shm.base_addr();
-    let regions = [base_addr..(base_addr + 3 * pagesize())];
+    let region = base_addr..(base_addr + 3 * pagesize());
+    let regions = [region];
     let page_handler =
         PageHandler::create(&file, &staging_shmem, &regions, worker.channel.clone()).unwrap();
     unsafe { register_regions(&regions, array::from_ref(&uffd)) }.unwrap();
@@ -208,13 +244,20 @@ fn handle_page_fault_duplicated_page_fault() {
 
 #[test]
 fn handle_page_remove_success() {
+    call_test_with_sudo("handle_page_remove_success_impl")
+}
+
+#[ignore = "Only to be called by handle_page_remove_success"]
+#[test]
+fn handle_page_remove_success_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 3 * pagesize() as u64).unwrap();
     let uffd = create_uffd_for_test();
     let shm = create_shared_memory("shm", 3 * pagesize());
     let base_addr = shm.base_addr();
-    let regions = [base_addr..(base_addr + 3 * pagesize())];
+    let region = base_addr..(base_addr + 3 * pagesize());
+    let regions = [region];
     let page_handler =
         PageHandler::create(&file, &staging_shmem, &regions, worker.channel.clone()).unwrap();
     unsafe { register_regions(&regions, array::from_ref(&uffd)) }.unwrap();
@@ -254,13 +297,20 @@ fn handle_page_remove_success() {
 
 #[test]
 fn handle_page_remove_invalid_address() {
+    call_test_with_sudo("handle_page_remove_invalid_address_impl")
+}
+
+#[ignore = "Only to be called by handle_page_remove_invalid_address"]
+#[test]
+fn handle_page_remove_invalid_address_impl() {
     let worker = Worker::new(2, 2);
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 3 * pagesize() as u64).unwrap();
     let uffd = create_uffd_for_test();
     let shm = create_shared_memory("shm", 3 * pagesize());
     let base_addr = shm.base_addr();
-    let regions = [base_addr..(base_addr + 3 * pagesize())];
+    let region = base_addr..(base_addr + 3 * pagesize());
+    let regions = [region];
     let page_handler =
         PageHandler::create(&file, &staging_shmem, &regions, worker.channel.clone()).unwrap();
     unsafe { register_regions(&regions, array::from_ref(&uffd)) }.unwrap();
@@ -296,6 +346,12 @@ fn handle_page_remove_invalid_address() {
 
 #[test]
 fn move_to_staging_data_written_before_enabling() {
+    call_test_with_sudo("move_to_staging_data_written_before_enabling_impl")
+}
+
+#[ignore = "Only to be called by move_to_staging_data_written_before_enabling"]
+#[test]
+fn move_to_staging_data_written_before_enabling_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();
@@ -391,6 +447,12 @@ fn page_idx_to_addr(page_idx: usize) -> usize {
 
 #[test]
 fn move_to_staging_hugepage_chunks() {
+    call_test_with_sudo("move_to_staging_hugepage_chunks_impl")
+}
+
+#[ignore = "Only to be called by move_to_staging_hugepage_chunks"]
+#[test]
+fn move_to_staging_hugepage_chunks_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();
@@ -520,13 +582,20 @@ fn move_to_staging_hugepage_chunks() {
 
 #[test]
 fn move_to_staging_invalid_base_addr() {
+    call_test_with_sudo("move_to_staging_invalid_base_addr_impl")
+}
+
+#[ignore = "Only to be called by move_to_staging_invalid_base_addr"]
+#[test]
+fn move_to_staging_invalid_base_addr_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();
     let staging_shmem = SharedMemory::new("test staging memory", 3 * pagesize() as u64).unwrap();
     let shm = create_shared_memory("shm1", 3 * pagesize());
     let base_addr = shm.base_addr();
-    let regions = [base_addr..(base_addr + 3 * pagesize())];
+    let region = base_addr..(base_addr + 3 * pagesize());
+    let regions = [region];
     let page_handler =
         PageHandler::create(&file, &staging_shmem, &regions, worker.channel.clone()).unwrap();
     unsafe { register_regions(&regions, array::from_ref(&uffd)) }.unwrap();
@@ -550,6 +619,12 @@ fn swap_out_all(page_handler: &PageHandler) {
 
 #[test]
 fn swap_out_success() {
+    call_test_with_sudo("swap_out_success_impl")
+}
+
+#[ignore = "Only to be called by swap_out_success"]
+#[test]
+fn swap_out_success_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();
@@ -635,6 +710,12 @@ fn swap_out_success() {
 
 #[test]
 fn swap_out_handled_page() {
+    call_test_with_sudo("swap_out_handled_page_impl")
+}
+
+#[ignore = "Only to be called by swap_out_handled_page"]
+#[test]
+fn swap_out_handled_page_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();
@@ -646,7 +727,8 @@ fn swap_out_handled_page() {
         .unwrap();
     let base_addr1 = mmap1.as_ptr() as usize;
 
-    let regions = [base_addr1..(base_addr1 + 3 * pagesize())];
+    let region = base_addr1..(base_addr1 + 3 * pagesize());
+    let regions = [region];
     let page_handler =
         PageHandler::create(&file, &staging_shmem, &regions, worker.channel.clone()).unwrap();
     // write data before registering to userfaultfd
@@ -688,6 +770,12 @@ fn swap_out_handled_page() {
 
 #[test]
 fn swap_out_twice() {
+    call_test_with_sudo("swap_out_twice_impl")
+}
+
+#[ignore = "Only to be called by swap_out_twice"]
+#[test]
+fn swap_out_twice_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();
@@ -801,6 +889,12 @@ fn swap_out_twice() {
 
 #[test]
 fn swap_in_success() {
+    call_test_with_sudo("swap_in_success_impl")
+}
+
+#[ignore = "Only to be called by swap_in_success"]
+#[test]
+fn swap_in_success_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();
@@ -899,6 +993,12 @@ fn swap_in_success() {
 
 #[test]
 fn trim_success() {
+    call_test_with_sudo("trim_success_impl")
+}
+
+#[ignore = "Only to be called by trim_success"]
+#[test]
+fn trim_success_impl() {
     let worker = Worker::new(2, 2);
     let uffd = create_uffd_for_test();
     let file = tempfile::tempfile().unwrap();

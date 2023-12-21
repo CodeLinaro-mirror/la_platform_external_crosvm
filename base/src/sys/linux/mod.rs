@@ -15,8 +15,6 @@ mod linux;
 use linux as target_os;
 use log::warn;
 #[macro_use]
-pub mod handle_eintr;
-#[macro_use]
 pub mod ioctl;
 #[macro_use]
 pub mod syslog;
@@ -29,7 +27,7 @@ mod file_flags;
 pub mod file_traits;
 mod get_filesystem_type;
 mod mmap;
-pub mod net;
+mod net;
 mod netlink;
 mod notifiers;
 pub mod panic_handler;
@@ -38,25 +36,21 @@ mod poll;
 mod priority;
 pub mod process;
 mod sched;
-pub mod scoped_signal_handler;
 mod shm;
 pub mod signal;
 mod signalfd;
-mod sock_ctrl_msg;
-mod stream_channel;
 mod terminal;
 mod timer;
 pub mod tube;
 pub mod vsock;
 mod write_zeroes;
 
-use std::ffi::CStr;
 use std::fs::remove_file;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::mem;
+use std::mem::MaybeUninit;
 use std::ops::Deref;
-use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixDatagram;
@@ -76,6 +70,7 @@ pub(crate) use event::PlatformEvent;
 pub use file::find_next_data;
 pub use file::FileDataIterator;
 pub use file_flags::*;
+pub(crate) use file_traits::lib::*;
 pub use get_filesystem_type::*;
 pub use ioctl::*;
 use libc::c_int;
@@ -83,7 +78,6 @@ use libc::c_long;
 use libc::fcntl;
 use libc::pipe2;
 use libc::syscall;
-use libc::sysconf;
 use libc::waitpid;
 use libc::SYS_getpid;
 use libc::SYS_getppid;
@@ -92,26 +86,22 @@ use libc::EINVAL;
 use libc::F_GETFL;
 use libc::F_SETFL;
 use libc::O_CLOEXEC;
-pub(crate) use libc::PROT_READ;
-pub(crate) use libc::PROT_WRITE;
 use libc::SIGKILL;
 use libc::WNOHANG;
-use libc::_SC_IOV_MAX;
-use libc::_SC_PAGESIZE;
-pub use mmap::Error as MmapError;
 pub use mmap::*;
+pub(in crate::sys) use net::sendmsg_nosignal as sendmsg;
+pub(in crate::sys) use net::sockaddr_un;
+pub(in crate::sys) use net::sockaddrv4_to_lib_c;
+pub(in crate::sys) use net::sockaddrv6_to_lib_c;
 pub use netlink::*;
 pub use poll::EventContext;
 pub use priority::*;
 pub use sched::*;
-pub use scoped_signal_handler::*;
 pub use shm::MemfdSeals;
 pub use shm::SharedMemoryLinux;
 pub use signal::*;
 pub use signalfd::Error as SignalFdError;
 pub use signalfd::*;
-pub use sock_ctrl_msg::*;
-pub use stream_channel::*;
 pub use terminal::*;
 pub use timer::*;
 pub(crate) use write_zeroes::file_punch_hole;
@@ -119,17 +109,15 @@ pub(crate) use write_zeroes::file_write_zeroes_at;
 
 use crate::descriptor::FromRawDescriptor;
 use crate::descriptor::SafeDescriptor;
-pub use crate::descriptor_reflection::deserialize_with_descriptors;
-pub use crate::descriptor_reflection::with_as_descriptor;
-pub use crate::descriptor_reflection::with_raw_descriptor;
-pub use crate::descriptor_reflection::FileSerdeWrapper;
-pub use crate::descriptor_reflection::SerializeDescriptors;
 pub use crate::errno::Error;
 pub use crate::errno::Result;
 pub use crate::errno::*;
+use crate::round_up_to_page_size;
+pub use crate::sys::unix::descriptor::*;
+use crate::AsRawDescriptor;
+use crate::Pid;
 
 /// Re-export libc types that are part of the API.
-pub type Pid = libc::pid_t;
 pub type Uid = libc::uid_t;
 pub type Gid = libc::gid_t;
 pub type Mode = libc::mode_t;
@@ -144,26 +132,6 @@ macro_rules! syscall {
             Ok(res)
         }
     }};
-}
-
-/// Safe wrapper for `sysconf(_SC_PAGESIZE)`.
-#[inline(always)]
-pub fn pagesize() -> usize {
-    // Trivially safe
-    unsafe { sysconf(_SC_PAGESIZE) as usize }
-}
-
-/// Safe wrapper for `sysconf(_SC_IOV_MAX)`.
-pub fn iov_max() -> usize {
-    // Trivially safe
-    unsafe { sysconf(_SC_IOV_MAX) as usize }
-}
-
-/// Uses the system's page size in bytes to round the given value up to the nearest page boundary.
-#[inline(always)]
-pub fn round_up_to_page_size(v: usize) -> usize {
-    let page_mask = pagesize() - 1;
-    (v + page_mask) & !page_mask
 }
 
 /// This bypasses `libc`'s caching `getpid(2)` wrapper which can be invalid if a raw clone was used
@@ -187,18 +155,6 @@ pub fn gettid() -> Pid {
     unsafe { syscall(SYS_gettid as c_long) as Pid }
 }
 
-/// Safe wrapper for `getsid(2)`.
-pub fn getsid(pid: Option<Pid>) -> Result<Pid> {
-    // Calling the getsid() sycall is always safe.
-    syscall!(unsafe { libc::getsid(pid.unwrap_or(0)) } as Pid)
-}
-
-/// Wrapper for `setsid(2)`.
-pub fn setsid() -> Result<Pid> {
-    // Safe because the return code is checked.
-    syscall!(unsafe { libc::setsid() as Pid })
-}
-
 /// Safe wrapper for `geteuid(2)`.
 #[inline(always)]
 pub fn geteuid() -> Uid {
@@ -213,27 +169,6 @@ pub fn getegid() -> Gid {
     unsafe { libc::getegid() }
 }
 
-/// Safe wrapper for chown(2).
-#[inline(always)]
-pub fn chown(path: &CStr, uid: Uid, gid: Gid) -> Result<()> {
-    // Safe since we pass in a valid string pointer and check the return value.
-    syscall!(unsafe { libc::chown(path.as_ptr(), uid, gid) }).map(|_| ())
-}
-
-/// Safe wrapper for fchmod(2).
-#[inline(always)]
-pub fn fchmod<A: AsRawFd>(fd: &A, mode: Mode) -> Result<()> {
-    // Safe since the function does not operate on pointers and check the return value.
-    syscall!(unsafe { libc::fchmod(fd.as_raw_fd(), mode) }).map(|_| ())
-}
-
-/// Safe wrapper for fchown(2).
-#[inline(always)]
-pub fn fchown<A: AsRawFd>(fd: &A, uid: Uid, gid: Gid) -> Result<()> {
-    // Safe since the function does not operate on pointers and check the return value.
-    syscall!(unsafe { libc::fchown(fd.as_raw_fd(), uid, gid) }).map(|_| ())
-}
-
 /// The operation to perform with `flock`.
 pub enum FlockOperation {
     LockShared,
@@ -244,7 +179,7 @@ pub enum FlockOperation {
 /// Safe wrapper for flock(2) with the operation `op` and optionally `nonblocking`. The lock will be
 /// dropped automatically when `file` is dropped.
 #[inline(always)]
-pub fn flock(file: &dyn AsRawFd, op: FlockOperation, nonblocking: bool) -> Result<()> {
+pub fn flock<F: AsRawDescriptor>(file: &F, op: FlockOperation, nonblocking: bool) -> Result<()> {
     let mut operation = match op {
         FlockOperation::LockShared => libc::LOCK_SH,
         FlockOperation::LockExclusive => libc::LOCK_EX,
@@ -256,7 +191,7 @@ pub fn flock(file: &dyn AsRawFd, op: FlockOperation, nonblocking: bool) -> Resul
     }
 
     // Safe since we pass in a valid fd and flock operation, and check the return value.
-    syscall!(unsafe { libc::flock(file.as_raw_fd(), operation) }).map(|_| ())
+    syscall!(unsafe { libc::flock(file.as_raw_descriptor(), operation) }).map(|_| ())
 }
 
 /// The operation to perform with `fallocate`.
@@ -266,11 +201,26 @@ pub enum FallocateMode {
     Allocate,
 }
 
+impl From<FallocateMode> for i32 {
+    fn from(value: FallocateMode) -> Self {
+        match value {
+            FallocateMode::Allocate => libc::FALLOC_FL_KEEP_SIZE,
+            FallocateMode::PunchHole => libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            FallocateMode::ZeroRange => libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE,
+        }
+    }
+}
+
+impl From<FallocateMode> for u32 {
+    fn from(value: FallocateMode) -> Self {
+        Into::<i32>::into(value) as u32
+    }
+}
+
 /// Safe wrapper for `fallocate()`.
-pub fn fallocate(
-    file: &dyn AsRawFd,
+pub fn fallocate<F: AsRawDescriptor>(
+    file: &F,
     mode: FallocateMode,
-    keep_size: bool,
     offset: u64,
     len: u64,
 ) -> Result<()> {
@@ -286,19 +236,43 @@ pub fn fallocate(
         len as libc::off64_t
     };
 
-    let mut mode = match mode {
-        FallocateMode::PunchHole => libc::FALLOC_FL_PUNCH_HOLE,
-        FallocateMode::ZeroRange => libc::FALLOC_FL_ZERO_RANGE,
-        FallocateMode::Allocate => 0,
-    };
-
-    if keep_size {
-        mode |= libc::FALLOC_FL_KEEP_SIZE;
-    }
-
     // Safe since we pass in a valid fd and fallocate mode, validate offset and len,
     // and check the return value.
-    syscall!(unsafe { libc::fallocate64(file.as_raw_fd(), mode, offset, len) }).map(|_| ())
+    syscall!(unsafe { libc::fallocate64(file.as_raw_descriptor(), mode.into(), offset, len) })
+        .map(|_| ())
+}
+
+/// Safe wrapper for `fstat()`.
+pub fn fstat<F: AsRawDescriptor>(f: &F) -> Result<libc::stat64> {
+    let mut st = MaybeUninit::<libc::stat64>::zeroed();
+
+    // Safe because the kernel will only write data in `st` and we check the return
+    // value.
+    syscall!(unsafe { libc::fstat64(f.as_raw_descriptor(), st.as_mut_ptr()) })?;
+
+    // Safe because the kernel guarantees that the struct is now fully initialized.
+    Ok(unsafe { st.assume_init() })
+}
+
+/// Checks whether a file is a block device fie or not.
+pub fn is_block_file<F: AsRawDescriptor>(file: &F) -> Result<bool> {
+    let stat = fstat(file)?;
+    Ok((stat.st_mode & libc::S_IFMT) == libc::S_IFBLK)
+}
+
+const BLOCK_IO_TYPE: u32 = 0x12;
+ioctl_io_nr!(BLKDISCARD, BLOCK_IO_TYPE, 119);
+
+/// Discards the given range of a block file.
+pub fn discard_block<F: AsRawDescriptor>(file: &F, offset: u64, len: u64) -> Result<()> {
+    let range: [u64; 2] = [offset, len];
+    // # Safety
+    // Safe because
+    // - we check the return value.
+    // - ioctl(BLKDISCARD) does not hold the descriptor after the call.
+    // - ioctl(BLKDISCARD) does not break the file descriptor.
+    // - ioctl(BLKDISCARD) does not modify the given range.
+    syscall!(unsafe { libc::ioctl(file.as_raw_descriptor(), BLKDISCARD(), &range) }).map(|_| ())
 }
 
 /// A trait used to abstract types that provide a process id that can be operated on.
@@ -422,7 +396,7 @@ pub fn new_pipe_full() -> Result<(File, File)> {
 
     let (rx, mut tx) = pipe(true)?;
     // The smallest allowed size of a pipe is the system page size on linux.
-    let page_size = set_pipe_size(tx.as_raw_fd(), round_up_to_page_size(1))?;
+    let page_size = set_pipe_size(tx.as_raw_descriptor(), round_up_to_page_size(1))?;
 
     // Fill the pipe with page_size zeros so the next write call will block.
     let buf = vec![0u8; page_size];
@@ -510,9 +484,9 @@ pub fn validate_raw_fd(raw_fd: RawFd) -> Result<RawFd> {
 ///
 /// On an error, such as an invalid or incompatible FD, this will return false, which can not be
 /// distinguished from a non-ready to read FD.
-pub fn poll_in(fd: &dyn AsRawFd) -> bool {
+pub fn poll_in<F: AsRawDescriptor>(fd: &F) -> bool {
     let mut fds = libc::pollfd {
-        fd: fd.as_raw_fd(),
+        fd: fd.as_raw_descriptor(),
         events: libc::POLLIN,
         revents: 0,
     };
@@ -614,7 +588,7 @@ pub fn open_file_or_duplicate<P: AsRef<Path>>(path: P, options: &OpenOptions) ->
 }
 
 /// Get the max number of open files allowed by the environment.
-pub fn get_max_open_files() -> Result<u64> {
+pub fn max_open_files() -> Result<u64> {
     let mut buf = mem::MaybeUninit::<libc::rlimit64>::zeroed();
 
     // Safe because this will only modify `buf` and we check the return value.
@@ -626,12 +600,6 @@ pub fn get_max_open_files() -> Result<u64> {
     } else {
         errno_result()
     }
-}
-
-/// Returns the number of online logical cores on the system.
-pub fn number_of_logical_cores() -> Result<usize> {
-    // Safe because we pass a flag for this call and the host supports this system call
-    Ok(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) } as usize)
 }
 
 /// Moves the requested PID/TID to a particular cgroup
@@ -722,6 +690,7 @@ pub fn sched_setattr(pid: Pid, attr: &mut sched_attr, flags: u32) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::os::fd::AsRawFd;
 
     use super::*;
 

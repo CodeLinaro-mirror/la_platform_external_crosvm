@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::sync::Arc;
-use std::sync::Mutex;
-
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -13,10 +10,7 @@ use base::AsRawDescriptor;
 use base::SafeDescriptor;
 use cros_async::AsyncWrapper;
 use cros_async::Executor;
-use vmm_vhost::connection::socket::Endpoint as SocketEndpoint;
-use vmm_vhost::message::MasterReq;
 use vmm_vhost::Error as VhostError;
-use vmm_vhost::Master;
 use vmm_vhost::MasterReqHandler;
 
 use crate::virtio::vhost::user::vmm::handler::BackendReqHandler;
@@ -24,12 +18,8 @@ use crate::virtio::vhost::user::vmm::handler::BackendReqHandlerImpl;
 use crate::virtio::vhost::user::vmm::Error;
 use crate::virtio::vhost::user::vmm::Result as VhostResult;
 
-pub(in crate::virtio::vhost::user::vmm::handler) type SocketMaster =
-    Master<SocketEndpoint<MasterReq>>;
-
 pub fn create_backend_req_handler(h: BackendReqHandlerImpl) -> VhostResult<BackendReqHandler> {
-    let handler = MasterReqHandler::with_stream(Arc::new(Mutex::new(h)))
-        .map_err(Error::CreateBackendReqHandler)?;
+    let handler = MasterReqHandler::with_stream(h).map_err(Error::CreateBackendReqHandler)?;
     Ok(handler)
 }
 

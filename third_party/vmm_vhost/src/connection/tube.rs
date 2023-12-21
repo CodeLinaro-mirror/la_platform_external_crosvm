@@ -1,31 +1,28 @@
 // Copyright 2022 The Chromium OS Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Structs for Tube based endpoint. Listeners are not used with Tubes, since they are essentially
-//! fancy socket pairs.
+//! Structs for Tube based connection. Listeners are not used with Tubes, since they are
+//! essentially fancy socket pairs.
 
 use std::cmp::min;
 use std::fs::File;
 use std::io::IoSlice;
 use std::io::IoSliceMut;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr::copy_nonoverlapping;
 
 use base::AsRawDescriptor;
 use base::FromRawDescriptor;
 use base::RawDescriptor;
+use base::SafeDescriptor;
 use base::Tube;
 use serde::Deserialize;
 use serde::Serialize;
 use tube_transporter::packed_tube;
 
-use crate::connection::Endpoint;
-use crate::connection::Req;
-use crate::message::SlaveReq;
-use crate::take_single_file;
 use crate::Error;
 use crate::Result;
+use crate::SystemStream;
 
 #[derive(Serialize, Deserialize)]
 struct RawDescriptorContainer {
@@ -34,34 +31,30 @@ struct RawDescriptorContainer {
 }
 
 #[derive(Serialize, Deserialize)]
-struct EndpointMessage {
+struct Message {
     rds: Vec<RawDescriptorContainer>,
     data: Vec<u8>,
 }
 
-/// Tube endpoint for vhost-user connection.
-pub struct TubeEndpoint<R: Req> {
+/// Tube based vhost-user connection.
+pub struct TubePlatformConnection {
     tube: Tube,
-    _r: PhantomData<R>,
 }
 
-impl<R: Req> TubeEndpoint<R> {
+impl TubePlatformConnection {
     pub(crate) fn get_tube(&self) -> &Tube {
         &self.tube
     }
 }
 
-impl<R: Req> From<Tube> for TubeEndpoint<R> {
+impl From<Tube> for TubePlatformConnection {
     fn from(tube: Tube) -> Self {
-        Self {
-            tube,
-            _r: PhantomData,
-        }
+        Self { tube }
     }
 }
 
-impl<R: Req> Endpoint<R> for TubeEndpoint<R> {
-    fn connect<P: AsRef<Path>>(_path: P) -> Result<Self> {
+impl TubePlatformConnection {
+    pub fn connect<P: AsRef<Path>>(_path: P) -> Result<Self> {
         unimplemented!("connections not supported on Tubes")
     }
 
@@ -70,7 +63,7 @@ impl<R: Req> Endpoint<R> for TubeEndpoint<R> {
     /// # Return:
     /// * - number of bytes sent on success
     /// * - TubeError: tube related errors.
-    fn send_iovec(&mut self, iovs: &[IoSlice], rds: Option<&[RawDescriptor]>) -> Result<usize> {
+    pub fn send_iovec(&self, iovs: &[IoSlice], rds: Option<&[RawDescriptor]>) -> Result<usize> {
         // Gather the iovecs
         let total_bytes = iovs.iter().map(|iov| iov.len()).sum();
         let mut data = Vec::with_capacity(total_bytes);
@@ -78,7 +71,7 @@ impl<R: Req> Endpoint<R> for TubeEndpoint<R> {
             data.extend(iov.iter());
         }
 
-        let mut msg = EndpointMessage {
+        let mut msg = Message {
             data,
             rds: Vec::with_capacity(rds.map_or(0, |rds| rds.len())),
         };
@@ -102,14 +95,14 @@ impl<R: Req> Endpoint<R> for TubeEndpoint<R> {
     /// * - (number of bytes received, [received files]) on success
     /// * - RecvBufferTooSmall: Input bufs is too small for the received buffer.
     /// * - TubeError: tube related errors.
-    fn recv_into_bufs(
-        &mut self,
+    pub fn recv_into_bufs(
+        &self,
         bufs: &mut [IoSliceMut],
         _allow_rds: bool,
     ) -> Result<(usize, Option<Vec<File>>)> {
         // TODO(b/221882601): implement "allow_rds"
 
-        let msg: EndpointMessage = self.tube.recv()?;
+        let msg: Message = self.tube.recv()?;
 
         let files = match msg.rds.len() {
             0 => None,
@@ -155,19 +148,20 @@ impl<R: Req> Endpoint<R> for TubeEndpoint<R> {
 
         Ok((bytes_read, files))
     }
-
-    fn create_slave_request_endpoint(
-        &mut self,
-        files: Option<Vec<File>>,
-    ) -> Result<Box<dyn Endpoint<SlaveReq>>> {
-        let file = take_single_file(files).ok_or(Error::InvalidMessage)?;
-        // Safe because the file represents a packed tube.
-        let tube = unsafe { packed_tube::unpack(file.into()).expect("unpacked Tube") };
-        Ok(Box::new(TubeEndpoint::from(tube)))
-    }
 }
 
-impl<R: Req> AsRawDescriptor for TubeEndpoint<R> {
+/// Convert a`SafeDescriptor` to a `Tube`.
+///
+/// # Safety
+///
+/// `fd` must represent a packed tube.
+pub unsafe fn to_system_stream(fd: SafeDescriptor) -> Result<SystemStream> {
+    // SAFETY: Safe because the file represents a packed tube.
+    let tube = unsafe { packed_tube::unpack(fd).expect("unpacked Tube") };
+    Ok(tube)
+}
+
+impl AsRawDescriptor for TubePlatformConnection {
     /// WARNING: this function does not return a waitable descriptor! Use base::ReadNotifier
     /// instead.
     fn as_raw_descriptor(&self) -> RawDescriptor {
@@ -187,23 +181,24 @@ mod tests {
     use base::AsRawDescriptor;
     use base::Tube;
     use tempfile::tempfile;
+    use zerocopy::AsBytes;
 
-    use super::*;
-    use crate::connection::EndpointExt;
     use crate::message::MasterReq;
     use crate::message::VhostUserMsgHeader;
+    use crate::message::VhostUserMsgValidator;
+    use crate::Connection;
 
-    fn create_pair() -> (TubeEndpoint<MasterReq>, TubeEndpoint<MasterReq>) {
+    fn create_pair() -> (Connection<MasterReq>, Connection<MasterReq>) {
         let (master_tube, slave_tube) = Tube::pair().unwrap();
         (
-            TubeEndpoint::<MasterReq>::from(master_tube),
-            TubeEndpoint::<MasterReq>::from(slave_tube),
+            Connection::<MasterReq>::from(master_tube),
+            Connection::<MasterReq>::from(slave_tube),
         )
     }
 
     #[test]
     fn send_data() {
-        let (mut master, mut slave) = create_pair();
+        let (master, slave) = create_pair();
 
         let buf1 = vec![0x1, 0x2, 0x3, 0x4];
         let len = master.send_slice(IoSlice::new(&buf1[..]), None).unwrap();
@@ -215,7 +210,7 @@ mod tests {
 
     #[test]
     fn send_fd() {
-        let (mut master, mut slave) = create_pair();
+        let (master, slave) = create_pair();
 
         let mut file = tempfile().unwrap();
         write!(file, "test").unwrap();
@@ -300,7 +295,7 @@ mod tests {
 
     #[test]
     fn send_recv() {
-        let (mut master, mut slave) = create_pair();
+        let (master, slave) = create_pair();
 
         let mut hdr1 =
             VhostUserMsgHeader::new(MasterReq::GET_FEATURES, 0, mem::size_of::<u64>() as u32);
@@ -308,16 +303,13 @@ mod tests {
         let features1 = 0x1u64;
         master.send_message(&hdr1, &features1, None).unwrap();
 
+        let mut hdr2 = VhostUserMsgHeader::default();
         let mut features2 = 0u64;
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(
-                (&mut features2 as *mut u64) as *mut u8,
-                mem::size_of::<u64>(),
-            )
-        };
-        let (hdr2, bytes, files) = slave.recv_body_into_buf(slice).unwrap();
+        let files = slave
+            .recv_into_bufs_all(&mut [hdr2.as_bytes_mut(), features2.as_bytes_mut()])
+            .unwrap();
+        assert!(hdr2.is_valid());
         assert_eq!(hdr1, hdr2);
-        assert_eq!(bytes, 8);
         assert_eq!(features1, features2);
         assert!(files.is_none());
 

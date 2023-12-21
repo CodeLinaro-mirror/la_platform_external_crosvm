@@ -65,8 +65,8 @@ use base::trace;
 use base::warn;
 use base::AsRawDescriptor;
 use base::EventType;
+use base::IoBufMut;
 use base::RawDescriptor;
-use data_model::IoBufMut;
 use io_uring::URingAllowlist;
 use io_uring::URingContext;
 use io_uring::URingOperation;
@@ -88,9 +88,15 @@ use crate::MemRegion;
 #[sorted]
 #[derive(Debug, ThisError)]
 pub enum Error {
+    /// Failed to check if a file is a block file.
+    #[error("Failed to check if a file is a block file.: {0}")]
+    CheckingBlockFile(base::Error),
     /// Creating a context to wait on FDs failed.
     #[error("Error creating the fd waiting context: {0}")]
     CreatingContext(io_uring::Error),
+    /// Failed to discard a block
+    #[error("Failed to discard a block: {0}")]
+    Discard(base::Error),
     /// Failed to copy the FD for the polling context.
     #[error("Failed to copy the FD for the polling context: {0}")]
     DuplicatingFd(base::Error),
@@ -131,8 +137,10 @@ impl From<Error> for io::Error {
     fn from(e: Error) -> Self {
         use Error::*;
         match e {
+            Discard(e) => e.into(),
             DuplicatingFd(e) => e.into(),
             ExecutorGone => io::Error::new(io::ErrorKind::Other, ExecutorGone),
+            CheckingBlockFile(e) => e.into(),
             InvalidOffset => io::Error::new(io::ErrorKind::InvalidInput, InvalidOffset),
             InvalidSource => io::Error::new(io::ErrorKind::InvalidData, InvalidSource),
             Io(e) => e,

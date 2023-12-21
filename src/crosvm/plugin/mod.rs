@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod config;
 mod process;
 mod vcpu;
 
+use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -87,6 +89,9 @@ use self::process::*;
 use self::vcpu::*;
 use crate::crosvm::config::Executable;
 use crate::crosvm::config::HypervisorKind;
+pub use crate::crosvm::plugin::config::parse_plugin_mount_option;
+pub use crate::crosvm::plugin::config::BindMount;
+pub use crate::crosvm::plugin::config::GidMap;
 use crate::Config;
 
 const MAX_DATAGRAM_SIZE: usize = 4096;
@@ -496,8 +501,10 @@ pub fn run_config(cfg: Config) -> Result<()> {
                 + &cfg
                     .plugin_gid_maps
                     .into_iter()
-                    .map(|m| format!(",{} {} {}", m.inner, m.outer, m.count))
-                    .collect::<String>()
+                    .fold(String::new(), |mut output, m| {
+                        let _ = write!(output, ",{} {} {}", m.inner, m.outer, m.count);
+                        output
+                    })
         } else {
             gid_map
         };

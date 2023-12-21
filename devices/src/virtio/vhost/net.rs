@@ -72,7 +72,7 @@ where
         .map_err(Error::TapSetOffload)?;
 
         // We declare VIRTIO_NET_F_MRG_RXBUF, so set the vnet hdr size to match.
-        let vnet_hdr_size = mem::size_of::<virtio_net::virtio_net_hdr_mrg_rxbuf>() as i32;
+        let vnet_hdr_size = mem::size_of::<virtio_net::virtio_net_hdr_mrg_rxbuf>();
         tap.set_vnet_hdr_size(vnet_hdr_size)
             .map_err(Error::TapSetVnetHdrSize)?;
 
@@ -326,6 +326,7 @@ pub mod tests {
     use std::path::PathBuf;
     use std::result;
 
+    use base::pagesize;
     use hypervisor::ProtectionType;
     use net_util::sys::linux::fakes::FakeTap;
     use net_util::TapTCommon;
@@ -342,8 +343,11 @@ pub mod tests {
 
     fn create_guest_memory() -> result::Result<GuestMemory, GuestMemoryError> {
         let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x4000)])
+        let start_addr2 = GuestAddress(pagesize() as u64);
+        GuestMemory::new(&[
+            (start_addr1, pagesize() as u64),
+            (start_addr2, 4 * pagesize() as u64),
+        ])
     }
 
     fn create_net_common() -> Net<FakeTap, FakeNet<FakeTap>> {

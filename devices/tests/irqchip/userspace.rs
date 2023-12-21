@@ -785,10 +785,20 @@ impl VcpuX86_64 for FakeVcpu {
     fn set_tsc_offset(&self, _offset: u64) -> Result<()> {
         unimplemented!()
     }
+    fn set_tsc_value(&self, _value: u64) -> Result<()> {
+        unimplemented!()
+    }
     fn snapshot(&self) -> anyhow::Result<VcpuSnapshot> {
         unimplemented!()
     }
-    fn restore(&mut self, _snapshot: &VcpuSnapshot) -> anyhow::Result<()> {
+    fn restore(
+        &mut self,
+        _snapshot: &VcpuSnapshot,
+        _host_tsc_reference_moment: u64,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+    fn restore_timekeeping(&self, _host_tsc_reference_moment: u64, _tsc_offset: u64) -> Result<()> {
         unimplemented!()
     }
 }

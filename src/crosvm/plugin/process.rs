@@ -7,8 +7,6 @@ use std::collections::hash_map::HashMap;
 use std::collections::hash_map::VacantEntry;
 use std::env::set_var;
 use std::fs::File;
-use std::io::IoSlice;
-use std::io::IoSliceMut;
 use std::io::Write;
 use std::mem::transmute;
 use std::os::unix::net::UnixDatagram;
@@ -121,7 +119,7 @@ pub enum ProcessStatus {
 pub struct Process {
     started: bool,
     plugin_pid: pid_t,
-    request_sockets: Vec<UnixDatagram>,
+    request_sockets: Vec<ScmSocket<UnixDatagram>>,
     objects: HashMap<u32, PluginObject>,
     shared_vcpu_state: Arc<RwLock<SharedVcpuState>>,
     per_vcpu_states: Vec<Arc<Mutex<PerVcpuState>>>,
@@ -204,7 +202,7 @@ impl Process {
         Ok(Process {
             started: false,
             plugin_pid,
-            request_sockets: vec![request_socket],
+            request_sockets: vec![request_socket.try_into()?],
             objects: Default::default(),
             shared_vcpu_state: Default::default(),
             per_vcpu_states,
@@ -253,7 +251,7 @@ impl Process {
     /// If any socket in this slice becomes readable, `handle_socket` should be called with the
     /// index of that socket. If any socket becomes closed, its index should be passed to
     /// `drop_sockets`.
-    pub fn sockets(&self) -> &[UnixDatagram] {
+    pub fn sockets(&self) -> &[ScmSocket<UnixDatagram>] {
         &self.request_sockets
     }
 
@@ -548,7 +546,7 @@ impl Process {
         taps: &[Tap],
     ) -> result::Result<(), CommError> {
         let (msg_size, request_file) = self.request_sockets[index]
-            .recv_with_fd(IoSliceMut::new(&mut self.request_buffer))
+            .recv_with_file(&mut self.request_buffer)
             .map_err(io_to_sys_err)
             .map_err(CommError::PluginSocketRecv)?;
 
@@ -635,7 +633,11 @@ impl Process {
             response.mut_new_connection();
             match new_seqpacket_pair() {
                 Ok((request_socket, child_socket)) => {
-                    self.request_sockets.push(request_socket);
+                    self.request_sockets.push(
+                        request_socket
+                            .try_into()
+                            .map_err(|_| CommError::PluginSocketHup)?,
+                    );
                     response_fds.push(child_socket.as_raw_descriptor());
                     boxed_fds.push(box_owned_fd(child_socket));
                     Ok(())
@@ -775,7 +777,7 @@ impl Process {
             .map_err(CommError::EncodeResponse)?;
         assert_ne!(self.response_buffer.len(), 0);
         self.request_sockets[index]
-            .send_with_fds(&[IoSlice::new(&self.response_buffer[..])], &response_fds)
+            .send_with_fds(&self.response_buffer, &response_fds)
             .map_err(io_to_sys_err)
             .map_err(CommError::PluginSocketSend)?;
 

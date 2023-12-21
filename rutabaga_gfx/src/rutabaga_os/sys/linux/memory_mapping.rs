@@ -13,7 +13,6 @@ use nix::sys::mman::ProtFlags;
 use crate::rutabaga_os::descriptor::SafeDescriptor;
 use crate::rutabaga_utils::RutabagaError;
 use crate::rutabaga_utils::RutabagaResult;
-
 use crate::rutabaga_utils::RUTABAGA_MAP_ACCESS_MASK;
 use crate::rutabaga_utils::RUTABAGA_MAP_ACCESS_READ;
 use crate::rutabaga_utils::RUTABAGA_MAP_ACCESS_RW;
@@ -32,7 +31,7 @@ impl Drop for MemoryMapping {
         // This is safe because we mmap the area at addr ourselves, and nobody
         // else is holding a reference to it.
         unsafe {
-            munmap(self.addr as *mut libc::c_void, self.size).unwrap();
+            munmap(self.addr, self.size).unwrap();
         }
     }
 }

@@ -11,10 +11,8 @@ use cros_async::AsyncWrapper;
 use cros_async::Executor;
 use futures::Future;
 use futures::FutureExt;
-use vmm_vhost::connection::socket::Listener as SocketListener;
-use vmm_vhost::connection::Endpoint;
+use vmm_vhost::connection::socket::SocketListener;
 use vmm_vhost::connection::Listener;
-use vmm_vhost::message::MasterReq;
 use vmm_vhost::SlaveReqHandler;
 use vmm_vhost::VhostUserSlaveReqHandler;
 
@@ -23,7 +21,7 @@ use crate::virtio::vhost::user::device::handler::VhostUserPlatformOps;
 use crate::virtio::vhost::user::device::handler::VhostUserRegularOps;
 use crate::virtio::vhost::user::device::listener::VhostUserListenerTrait;
 
-//// On Unix we can listen to a socket.
+/// On Unix we can listen to a socket.
 pub struct VhostUserListener(SocketListener);
 
 impl VhostUserListener {
@@ -46,15 +44,11 @@ impl VhostUserListener {
 
 /// Attaches to an already bound socket via `listener` and handles incoming messages from the
 /// VMM, which are dispatched to the device backend via the `VhostUserBackend` trait methods.
-async fn run_with_handler<L>(
-    mut listener: L,
+async fn run_with_handler(
+    mut listener: SocketListener,
     handler: Box<dyn VhostUserSlaveReqHandler>,
     ex: &Executor,
-) -> anyhow::Result<()>
-where
-    L::Endpoint: Endpoint<MasterReq> + AsRawDescriptor,
-    L: Listener + AsRawDescriptor,
-{
+) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
 
     loop {
@@ -65,8 +59,8 @@ where
             .accept()
             .context("failed to accept an incoming connection")?
         {
-            Some(endpoint) => {
-                let req_handler = SlaveReqHandler::new(endpoint, handler);
+            Some(connection) => {
+                let req_handler = SlaveReqHandler::new(connection, handler);
                 return run_handler(req_handler, ex).await;
             }
             None => {
