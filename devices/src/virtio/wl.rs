@@ -61,11 +61,11 @@ use base::error;
 use base::ioctl_iow_nr;
 use base::ioctl_iowr_nr;
 use base::ioctl_with_ref;
-use base::linux::FileFlags;
 use base::linux::SharedMemoryLinux;
 use base::pagesize;
 use base::pipe;
 use base::round_up_to_page_size;
+use base::unix::FileFlags;
 use base::warn;
 use base::AsRawDescriptor;
 use base::Error;
@@ -215,6 +215,7 @@ ioctl_iowr_nr!(SYNC_IOC_FILE_INFO, 0x3e, 4, sync_file_info);
 
 fn is_fence(f: &File) -> bool {
     let info = sync_file_info::default();
+    // SAFETY:
     // Safe as f is a valid file
     unsafe { ioctl_with_ref(f, SYNC_IOC_FILE_INFO(), &info) == 0 }
 }
@@ -373,6 +374,8 @@ enum WlError {
     DmabufSync(io::Error),
     #[error("failed to create shared memory from descriptor: {0}")]
     FromSharedMemory(Error),
+    #[error("failed to get seals: {0}")]
+    GetSeals(Error),
     #[error("gralloc error: {0}")]
     #[cfg(feature = "minigbm")]
     GrallocError(#[from] RutabagaError),
@@ -442,6 +445,7 @@ struct VmRequester {
 // The following are wrappers to avoid base dependencies in the rutabaga crate
 #[cfg(feature = "minigbm")]
 fn to_safe_descriptor(r: RutabagaDescriptor) -> SafeDescriptor {
+    // SAFETY:
     // Safe because we own the SafeDescriptor at this point.
     unsafe { SafeDescriptor::from_raw_descriptor(r.into_raw_descriptor()) }
 }
@@ -525,27 +529,23 @@ impl VmRequester {
                 .context("failed to dup gfx handle")
                 .map_err(WlError::ShmemMapperError)?,
             reqs.size,
+            Protection::read_write(),
         )
         .map(|info| (info, safe_descriptor, reqs))
     }
 
     fn register_shmem(&self, shm: &SharedMemory) -> WlResult<u64> {
-        self.register_memory(
-            SafeDescriptor::try_from(shm as &dyn AsRawDescriptor)
-                .context("failed to create safe descriptor")
-                .map_err(WlError::ShmemMapperError)?,
-            shm.size(),
-        )
-    }
-
-    fn register_memory(&self, descriptor: SafeDescriptor, size: u64) -> WlResult<u64> {
-        let mut state = self.state.borrow_mut();
-        let size = round_up_to_page_size(size as usize) as u64;
-
-        let prot = match FileFlags::from_file(&descriptor) {
+        let prot = match FileFlags::from_file(shm) {
             Ok(FileFlags::Read) => Protection::read(),
             Ok(FileFlags::Write) => Protection::write(),
-            Ok(FileFlags::ReadWrite) => Protection::read_write(),
+            Ok(FileFlags::ReadWrite) => {
+                let seals = shm.get_seals().map_err(WlError::GetSeals)?;
+                if seals.write_seal() {
+                    Protection::read()
+                } else {
+                    Protection::read_write()
+                }
+            }
             Err(e) => {
                 return Err(WlError::ShmemMapperError(anyhow!(
                     "failed to get file descriptor flags with error: {:?}",
@@ -553,6 +553,23 @@ impl VmRequester {
                 )))
             }
         };
+        self.register_memory(
+            SafeDescriptor::try_from(shm as &dyn AsRawDescriptor)
+                .context("failed to create safe descriptor")
+                .map_err(WlError::ShmemMapperError)?,
+            shm.size(),
+            prot,
+        )
+    }
+
+    fn register_memory(
+        &self,
+        descriptor: SafeDescriptor,
+        size: u64,
+        prot: Protection,
+    ) -> WlResult<u64> {
+        let mut state = self.state.borrow_mut();
+        let size = round_up_to_page_size(size as usize) as u64;
 
         let source = VmMemorySource::Descriptor {
             descriptor,
@@ -694,11 +711,13 @@ impl CtrlVfdSendVfdV2 {
             self.kind == VIRTIO_WL_CTRL_VFD_SEND_KIND_LOCAL
                 || self.kind == VIRTIO_WL_CTRL_VFD_SEND_KIND_VIRTGPU
         );
+        // SAFETY: trivially safe given we assert kind
         unsafe { self.payload.id }
     }
     #[cfg(feature = "gpu")]
     fn seqno(&self) -> Le64 {
         assert!(self.kind == VIRTIO_WL_CTRL_VFD_SEND_KIND_VIRTGPU_FENCE);
+        // SAFETY: trivially safe given we assert kind
         unsafe { self.payload.seqno }
     }
 }
@@ -855,6 +874,7 @@ impl WlVfd {
                 let sync = dma_buf_sync {
                     flags: flags as u64,
                 };
+                // SAFETY:
                 // Safe as descriptor is a valid dmabuf and incorrect flags will return an error.
                 if unsafe { ioctl_with_ref(descriptor, DMA_BUF_IOCTL_SYNC(), &sync) } < 0 {
                     Err(WlError::DmabufSync(io::Error::last_os_error()))
@@ -1415,6 +1435,7 @@ impl WlState {
                     match self.signaled_fence.as_ref().unwrap().try_clone() {
                         Ok(dup) => {
                             *descriptor = dup.into_raw_descriptor();
+                            // SAFETY:
                             // Safe because the fd comes from a valid SafeDescriptor.
                             let file = unsafe { File::from_raw_descriptor(*descriptor) };
                             bridged_files.push(file);

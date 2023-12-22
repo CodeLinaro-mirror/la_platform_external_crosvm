@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -268,6 +269,7 @@ impl VhostUserBackend for WlBackend {
             0 => {
                 let wlstate_ctx = clone_descriptor(wlstate.borrow().wait_ctx())
                     .map(|fd| {
+                        // SAFETY:
                         // Safe because we just created this fd.
                         AsyncWrapper::new(unsafe { SafeDescriptor::from_raw_descriptor(fd) })
                     })
@@ -324,7 +326,7 @@ impl VhostUserBackend for WlBackend {
         })
     }
 
-    fn set_backend_req_connection(&mut self, conn: VhostBackendReqConnection) {
+    fn set_backend_req_connection(&mut self, conn: Arc<VhostBackendReqConnection>) {
         if let VhostBackendReqConnectionState::Connected(_) = &self.backend_req_conn {
             warn!("connection already established. Overwriting");
         }

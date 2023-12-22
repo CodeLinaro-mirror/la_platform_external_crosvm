@@ -83,7 +83,7 @@ impl Slave {
         }
 
         let (reply, body, rfds) = self.sock.recv_message::<VhostUserU64>()?;
-        if !reply.is_reply_for(hdr) || rfds.is_some() || !body.is_valid() {
+        if !reply.is_reply_for(hdr) || !rfds.is_empty() || !body.is_valid() {
             return Err(Error::InvalidMessage);
         }
         if body.value != 0 {
@@ -178,7 +178,7 @@ mod tests {
         let mut fs_cache = Slave::from_stream(p1);
         let master = Connection::from(p2);
 
-        let len = mem::size_of::<VhostUserFSSlaveMsg>();
+        let len = mem::size_of::<VhostUserU64>();
         let mut hdr = VhostUserMsgHeader::new(
             SlaveReq::FS_MAP,
             VhostUserHeaderFlag::REPLY.bits(),

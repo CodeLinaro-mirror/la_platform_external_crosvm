@@ -12,33 +12,6 @@ pub(in crate::sys) use net::sockaddr_un;
 pub(in crate::sys) use net::sockaddrv4_to_lib_c;
 pub(in crate::sys) use net::sockaddrv6_to_lib_c;
 
-pub mod tube {
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct Tube {}
-
-    impl Tube {
-        pub fn pair() -> crate::tube::Result<(Tube, Tube)> {
-            todo!();
-        }
-        #[deprecated]
-        pub fn try_clone(&self) -> crate::tube::Result<Self> {
-            todo!();
-        }
-        pub fn send<T: serde::Serialize>(&self, _msg: &T) -> crate::tube::Result<()> {
-            todo!();
-        }
-        pub fn recv<T: serde::de::DeserializeOwned>(&self) -> crate::tube::Result<T> {
-            todo!();
-        }
-    }
-
-    impl crate::ReadNotifier for Tube {
-        fn get_read_notifier(&self) -> &dyn crate::AsRawDescriptor {
-            todo!();
-        }
-    }
-}
-
 pub fn get_cpu_affinity() -> crate::errno::Result<Vec<usize>> {
     todo!();
 }
@@ -183,6 +156,12 @@ impl From<PlatformEvent> for crate::SafeDescriptor {
     }
 }
 
+impl From<crate::SafeDescriptor> for PlatformEvent {
+    fn from(_evt: crate::SafeDescriptor) -> Self {
+        todo!();
+    }
+}
+
 #[derive(Debug)]
 pub struct MemoryMapping {}
 
@@ -203,6 +182,9 @@ impl MemoryMapping {
     ) -> Result<MemoryMapping, MmapError> {
         todo!();
     }
+    /// # Safety
+    ///
+    /// unimplemented, always aborts
     pub unsafe fn from_descriptor_offset_protection_fixed(
         _addr: *mut u8,
         _fd: &dyn crate::AsRawDescriptor,
@@ -214,6 +196,7 @@ impl MemoryMapping {
     }
 }
 
+// SAFETY: Unimplemented, always aborts
 unsafe impl crate::MappedRegion for MemoryMapping {
     fn as_ptr(&self) -> *mut u8 {
         todo!();
@@ -223,23 +206,20 @@ unsafe impl crate::MappedRegion for MemoryMapping {
     }
 }
 
-impl<'a> crate::MemoryMappingBuilder<'a> {
-    pub(crate) fn wrap(
-        _mapping: MemoryMapping,
-        _file_descriptor: Option<&'a dyn crate::AsRawDescriptor>,
-    ) -> Result<crate::MemoryMapping, MmapError> {
-        todo!();
-    }
-}
-
 pub mod ioctl {
     pub type IoctlNr = std::ffi::c_ulong;
+    /// # Safety
+    ///
+    /// unimplemented, always aborts
     pub unsafe fn ioctl<F: crate::AsRawDescriptor>(
         _descriptor: &F,
         _nr: IoctlNr,
     ) -> std::ffi::c_int {
         todo!();
     }
+    /// # Safety
+    ///
+    /// unimplemented, always aborts
     pub unsafe fn ioctl_with_val(
         _descriptor: &dyn crate::AsRawDescriptor,
         _nr: IoctlNr,
@@ -247,6 +227,9 @@ pub mod ioctl {
     ) -> std::ffi::c_int {
         todo!();
     }
+    /// # Safety
+    ///
+    /// unimplemented, always aborts
     pub unsafe fn ioctl_with_ref<T>(
         _descriptor: &dyn crate::AsRawDescriptor,
         _nr: IoctlNr,
@@ -254,6 +237,9 @@ pub mod ioctl {
     ) -> std::ffi::c_int {
         todo!();
     }
+    /// # Safety
+    ///
+    /// unimplemented, always aborts
     pub unsafe fn ioctl_with_mut_ref<T>(
         _descriptor: &dyn crate::AsRawDescriptor,
         _nr: IoctlNr,
@@ -261,6 +247,9 @@ pub mod ioctl {
     ) -> std::ffi::c_int {
         todo!();
     }
+    /// # Safety
+    ///
+    /// unimplemented, always aborts
     pub unsafe fn ioctl_with_ptr<T>(
         _descriptor: &dyn crate::AsRawDescriptor,
         _nr: IoctlNr,
@@ -268,6 +257,9 @@ pub mod ioctl {
     ) -> std::ffi::c_int {
         todo!();
     }
+    /// # Safety
+    ///
+    /// unimplemented, always aborts
     pub unsafe fn ioctl_with_mut_ptr<T>(
         _descriptor: &dyn crate::AsRawDescriptor,
         _nr: IoctlNr,

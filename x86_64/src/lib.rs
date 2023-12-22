@@ -71,6 +71,7 @@ use base::TubeError;
 use chrono::Utc;
 pub use cpuid::adjust_cpuid;
 pub use cpuid::CpuIdContext;
+use devices::acpi::PM_WAKEUP_GPIO;
 use devices::Bus;
 use devices::BusDevice;
 use devices::BusDeviceObj;
@@ -2096,9 +2097,16 @@ impl X8664arch {
         let addresses = root_bus.lock().get_downstream_devices();
         for address in addresses {
             if let Some(acpi_path) = pci_root.lock().acpi_path(&address) {
+                const DEEPEST_SLEEP_STATE: u32 = 3;
                 aml::Device::new(
                     (*acpi_path).into(),
-                    vec![&aml::Name::new("_ADR".into(), &address.acpi_adr())],
+                    vec![
+                        &aml::Name::new("_ADR".into(), &address.acpi_adr()),
+                        &aml::Name::new(
+                            "_PRW".into(),
+                            &aml::Package::new(vec![&PM_WAKEUP_GPIO, &DEEPEST_SLEEP_STATE]),
+                        ),
+                    ],
                 )
                 .to_aml_bytes(&mut amls);
             }
@@ -2271,12 +2279,14 @@ impl CpuIdCall {
 pub fn check_host_hybrid_support(cpuid: &CpuIdCall) -> std::result::Result<(), HybridSupportError> {
     // CPUID.0H.EAX returns maximum input value for basic CPUID information.
     //
+    // SAFETY:
     // Safe because we pass 0 for this call and the host supports the
     // `cpuid` instruction.
     let mut cpuid_entry = unsafe { (cpuid.cpuid)(0x0) };
     if cpuid_entry.eax < 0x1A {
         return Err(HybridSupportError::UnsupportedHostCpu);
     }
+    // SAFETY:
     // Safe because we pass 0x7 and 0 for this call and the host supports the
     // `cpuid` instruction.
     cpuid_entry = unsafe { (cpuid.cpuid_count)(0x7, 0) };
@@ -2288,6 +2298,7 @@ pub fn check_host_hybrid_support(cpuid: &CpuIdCall) -> std::result::Result<(), H
     // 0 is returned in all the registers.
     // For the CPU with hybrid support, its CPUID.1AH.EAX shouldn't be zero.
     //
+    // SAFETY:
     // Safe because we pass 0 for this call and the host supports the
     // `cpuid` instruction.
     cpuid_entry = unsafe { (cpuid.cpuid)(0x1A) };

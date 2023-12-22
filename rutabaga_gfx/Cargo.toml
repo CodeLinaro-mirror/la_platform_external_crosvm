@@ -10,7 +10,6 @@ license-file = "LICENSE"
 gfxstream = []
 gfxstream_stub = []
 virgl_renderer = []
-virgl_renderer_next = []
 minigbm = []
 # To try out Vulkano, delete the following line and uncomment the line in "dependencies". Vulkano
 # features are just a prototype and not integrated yet into the ChromeOS build system.
@@ -27,7 +26,7 @@ zerocopy = { version = "0.7", features = ["derive"] }
 log = "0.4"
 
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
-nix = { version = "0.27.1", features = ["event", "feature", "fs", "mman", "socket", "uio"] }
+nix = { version = "0.27.1", features = ["event", "feature", "fs", "mman", "socket", "uio", "ioctl"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi = "0.3"

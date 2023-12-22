@@ -5,6 +5,7 @@
 #![cfg(any(target_os = "android", target_os = "linux"))]
 #![cfg(target_arch = "x86_64")]
 #![allow(non_camel_case_types)]
+#![allow(clippy::missing_safety_doc)]
 
 //! This module implements the dynamically loaded client library API used by a crosvm plugin,
 //! defined in `crosvm.h`. It implements the client half of the plugin protocol, which is defined in
@@ -161,6 +162,7 @@ fn proto_error_to_int(e: protobuf::Error) -> c_int {
 }
 
 fn fd_cast<F: FromRawFd>(f: File) -> F {
+    // SAFETY:
     // Safe because we are transferring unique ownership.
     unsafe { F::from_raw_fd(f.into_raw_fd()) }
 }
@@ -532,14 +534,20 @@ impl crosvm {
             match route.kind {
                 CROSVM_IRQ_ROUTE_IRQCHIP => {
                     let irqchip = entry.mut_irqchip();
+                    // SAFETY:
                     // Safe because route.kind indicates which union field is valid.
                     irqchip.irqchip = unsafe { route.route.irqchip }.irqchip;
+                    // SAFETY:
+                    // Safe because route.kind indicates which union field is valid.
                     irqchip.pin = unsafe { route.route.irqchip }.pin;
                 }
                 CROSVM_IRQ_ROUTE_MSI => {
                     let msi = entry.mut_msi();
+                    // SAFETY:
                     // Safe because route.kind indicates which union field is valid.
                     msi.address = unsafe { route.route.msi }.address;
+                    // SAFETY:
+                    // Safe because route.kind indicates which union field is valid.
                     msi.data = unsafe { route.route.msi }.data;
                 }
                 _ => return Err(EINVAL),

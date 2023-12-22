@@ -19,10 +19,7 @@ rust_library {
     cargo_pkg_version: "0.1.2",
     srcs: ["src/lib.rs"],
     edition: "2021",
-    features: [
-        "virgl_renderer",
-        "virgl_renderer_next",
-    ],
+    features: ["virgl_renderer"],
     rustlibs: [
         "libcfg_if",
         "liblibc",
@@ -68,10 +65,7 @@ rust_test {
         unit_test: true,
     },
     edition: "2021",
-    features: [
-        "virgl_renderer",
-        "virgl_renderer_next",
-    ],
+    features: ["virgl_renderer"],
     rustlibs: [
         "libcfg_if",
         "liblibc",

@@ -838,6 +838,12 @@ fn create_devices(
             Tube::pair().context("failed to create ioevent tube")?;
         vm_memory_control_tubes.push(ioevent_host_tube);
 
+        let (vm_control_host_tube, vm_control_device_tube) =
+            Tube::pair().context("failed to create vm_control tube")?;
+        control_tubes.push(TaggedControlTube::Vm(FlushOnDropTube::from(
+            vm_control_host_tube,
+        )));
+
         let dev = Box::new(
             VirtioPciDevice::new(
                 mem.clone(),
@@ -846,6 +852,7 @@ fn create_devices(
                 cfg.disable_virtio_intx,
                 shared_memory_tube.map(VmMemoryClient::new),
                 VmMemoryClient::new(ioevent_device_tube),
+                vm_control_device_tube,
             )
             .exit_context(Exit::VirtioPciDev, "failed to create virtio pci dev")?,
         ) as Box<dyn BusDeviceObj>;
@@ -2214,9 +2221,10 @@ fn set_tsc_clock_snapshot() {
 
 /// Launches run_config for the broker, reading configuration from a TubeTransporter.
 pub fn run_config_for_broker(raw_tube_transporter: RawDescriptor) -> Result<ExitState> {
-    // Safe because we know that raw_transport_tube is valid (passed by inheritance), and that
-    // the blocking & framing modes are accurate because we create them ourselves in the broker.
     let tube_transporter =
+        // SAFETY:
+        // Safe because we know that raw_transport_tube is valid (passed by inheritance), and that
+        // the blocking & framing modes are accurate because we create them ourselves in the broker.
         unsafe { TubeTransporterReader::from_raw_descriptor(raw_tube_transporter) };
 
     let mut tube_data_list = tube_transporter

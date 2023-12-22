@@ -17,8 +17,7 @@
     "usb",
     // TODO: Enable these in the root crate instead. May be difficult because of host-vs-device
     // difference that are handled in patches in, e.g., the "devices" crate.
-    "rutabaga_gfx/virgl_renderer",
-    "rutabaga_gfx/virgl_renderer_next"
+    "rutabaga_gfx/virgl_renderer"
   ],
   "workspace": true,
   "workspace_excludes": [
@@ -196,7 +195,18 @@
       "patch": "protos/patches/Android.bp.patch"
     },
     "rutabaga_gfx": {
-      "patch": "rutabaga_gfx/patches/Android.bp.patch"
+      "patch": "rutabaga_gfx/patches/Android.bp.patch",
+      "dep_blocklist": [
+        "libEGL",
+        "libGL",
+        "libX11",
+        "libXau",
+        "libXdmcp",
+        "libdl",
+        "libm",
+        "libpthread",
+        "libxcb"
+      ]
     },
     "vhost": {
       "no_presubmit": true

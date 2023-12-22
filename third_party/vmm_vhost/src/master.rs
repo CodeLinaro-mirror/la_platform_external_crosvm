@@ -18,8 +18,8 @@ use zerocopy::FromBytes;
 
 use crate::backend::VhostUserMemoryRegionInfo;
 use crate::backend::VringConfigData;
+use crate::into_single_file;
 use crate::message::*;
-use crate::take_single_file;
 use crate::Connection;
 use crate::Error as VhostUserError;
 use crate::MasterReq;
@@ -138,11 +138,10 @@ impl Master {
         }
 
         let body = VhostUserMemory::new(ctx.regions.len() as u32);
-        let (_, payload, _) = unsafe { ctx.regions.align_to::<u8>() };
         let hdr = self.send_request_with_payload(
             MasterReq::SET_MEM_TABLE,
             &body,
-            payload,
+            ctx.regions.as_bytes(),
             Some(ctx.fds.as_slice()),
         )?;
         self.wait_for_ack(&hdr)
@@ -388,7 +387,7 @@ impl Master {
         let hdr = self.send_request_with_payload(MasterReq::GET_CONFIG, &body, buf, None)?;
         let (body_reply, buf_reply, rfds) =
             self.recv_reply_with_payload::<VhostUserConfig>(&hdr)?;
-        if rfds.is_some() {
+        if !rfds.is_empty() {
             return Err(VhostUserError::InvalidMessage);
         } else if body_reply.size == 0 {
             return Err(VhostUserError::SlaveInternalError);
@@ -447,7 +446,7 @@ impl Master {
         let hdr = self.send_request_with_body(MasterReq::GET_INFLIGHT_FD, inflight, None)?;
         let (inflight, files) = self.recv_reply_with_files::<VhostUserInflight>(&hdr)?;
 
-        match take_single_file(files) {
+        match into_single_file(files) {
             Some(file) => Ok((inflight, file)),
             None => Err(VhostUserError::IncorrectFds),
         }
@@ -531,7 +530,7 @@ impl Master {
         let hdr = self.send_request_header(MasterReq::GET_SHARED_MEMORY_REGIONS, None)?;
         let (body_reply, buf_reply, rfds) = self.recv_reply_with_payload::<VhostUserU64>(&hdr)?;
         let struct_size = mem::size_of::<VhostSharedMemoryRegion>();
-        if rfds.is_some() || buf_reply.len() != body_reply.value as usize * struct_size {
+        if !rfds.is_empty() || buf_reply.len() != body_reply.value as usize * struct_size {
             return Err(VhostUserError::InvalidMessage);
         }
         let mut regions = Vec::new();
@@ -552,7 +551,7 @@ impl Master {
         fds: Option<&[RawDescriptor]>,
     ) -> VhostUserResult<VhostUserMsgHeader<MasterReq>> {
         let hdr = self.new_request_header(code, 0);
-        self.main_sock.send_header(&hdr, fds)?;
+        self.main_sock.send_header_only_message(&hdr, fds)?;
         Ok(hdr)
     }
 
@@ -614,7 +613,7 @@ impl Master {
             return Err(VhostUserError::InvalidParam);
         }
         let (reply, body, rfds) = self.main_sock.recv_message::<T>()?;
-        if !reply.is_reply_for(hdr) || rfds.is_some() || !body.is_valid() {
+        if !reply.is_reply_for(hdr) || !rfds.is_empty() || !body.is_valid() {
             return Err(VhostUserError::InvalidMessage);
         }
         Ok(body)
@@ -623,13 +622,13 @@ impl Master {
     fn recv_reply_with_files<T: Sized + AsBytes + FromBytes + Default + VhostUserMsgValidator>(
         &self,
         hdr: &VhostUserMsgHeader<MasterReq>,
-    ) -> VhostUserResult<(T, Option<Vec<File>>)> {
+    ) -> VhostUserResult<(T, Vec<File>)> {
         if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam);
         }
 
         let (reply, body, files) = self.main_sock.recv_message::<T>()?;
-        if !reply.is_reply_for(hdr) || files.is_none() || !body.is_valid() {
+        if !reply.is_reply_for(hdr) || files.is_empty() || !body.is_valid() {
             return Err(VhostUserError::InvalidMessage);
         }
         Ok((body, files))
@@ -638,13 +637,13 @@ impl Master {
     fn recv_reply_with_payload<T: Sized + AsBytes + FromBytes + Default + VhostUserMsgValidator>(
         &self,
         hdr: &VhostUserMsgHeader<MasterReq>,
-    ) -> VhostUserResult<(T, Vec<u8>, Option<Vec<File>>)> {
+    ) -> VhostUserResult<(T, Vec<u8>, Vec<File>)> {
         if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam);
         }
 
         let (reply, body, buf, files) = self.main_sock.recv_message_with_payload::<T>()?;
-        if !reply.is_reply_for(hdr) || files.is_some() || !body.is_valid() {
+        if !reply.is_reply_for(hdr) || !files.is_empty() || !body.is_valid() {
             return Err(VhostUserError::InvalidMessage);
         }
 
@@ -659,7 +658,7 @@ impl Master {
         }
 
         let (reply, body, rfds) = self.main_sock.recv_message::<VhostUserU64>()?;
-        if !reply.is_reply_for(hdr) || rfds.is_some() || !body.is_valid() {
+        if !reply.is_reply_for(hdr) || !rfds.is_empty() || !body.is_valid() {
             return Err(VhostUserError::InvalidMessage);
         }
         if body.value != 0 {
@@ -724,13 +723,13 @@ mod tests {
         assert_eq!(hdr.get_code(), Ok(MasterReq::SET_OWNER));
         assert_eq!(hdr.get_size(), 0);
         assert_eq!(hdr.get_version(), 0x1);
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
 
         let (hdr, rfds) = slave.recv_header().unwrap();
         assert_eq!(hdr.get_code(), Ok(MasterReq::RESET_OWNER));
         assert_eq!(hdr.get_size(), 0);
         assert_eq!(hdr.get_version(), 0x1);
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
     }
 
     #[test]
@@ -742,7 +741,7 @@ mod tests {
         assert_eq!(hdr.get_code(), Ok(MasterReq::SET_OWNER));
         assert_eq!(hdr.get_size(), 0);
         assert_eq!(hdr.get_version(), 0x1);
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
 
         let hdr = VhostUserMsgHeader::new(MasterReq::GET_FEATURES, 0x4, 8);
         let msg = VhostUserU64::new(0x15);
@@ -750,14 +749,14 @@ mod tests {
         let features = master.get_features().unwrap();
         assert_eq!(features, 0x15u64);
         let (_hdr, rfds) = peer.recv_header().unwrap();
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
 
         let hdr = VhostUserMsgHeader::new(MasterReq::SET_FEATURES, 0x4, 8);
         let msg = VhostUserU64::new(0x15);
         peer.send_message(&hdr, &msg, None).unwrap();
         master.set_features(0x15).unwrap();
         let (_hdr, msg, rfds) = peer.recv_message::<VhostUserU64>().unwrap();
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
         let val = msg.value;
         assert_eq!(val, 0x15);
 
@@ -774,7 +773,7 @@ mod tests {
         master.set_owner().unwrap();
         let (hdr, rfds) = peer.recv_header().unwrap();
         assert_eq!(hdr.get_code(), Ok(MasterReq::SET_OWNER));
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
 
         assert!(master.get_protocol_features().is_err());
         assert!(master
@@ -788,11 +787,11 @@ mod tests {
         let features = master.get_features().unwrap();
         assert_eq!(features, vfeatures);
         let (_hdr, rfds) = peer.recv_header().unwrap();
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
 
         master.set_features(vfeatures).unwrap();
         let (_hdr, msg, rfds) = peer.recv_message::<VhostUserU64>().unwrap();
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
         let val = msg.value;
         assert_eq!(val, vfeatures);
 
@@ -803,11 +802,11 @@ mod tests {
         let features = master.get_protocol_features().unwrap();
         assert_eq!(features, pfeatures);
         let (_hdr, rfds) = peer.recv_header().unwrap();
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
 
         master.set_protocol_features(pfeatures).unwrap();
         let (_hdr, msg, rfds) = peer.recv_message::<VhostUserU64>().unwrap();
-        assert!(rfds.is_none());
+        assert!(rfds.is_empty());
         let val = msg.value;
         assert_eq!(val, pfeatures.bits());
 

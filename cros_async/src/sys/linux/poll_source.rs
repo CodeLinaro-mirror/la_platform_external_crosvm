@@ -6,13 +6,10 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
-use base::sys::discard_block;
 use base::sys::fallocate;
-use base::sys::is_block_file;
 use base::sys::FallocateMode;
 use base::AsRawDescriptor;
 use base::VolatileSlice;
-use once_cell::unsync::OnceCell;
 use remain::sorted;
 use thiserror::Error as ThisError;
 
@@ -31,9 +28,6 @@ pub enum Error {
     /// An error occurred attempting to register a waker with the executor.
     #[error("An error occurred attempting to register a waker with the executor: {0}.")]
     AddingWaker(fd_executor::Error),
-    /// Failed to check if a file is a block file.
-    #[error("Failed to check if a file is a block file.: {0}")]
-    CheckingBlockFile(base::Error),
     /// Failed to discard a block
     #[error("Failed to discard a block: {0}")]
     Discard(base::Error),
@@ -70,7 +64,6 @@ impl From<Error> for io::Error {
             Discard(e) => e.into(),
             Fallocate(e) => e.into(),
             Fdatasync(e) => e.into(),
-            CheckingBlockFile(e) => e.into(),
             Fsync(e) => e.into(),
             Read(e) => e.into(),
             Seeking(e) => e.into(),
@@ -82,8 +75,6 @@ impl From<Error> for io::Error {
 /// Async wrapper for an IO source that uses the FD executor to drive async operations.
 pub struct PollSource<F> {
     registered_source: RegisteredSource<F>,
-    // Caches if the backed file is a block device since the punch-hole needs different operation.
-    is_block_file: OnceCell<bool>,
 }
 
 impl<F: AsRawDescriptor> PollSource<F> {
@@ -93,7 +84,6 @@ impl<F: AsRawDescriptor> PollSource<F> {
             .map({
                 |f| PollSource {
                     registered_source: f,
-                    is_block_file: OnceCell::new(),
                 }
             })
             .map_err(Error::Executor)
@@ -108,8 +98,9 @@ impl<F: AsRawDescriptor> PollSource<F> {
         mut vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
         loop {
-            // Safe because this will only modify `vec` and we check the return value.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because this will only modify `vec` and we check the return value.
                 unsafe {
                     libc::pread64(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -119,6 +110,8 @@ impl<F: AsRawDescriptor> PollSource<F> {
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because this will only modify `vec` and we check the return value.
                 unsafe {
                     libc::read(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -158,9 +151,10 @@ impl<F: AsRawDescriptor> PollSource<F> {
             .collect::<Vec<VolatileSlice>>();
 
         loop {
-            // Safe because we trust the kernel not to write path the length given and the length is
-            // guaranteed to be valid from the pointer by io_slice_mut.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::preadv64(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -170,6 +164,9 @@ impl<F: AsRawDescriptor> PollSource<F> {
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::readv(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -213,8 +210,9 @@ impl<F: AsRawDescriptor> PollSource<F> {
         vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
         loop {
-            // Safe because this will not modify any memory and we check the return value.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because this will not modify any memory and we check the return value.
                 unsafe {
                     libc::pwrite64(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -224,6 +222,8 @@ impl<F: AsRawDescriptor> PollSource<F> {
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because this will not modify any memory and we check the return value.
                 unsafe {
                     libc::write(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -264,9 +264,10 @@ impl<F: AsRawDescriptor> PollSource<F> {
             .collect::<Vec<VolatileSlice>>();
 
         loop {
-            // Safe because we trust the kernel not to write path the length given and the length is
-            // guaranteed to be valid from the pointer by io_slice_mut.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::pwritev64(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -276,6 +277,9 @@ impl<F: AsRawDescriptor> PollSource<F> {
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::writev(
                         self.registered_source.duped_fd.as_raw_fd(),
@@ -302,8 +306,11 @@ impl<F: AsRawDescriptor> PollSource<F> {
         }
     }
 
+    /// # Safety
+    ///
     /// Sync all completed write operations to the backing storage.
     pub async fn fsync(&self) -> AsyncResult<()> {
+        // SAFETY: the duped_fd is valid and return value is checked.
         let ret = unsafe { libc::fsync(self.registered_source.duped_fd.as_raw_fd()) };
         if ret == 0 {
             Ok(())
@@ -314,20 +321,13 @@ impl<F: AsRawDescriptor> PollSource<F> {
 
     /// punch_hole
     pub async fn punch_hole(&self, file_offset: u64, len: u64) -> AsyncResult<()> {
-        if *self.is_block_file.get_or_try_init(|| {
-            is_block_file(&self.registered_source.duped_fd).map_err(Error::CheckingBlockFile)
-        })? {
-            discard_block(&self.registered_source.duped_fd, file_offset, len)
-                .map_err(|e| AsyncError::Poll(Error::Discard(e)))
-        } else {
-            fallocate(
-                &self.registered_source.duped_fd,
-                FallocateMode::PunchHole,
-                file_offset,
-                len,
-            )
-            .map_err(|e| AsyncError::Poll(Error::Fallocate(e)))
-        }
+        fallocate(
+            &self.registered_source.duped_fd,
+            FallocateMode::PunchHole,
+            file_offset,
+            len,
+        )
+        .map_err(|e| AsyncError::Poll(Error::Fallocate(e)))
     }
 
     /// write_zeroes_at
@@ -344,6 +344,7 @@ impl<F: AsRawDescriptor> PollSource<F> {
     /// Sync all data of completed write operations to the backing storage, avoiding updating extra
     /// metadata.
     pub async fn fdatasync(&self) -> AsyncResult<()> {
+        // SAFETY: the duped_fd is valid and return value is checked.
         let ret = unsafe { libc::fdatasync(self.registered_source.duped_fd.as_raw_fd()) };
         if ret == 0 {
             Ok(())

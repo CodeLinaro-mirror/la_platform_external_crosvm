@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp;
 use std::collections::btree_map;
 use std::collections::BTreeMap;
@@ -15,6 +16,7 @@ use std::mem::size_of;
 use std::mem::MaybeUninit;
 use std::os::raw::c_int;
 use std::os::raw::c_long;
+use std::ptr;
 use std::ptr::addr_of;
 use std::ptr::addr_of_mut;
 use std::sync::atomic::AtomicBool;
@@ -30,8 +32,9 @@ use base::ioctl_iow_nr;
 use base::ioctl_iowr_nr;
 use base::ioctl_with_mut_ptr;
 use base::ioctl_with_ptr;
-use base::linux::FileFlags;
 use base::syscall;
+use base::unix::FileFlags;
+use base::warn;
 use base::AsRawDescriptor;
 use base::FromRawDescriptor;
 use base::Protection;
@@ -80,6 +83,7 @@ use crate::virtio::fs::read_dir::ReadDir;
 const EMPTY_CSTR: &[u8] = b"\0";
 const ROOT_CSTR: &[u8] = b"/\0";
 const PROC_CSTR: &[u8] = b"/proc\0";
+const UNLABELED_CSTR: &[u8] = b"unlabeled\0";
 
 const USER_VIRTIOFS_XATTR: &[u8] = b"user.virtiofs.";
 const SECURITY_XATTR: &[u8] = b"security.";
@@ -297,6 +301,7 @@ macro_rules! scoped_cred {
 
         impl Drop for $name {
             fn drop(&mut self) {
+                // SAFETY: trivially safe
                 let res = unsafe { libc::syscall($syscall_nr, -1, self.old, -1) };
                 if res < 0 {
                     error!(
@@ -333,6 +338,8 @@ thread_local! {
     // SAFETY: both calls take no parameters and only return an integer value. The kernel also
     // guarantees that they can never fail.
     static THREAD_EUID: libc::uid_t = unsafe { libc::syscall(SYS_GETEUID) as libc::uid_t };
+    // SAFETY: both calls take no parameters and only return an integer value. The kernel also
+    // guarantees that they can never fail.
     static THREAD_EGID: libc::gid_t = unsafe { libc::syscall(SYS_GETEGID) as libc::gid_t };
 }
 
@@ -346,6 +353,83 @@ fn set_creds(
     // We have to change the gid before we change the uid because if we change the uid first then we
     // lose the capability to change the gid.  However changing back can happen in any order.
     ScopedGid::new(gid, oldgid).and_then(|gid| Ok((ScopedUid::new(uid, olduid)?, gid)))
+}
+
+thread_local!(static THREAD_FSCREATE: RefCell<Option<File>> = RefCell::new(None));
+
+// Opens and returns a write-only handle to /proc/thread-self/attr/fscreate. Panics if it fails to
+// open the file.
+fn open_fscreate(proc: &File) -> File {
+    // SAFETY: This string is nul-terminated and does not contain any interior nul bytes
+    let fscreate = unsafe { CStr::from_bytes_with_nul_unchecked(b"thread-self/attr/fscreate\0") };
+
+    // SAFETY: this doesn't modify any memory and we check the return value.
+    let raw_descriptor = unsafe {
+        libc::openat(
+            proc.as_raw_descriptor(),
+            fscreate.as_ptr(),
+            libc::O_CLOEXEC | libc::O_WRONLY,
+        )
+    };
+
+    // We don't expect this to fail and we're not in a position to return an error here so just
+    // panic.
+    if raw_descriptor < 0 {
+        panic!(
+            "Failed to open /proc/thread-self/attr/fscreate: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    // SAFETY: safe because we just opened this descriptor.
+    unsafe { File::from_raw_descriptor(raw_descriptor) }
+}
+
+struct ScopedSecurityContext;
+
+impl ScopedSecurityContext {
+    fn new(proc: &File, ctx: &CStr) -> io::Result<ScopedSecurityContext> {
+        THREAD_FSCREATE.with(|thread_fscreate| {
+            let mut fscreate = thread_fscreate.borrow_mut();
+            let file = fscreate.get_or_insert_with(|| open_fscreate(proc));
+            // SAFETY: this doesn't modify any memory and we check the return value.
+            let ret = unsafe {
+                libc::write(
+                    file.as_raw_descriptor(),
+                    ctx.as_ptr() as *const libc::c_void,
+                    ctx.to_bytes_with_nul().len(),
+                )
+            };
+            if ret < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(ScopedSecurityContext)
+            }
+        })
+    }
+}
+
+impl Drop for ScopedSecurityContext {
+    fn drop(&mut self) {
+        THREAD_FSCREATE.with(|thread_fscreate| {
+            // expect is safe here because the thread local would have been initialized by the call
+            // to `new` above.
+            let fscreate = thread_fscreate.borrow();
+            let file = fscreate
+                .as_ref()
+                .expect("Uninitialized thread-local when dropping ScopedSecurityContext");
+
+            // SAFETY: this doesn't modify any memory and we check the return value.
+            let ret = unsafe { libc::write(file.as_raw_descriptor(), ptr::null(), 0) };
+
+            if ret < 0 {
+                warn!(
+                    "Failed to restore security context: {}",
+                    io::Error::last_os_error()
+                );
+            }
+        })
+    }
 }
 
 struct ScopedUmask {
@@ -1025,14 +1109,18 @@ impl PassthroughFs {
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
         let open_flags = self.update_open_flags(flags as i32);
 
-        let fd_open = syscall!(unsafe {
-            libc::openat64(
-                parent_data.as_raw_descriptor(),
-                name.as_ptr(),
-                (open_flags | libc::O_CLOEXEC) & !(libc::O_NOFOLLOW | libc::O_DIRECT),
-            )
-        })?;
+        let fd_open = syscall!(
+            // SAFETY: return value is checked.
+            unsafe {
+                libc::openat64(
+                    parent_data.as_raw_descriptor(),
+                    name.as_ptr(),
+                    (open_flags | libc::O_CLOEXEC) & !(libc::O_NOFOLLOW | libc::O_DIRECT),
+                )
+            }
+        )?;
 
+        // SAFETY: fd_open is valid
         let file_open = unsafe { File::from_raw_descriptor(fd_open) };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let data = HandleData {
@@ -1184,8 +1272,8 @@ impl PassthroughFs {
         let policy_size = cmp::min(arg.policy_size, size_of::<fscrypt_policy>() as u64);
         arg.policy_size = policy_size;
 
-        // SAFETY: the kernel will only write to `arg` and we check the return value.
         let res =
+            // SAFETY: the kernel will only write to `arg` and we check the return value.
             unsafe { ioctl_with_mut_ptr(&*data, FS_IOC_GET_ENCRYPTION_POLICY_EX(), &mut arg) };
         if res < 0 {
             Ok(IoctlReply::Done(Err(io::Error::last_os_error())))
@@ -1513,9 +1601,9 @@ impl PassthroughFs {
         if res < 0 {
             Ok(IoctlReply::Done(Err(io::Error::last_os_error())))
         } else {
-            // SAFETY: this value was initialized by us already and then overwritten by the kernel.
-            // TODO: Replace with `MaybeUninit::slice_as_ptr` once it is stabilized.
             let digest_size =
+                // SAFETY: this value was initialized by us already and then overwritten by the kernel.
+                // TODO: Replace with `MaybeUninit::slice_as_ptr` once it is stabilized.
                 unsafe { addr_of!((*(buf.as_ptr() as *const fsverity_digest)).digest_size).read() };
             let outlen = size_of::<fsverity_digest>() as u32 + u32::from(digest_size);
 
@@ -1527,16 +1615,16 @@ impl PassthroughFs {
                 ))));
             }
 
-            // SAFETY: any bit pattern is valid for `MaybeUninit<u8>` and `fsverity_digest` doesn't
-            // contain any references.
             let buf: [MaybeUninit<u8>; ROUNDED_LEN * size_of::<fsverity_digest>()] =
+                // SAFETY: any bit pattern is valid for `MaybeUninit<u8>` and `fsverity_digest`
+                // doesn't contain any references.
                 unsafe { mem::transmute(buf) };
 
-            // SAFETY: Casting to `*const [u8]` is safe because the kernel guarantees that the first
-            // `outlen` bytes of `buf` are initialized and `MaybeUninit<u8>` is guaranteed to have
-            // the same layout as `u8`.
-            // TODO: Replace with `MaybeUninit::slice_assume_init_ref` once it is stabilized.
             let buf =
+                // SAFETY: Casting to `*const [u8]` is safe because the kernel guarantees that the
+                // first `outlen` bytes of `buf` are initialized and `MaybeUninit<u8>` is guaranteed
+                // to have the same layout as `u8`.
+                // TODO: Replace with `MaybeUninit::slice_assume_init_ref` once it is stabilized.
                 unsafe { &*(&buf[..outlen as usize] as *const [MaybeUninit<u8>] as *const [u8]) };
             Ok(IoctlReply::Done(Ok(buf.to_vec())))
         }
@@ -1663,7 +1751,8 @@ impl FileSystem for PassthroughFs {
             | FsOptions::READDIRPLUS_AUTO
             | FsOptions::EXPORT_SUPPORT
             | FsOptions::DONT_MASK
-            | FsOptions::CACHE_SYMLINKS;
+            | FsOptions::CACHE_SYMLINKS
+            | FsOptions::SECURITY_CONTEXT;
         if self.cfg.posix_acl {
             opts |= FsOptions::POSIX_ACL;
         }
@@ -1795,9 +1884,15 @@ impl FileSystem for PassthroughFs {
         name: &CStr,
         mode: u32,
         umask: u32,
+        security_ctx: Option<&CStr>,
     ) -> io::Result<Entry> {
-        let _trace = fs_trace!(self.tag, "mkdir", parent, name, mode, umask);
+        let _trace = fs_trace!(self.tag, "mkdir", parent, name, mode, umask, security_ctx);
         let data = self.find_inode(parent)?;
+
+        let _ctx = security_ctx
+            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
+            .transpose()?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
         {
@@ -1889,9 +1984,22 @@ impl FileSystem for PassthroughFs {
         parent: Self::Inode,
         mode: u32,
         umask: u32,
+        security_ctx: Option<&CStr>,
     ) -> io::Result<Entry> {
-        let _trace = fs_trace!(self.tag, "chromeos_tempfile", parent, mode, umask);
+        let _trace = fs_trace!(
+            self.tag,
+            "chromeos_tempfile",
+            parent,
+            mode,
+            umask,
+            security_ctx
+        );
         let data = self.find_inode(parent)?;
+
+        let _ctx = security_ctx
+            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
+            .transpose()?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
@@ -1935,9 +2043,25 @@ impl FileSystem for PassthroughFs {
         mode: u32,
         flags: u32,
         umask: u32,
+        security_ctx: Option<&CStr>,
     ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
-        let _trace = fs_trace!(self.tag, "create", parent, name, mode, flags, umask);
+        let _trace = fs_trace!(
+            self.tag,
+            "create",
+            parent,
+            name,
+            mode,
+            flags,
+            umask,
+            security_ctx
+        );
         let data = self.find_inode(parent)?;
+
+        let _ctx = security_ctx
+            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
+            .transpose()?;
+
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
         let create_flags =
@@ -2184,12 +2308,15 @@ impl FileSystem for PassthroughFs {
         }
 
         if valid.contains(SetattrValid::SIZE) {
-            // SAFETY: this doesn't modify any memory and we check the return value.
             syscall!(match data {
-                Data::Handle(_, fd) => unsafe { libc::ftruncate64(fd, attr.st_size) },
+                Data::Handle(_, fd) => {
+                    // SAFETY: this doesn't modify any memory and we check the return value.
+                    unsafe { libc::ftruncate64(fd, attr.st_size) }
+                }
                 _ => {
                     // There is no `ftruncateat` so we need to get a new fd and truncate it.
                     let f = self.open_inode(&inode_data, libc::O_NONBLOCK | libc::O_RDWR)?;
+                    // SAFETY: this doesn't modify any memory and we check the return value.
                     unsafe { libc::ftruncate64(f.as_raw_descriptor(), attr.st_size) }
                 }
             })?;
@@ -2281,9 +2408,24 @@ impl FileSystem for PassthroughFs {
         mode: u32,
         rdev: u32,
         umask: u32,
+        security_ctx: Option<&CStr>,
     ) -> io::Result<Entry> {
-        let _trace = fs_trace!(self.tag, "mknod", parent, name, mode, rdev, umask);
+        let _trace = fs_trace!(
+            self.tag,
+            "mknod",
+            parent,
+            name,
+            mode,
+            rdev,
+            umask,
+            security_ctx
+        );
         let data = self.find_inode(parent)?;
+
+        let _ctx = security_ctx
+            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
+            .transpose()?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
         {
@@ -2347,9 +2489,15 @@ impl FileSystem for PassthroughFs {
         linkname: &CStr,
         parent: Inode,
         name: &CStr,
+        security_ctx: Option<&CStr>,
     ) -> io::Result<Entry> {
-        let _trace = fs_trace!(self.tag, "symlink", parent, linkname, name);
+        let _trace = fs_trace!(self.tag, "symlink", parent, linkname, name, security_ctx);
         let data = self.find_inode(parent)?;
+
+        let _ctx = security_ctx
+            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
+            .transpose()?;
 
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
         {
@@ -2404,6 +2552,7 @@ impl FileSystem for PassthroughFs {
             self.find_handle(handle, inode)?
         };
 
+        // SAFETY:
         // Since this method is called whenever an fd is closed in the client, we can emulate that
         // behavior by doing the same thing (dup-ing the fd and then immediately closing it). Safe
         // because this doesn't modify any memory and we check the return values.
@@ -2526,8 +2675,8 @@ impl FileSystem for PassthroughFs {
             let path = CString::new(format!("self/fd/{}", file.0.as_raw_descriptor()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            // SAFETY: this doesn't modify any memory and we check the return value.
             syscall!(self.with_proc_chdir(|| {
+                // SAFETY: this doesn't modify any memory and we check the return value.
                 unsafe {
                     libc::setxattr(
                         path.as_ptr(),
@@ -2539,17 +2688,19 @@ impl FileSystem for PassthroughFs {
                 }
             }))?;
         } else {
-            // For regular files and directories, we can just use fsetxattr.
-            // SAFETY: this doesn't modify any memory and we check the return value.
-            syscall!(unsafe {
-                libc::fsetxattr(
-                    file.0.as_raw_descriptor(),
-                    name.as_ptr(),
-                    value.as_ptr() as *const libc::c_void,
-                    value.len() as libc::size_t,
-                    flags as c_int,
-                )
-            })?;
+            syscall!(
+                // For regular files and directories, we can just use fsetxattr.
+                // SAFETY: this doesn't modify any memory and we check the return value.
+                unsafe {
+                    libc::fsetxattr(
+                        file.0.as_raw_descriptor(),
+                        name.as_ptr(),
+                        value.as_ptr() as *const libc::c_void,
+                        value.len() as libc::size_t,
+                        flags as c_int,
+                    )
+                }
+            )?;
         }
 
         Ok(())
@@ -2650,14 +2801,15 @@ impl FileSystem for PassthroughFs {
             let path = CString::new(format!("self/fd/{}", file.0.as_raw_descriptor()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            // SAFETY: this doesn't modify any memory and we check the return value.
-            syscall!(
-                self.with_proc_chdir(|| unsafe { libc::removexattr(path.as_ptr(), name.as_ptr()) })
-            )?;
+            syscall!(self.with_proc_chdir(||
+                    // SAFETY: this doesn't modify any memory and we check the return value.
+                    unsafe { libc::removexattr(path.as_ptr(), name.as_ptr()) }))?;
         } else {
             // For regular files and directories, we can just use fremovexattr.
-            // SAFETY: this doesn't modify any memory and we check the return value.
-            syscall!(unsafe { libc::fremovexattr(file.0.as_raw_descriptor(), name.as_ptr()) })?;
+            syscall!(
+                // SAFETY: this doesn't modify any memory and we check the return value.
+                unsafe { libc::fremovexattr(file.0.as_raw_descriptor(), name.as_ptr()) }
+            )?;
         }
 
         Ok(())
@@ -2829,17 +2981,21 @@ impl FileSystem for PassthroughFs {
         let src = src_data.as_raw_descriptor();
         let dst = dst_data.as_raw_descriptor();
 
-        Ok(syscall!(unsafe {
-            libc::syscall(
-                libc::SYS_copy_file_range,
-                src,
-                &offset_src,
-                dst,
-                &offset_dst,
-                length,
-                flags,
-            )
-        })? as usize)
+        Ok(syscall!(
+            // SAFETY: this call is safe because it doesn't modify any memory and we
+            // check the return value.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_copy_file_range,
+                    src,
+                    &offset_src,
+                    dst,
+                    &offset_dst,
+                    length,
+                    flags,
+                )
+            }
+        )? as usize)
     }
 
     fn set_up_mapping<M: Mapper>(
@@ -2927,8 +3083,18 @@ impl FileSystem for PassthroughFs {
         mode: u32,
         flags: u32,
         umask: u32,
+        security_ctx: Option<&CStr>,
     ) -> io::Result<(Entry, Option<Self::Handle>, OpenOptions)> {
-        let _trace = fs_trace!(self.tag, "atomic_open", parent, name, mode, flags, umask);
+        let _trace = fs_trace!(
+            self.tag,
+            "atomic_open",
+            parent,
+            name,
+            mode,
+            flags,
+            umask,
+            security_ctx
+        );
         let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
         // Perform lookup but not create negative dentry
@@ -2944,7 +3110,7 @@ impl FileSystem for PassthroughFs {
                 // If the file did not exist & O_CREAT is set,
                 // create file & set FILE_CREATED bits in open options
                 let (entry, handler, mut opts) =
-                    self.create(ctx, parent, name, mode, flags, umask)?;
+                    self.create(ctx, parent, name, mode, flags, umask, security_ctx)?;
                 opts |= OpenOptions::FILE_CREATED;
                 return Ok((entry, handler, opts));
             }
@@ -2989,6 +3155,8 @@ mod tests {
         // SAFETY: both calls take no parameters and only return an integer value. The kernel also
         // guarantees that they can never fail.
         let uid = unsafe { libc::syscall(SYS_GETEUID) as libc::uid_t };
+        // SAFETY: both calls take no parameters and only return an integer value. The kernel also
+        // guarantees that they can never fail.
         let gid = unsafe { libc::syscall(SYS_GETEGID) as libc::gid_t };
         let pid = std::process::id() as libc::pid_t;
         Context { uid, gid, pid }
@@ -3030,8 +3198,17 @@ mod tests {
         let filename = CString::new(path.file_name().unwrap().to_str().unwrap()).unwrap();
         let parent_inode = lookup(fs, parent)?;
         let ctx = get_context();
-        fs.create(ctx, parent_inode, &filename, 0o666, libc::O_RDWR as u32, 0)
-            .map(|(entry, _, _)| entry)
+        let security_ctx = None;
+        fs.create(
+            ctx,
+            parent_inode,
+            &filename,
+            0o666,
+            libc::O_RDWR as u32,
+            0,
+            security_ctx,
+        )
+        .map(|(entry, _, _)| entry)
     }
 
     /// Removes a file at the given `path`.
@@ -3059,6 +3236,7 @@ mod tests {
         mode: u32,
         flags: u32,
         umask: u32,
+        security_ctx: Option<&CStr>,
     ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
         let mut inode = 1;
         let ctx = get_context();
@@ -3076,15 +3254,20 @@ mod tests {
 
         let name = CString::new(path_vec[vec_len - 1].to_str().unwrap()).unwrap();
 
-        fs.atomic_open(ctx, inode, &name, mode, flags, umask)
+        fs.atomic_open(ctx, inode, &name, mode, flags, umask, security_ctx)
     }
 
-    fn symlink(fs: &PassthroughFs, linkname: &Path, name: &Path) -> io::Result<Entry> {
+    fn symlink(
+        fs: &PassthroughFs,
+        linkname: &Path,
+        name: &Path,
+        security_ctx: Option<&CStr>,
+    ) -> io::Result<Entry> {
         let inode = 1;
         let ctx = get_context();
         let name = CString::new(name.to_str().unwrap()).unwrap();
         let linkname = CString::new(linkname.to_str().unwrap()).unwrap();
-        fs.symlink(ctx, &linkname, inode, &name)
+        fs.symlink(ctx, &linkname, inode, &name, security_ctx)
     }
 
     #[test]
@@ -3102,18 +3285,23 @@ mod tests {
         let p = PassthroughFs::new("tag", cfg).expect("Failed to create PassthroughFs");
 
         // Selinux shouldn't get overwritten.
+        // SAFETY: trivially safe
         let selinux = unsafe { CStr::from_bytes_with_nul_unchecked(b"security.selinux\0") };
         assert_eq!(p.rewrite_xattr_name(selinux).to_bytes(), selinux.to_bytes());
 
         // user, trusted, and system should not be changed either.
+        // SAFETY: trivially safe
         let user = unsafe { CStr::from_bytes_with_nul_unchecked(b"user.foobar\0") };
         assert_eq!(p.rewrite_xattr_name(user).to_bytes(), user.to_bytes());
+        // SAFETY: trivially safe
         let trusted = unsafe { CStr::from_bytes_with_nul_unchecked(b"trusted.foobar\0") };
         assert_eq!(p.rewrite_xattr_name(trusted).to_bytes(), trusted.to_bytes());
+        // SAFETY: trivially safe
         let system = unsafe { CStr::from_bytes_with_nul_unchecked(b"system.foobar\0") };
         assert_eq!(p.rewrite_xattr_name(system).to_bytes(), system.to_bytes());
 
         // sehash should be re-written.
+        // SAFETY: trivially safe
         let sehash = unsafe { CStr::from_bytes_with_nul_unchecked(b"security.sehash\0") };
         assert_eq!(
             p.rewrite_xattr_name(sehash).to_bytes(),
@@ -3484,6 +3672,7 @@ mod tests {
             0o666,
             libc::O_RDWR as u32,
             0,
+            None,
         );
         assert!(res.is_ok());
         let (entry, handler, open_options) = res.unwrap();
@@ -3507,6 +3696,7 @@ mod tests {
             0o666,
             (libc::O_RDWR | libc::O_CREAT) as u32,
             0,
+            None,
         );
         assert!(res.is_ok());
         let (entry, handler, open_options) = res.unwrap();
@@ -3530,6 +3720,7 @@ mod tests {
             0o666,
             (libc::O_RDWR | libc::O_CREAT | libc::O_EXCL) as u32,
             0,
+            None,
         );
         assert!(res.is_err());
         let err_kind = res.unwrap_err().kind();
@@ -3575,6 +3766,7 @@ mod tests {
             0o666,
             libc::O_RDWR as u32,
             0,
+            None,
         );
         assert!(res.is_err());
         let err_kind = res.unwrap_err().kind();
@@ -3587,6 +3779,7 @@ mod tests {
             0o666,
             (libc::O_RDWR | libc::O_CREAT) as u32,
             0,
+            None,
         );
         assert!(res.is_ok());
         let (entry, handler, open_options) = res.unwrap();
@@ -3630,6 +3823,7 @@ mod tests {
             0o666,
             libc::O_RDWR as u32,
             0,
+            None,
         );
         assert!(res_dst.is_ok());
         let (entry_dst, handler_dst, _) = res_dst.unwrap();
@@ -3641,6 +3835,7 @@ mod tests {
             &fs,
             &temp_dir.path().join("a.txt"),
             &temp_dir.path().join("blink"),
+            None,
         );
         assert!(sym1_res.is_ok());
         let sym1_entry = sym1_res.unwrap();
@@ -3653,6 +3848,7 @@ mod tests {
             0o666,
             libc::O_RDWR as u32,
             0,
+            None,
         );
         assert!(res.is_ok());
         let (entry, handler, open_options) = res.unwrap();
@@ -3677,6 +3873,7 @@ mod tests {
             0o666,
             libc::O_RDWR as u32,
             0,
+            None,
         );
         assert!(res.is_ok());
         let (entry, handler, open_options) = res.unwrap();

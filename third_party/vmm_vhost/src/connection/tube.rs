@@ -6,7 +6,6 @@
 
 use std::cmp::min;
 use std::fs::File;
-use std::io::IoSlice;
 use std::io::IoSliceMut;
 use std::path::Path;
 use std::ptr::copy_nonoverlapping;
@@ -58,30 +57,43 @@ impl TubePlatformConnection {
         unimplemented!("connections not supported on Tubes")
     }
 
-    /// Sends bytes from scatter-gather vectors with optional attached file descriptors.
+    /// Sends a single message over the socket with optional attached file descriptors.
     ///
-    /// # Return:
-    /// * - number of bytes sent on success
-    /// * - TubeError: tube related errors.
-    pub fn send_iovec(&self, iovs: &[IoSlice], rds: Option<&[RawDescriptor]>) -> Result<usize> {
-        // Gather the iovecs
-        let total_bytes = iovs.iter().map(|iov| iov.len()).sum();
-        let mut data = Vec::with_capacity(total_bytes);
-        for iov in iovs {
-            data.extend(iov.iter());
+    /// - `hdr`: vhost message header
+    /// - `body`: vhost message body (may be empty to send a header-only message)
+    /// - `payload`: additional bytes to append to `body` (may be empty)
+    pub fn send_message(
+        &self,
+        hdr: &[u8],
+        body: &[u8],
+        payload: &[u8],
+        rds: Option<&[RawDescriptor]>,
+    ) -> Result<()> {
+        let hdr_msg = Message {
+            rds: rds
+                .unwrap_or(&[])
+                .iter()
+                .map(|rd| RawDescriptorContainer { rd: *rd })
+                .collect(),
+            data: hdr.to_vec(),
+        };
+
+        let mut body_data = Vec::with_capacity(body.len() + payload.len());
+        body_data.extend_from_slice(body);
+        body_data.extend_from_slice(payload);
+        let body_msg = Message {
+            rds: Vec::new(),
+            data: body_data,
+        };
+
+        // We send the header and the body separately here. This is necessary on Windows. Otherwise
+        // the recv side cannot read the header independently (the transport is message oriented).
+        self.tube.send(&hdr_msg)?;
+        if !body_msg.data.is_empty() {
+            self.tube.send(&body_msg)?;
         }
 
-        let mut msg = Message {
-            data,
-            rds: Vec::with_capacity(rds.map_or(0, |rds| rds.len())),
-        };
-        if let Some(rds) = rds {
-            for rd in rds {
-                msg.rds.push(RawDescriptorContainer { rd: *rd });
-            }
-        }
-        self.tube.send(&msg)?;
-        Ok(total_bytes)
+        Ok(())
     }
 
     /// Reads bytes from the tube into the given scatter/gather vectors with optional attached
@@ -106,11 +118,13 @@ impl TubePlatformConnection {
 
         let files = match msg.rds.len() {
             0 => None,
-            // Safe because we own r.rd and it is guaranteed valid.
             _ => Some(
                 msg.rds
                     .iter()
-                    .map(|r| unsafe { File::from_raw_descriptor(r.rd) })
+                    .map(|r|
+                        // SAFETY:
+                        // Safe because we own r.rd and it is guaranteed valid.
+                        unsafe { File::from_raw_descriptor(r.rd) })
                     .collect::<Vec<File>>(),
             ),
         };
@@ -124,6 +138,7 @@ impl TubePlatformConnection {
 
             let copy_count = min(dest_iov.len(), msg.data.len() - bytes_read);
 
+            // SAFETY:
             // Safe because:
             //      1) msg.data and dest_iov do not overlap.
             //      2) copy_count is bounded by dest_iov's length and msg.data.len() so we can't
@@ -166,156 +181,5 @@ impl AsRawDescriptor for TubePlatformConnection {
     /// instead.
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.tube.as_raw_descriptor()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::IoSlice;
-    use std::io::Read;
-    use std::io::Seek;
-    use std::io::SeekFrom;
-    use std::io::Write;
-    use std::mem;
-
-    use base::AsRawDescriptor;
-    use base::Tube;
-    use tempfile::tempfile;
-    use zerocopy::AsBytes;
-
-    use crate::message::MasterReq;
-    use crate::message::VhostUserMsgHeader;
-    use crate::message::VhostUserMsgValidator;
-    use crate::Connection;
-
-    fn create_pair() -> (Connection<MasterReq>, Connection<MasterReq>) {
-        let (master_tube, slave_tube) = Tube::pair().unwrap();
-        (
-            Connection::<MasterReq>::from(master_tube),
-            Connection::<MasterReq>::from(slave_tube),
-        )
-    }
-
-    #[test]
-    fn send_data() {
-        let (master, slave) = create_pair();
-
-        let buf1 = vec![0x1, 0x2, 0x3, 0x4];
-        let len = master.send_slice(IoSlice::new(&buf1[..]), None).unwrap();
-        assert_eq!(len, 4);
-        let (bytes, buf2, _) = slave.recv_into_buf(0x1000).unwrap();
-        assert_eq!(bytes, 4);
-        assert_eq!(&buf1[..], &buf2[..bytes]);
-    }
-
-    #[test]
-    fn send_fd() {
-        let (master, slave) = create_pair();
-
-        let mut file = tempfile().unwrap();
-        write!(file, "test").unwrap();
-
-        // Normal case for sending/receiving file descriptors
-        let buf1 = vec![0x1, 0x2, 0x3, 0x4];
-        let len = master
-            .send_slice(IoSlice::new(&buf1[..]), Some(&[file.as_raw_descriptor()]))
-            .unwrap();
-        assert_eq!(len, 4);
-
-        let (bytes, buf2, files) = slave.recv_into_buf(4).unwrap();
-        assert_eq!(bytes, 4);
-        assert_eq!(&buf1[..], &buf2[..]);
-        assert!(files.is_some());
-        let files = files.unwrap();
-        {
-            assert_eq!(files.len(), 1);
-            let mut file = &files[0];
-            let mut content = String::new();
-            file.seek(SeekFrom::Start(0)).unwrap();
-            file.read_to_string(&mut content).unwrap();
-            assert_eq!(content, "test");
-        }
-
-        // Following communication pattern should work:
-        // Sending side: data, data with fds
-        // Receiving side: data, data with fds
-        let len = master.send_slice(IoSlice::new(&buf1[..]), None).unwrap();
-        assert_eq!(len, 4);
-        let len = master
-            .send_slice(
-                IoSlice::new(&buf1[..]),
-                Some(&[
-                    file.as_raw_descriptor(),
-                    file.as_raw_descriptor(),
-                    file.as_raw_descriptor(),
-                ]),
-            )
-            .unwrap();
-        assert_eq!(len, 4);
-
-        let (bytes, buf2, files) = slave.recv_into_buf(0x4).unwrap();
-        assert_eq!(bytes, 4);
-        assert_eq!(&buf1[..], &buf2[..]);
-        assert!(files.is_none());
-
-        let (bytes, buf2, files) = slave.recv_into_buf(0x4).unwrap();
-        assert_eq!(bytes, 4);
-        assert_eq!(&buf1[..], &buf2[..]);
-        assert!(files.is_some());
-        let files = files.unwrap();
-        {
-            assert_eq!(files.len(), 3);
-            let mut file = &files[1];
-            let mut content = String::new();
-            file.seek(SeekFrom::Start(0)).unwrap();
-            file.read_to_string(&mut content).unwrap();
-            assert_eq!(content, "test");
-        }
-
-        // If the target fd array is too small, extra file descriptors will get lost.
-        //
-        // Porting note: no, they won't. The FD array is sized to whatever the header says it
-        // should be.
-        let len = master
-            .send_slice(
-                IoSlice::new(&buf1[..]),
-                Some(&[
-                    file.as_raw_descriptor(),
-                    file.as_raw_descriptor(),
-                    file.as_raw_descriptor(),
-                ]),
-            )
-            .unwrap();
-        assert_eq!(len, 4);
-
-        let (bytes, _, files) = slave.recv_into_buf(0x4).unwrap();
-        assert_eq!(bytes, 4);
-        assert!(files.is_some());
-    }
-
-    #[test]
-    fn send_recv() {
-        let (master, slave) = create_pair();
-
-        let mut hdr1 =
-            VhostUserMsgHeader::new(MasterReq::GET_FEATURES, 0, mem::size_of::<u64>() as u32);
-        hdr1.set_need_reply(true);
-        let features1 = 0x1u64;
-        master.send_message(&hdr1, &features1, None).unwrap();
-
-        let mut hdr2 = VhostUserMsgHeader::default();
-        let mut features2 = 0u64;
-        let files = slave
-            .recv_into_bufs_all(&mut [hdr2.as_bytes_mut(), features2.as_bytes_mut()])
-            .unwrap();
-        assert!(hdr2.is_valid());
-        assert_eq!(hdr1, hdr2);
-        assert_eq!(features1, features2);
-        assert!(files.is_none());
-
-        master.send_header(&hdr1, None).unwrap();
-        let (hdr2, files) = slave.recv_header().unwrap();
-        assert_eq!(hdr1, hdr2);
-        assert!(files.is_none());
     }
 }

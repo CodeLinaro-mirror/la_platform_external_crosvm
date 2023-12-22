@@ -681,8 +681,10 @@ fn create_devices(
 
         if !coiommu_attached_endpoints.is_empty() || !iommu_attached_endpoints.is_empty() {
             let mut buf = mem::MaybeUninit::<libc::rlimit64>::zeroed();
+            // SAFETY: trivially safe
             let res = unsafe { libc::getrlimit64(libc::RLIMIT_MEMLOCK, buf.as_mut_ptr()) };
             if res == 0 {
+                // SAFETY: safe because getrlimit64 has returned success.
                 let limit = unsafe { buf.assume_init() };
                 let rlim_new = limit.rlim_cur.saturating_add(vm.get_memory().memory_size());
                 let rlim_max = max(limit.rlim_max, rlim_new);
@@ -691,6 +693,7 @@ fn create_devices(
                         rlim_cur: rlim_new,
                         rlim_max,
                     };
+                    // SAFETY: trivially safe
                     let res = unsafe { libc::setrlimit64(libc::RLIMIT_MEMLOCK, &limit_arg) };
                     if res != 0 {
                         bail!("Set rlimit failed");
@@ -789,6 +792,10 @@ fn create_devices(
                     expose_with_viommu: false,
                 });
 
+                let (host_tube, device_tube) =
+                    Tube::pair().context("failed to create device control tube")?;
+                control_tubes.push(TaggedControlTube::Vm(host_tube));
+
                 let dev = VirtioPciDevice::new(
                     vm.get_memory().clone(),
                     stub.dev,
@@ -796,6 +803,7 @@ fn create_devices(
                     cfg.disable_virtio_intx,
                     shared_memory_tube.map(VmMemoryClient::new),
                     VmMemoryClient::new(ioevent_device_tube),
+                    device_tube,
                 )
                 .context("failed to create virtio pci dev")?;
 
@@ -1843,6 +1851,9 @@ where
             tube: ioevent_host_tube,
             expose_with_viommu: false,
         });
+        let (host_tube, device_tube) =
+            Tube::pair().context("failed to create device control tube")?;
+        control_tubes.push(TaggedControlTube::Vm(host_tube));
         let mut dev = VirtioPciDevice::new(
             vm.get_memory().clone(),
             iommu_dev.dev,
@@ -1850,6 +1861,7 @@ where
             cfg.disable_virtio_intx,
             None,
             VmMemoryClient::new(ioevent_device_tube),
+            device_tube,
         )
         .context("failed to create virtio pci dev")?;
         // early reservation for viommu.
@@ -2206,6 +2218,7 @@ fn add_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
                         endpoint_addr,
                         wrapper_id: vfio_wrapper.id(),
                         container: {
+                            // SAFETY:
                             // Safe because the descriptor is uniquely owned by `descriptor`.
                             unsafe { File::from_raw_descriptor(descriptor) }
                         },
@@ -2234,6 +2247,7 @@ fn add_hotplug_net<V: VmArch, Vcpu: VcpuArch>(
     sys_allocator: &mut SystemAllocator,
     irq_control_tubes: &mut Vec<Tube>,
     vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
+    vm_control_tubes: &mut Vec<TaggedControlTube>,
     hotplug_manager: &mut PciHotPlugManager,
     net_param: NetParameters,
 ) -> Result<u8> {
@@ -2245,8 +2259,14 @@ fn add_hotplug_net<V: VmArch, Vcpu: VcpuArch>(
         tube: ioevent_host_tube,
         expose_with_viommu: false,
     });
-    let net_carrier_device =
-        NetResourceCarrier::new(net_param, msi_device_tube, ioevent_vm_memory_client);
+    let (vm_control_host_tube, vm_control_device_tube) = Tube::pair().context("create tube")?;
+    vm_control_tubes.push(TaggedControlTube::Vm(vm_control_host_tube));
+    let net_carrier_device = NetResourceCarrier::new(
+        net_param,
+        msi_device_tube,
+        ioevent_vm_memory_client,
+        vm_control_device_tube,
+    );
     hotplug_manager.hotplug_device(
         vec![ResourceCarrier::VirtioNet(net_carrier_device)],
         linux,
@@ -2261,6 +2281,7 @@ fn handle_hotplug_net_command<V: VmArch, Vcpu: VcpuArch>(
     sys_allocator: &mut SystemAllocator,
     irq_control_tubes: &mut Vec<Tube>,
     vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
+    vm_control_tubes: &mut Vec<TaggedControlTube>,
     hotplug_manager: &mut PciHotPlugManager,
 ) -> VmResponse {
     match net_cmd {
@@ -2269,6 +2290,7 @@ fn handle_hotplug_net_command<V: VmArch, Vcpu: VcpuArch>(
             sys_allocator,
             irq_control_tubes,
             vm_memory_control_tubes,
+            vm_control_tubes,
             hotplug_manager,
             &tap_name,
         ),
@@ -2284,6 +2306,7 @@ fn handle_hotplug_net_add<V: VmArch, Vcpu: VcpuArch>(
     sys_allocator: &mut SystemAllocator,
     irq_control_tubes: &mut Vec<Tube>,
     vm_memory_control_tubes: &mut Vec<VmMemoryTube>,
+    vm_control_tubes: &mut Vec<TaggedControlTube>,
     hotplug_manager: &mut PciHotPlugManager,
     tap_name: &str,
 ) -> VmResponse {
@@ -2302,6 +2325,7 @@ fn handle_hotplug_net_add<V: VmArch, Vcpu: VcpuArch>(
         sys_allocator,
         irq_control_tubes,
         vm_memory_control_tubes,
+        vm_control_tubes,
         hotplug_manager,
         net_param,
     );
@@ -3228,6 +3252,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                                     &mut sys_allocator_mutex.lock(),
                                                     &mut add_irq_control_tubes,
                                                     &mut add_vm_memory_control_tubes,
+                                                    &mut add_tubes,
                                                     hotplug_manager,
                                                 )
                                             } else {
@@ -4079,6 +4104,7 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
     keep_rds.sort_unstable();
     keep_rds.dedup();
 
+    // SAFETY:
     // Safe because we are keeping all the descriptors needed for the child to function.
     match unsafe { jail.fork(Some(&keep_rds)).context("error while forking")? } {
         0 => {
@@ -4089,6 +4115,7 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
             let _ = std::mem::ManuallyDrop::new(parent_resources);
 
             // Make sure the child process does not survive its parent.
+            // SAFETY: trivially safe
             if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } < 0 {
                 panic!("call to prctl(PR_SET_DEATHSIG, SIGKILL) failed. Aborting child process.");
             }
@@ -4097,6 +4124,7 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
             const MAX_LEN: usize = 15; // pthread_setname_np() limit on Linux
             let debug_label_trimmed = &name.as_bytes()[..std::cmp::min(MAX_LEN, name.len())];
             let thread_name = CString::new(debug_label_trimmed).unwrap();
+            // SAFETY:
             // Safe because we trimmed the name to 15 characters (and pthread_setname_np will return
             // an error if we don't anyway).
             let _ = unsafe { libc::pthread_setname_np(libc::pthread_self(), thread_name.as_ptr()) };
@@ -4112,6 +4140,7 @@ fn jail_and_start_vu_device<T: VirtioDeviceBuilder>(
                     1
                 }
             };
+            // SAFETY: trivially safe
             unsafe { libc::exit(res) };
         }
         pid => {

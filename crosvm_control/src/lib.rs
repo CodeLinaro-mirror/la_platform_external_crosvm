@@ -166,6 +166,12 @@ pub unsafe extern "C" fn crosvm_client_balloon_vms(
 }
 
 /// See crosvm_client_balloon_vms.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[cfg(any(target_os = "android", target_os = "linux"))]
 #[no_mangle]
 pub unsafe extern "C" fn crosvm_client_balloon_vms_wait_with_timeout(
@@ -454,6 +460,7 @@ pub unsafe extern "C" fn crosvm_client_usb_attach(
 
             if let Ok(UsbControlResult::Ok { port }) = do_usb_attach(socket_path, dev_path) {
                 if !out_port.is_null() {
+                    // SAFETY: trivially safe
                     unsafe { *out_port = port };
                 }
                 true
@@ -589,8 +596,11 @@ pub unsafe extern "C" fn crosvm_client_modify_battery(
             if battery_type.is_null() || property.is_null() || target.is_null() {
                 return false;
             }
+            // SAFETY: trivially safe
             let battery_type = unsafe { CStr::from_ptr(battery_type) };
+            // SAFETY: trivially safe
             let property = unsafe { CStr::from_ptr(property) };
+            // SAFETY: trivially safe
             let target = unsafe { CStr::from_ptr(target) };
 
             do_modify_battery(
@@ -710,6 +720,12 @@ pub unsafe extern "C" fn crosvm_client_balloon_stats(
 }
 
 /// See crosvm_client_balloon_stats.
+///
+/// # Safety
+///
+/// Function is unsafe due to raw pointer usage - a null pointer could be passed in. Usage of
+/// !raw_pointer.is_null() checks should prevent unsafe behavior but the caller should ensure no
+/// null pointers are passed.
 #[cfg(any(target_os = "android", target_os = "linux"))]
 #[no_mangle]
 pub unsafe extern "C" fn crosvm_client_balloon_stats_with_timeout(

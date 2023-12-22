@@ -17,7 +17,6 @@ cfg_if::cfg_if! {
 }
 
 use std::fs::File;
-use std::io::IoSlice;
 use std::io::IoSliceMut;
 use std::mem;
 use std::path::Path;
@@ -42,25 +41,6 @@ pub trait Listener: Sized {
 
     /// Change blocking status on the listener.
     fn set_nonblocking(&self, block: bool) -> Result<()>;
-}
-
-// Advance the internal cursor of the slices.
-// This is same with a nightly API `IoSlice::advance_slices` but for `&[u8]`.
-fn advance_slices(bufs: &mut &mut [&[u8]], mut count: usize) {
-    use std::mem::take;
-
-    let mut idx = 0;
-    for b in bufs.iter() {
-        if count < b.len() {
-            break;
-        }
-        count -= b.len();
-        idx += 1;
-    }
-    *bufs = &mut take(bufs)[idx..];
-    if !bufs.is_empty() {
-        bufs[0] = &bufs[0][count..];
-    }
 }
 
 // Advance the internal cursor of the slices.
@@ -117,54 +97,13 @@ impl<R: Req> Connection<R> {
         ))
     }
 
-    /// Sends all bytes from scatter-gather vectors with optional attached file descriptors. Will
-    /// loop until all data has been transfered.
-    ///
-    /// # TODO
-    /// This function takes a slice of `&[u8]` instead of `IoSlice` because the internal
-    /// cursor needs to be moved by `advance_slices()`.
-    /// Once `IoSlice::advance_slices()` becomes stable, this should be updated.
-    /// <https://github.com/rust-lang/rust/issues/62726>.
-    fn send_iovec_all(
-        &self,
-        mut iovs: &mut [&[u8]],
-        mut fds: Option<&[RawDescriptor]>,
-    ) -> Result<()> {
-        // Guarantee that `iovs` becomes empty if it doesn't contain any data.
-        advance_slices(&mut iovs, 0);
-
-        while !iovs.is_empty() {
-            let iovec: Vec<_> = iovs.iter_mut().map(|i| IoSlice::new(i)).collect();
-            match self.0.send_iovec(&iovec, fds) {
-                Ok(n) => {
-                    fds = None;
-                    advance_slices(&mut iovs, n);
-                }
-                Err(e) => match e {
-                    Error::SocketRetry(_) => {}
-                    _ => return Err(e),
-                },
-            }
-        }
-        Ok(())
-    }
-
-    /// Sends bytes from a slice with optional attached file descriptors.
-    ///
-    /// # Return:
-    /// * - number of bytes sent on success
-    #[cfg(test)]
-    fn send_slice(&self, data: IoSlice, fds: Option<&[RawDescriptor]>) -> Result<usize> {
-        self.0.send_iovec(&[data], fds)
-    }
-
     /// Sends a header-only message with optional attached file descriptors.
-    pub fn send_header(
+    pub fn send_header_only_message(
         &self,
         hdr: &VhostUserMsgHeader<R>,
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
-        self.send_iovec_all(&mut [hdr.as_bytes()], fds)
+        self.0.send_message(hdr.as_bytes(), &[], &[], fds)
     }
 
     /// Send a message with header and body. Optional file descriptors may be attached to
@@ -175,11 +114,8 @@ impl<R: Req> Connection<R> {
         body: &T,
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
-        // We send the header and the body separately here. This is necessary on Windows. Otherwise
-        // the recv side cannot read the header independently (the transport is message oriented).
-        self.send_iovec_all(&mut [hdr.as_bytes()], fds)?;
-        self.send_iovec_all(&mut [body.as_bytes()], None)?;
-        Ok(())
+        self.0
+            .send_message(hdr.as_bytes(), body.as_bytes(), &[], fds)
     }
 
     /// Send a message with header and body. `payload` is appended to the end of the body. Optional
@@ -191,18 +127,8 @@ impl<R: Req> Connection<R> {
         payload: &[u8],
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
-        if let Some(fd_arr) = fds {
-            if fd_arr.len() > MAX_ATTACHED_FD_ENTRIES {
-                return Err(Error::IncorrectFds);
-            }
-        }
-
-        // We send the header and the body separately here. This is necessary on Windows. Otherwise
-        // the recv side cannot read the header independently (the transport is message oriented).
-        self.send_iovec_all(&mut [hdr.as_bytes()], fds)?;
-        self.send_iovec_all(&mut [body.as_bytes(), payload], None)?;
-
-        Ok(())
+        self.0
+            .send_message(hdr.as_bytes(), body.as_bytes(), payload, fds)
     }
 
     /// Reads all bytes into the given scatter/gather vectors with optional attached files. Will
@@ -217,9 +143,9 @@ impl<R: Req> Connection<R> {
     /// cursor needs to be moved by `advance_slices_mut()`.
     /// Once `IoSliceMut::advance_slices()` becomes stable, this should be updated.
     /// <https://github.com/rust-lang/rust/issues/62726>.
-    fn recv_into_bufs_all(&self, mut bufs: &mut [&mut [u8]]) -> Result<Option<Vec<File>>> {
+    fn recv_into_bufs_all(&self, mut bufs: &mut [&mut [u8]]) -> Result<Vec<File>> {
         let mut first_read = true;
-        let mut rfds = None;
+        let mut rfds = Vec::new();
 
         // Guarantee that `bufs` becomes empty if it doesn't contain any data.
         advance_slices_mut(&mut bufs, 0);
@@ -232,7 +158,9 @@ impl<R: Req> Connection<R> {
                 Ok((n, fds)) => {
                     if first_read {
                         first_read = false;
-                        rfds = fds;
+                        if let Some(fds) = fds {
+                            rfds = fds;
+                        }
                     }
                     advance_slices_mut(&mut bufs, n);
                 }
@@ -245,27 +173,13 @@ impl<R: Req> Connection<R> {
         Ok(rfds)
     }
 
-    /// Reads bytes into a new buffer with optional attached files. Received file descriptors are
-    /// set close-on-exec and converted to `File`.
-    ///
-    /// # Return:
-    /// * - (number of bytes received, buf, [received files]) on success.
-    /// * - backend specific errors
-    #[cfg(test)]
-    pub fn recv_into_buf(&self, buf_size: usize) -> Result<(usize, Vec<u8>, Option<Vec<File>>)> {
-        let mut buf = vec![0u8; buf_size];
-        let mut slices = [IoSliceMut::new(buf.as_mut_slice())];
-        let (bytes, files) = self.0.recv_into_bufs(&mut slices, true /* allow_fd */)?;
-        Ok((bytes, buf, files))
-    }
-
     /// Receive message header
     ///
     /// Errors if the header is invalid.
     ///
     /// Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be accepted and all
     /// other file descriptor will be discard silently.
-    pub fn recv_header(&self) -> Result<(VhostUserMsgHeader<R>, Option<Vec<File>>)> {
+    pub fn recv_header(&self) -> Result<(VhostUserMsgHeader<R>, Vec<File>)> {
         let mut hdr = VhostUserMsgHeader::default();
         let files = self.recv_into_bufs_all(&mut [hdr.as_bytes_mut()])?;
         if !hdr.is_valid() {
@@ -280,7 +194,7 @@ impl<R: Req> Connection<R> {
         // works as expected.
         let mut body = vec![0; hdr.get_size().try_into().unwrap()];
         let files = self.recv_into_bufs_all(&mut [&mut body[..]])?;
-        if files.is_some() {
+        if !files.is_empty() {
             return Err(Error::InvalidMessage);
         }
         Ok(body)
@@ -294,7 +208,7 @@ impl<R: Req> Connection<R> {
     /// accepted and all other file descriptor will be discard silently.
     pub fn recv_message<T: AsBytes + FromBytes + VhostUserMsgValidator>(
         &self,
-    ) -> Result<(VhostUserMsgHeader<R>, T, Option<Vec<File>>)> {
+    ) -> Result<(VhostUserMsgHeader<R>, T, Vec<File>)> {
         let mut hdr = VhostUserMsgHeader::default();
         let mut body = T::new_zeroed();
         let mut slices = [hdr.as_bytes_mut(), body.as_bytes_mut()];
@@ -316,7 +230,7 @@ impl<R: Req> Connection<R> {
     /// other file descriptor will be discard silently.
     pub fn recv_message_with_payload<T: AsBytes + FromBytes + VhostUserMsgValidator>(
         &self,
-    ) -> Result<(VhostUserMsgHeader<R>, T, Vec<u8>, Option<Vec<File>>)> {
+    ) -> Result<(VhostUserMsgHeader<R>, T, Vec<u8>, Vec<File>)> {
         let (hdr, files) = self.recv_header()?;
 
         let mut body = T::new_zeroed();
@@ -324,7 +238,7 @@ impl<R: Req> Connection<R> {
         let mut buf: Vec<u8> = vec![0; payload_size];
         let mut slices = [body.as_bytes_mut(), buf.as_bytes_mut()];
         let more_files = self.recv_into_bufs_all(&mut slices)?;
-        if !body.is_valid() || more_files.is_some() {
+        if !body.is_valid() || !more_files.is_empty() {
             return Err(Error::InvalidMessage);
         }
 
@@ -340,25 +254,70 @@ impl<R: Req> AsRawDescriptor for Connection<R> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::io::Read;
+    use std::io::Seek;
+    use std::io::SeekFrom;
+    use std::io::Write;
+
+    use tempfile::tempfile;
+
     use super::*;
+    use crate::message::VhostUserEmptyMessage;
+    use crate::message::VhostUserU64;
+
     cfg_if::cfg_if! {
         if #[cfg(unix)] {
             pub(crate) use super::unix::tests::*;
         } else if #[cfg(windows)] {
-            pub(crate) use windows::tests::*;
+            pub(crate) use super::windows::tests::*;
         }
     }
 
     #[test]
-    fn test_advance_slices() {
-        // Test case from https://doc.rust-lang.org/std/io/struct.IoSlice.html#method.advance_slices
-        let buf1 = [1; 8];
-        let buf2 = [2; 16];
-        let buf3 = [3; 8];
-        let mut bufs = &mut [&buf1[..], &buf2[..], &buf3[..]][..];
-        advance_slices(&mut bufs, 10);
-        assert_eq!(bufs[0], [2; 14].as_ref());
-        assert_eq!(bufs[1], [3; 8].as_ref());
+    fn send_header_only() {
+        let (master, slave) = create_connection_pair();
+        let hdr1 = VhostUserMsgHeader::new(MasterReq::GET_FEATURES, 0, 0);
+        master.send_header_only_message(&hdr1, None).unwrap();
+        let (hdr2, _, files) = slave.recv_message::<VhostUserEmptyMessage>().unwrap();
+        assert_eq!(hdr1, hdr2);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn send_data() {
+        let (master, slave) = create_connection_pair();
+        let hdr1 = VhostUserMsgHeader::new(MasterReq::SET_FEATURES, 0, 8);
+        master
+            .send_message(&hdr1, &VhostUserU64::new(0xf00dbeefdeadf00d), None)
+            .unwrap();
+        let (hdr2, body, files) = slave.recv_message::<VhostUserU64>().unwrap();
+        assert_eq!(hdr1, hdr2);
+        let value = body.value;
+        assert_eq!(value, 0xf00dbeefdeadf00d);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn send_fd() {
+        let (master, slave) = create_connection_pair();
+
+        let mut fd = tempfile().unwrap();
+        write!(fd, "test").unwrap();
+
+        // Normal case for sending/receiving file descriptors
+        let hdr1 = VhostUserMsgHeader::new(MasterReq::SET_MEM_TABLE, 0, 0);
+        master
+            .send_header_only_message(&hdr1, Some(&[fd.as_raw_descriptor()]))
+            .unwrap();
+
+        let (hdr2, _, files) = slave.recv_message::<VhostUserEmptyMessage>().unwrap();
+        assert_eq!(hdr1, hdr2);
+        assert_eq!(files.len(), 1);
+        let mut file = &files[0];
+        let mut content = String::new();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_to_string(&mut content).unwrap();
+        assert_eq!(content, "test");
     }
 
     #[test]

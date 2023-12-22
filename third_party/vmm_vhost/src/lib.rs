@@ -217,10 +217,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Result of request handler.
 pub type HandlerResult<T> = std::result::Result<T, IOError>;
 
-/// Utility function to take the first element from option of a vector of files.
-/// Returns `None` if the vector contains no file or more than one file.
-pub(crate) fn take_single_file(files: Option<Vec<File>>) -> Option<File> {
-    let mut files = files?;
+/// Utility function to convert a vector of files into a single file.
+/// Returns `None` if the vector contains no files or more than one file.
+pub(crate) fn into_single_file(mut files: Vec<File>) -> Option<File> {
     if files.len() != 1 {
         return None;
     }
@@ -438,8 +437,9 @@ mod tests {
         #[cfg(windows)]
         let tubes = base::Tube::pair().unwrap();
         #[cfg(windows)]
-        // Safe because we will be importing the Tube in the other thread.
         let descriptor =
+            // SAFETY:
+            // Safe because we will be importing the Tube in the other thread.
             unsafe { tube_transporter::packed_tube::pack(tubes.0, std::process::id()).unwrap() };
 
         #[cfg(unix)]
