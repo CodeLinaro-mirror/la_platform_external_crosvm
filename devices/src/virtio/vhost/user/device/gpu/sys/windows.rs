@@ -26,6 +26,8 @@ use cros_async::AsyncWrapper;
 use cros_async::EventAsync;
 use cros_async::Executor;
 use gpu_display::EventDevice;
+use gpu_display::WindowProcedureThread;
+use gpu_display::WindowProcedureThreadBuilder;
 use hypervisor::ProtectionType;
 use serde::Deserialize;
 use serde::Serialize;
@@ -115,15 +117,37 @@ pub struct Options {
     bootstrap: usize,
 }
 
+/// Main process end for input event devices.
+#[derive(Deserialize, Serialize)]
+pub struct InputEventVmmConfig {
+    // Pipes to receive input events on.
+    pub multi_touch_pipes: Vec<StreamChannel>,
+    pub mouse_pipes: Vec<StreamChannel>,
+    pub keyboard_pipes: Vec<StreamChannel>,
+}
+
+/// Backend process end for input event devices.
+#[derive(Deserialize, Serialize)]
+pub struct InputEventBackendConfig {
+    // Event devices to send input events to.
+    pub event_devices: Vec<EventDevice>,
+}
+
+/// Configuration for running input event devices, split by a part sent to the main VMM and a part
+/// sent to the window thread (either main process or a vhost-user process).
+#[derive(Deserialize, Serialize)]
+pub struct InputEventSplitConfig {
+    // Config sent to the backend.
+    pub backend_config: Option<InputEventBackendConfig>,
+    // Config sent to the main process.
+    pub vmm_config: InputEventVmmConfig,
+}
+
 /// Main process end for a GPU device.
 #[derive(Deserialize, Serialize)]
 pub struct GpuVmmConfig {
     // Tube for setting up the vhost-user connection. May not exist if not using vhost-user.
     pub main_vhost_user_tube: Option<Tube>,
-    // Pipes to receive input events on.
-    pub input_event_multi_touch_pipes: Vec<StreamChannel>,
-    pub input_event_mouse_pipes: Vec<StreamChannel>,
-    pub input_event_keyboard_pipes: Vec<StreamChannel>,
     pub product_config: product::GpuVmmConfig,
 }
 
@@ -137,12 +161,23 @@ pub struct GpuBackendConfig {
     pub exit_event: Event,
     // A tube to send an exit request.
     pub exit_evt_wrtube: SendTube,
-    // Event devices to send input events to.
-    pub event_devices: Vec<EventDevice>,
     // GPU parameters.
     pub params: GpuParameters,
     // Product related configurations.
     pub product_config: product::GpuBackendConfig,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct WindowProcedureThreadVmmConfig {
+    pub product_config: product::WindowProcedureThreadVmmConfig,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct WindowProcedureThreadSplitConfig {
+    // This is the config sent to the backend process.
+    pub wndproc_thread_builder: Option<WindowProcedureThreadBuilder>,
+    // Config sent to the main process.
+    pub vmm_config: WindowProcedureThreadVmmConfig,
 }
 
 pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
@@ -157,9 +192,16 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     let startup_args: CommonChildStartupArgs = bootstrap_tube.recv::<CommonChildStartupArgs>()?;
     let _child_cleanup = common_child_setup(startup_args)?;
 
-    let mut config: GpuBackendConfig = bootstrap_tube
+    let (mut config, input_event_backend_config, wndproc_thread_builder): (
+        GpuBackendConfig,
+        InputEventBackendConfig,
+        WindowProcedureThreadBuilder,
+    ) = bootstrap_tube
         .recv()
         .context("failed to parse GPU backend config from bootstrap tube")?;
+    let wndproc_thread = wndproc_thread_builder
+        .start_thread()
+        .context("Failed to create window procedure thread for vhost GPU")?;
 
     let vhost_user_tube = config
         .device_vhost_user_tube
@@ -175,9 +217,6 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     let display_backends = vec![virtio::DisplayBackend::WinApi(
         (&config.params.display_params[0]).into(),
     )];
-
-    let wndproc_thread =
-        virtio::gpu::start_wndproc_thread().context("failed to start wndproc_thread")?;
 
     let mut gpu_params = config.params.clone();
 
@@ -195,7 +234,7 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
         display_backends,
         &gpu_params,
         /*render_server_descriptor*/ None,
-        config.event_devices,
+        input_event_backend_config.event_devices,
         base_features,
         /*channels=*/ &Default::default(),
         wndproc_thread,
