@@ -78,54 +78,45 @@ cfg_if::cfg_if! {
     if #[cfg(any(target_os = "android", target_os = "linux"))] {
         pub use sys::linux;
 
-        pub use linux::net;
-
-        // File related exports.
-        pub use platform::{FileFlags, get_max_open_files};
-
-        // memory/mmap related exports.
-        pub use platform::{
-            MemfdSeals, MemoryMappingBuilderUnix, Unix as MemoryMappingUnix,
-            SharedMemoryUnix,
-        };
-
         // descriptor/fd related exports.
-        pub use platform::{
+        pub use linux::{
             add_fd_flags, clear_fd_flags, clone_descriptor, safe_descriptor_from_path,
             validate_raw_descriptor, clear_descriptor_cloexec,
         };
 
         // Event/signal related exports.
-        pub use platform::{
+        pub use linux::{
             block_signal, clear_signal, get_blocked_signals, new_pipe_full,
             register_rt_signal_handler, signal, unblock_signal, Killable, SIGRTMIN,
             AcpiNotifyEvent, NetlinkGenericSocket, SignalFd, Terminal,
         };
 
-        pub use platform::{
+        pub use linux::{
             chown, drop_capabilities, iov_max, pipe, read_raw_stdin
         };
-        pub use platform::{enable_core_scheduling, set_rt_prio_limit, set_rt_round_robin};
-        pub use platform::{flock, FlockOperation};
-        pub use platform::{getegid, geteuid};
-        pub use platform::{gettid, kill_process_group, reap_child};
-        pub use platform::{
+        pub use linux::{enable_core_scheduling, set_rt_prio_limit, set_rt_round_robin};
+        pub use linux::{flock, FlockOperation};
+        pub use linux::{getegid, geteuid};
+        pub use linux::{gettid, kill_process_group, reap_child};
+        pub use linux::{
             net::{UnixSeqpacket, UnixSeqpacketListener, UnlinkUnixSeqpacketListener},
             ScmSocket, UnlinkUnixListener, SCM_SOCKET_MAX_FD_COUNT,
         };
-        pub use platform::EventExt;
+        pub use linux::EventExt;
     } else if #[cfg(windows)] {
-        pub use platform::{EventTrigger, EventExt, WaitContextExt};
-        pub use platform::MemoryMappingBuilderWindows;
-        pub use platform::set_thread_priority;
-        pub use platform::{give_foregrounding_permission, Console};
-        pub use platform::{named_pipes, named_pipes::PipeConnection};
-        pub use platform::{SafeMultimediaHandle, MAXIMUM_WAIT_OBJECTS};
-        pub use platform::set_sparse_file;
-        pub use platform::ioctl::ioctl_with_ptr_sized;
-        pub use platform::create_overlapped;
-        pub use platform::device_io_control;
-        pub use platform::read_overlapped_blocking;
+        pub use sys::windows;
+
+        pub use windows::{EventTrigger, EventExt, WaitContextExt};
+        pub use windows::MemoryMappingBuilderWindows;
+        pub use windows::set_thread_priority;
+        pub use windows::{give_foregrounding_permission, Console};
+        pub use windows::{named_pipes, named_pipes::PipeConnection};
+        pub use windows::{SafeMultimediaHandle, MAXIMUM_WAIT_OBJECTS};
+        pub use windows::set_sparse_file;
+        pub use windows::ioctl::ioctl_with_ptr_sized;
+        pub use windows::create_overlapped;
+        pub use windows::device_io_control;
+        pub use windows::read_overlapped_blocking;
 
         pub use tube::{
             deserialize_and_recv, serialize_and_send, set_alias_pid, set_duplicate_handle_tube,
@@ -133,8 +124,8 @@ cfg_if::cfg_if! {
         };
         pub use tube::PipeTube;
         pub use tube::FlushOnDropTube;
-        pub use platform::{set_audio_thread_priority, thread};
-        pub use platform::Terminal;
+        pub use windows::{set_audio_thread_priority, thread};
+        pub use windows::Terminal;
     } else {
         compile_error!("Unsupported platform");
     }
@@ -166,6 +157,7 @@ pub use platform::FileSerdeWrapper;
 pub use platform::FramingMode;
 pub use platform::MemoryMappingArena;
 pub use platform::MmapError;
+pub use platform::Pid;
 pub use platform::RawDescriptor;
 pub use platform::SerializeDescriptors;
 pub use platform::StreamChannel;
