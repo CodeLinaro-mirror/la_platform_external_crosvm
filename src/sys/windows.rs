@@ -41,6 +41,7 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use arch::CpuConfigArch;
+use arch::DtbOverlay;
 use arch::IrqChipArch;
 use arch::LinuxArch;
 use arch::RunnableLinuxVm;
@@ -279,10 +280,11 @@ pub enum ExitState {
 type DeviceResult<T = VirtioDeviceStub> = Result<T>;
 
 fn create_vhost_user_block_device(cfg: &Config, disk_device_tube: Tube) -> DeviceResult {
-    let features = virtio::base_features(cfg.protection_type);
-    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new_block(
-        features,
+    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+        virtio::DeviceType::Block,
+        virtio::base_features(cfg.protection_type),
         disk_device_tube,
+        None,
         None,
     )
     .exit_context(
@@ -316,9 +318,11 @@ fn create_block_device(cfg: &Config, disk: &DiskOption, disk_device_tube: Tube) 
 
 #[cfg(feature = "gpu")]
 fn create_vhost_user_gpu_device(base_features: u64, vhost_user_tube: Tube) -> DeviceResult {
-    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new_gpu(
+    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+        virtio::DeviceType::Gpu,
         base_features,
         vhost_user_tube,
+        None,
         None,
     )
     .exit_context(
@@ -337,6 +341,7 @@ fn create_gpu_device(
     cfg: &Config,
     gpu_parameters: &GpuParameters,
     vm_evt_wrtube: &SendTube,
+    gpu_control_tube: Tube,
     resource_bridges: Vec<Tube>,
     event_devices: Vec<EventDevice>,
     wndproc_thread: WindowProcedureThread,
@@ -348,6 +353,7 @@ fn create_gpu_device(
     let features = virtio::base_features(cfg.protection_type);
     let dev = product::create_gpu(
         vm_evt_wrtube,
+        gpu_control_tube,
         resource_bridges,
         display_backends,
         gpu_parameters,
@@ -381,9 +387,11 @@ fn create_snd_device(
 
 #[cfg(feature = "audio")]
 fn create_vhost_user_snd_device(base_features: u64, vhost_user_tube: Tube) -> DeviceResult {
-    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new_snd(
+    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+        virtio::DeviceType::Sound,
         base_features,
         vhost_user_tube,
+        None,
         None,
     )
     .exit_context(
@@ -434,12 +442,17 @@ fn create_mouse_device(cfg: &Config, event_pipe: StreamChannel, idx: u32) -> Dev
 #[cfg(feature = "slirp")]
 fn create_vhost_user_net_device(cfg: &Config, net_device_tube: Tube) -> DeviceResult {
     let features = virtio::base_features(cfg.protection_type);
-    let dev =
-        virtio::vhost::user::vmm::VhostUserVirtioDevice::new_net(features, net_device_tube, None)
-            .exit_context(
-            Exit::VhostUserNetDeviceNew,
-            "failed to set up vhost-user net device",
-        )?;
+    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+        virtio::DeviceType::Net,
+        features,
+        net_device_tube,
+        None,
+        None,
+    )
+    .exit_context(
+        Exit::VhostUserNetDeviceNew,
+        "failed to set up vhost-user net device",
+    )?;
 
     Ok(VirtioDeviceStub {
         dev: Box::new(dev),
@@ -756,6 +769,7 @@ fn create_virtio_gpu_device(
                 cfg,
                 &backend_config.params,
                 &backend_config.exit_evt_wrtube,
+                backend_config.gpu_control_device_tube,
                 resource_bridges,
                 event_devices.ok_or_else(|| {
                     anyhow!(
@@ -824,6 +838,12 @@ fn create_devices(
             Tube::pair().context("failed to create ioevent tube")?;
         vm_memory_control_tubes.push(ioevent_host_tube);
 
+        let (vm_control_host_tube, vm_control_device_tube) =
+            Tube::pair().context("failed to create vm_control tube")?;
+        control_tubes.push(TaggedControlTube::Vm(FlushOnDropTube::from(
+            vm_control_host_tube,
+        )));
+
         let dev = Box::new(
             VirtioPciDevice::new(
                 mem.clone(),
@@ -832,6 +852,7 @@ fn create_devices(
                 cfg.disable_virtio_intx,
                 shared_memory_tube.map(VmMemoryClient::new),
                 VmMemoryClient::new(ioevent_device_tube),
+                vm_control_device_tube,
             )
             .exit_context(Exit::VirtioPciDev, "failed to create virtio pci dev")?,
         ) as Box<dyn BusDeviceObj>;
@@ -851,6 +872,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     service_vm_state: &mut ServiceVmState,
     disk_host_tubes: &[Tube],
     ipc_main_loop_tube: Option<&Tube>,
+    #[cfg(feature = "gpu")] gpu_control_tube: Option<&Tube>,
     vm_evt_rdtube: &RecvTube,
     control_tubes: &mut BTreeMap<usize, TaggedControlTube>,
     guest_os: &mut RunnableLinuxVm<V, Vcpu>,
@@ -879,7 +901,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             disk_host_tubes,
             &mut guest_os.pm,
             #[cfg(feature = "gpu")]
-            None,
+            gpu_control_tube,
             None,
             &mut None,
             |msg| {
@@ -1262,6 +1284,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     vm_memory_control_tubes: Vec<Tube>,
     vm_evt_rdtube: RecvTube,
     vm_evt_wrtube: SendTube,
+    #[cfg(feature = "gpu")] gpu_control_tube: Option<Tube>,
     broker_shutdown_evt: Option<Event>,
     balloon_host_tube: Option<Tube>,
     pvclock_host_tube: Option<Tube>,
@@ -1507,6 +1530,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 &mut service_vm_state,
                 disk_host_tubes.as_slice(),
                 ipc_main_loop_tube.as_ref(),
+                #[cfg(feature = "gpu")]
+                gpu_control_tube.as_ref(),
                 &vm_evt_rdtube,
                 &mut control_tubes,
                 &mut guest_os,
@@ -2037,7 +2062,6 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         vcpu_affinity: cfg.vcpu_affinity.clone(),
         cpu_clusters: cfg.cpu_clusters.clone(),
         cpu_capacity: cfg.cpu_capacity.clone(),
-        cpu_frequencies: BTreeMap::new(),
         no_smt: cfg.no_smt,
         hugepages: cfg.hugepages,
         hv_cfg: hypervisor::Config {
@@ -2197,9 +2221,10 @@ fn set_tsc_clock_snapshot() {
 
 /// Launches run_config for the broker, reading configuration from a TubeTransporter.
 pub fn run_config_for_broker(raw_tube_transporter: RawDescriptor) -> Result<ExitState> {
-    // Safe because we know that raw_transport_tube is valid (passed by inheritance), and that
-    // the blocking & framing modes are accurate because we create them ourselves in the broker.
     let tube_transporter =
+        // SAFETY:
+        // Safe because we know that raw_transport_tube is valid (passed by inheritance), and that
+        // the blocking & framing modes are accurate because we create them ourselves in the broker.
         unsafe { TubeTransporterReader::from_raw_descriptor(raw_tube_transporter) };
 
     let mut tube_data_list = tube_transporter
@@ -2525,6 +2550,11 @@ where
         );
     }
 
+    #[cfg(feature = "gpu")]
+    let gpu_control_tube = cfg
+        .gpu_vmm_config
+        .as_mut()
+        .and_then(|config| config.gpu_control_host_tube.take());
     let product_args = product::get_run_control_args(&mut cfg);
 
     let virtio_snd_state_device_tube = create_snd_state_tube(&mut control_tubes)?;
@@ -2551,6 +2581,19 @@ where
 
     let mut vcpu_ids = Vec::new();
 
+    let dt_overlays = cfg
+        .device_tree_overlay
+        .iter()
+        .map(|o| {
+            Ok(DtbOverlay {
+                file: open_file_or_duplicate(o.path.as_path(), OpenOptions::new().read(true))
+                    .with_context(|| {
+                        format!("failed to open device tree overlay {}", o.path.display())
+                    })?,
+            })
+        })
+        .collect::<Result<Vec<DtbOverlay>>>()?;
+
     let windows = Arch::build_vm::<V, Vcpu>(
         components,
         &vm_evt_wrtube,
@@ -2567,6 +2610,7 @@ where
         /*debugcon_jail=*/ None,
         None,
         None,
+        dt_overlays,
     )
     .exit_context(Exit::BuildVm, "the architecture failed to build the vm")?;
 
@@ -2614,6 +2658,8 @@ where
         vm_memory_control_tubes,
         vm_evt_rdtube,
         vm_evt_wrtube,
+        #[cfg(feature = "gpu")]
+        gpu_control_tube,
         cfg.broker_shutdown_event.take(),
         balloon_host_tube,
         pvclock_host_tube,

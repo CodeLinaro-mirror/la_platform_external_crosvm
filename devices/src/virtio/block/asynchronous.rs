@@ -9,7 +9,6 @@ use std::io::Write;
 use std::mem::size_of;
 #[cfg(windows)]
 use std::num::NonZeroU32;
-use std::ops::Deref;
 use std::rc::Rc;
 use std::result;
 use std::sync::atomic::AtomicU64;
@@ -51,7 +50,6 @@ use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use futures::FutureExt;
 use remain::sorted;
-use sync::Mutex;
 use thiserror::Error as ThisError;
 use virtio_sys::virtio_config::VIRTIO_F_RING_PACKED;
 use vm_control::DiskControlCommand;
@@ -83,7 +81,6 @@ use crate::virtio::device_constants::block::VIRTIO_BLK_T_GET_ID;
 use crate::virtio::device_constants::block::VIRTIO_BLK_T_IN;
 use crate::virtio::device_constants::block::VIRTIO_BLK_T_OUT;
 use crate::virtio::device_constants::block::VIRTIO_BLK_T_WRITE_ZEROES;
-use crate::virtio::vhost::user::device::VhostBackendReqConnectionState;
 use crate::virtio::DescriptorChain;
 use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
@@ -306,6 +303,7 @@ pub async fn process_one_chain(
     flush_timer: &RefCell<TimerAsync<Timer>>,
     flush_timer_armed: &RefCell<bool>,
 ) {
+    let _trace = cros_tracing::trace_event!(VirtioBlk, "process_one_chain");
     let len = match process_one_request(&mut avail_desc, disk_state, flush_timer, flush_timer_armed)
         .await
     {
@@ -372,14 +370,9 @@ async fn handle_queue(
     }
 }
 
-pub enum ConfigChangeSignal {
-    Interrupt(Interrupt),
-    VhostUserBackendRequest(Arc<Mutex<VhostBackendReqConnectionState>>),
-}
-
 async fn handle_command_tube(
     command_tube: &Option<AsyncTube>,
-    signal: ConfigChangeSignal,
+    interrupt: Interrupt,
     disk_state: Rc<AsyncRwLock<DiskState>>,
 ) -> Result<(), ExecuteError> {
     let command_tube = match command_tube {
@@ -402,23 +395,7 @@ async fn handle_command_tube(
                     .await
                     .map_err(ExecuteError::SendingResponse)?;
                 if let DiskControlResult::Ok = resp {
-                    match &signal {
-                        ConfigChangeSignal::Interrupt(interrupt) => {
-                            interrupt.signal_config_changed();
-                        }
-                        ConfigChangeSignal::VhostUserBackendRequest(request) => {
-                            match &request.lock().deref() {
-                                VhostBackendReqConnectionState::Connected(frontend) => {
-                                    if let Err(e) = frontend.send_config_changed() {
-                                        error!("Failed to notify config change: {:#}", e);
-                                    }
-                                }
-                                VhostBackendReqConnectionState::NoConnection => {
-                                    error!("No Backend request connection found");
-                                }
-                            }
-                        }
-                    };
+                    interrupt.signal_config_changed();
                 }
             }
             Err(e) => return Err(ExecuteError::ReceivingCommand(e)),
@@ -510,19 +487,18 @@ pub enum WorkerCmd {
 // resizing command.
 pub async fn run_worker(
     ex: &Executor,
-    signal: ConfigChangeSignal,
+    interrupt: Interrupt,
     disk_state: &Rc<AsyncRwLock<DiskState>>,
     control_tube: &Option<AsyncTube>,
     mut worker_rx: mpsc::UnboundedReceiver<WorkerCmd>,
     kill_evt: Event,
-    resample_future: impl std::future::Future<Output = anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     // One flush timer per disk.
     let timer = Timer::new().expect("Failed to create a timer");
     let flush_timer_armed = Rc::new(RefCell::new(false));
 
     // Handles control requests.
-    let control = handle_command_tube(control_tube, signal, disk_state.clone()).fuse();
+    let control = handle_command_tube(control_tube, interrupt.clone(), disk_state.clone()).fuse();
     pin_mut!(control);
 
     // Handle all the queues in one sub-select call.
@@ -544,7 +520,8 @@ pub async fn run_worker(
     let kill = async_utils::await_and_exit(ex, kill_evt).fuse();
     pin_mut!(kill);
 
-    let resample_future = resample_future.fuse();
+    // Process any requests to resample the irq value.
+    let resample_future = async_utils::handle_irq_resample(ex, interrupt.clone()).fuse();
     pin_mut!(resample_future);
 
     // Running queue handlers.
@@ -815,6 +792,7 @@ impl BlockAsync {
                 let offset = sector
                     .checked_shl(u32::from(SECTOR_SHIFT))
                     .ok_or(ExecuteError::OutOfRange)?;
+                let _trace = cros_tracing::trace_event!(VirtioBlk, "in", offset, data_len);
                 check_range(offset, data_len as u64, disk_size)?;
                 let disk_image = &disk_state.disk_image;
                 writer
@@ -834,6 +812,7 @@ impl BlockAsync {
                 let offset = sector
                     .checked_shl(u32::from(SECTOR_SHIFT))
                     .ok_or(ExecuteError::OutOfRange)?;
+                let _trace = cros_tracing::trace_event!(VirtioBlk, "out", offset, data_len);
                 check_range(offset, data_len as u64, disk_size)?;
                 let disk_image = &disk_state.disk_image;
                 reader
@@ -856,6 +835,12 @@ impl BlockAsync {
                 }
             }
             VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
+                #[allow(clippy::if_same_then_else)]
+                let _trace = if req_type == VIRTIO_BLK_T_DISCARD {
+                    cros_tracing::trace_event!(VirtioBlk, "discard")
+                } else {
+                    cros_tracing::trace_event!(VirtioBlk, "write_zeroes")
+                };
                 if req_type == VIRTIO_BLK_T_DISCARD && !disk_state.sparse {
                     // Discard is a hint; if this is a non-sparse disk, just ignore it.
                     return Ok(());
@@ -911,6 +896,7 @@ impl BlockAsync {
                 }
             }
             VIRTIO_BLK_T_FLUSH => {
+                let _trace = cros_tracing::trace_event!(VirtioBlk, "flush");
                 disk_state
                     .disk_image
                     .fdatasync()
@@ -926,6 +912,7 @@ impl BlockAsync {
                 }
             }
             VIRTIO_BLK_T_GET_ID => {
+                let _trace = cros_tracing::trace_event!(VirtioBlk, "get_id");
                 if let Some(id) = disk_state.id {
                     writer.write_all(&id).map_err(ExecuteError::CopyId)?;
                 } else {
@@ -1078,15 +1065,11 @@ impl VirtioDevice for BlockAsync {
                     .run_until(async {
                         let r = run_worker(
                             &ex,
-                            ConfigChangeSignal::Interrupt(interrupt.clone()),
+                            interrupt.clone(),
                             &disk_state,
                             &async_control,
                             worker_rx,
                             kill_evt,
-                            async {
-                                // Process any requests to resample the irq value.
-                                async_utils::handle_irq_resample(&ex, interrupt.clone()).await
-                            },
                         )
                         .await;
                         // Flush any in-memory disk image state to file.
@@ -1177,7 +1160,7 @@ impl VirtioDevice for BlockAsync {
         Ok(())
     }
 
-    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+    fn virtio_snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
         // `virtio_sleep` ensures there is no pending state, except for the `Queue`s, which are
         // handled at a higher layer.
         Ok(serde_json::Value::Null)
@@ -1218,8 +1201,6 @@ mod tests {
     use crate::virtio::descriptor_utils::create_descriptor_chain;
     use crate::virtio::descriptor_utils::DescriptorType;
     use crate::virtio::QueueConfig;
-    use crate::virtio::VIRTIO_MSI_NO_VECTOR;
-    use crate::IrqLevelEvent;
 
     #[test]
     fn read_size() {
@@ -1616,7 +1597,7 @@ mod tests {
 
         b.activate(
             mem.clone(),
-            Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
+            Interrupt::new_for_test(),
             BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("activate should succeed");
@@ -1657,7 +1638,7 @@ mod tests {
 
         b.activate(
             mem,
-            Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
+            Interrupt::new_for_test(),
             BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("re-activate should succeed");
@@ -1727,7 +1708,7 @@ mod tests {
             .activate(&mem, Event::new().unwrap())
             .expect("QueueConfig::activate");
 
-        let interrupt = Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR);
+        let interrupt = Interrupt::new_for_test();
         b.activate(mem, interrupt.clone(), BTreeMap::from([(0, q0), (1, q1)]))
             .expect("activate should succeed");
 
@@ -1832,7 +1813,7 @@ mod tests {
 
         b.activate(
             mem.clone(),
-            Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
+            Interrupt::new_for_test(),
             BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("activate should succeed");
@@ -1865,7 +1846,7 @@ mod tests {
 
         b.activate(
             mem,
-            Interrupt::new(IrqLevelEvent::new().unwrap(), None, VIRTIO_MSI_NO_VECTOR),
+            Interrupt::new_for_test(),
             BTreeMap::from([(0, q0), (1, q1)]),
         )
         .expect("activate should succeed");

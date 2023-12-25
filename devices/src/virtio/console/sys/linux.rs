@@ -19,6 +19,7 @@ use sync::Mutex;
 
 use crate::serial::sys::InStreamType;
 use crate::serial_device::SerialInput;
+use crate::serial_device::SerialOptions;
 use crate::virtio::console::Console;
 use crate::virtio::ProtectionType;
 use crate::SerialDevice;
@@ -31,7 +32,7 @@ impl SerialDevice for Console {
         out: Option<Box<dyn io::Write + Send>>,
         // TODO(b/171331752): connect filesync functionality.
         _sync: Option<Box<dyn FileSync + Send>>,
-        _out_timestamp: bool,
+        _options: SerialOptions,
         keep_rds: Vec<RawDescriptor>,
     ) -> Console {
         Console::new(protection_type, input, out, keep_rds)
@@ -69,82 +70,90 @@ pub(in crate::virtio::console) fn spawn_input_thread(
         if !buffer.lock().is_empty() {
             thread_in_avail_evt.signal().unwrap();
         }
-
-        #[derive(EventToken)]
-        enum Token {
-            ConsoleEvent,
-            Kill,
-        }
-
-        let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
-            (&kill_evt, Token::Kill),
-            (rx.get_read_notifier(), Token::ConsoleEvent),
-        ]) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                error!("failed creating WaitContext {:?}", e);
-                return rx;
-            }
-        };
-
-        let mut kill_timeout = None;
-        let mut rx_buf = [0u8; 1 << 12];
-        'wait: loop {
-            let events = match wait_ctx.wait() {
-                Ok(events) => events,
-                Err(e) => {
-                    error!("Failed to wait for events. {}", e);
-                    return rx;
-                }
-            };
-            for event in events.iter() {
-                match event.token {
-                    Token::Kill => {
-                        // Ignore the kill event until there are no other events to process so that
-                        // we drain `rx` as much as possible. The next `wait_ctx.wait()` call will
-                        // immediately re-entry this case since we don't call `kill_evt.wait()`.
-                        if events.iter().all(|e| matches!(e.token, Token::Kill)) {
-                            break 'wait;
-                        }
-                        const TIMEOUT_DURATION: Duration = Duration::from_millis(500);
-                        match kill_timeout {
-                            None => {
-                                kill_timeout = Some(Instant::now() + TIMEOUT_DURATION);
-                            }
-                            Some(t) => {
-                                if Instant::now() >= t {
-                                    error!(
-                                        "failed to drain console input within {:?}, giving up",
-                                        TIMEOUT_DURATION
-                                    );
-                                    break 'wait;
-                                }
-                            }
-                        }
-                    }
-                    Token::ConsoleEvent => {
-                        match rx.read(&mut rx_buf) {
-                            Ok(0) => break 'wait, // Assume the stream of input has ended.
-                            Ok(size) => {
-                                buffer.lock().extend(&rx_buf[0..size]);
-                                thread_in_avail_evt.signal().unwrap();
-                            }
-                            Err(e) => {
-                                // Being interrupted is not an error, but everything else is.
-                                if is_a_fatal_input_error(&e) {
-                                    error!(
-                                        "failed to read for bytes to queue into console device: {}",
-                                        e
-                                    );
-                                    break 'wait;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        read_input(&mut rx, &thread_in_avail_evt, buffer, kill_evt);
         rx
     });
     (buffer_cloned, res)
+}
+
+pub(in crate::virtio::console) fn read_input(
+    rx: &mut InStreamType,
+    thread_in_avail_evt: &Event,
+    buffer: Arc<Mutex<VecDeque<u8>>>,
+    kill_evt: Event,
+) {
+    #[derive(EventToken)]
+    enum Token {
+        ConsoleEvent,
+        Kill,
+    }
+
+    let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
+        (&kill_evt, Token::Kill),
+        (rx.get_read_notifier(), Token::ConsoleEvent),
+    ]) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            error!("failed creating WaitContext {:?}", e);
+            return;
+        }
+    };
+
+    let mut kill_timeout = None;
+    let mut rx_buf = [0u8; 1 << 12];
+    'wait: loop {
+        let events = match wait_ctx.wait() {
+            Ok(events) => events,
+            Err(e) => {
+                error!("Failed to wait for events. {}", e);
+                return;
+            }
+        };
+        for event in events.iter() {
+            match event.token {
+                Token::Kill => {
+                    // Ignore the kill event until there are no other events to process so that
+                    // we drain `rx` as much as possible. The next `wait_ctx.wait()` call will
+                    // immediately re-entry this case since we don't call `kill_evt.wait()`.
+                    if events.iter().all(|e| matches!(e.token, Token::Kill)) {
+                        break 'wait;
+                    }
+                    const TIMEOUT_DURATION: Duration = Duration::from_millis(500);
+                    match kill_timeout {
+                        None => {
+                            kill_timeout = Some(Instant::now() + TIMEOUT_DURATION);
+                        }
+                        Some(t) => {
+                            if Instant::now() >= t {
+                                error!(
+                                    "failed to drain console input within {:?}, giving up",
+                                    TIMEOUT_DURATION
+                                );
+                                break 'wait;
+                            }
+                        }
+                    }
+                }
+                Token::ConsoleEvent => {
+                    match rx.read(&mut rx_buf) {
+                        Ok(0) => break 'wait, // Assume the stream of input has ended.
+                        Ok(size) => {
+                            buffer.lock().extend(&rx_buf[0..size]);
+                            thread_in_avail_evt.signal().unwrap();
+                        }
+                        Err(e) => {
+                            // Being interrupted is not an error, but everything else is.
+                            if is_a_fatal_input_error(&e) {
+                                error!(
+                                    "failed to read for bytes to queue into console device: {}",
+                                    e
+                                );
+                                break 'wait;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

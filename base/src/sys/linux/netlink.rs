@@ -179,6 +179,7 @@ impl AsRawDescriptor for NetlinkGenericSocket {
 impl NetlinkGenericSocket {
     /// Create and bind a new `NETLINK_GENERIC` socket.
     pub fn new(nl_groups: u32) -> Result<Self> {
+        // SAFETY:
         // Safe because we check the return value and convert the raw fd into a SafeDescriptor.
         let sock = unsafe {
             let fd = libc::socket(
@@ -193,12 +194,14 @@ impl NetlinkGenericSocket {
             SafeDescriptor::from_raw_descriptor(fd)
         };
 
+        // SAFETY:
         // This MaybeUninit dance is needed because sockaddr_nl has a private padding field and
         // doesn't implement Default. Safe because all 0s is valid data for sockaddr_nl.
         let mut sa = unsafe { MaybeUninit::<libc::sockaddr_nl>::zeroed().assume_init() };
         sa.nl_family = libc::AF_NETLINK as libc::sa_family_t;
         sa.nl_groups = nl_groups;
 
+        // SAFETY:
         // Safe because we pass a descriptor that we own and valid pointer/size for sockaddr.
         unsafe {
             let res = libc::bind(
@@ -223,14 +226,10 @@ impl NetlinkGenericSocket {
             .map_err(|_| Error::new(EINVAL))?;
         let allocation = LayoutAllocation::uninitialized(layout);
 
+        // SAFETY:
         // Safe because we pass a valid, owned socket fd and a valid pointer/size for the buffer.
         let bytes_read = unsafe {
-            let res = libc::recv(
-                self.sock.as_raw_fd(),
-                allocation.as_ptr() as *mut libc::c_void,
-                buf_size,
-                0,
-            );
+            let res = libc::recv(self.sock.as_raw_fd(), allocation.as_ptr(), buf_size, 0);
             if res < 0 {
                 return errno_result();
             }
@@ -257,6 +256,7 @@ impl NetlinkGenericSocket {
             .unwrap();
         let mut allocation = LayoutAllocation::zeroed(layout);
 
+        // SAFETY:
         // Safe because the data in allocation was initialized up to `buf_size` and is
         // sufficiently aligned.
         let data = unsafe { allocation.as_mut_slice(buf_size) };
@@ -293,11 +293,12 @@ impl NetlinkGenericSocket {
         let payload_end = payload_start + family_name.len();
         data[payload_start..payload_end].copy_from_slice(family_name.as_bytes());
 
+        // SAFETY:
         // Safe because we pass a valid, owned socket fd and a valid pointer/size for the buffer.
         unsafe {
             let res = libc::send(
                 self.sock.as_raw_fd(),
-                allocation.as_ptr() as *mut libc::c_void,
+                allocation.as_ptr(),
                 payload_end + 1,
                 0,
             );
@@ -435,6 +436,7 @@ pub struct NetlinkGenericRead {
 
 impl NetlinkGenericRead {
     pub fn iter(&self) -> NetlinkMessageIter {
+        // SAFETY:
         // Safe because the data in allocation was initialized up to `self.len` by `recv()` and is
         // sufficiently aligned.
         let data = unsafe { &self.allocation.as_slice(self.len) };

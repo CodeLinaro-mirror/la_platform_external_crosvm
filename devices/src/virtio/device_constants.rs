@@ -15,6 +15,13 @@ use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
 
+/// Virtio feature bits that are specific to a device type.
+///
+/// Per virtio 1.2 spec, features 0 to 23 and 50 to 127 are feature bits for the specific device
+/// type. Features beyond 63 are not representable in the current `u64` type used to store sets of
+/// features, so bits 64 to 127 are not included in this mask.
+pub const VIRTIO_DEVICE_TYPE_SPECIFIC_FEATURES_MASK: u64 = 0xfffc_0000_00ff_ffff;
+
 pub mod block {
     use super::*;
 
@@ -209,13 +216,6 @@ pub mod video {
         1u64 << VIRTIO_VIDEO_F_RESOURCE_NON_CONTIG | 1u64 << VIRTIO_VIDEO_F_RESOURCE_VIRTIO_OBJECT
     }
 
-    /// Union of the supported features of all decoder and encoder backends.
-    pub fn all_backend_virtio_features() -> u64 {
-        ffmpeg_supported_virtio_features()
-            | vaapi_supported_virtio_features()
-            | vda_supported_virtio_features()
-    }
-
     pub fn backend_supported_virtio_features(backend: VideoBackendType) -> u64 {
         match backend {
             #[cfg(feature = "libvda")]
@@ -249,4 +249,10 @@ pub mod wl {
     pub const VIRTIO_WL_F_TRANS_FLAGS: u32 = 0x01;
     pub const VIRTIO_WL_F_SEND_FENCES: u32 = 0x02;
     pub const VIRTIO_WL_F_USE_SHMEM: u32 = 0x03;
+}
+
+pub mod console {
+    pub const VIRTIO_CONSOLE_F_SIZE: u32 = 0;
+    pub const VIRTIO_CONSOLE_F_MULTIPORT: u32 = 1;
+    pub const VIRTIO_CONSOLE_F_EMERG_WRITE: u32 = 2;
 }

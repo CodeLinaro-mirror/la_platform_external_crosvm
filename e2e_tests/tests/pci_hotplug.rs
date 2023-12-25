@@ -17,6 +17,7 @@ use base::test_utils::call_test_with_sudo;
 use fixture::vm::Config;
 use fixture::vm::TestVm;
 use net_util::sys::linux::Tap;
+use net_util::sys::linux::TapTLinux;
 use net_util::MacAddress;
 use net_util::TapTCommon;
 
@@ -46,6 +47,7 @@ where
 /// setup a tap device for test
 fn setup_tap_device(tap_name: &[u8], ip_addr: Ipv4Addr, netmask: Ipv4Addr, mac_addr: MacAddress) {
     let tap = Tap::new_with_name(tap_name, true, false).unwrap();
+    // SAFETY:
     // ioctl is safe since we call it with a valid tap fd and check the return value.
     let ret = unsafe { ioctl_with_val(&tap, net_sys::TUNSETPERSIST(), 1) };
     if ret < 0 {

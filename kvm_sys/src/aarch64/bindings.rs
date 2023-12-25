@@ -2,6 +2,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::undocumented_unsafe_blocks)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -17,6 +18,23 @@ pub const KVM_CAP_ARM_PROTECTED_VM: u32 = 0xffbadab1;
 pub const KVM_CAP_ARM_PROTECTED_VM_FLAGS_SET_FW_IPA: u32 = 0;
 pub const KVM_CAP_ARM_PROTECTED_VM_FLAGS_INFO: u32 = 1;
 pub const KVM_VM_TYPE_ARM_PROTECTED: u32 = 0x80000000;
+pub const KVM_DEV_VFIO_PVIOMMU: u32 = 2;
+pub const KVM_DEV_VFIO_PVIOMMU_ATTACH: u32 = 1;
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct kvm_vfio_iommu_info {
+    pub device_fd: i32,
+    pub nr_sids: u32,
+}
+pub const KVM_DEV_VFIO_PVIOMMU_GET_INFO: u32 = 2;
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct kvm_vfio_iommu_config {
+    pub device_fd: i32,
+    pub sid_idx: u32,
+    pub vsid: u32,
+}
+pub const KVM_PVIOMMU_SET_CONFIG: i32 = 1;
 
 #[repr(C)]
 #[derive(Default)]

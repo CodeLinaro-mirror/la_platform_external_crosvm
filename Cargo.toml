@@ -28,6 +28,11 @@ strip = "symbols"
 inherits = "chromeos"
 lto = true
 
+# Set codegen units to 1 to further reduce binary size.
+[profile.largecodegen]
+inherits = "lto"
+codegen-units = 1
+
 [workspace]
 # Explicitly list all crates of crosvm as workspace members since not all of them may be referenced
 # by dependencies.
@@ -200,9 +205,6 @@ gfxstream_stub = ["rutabaga_gfx/gfxstream_stub"]
 ## Enables 3D acceleration for the guest via the virglrenderer library over virtio-gpu.
 virgl_renderer = ["devices/virgl_renderer"]
 
-## Enables in development features of virglrenderer to support newer OpenGL versions.
-virgl_renderer_next = ["devices/virgl_renderer_next", "rutabaga_gfx/virgl_renderer_next"]
-
 #! ### Video features
 #!
 #! See [Video Device](https://crosvm.dev/book/devices/video.html) for more information.
@@ -330,7 +332,6 @@ all-default = [
     "vaapi",
     "video-decoder",
     "video-encoder",
-    "virgl_renderer_next",
     "virgl_renderer",
     "vtpm",
     "wl-dmabuf",
@@ -443,6 +444,7 @@ thiserror = { version = "1.0.20" }
 vm_control = { path = "vm_control" }
 acpi_tables = { path = "acpi_tables" }
 vm_memory = { path = "vm_memory" }
+uuid = { version = "1", features = ["v4"] }
 zerocopy = { version = "0.7", features = ["derive"] }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]

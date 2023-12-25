@@ -30,6 +30,7 @@ impl ArcWake for Waker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         let state = arc_self.0.swap(WOKEN, Ordering::Release);
         if state == WAITING {
+            // SAFETY:
             // The thread hasn't already been woken up so wake it up now. Safe because this doesn't
             // modify any memory and we check the return value.
             let res = unsafe {
@@ -38,8 +39,8 @@ impl ArcWake for Waker {
                     &arc_self.0,
                     FUTEX_WAKE_PRIVATE,
                     libc::INT_MAX,                        // val
-                    ptr::null() as *const libc::timespec, // timeout
-                    ptr::null() as *const libc::c_int,    // uaddr2
+                    ptr::null::<*const libc::timespec>(), // timeout
+                    ptr::null::<*const libc::c_int>(),    // uaddr2
                     0_i32,                                // val3
                 )
             };
@@ -71,6 +72,7 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
 
             let state = thread_waker.0.swap(WAITING, Ordering::Acquire);
             if state == WAITING {
+                // SAFETY:
                 // If we weren't already woken up then wait until we are. Safe because this doesn't
                 // modify any memory and we check the return value.
                 let res = unsafe {
@@ -79,8 +81,8 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
                         &thread_waker.0,
                         FUTEX_WAIT_PRIVATE,
                         state,
-                        ptr::null() as *const libc::timespec, // timeout
-                        ptr::null() as *const libc::c_int,    // uaddr2
+                        ptr::null::<*const libc::timespec>(), // timeout
+                        ptr::null::<*const libc::c_int>(),    // uaddr2
                         0_i32,                                // val3
                     )
                 };

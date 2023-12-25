@@ -14,6 +14,7 @@ pub mod constants;
 mod device;
 
 pub use device::Controller;
+pub use device::DiskConfig;
 
 fn scsi_option_block_size_default() -> u32 {
     512
@@ -41,8 +42,9 @@ pub struct ScsiOption {
 mod tests {
     use std::path::Path;
 
-    use super::*;
     use serde_keyvalue::from_key_values;
+
+    use super::*;
 
     #[test]
     fn parse_scsi_options() {

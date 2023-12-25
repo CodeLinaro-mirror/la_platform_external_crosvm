@@ -11,19 +11,15 @@ use cros_async::AsyncWrapper;
 use cros_async::Executor;
 use futures::Future;
 use futures::FutureExt;
-use vmm_vhost::connection::socket::Listener as SocketListener;
-use vmm_vhost::connection::Endpoint;
+use vmm_vhost::connection::socket::SocketListener;
 use vmm_vhost::connection::Listener;
-use vmm_vhost::message::MasterReq;
 use vmm_vhost::SlaveReqHandler;
 use vmm_vhost::VhostUserSlaveReqHandler;
 
 use crate::virtio::vhost::user::device::handler::sys::linux::run_handler;
-use crate::virtio::vhost::user::device::handler::VhostUserPlatformOps;
-use crate::virtio::vhost::user::device::handler::VhostUserRegularOps;
 use crate::virtio::vhost::user::device::listener::VhostUserListenerTrait;
 
-//// On Unix we can listen to a socket.
+/// On Unix we can listen to a socket.
 pub struct VhostUserListener(SocketListener);
 
 impl VhostUserListener {
@@ -46,15 +42,11 @@ impl VhostUserListener {
 
 /// Attaches to an already bound socket via `listener` and handles incoming messages from the
 /// VMM, which are dispatched to the device backend via the `VhostUserBackend` trait methods.
-async fn run_with_handler<L>(
-    mut listener: L,
+async fn run_with_handler(
+    mut listener: SocketListener,
     handler: Box<dyn VhostUserSlaveReqHandler>,
     ex: &Executor,
-) -> anyhow::Result<()>
-where
-    L::Endpoint: Endpoint<MasterReq> + AsRawDescriptor,
-    L: Listener + AsRawDescriptor,
-{
+) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
 
     loop {
@@ -65,8 +57,8 @@ where
             .accept()
             .context("failed to accept an incoming connection")?
         {
-            Some(endpoint) => {
-                let req_handler = SlaveReqHandler::new(endpoint, handler);
+            Some(connection) => {
+                let req_handler = SlaveReqHandler::new(connection, handler);
                 return run_handler(req_handler, ex).await;
             }
             None => {
@@ -98,22 +90,13 @@ impl VhostUserListenerTrait for VhostUserListener {
 
     /// Returns a future that runs a `VhostUserSlaveReqHandler` using this listener.
     ///
-    /// The request handler is built from the `handler_builder` closure, which is passed the
-    /// `VhostUserPlatformOps` used by this listener. `ex` is the executor on which the request
-    /// handler can schedule its own tasks.
-    fn run_req_handler<'e, F>(
+    /// `ex` is the executor on which the request handler can schedule its own tasks.
+    fn run_req_handler<'e>(
         self,
-        handler_builder: F,
+        handler: Box<dyn VhostUserSlaveReqHandler>,
         ex: &'e Executor,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'e>>
-    where
-        F: FnOnce(Box<dyn VhostUserPlatformOps>) -> Box<dyn VhostUserSlaveReqHandler> + 'e,
-    {
-        async {
-            let handler = handler_builder(Box::new(VhostUserRegularOps));
-            run_with_handler(self.0, handler, ex).await
-        }
-        .boxed_local()
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'e>> {
+        async { run_with_handler(self.0, handler, ex).await }.boxed_local()
     }
 
     fn take_parent_process_resources(&mut self) -> Option<Box<dyn std::any::Any>> {

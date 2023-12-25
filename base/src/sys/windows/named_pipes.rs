@@ -89,12 +89,22 @@ pub struct PipeConnection {
     blocking_mode: BlockingMode,
 }
 
+/// `OVERLAPPED` is allocated on the heap because it must not move while performing I/O operations.
+///
+/// Defined as a separate type so that we can mark it as `Send` and `Sync`.
+pub struct BoxedOverlapped(pub Box<OVERLAPPED>);
+
+// SAFETY: `OVERLAPPED` is not automatically `Send` because it contains a `HANDLE`, which is a raw
+// pointer, but `HANDLE`s are safe to move between threads and thus so is `OVERLAPPED`.
+unsafe impl Send for BoxedOverlapped {}
+
+// SAFETY: See the argument for `Send` above. `HANDLE`s are also safe to share between threads.
+unsafe impl Sync for BoxedOverlapped {}
+
 /// Wraps the OVERLAPPED structure. Also keeps track of whether OVERLAPPED is being used by a
 /// Readfile or WriteFile operation and holds onto the event object so it doesn't get dropped.
 pub struct OverlappedWrapper {
-    // Allocated on the heap so that the OVERLAPPED struct doesn't move when performing I/O
-    // operations.
-    overlapped: Box<OVERLAPPED>,
+    overlapped: BoxedOverlapped,
     // This field prevents the event handle from being dropped too early and allows callers to
     // be notified when a read or write overlapped operation has completed.
     h_event: Option<Event>,
@@ -130,15 +140,12 @@ impl OverlappedWrapper {
         };
 
         Ok(OverlappedWrapper {
-            overlapped: Box::new(overlapped),
+            overlapped: BoxedOverlapped(Box::new(overlapped)),
             h_event,
             in_use: false,
         })
     }
 }
-
-// Safe because all of the contained fields may be safely sent to another thread.
-unsafe impl Send for OverlappedWrapper {}
 
 pub trait WriteOverlapped {
     /// Perform an overlapped write operation with the specified buffer and overlapped wrapper.
@@ -242,6 +249,7 @@ impl From<&BlockingMode> for DWORD {
 }
 
 /// Sets the handle state for a named pipe in a rust friendly way.
+/// SAFETY:
 /// This is safe if the pipe handle is open.
 unsafe fn set_named_pipe_handle_state(
     pipe_handle: RawDescriptor,
@@ -377,9 +385,10 @@ pub fn create_server_pipe(
 
     // This sets flags so there will be an error if >1 instance (server end)
     // of this pipe name is opened because we expect exactly one.
+    // SAFETY:
+    // Safe because security attributes are valid, pipe_name is valid C string,
+    // and we're checking the return code
     let server_handle = unsafe {
-        // Safe because security attributes are valid, pipe_name is valid C string,
-        // and we're checking the return code
         CreateNamedPipeA(
             c_pipe_name.as_ptr(),
             /* dwOpenMode= */
@@ -405,6 +414,7 @@ pub fn create_server_pipe(
     if server_handle == INVALID_HANDLE_VALUE {
         Err(io::Error::last_os_error())
     } else {
+        // SAFETY: Safe because server_handle is valid.
         unsafe {
             Ok(PipeConnection {
                 handle: SafeDescriptor::from_raw_descriptor(server_handle),
@@ -448,12 +458,14 @@ pub fn create_client_pipe(
 
     let mut client_mode = framing_mode.to_readmode() | DWORD::from(blocking_mode);
 
+    // SAFETY:
     // Safe because client_handle's open() call did not return an error.
     unsafe {
         set_named_pipe_handle_state(client_handle, &mut client_mode)?;
     }
 
     Ok(PipeConnection {
+        // SAFETY:
         // Safe because client_handle is valid
         handle: unsafe { SafeDescriptor::from_raw_descriptor(client_handle) },
         framing_mode: *framing_mode,
@@ -558,7 +570,7 @@ impl PipeConnection {
             &self.handle,
             self.blocking_mode,
             buf,
-            Some(&mut overlapped_wrapper.overlapped),
+            Some(&mut overlapped_wrapper.overlapped.0),
         )?;
         Ok(())
     }
@@ -604,6 +616,7 @@ impl PipeConnection {
         overlapped_wrapper: &mut OverlappedWrapper,
         exit_event: &Event,
     ) -> Result<()> {
+        // SAFETY:
         // Safe because we are providing a valid buffer slice and also providing a valid
         // overlapped struct.
         match unsafe { self.read_overlapped(buf, overlapped_wrapper) } {
@@ -665,6 +678,7 @@ impl PipeConnection {
     pub fn get_available_byte_count(&self) -> io::Result<u32> {
         let mut total_bytes_avail: DWORD = 0;
 
+        // SAFETY:
         // Safe because the underlying pipe handle is guaranteed to be open, and the output values
         // live at valid memory locations.
         fail_if_zero!(unsafe {
@@ -719,7 +733,7 @@ impl PipeConnection {
         PipeConnection::write_internal(
             &self.handle,
             buf,
-            Some(&mut overlapped_wrapper.overlapped),
+            Some(&mut overlapped_wrapper.overlapped.0),
         )?;
         Ok(())
     }
@@ -736,6 +750,7 @@ impl PipeConnection {
         buf: &[T],
         overlapped: Option<&mut OVERLAPPED>,
     ) -> Result<usize> {
+        // SAFETY:
         // Safe because buf points to memory valid until the write completes and we pass a valid
         // length for that memory.
         unsafe {
@@ -753,6 +768,7 @@ impl PipeConnection {
         let mut client_mode = DWORD::from(blocking_mode) | self.framing_mode.to_readmode();
         self.blocking_mode = *blocking_mode;
 
+        // SAFETY:
         // Safe because the pipe has not been closed (it is managed by this object).
         unsafe { set_named_pipe_handle_state(self.handle.as_raw_descriptor(), &mut client_mode) }
     }
@@ -827,6 +843,7 @@ impl PipeConnection {
         overlapped_wrapper: &mut OverlappedWrapper,
         should_block: bool,
     ) -> Result<()> {
+        // SAFETY:
         // Safe because the handle is valid and we're checking the return
         // code according to the documentation
         //
@@ -839,7 +856,7 @@ impl PipeConnection {
                 self.as_raw_descriptor(),
                 // Note: The overlapped structure is only used if the pipe was opened in
                 // OVERLAPPED mode, but is necessary in that case.
-                &mut *overlapped_wrapper.overlapped,
+                &mut *overlapped_wrapper.overlapped.0,
             );
             if success_flag == 0 {
                 return match GetLastError() {
@@ -917,12 +934,13 @@ impl PipeConnection {
             ));
         }
         let mut size_transferred = 0;
+        // SAFETY:
         // Safe as long as `overlapped_struct` isn't copied and also contains a valid event.
         // Also the named pipe handle must created with `FILE_FLAG_OVERLAPPED`.
         fail_if_zero!(unsafe {
             GetOverlappedResult(
                 self.handle.as_raw_descriptor(),
-                &mut *overlapped_wrapper.overlapped,
+                &mut *overlapped_wrapper.overlapped.0,
                 &mut size_transferred,
                 if wait { TRUE } else { FALSE },
             )
@@ -934,12 +952,15 @@ impl PipeConnection {
     /// Cancels I/O Operations in the current process. Since `lpOverlapped` is null, this will
     /// cancel all I/O requests for the file handle passed in.
     pub fn cancel_io(&mut self) -> Result<()> {
-        fail_if_zero!(unsafe {
-            CancelIoEx(
-                self.handle.as_raw_descriptor(),
-                /* lpOverlapped= */ std::ptr::null_mut(),
-            )
-        });
+        fail_if_zero!(
+            // SAFETY: descriptor is valid and the return value is checked.
+            unsafe {
+                CancelIoEx(
+                    self.handle.as_raw_descriptor(),
+                    /* lpOverlapped= */ std::ptr::null_mut(),
+                )
+            }
+        );
 
         Ok(())
     }
@@ -979,6 +1000,7 @@ impl PipeConnection {
     /// call this if you are sure the client is reading the
     /// data!
     pub fn flush_data_blocking(&self) -> Result<()> {
+        // SAFETY:
         // Safe because the only buffers interacted with are
         // outside of Rust memory
         fail_if_zero!(unsafe { FlushFileBuffers(self.as_raw_descriptor()) });
@@ -987,6 +1009,7 @@ impl PipeConnection {
 
     /// For a server pipe, disconnect all clients, discarding any buffered data.
     pub fn disconnect_clients(&self) -> Result<()> {
+        // SAFETY:
         // Safe because we own the handle passed in and know it will remain valid for the duration
         // of the call. Discarded buffers are not managed by rust.
         fail_if_zero!(unsafe { DisconnectNamedPipe(self.as_raw_descriptor()) });
@@ -1006,11 +1029,14 @@ impl IntoRawDescriptor for PipeConnection {
     }
 }
 
+// SAFETY: Send safety is ensured by inner fields.
 unsafe impl Send for PipeConnection {}
+// SAFETY: Sync safety is ensured by inner fields.
 unsafe impl Sync for PipeConnection {}
 
 impl io::Read for PipeConnection {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // SAFETY:
         // This is safe because PipeConnection::read is always safe for u8
         unsafe { PipeConnection::read(self, buf) }
     }
@@ -1118,16 +1144,16 @@ impl MultiPartMessagePipe {
         Ok(())
     }
 
-    /// # Safety
-    /// `buf` and `overlapped_wrapper` will be in use for the duration of
-    /// the overlapped operation. These must not be reused and must live until
-    /// after `get_overlapped_result()` has been called which is done right
-    /// after this call.
     fn write_overlapped_blocking_message_internal<T: PipeSendable>(
         pipe: &mut PipeConnection,
         buf: &[T],
         overlapped_wrapper: &mut OverlappedWrapper,
     ) -> Result<()> {
+        // Safety:
+        // `buf` and `overlapped_wrapper` will be in use for the duration of
+        // the overlapped operation. These must not be reused and must live until
+        // after `get_overlapped_result()` has been called which is done right
+        // after this call.
         unsafe {
             pipe.write_overlapped(buf, overlapped_wrapper)?;
         }
@@ -1229,6 +1255,7 @@ mod tests {
         let (p1, p2) = pair(&FramingMode::Byte, &BlockingMode::Wait, 0).unwrap();
 
         // Test both forward and reverse direction since the underlying APIs are a bit asymmetrical
+        // SAFETY: trivially safe with pipe created and return value checked.
         unsafe {
             for (dir, sender, receiver) in [("1 -> 2", &p1, &p2), ("2 -> 1", &p2, &p1)].iter() {
                 println!("{}", dir);
@@ -1284,6 +1311,7 @@ mod tests {
         let (p1, p2) = pair(&FramingMode::Message, &BlockingMode::Wait, 0).unwrap();
 
         // Test both forward and reverse direction since the underlying APIs are a bit asymmetrical
+        // SAFETY: trivially safe with pipe created and return value checked.
         unsafe {
             for (dir, sender, receiver) in [("1 -> 2", &p1, &p2), ("2 -> 1", &p2, &p1)].iter() {
                 println!("{}", dir);
@@ -1310,6 +1338,7 @@ mod tests {
         let mut recv_buffer: [u8; 1] = [0; 1];
 
         // Test both forward and reverse direction since the underlying APIs are a bit asymmetrical
+        // SAFETY: trivially safe with PipeConnection created and return value checked.
         unsafe {
             for (dir, sender, receiver) in [("1 -> 2", &p1, &p2), ("2 -> 1", &p2, &p1)].iter() {
                 println!("{}", dir);
@@ -1362,6 +1391,7 @@ mod tests {
         )
         .unwrap();
 
+        // SAFETY:
         // Safe because `read_overlapped` can be called since overlapped struct is created.
         unsafe {
             let mut p1_overlapped_wrapper =
@@ -1419,9 +1449,9 @@ mod tests {
         let res = unsafe { p1.write_overlapped(&data, &mut overlapped_wrapper) };
         assert!(res.is_ok());
 
-        // SAFETY: safe because we know the unsafe re-use of overlapped wrapper
-        // will error out.
         let res =
+            // SAFETY: safe because we know the unsafe re-use of overlapped wrapper
+            // will error out.
             unsafe { p2.write_overlapped(&[75, 77, 54, 82, 76, 65], &mut overlapped_wrapper) };
         assert!(res.is_err());
 

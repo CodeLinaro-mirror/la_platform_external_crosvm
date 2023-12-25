@@ -7,17 +7,23 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 
+use super::discard_block;
 use super::fallocate;
+use super::is_block_file;
 use super::FallocateMode;
 
 pub(crate) fn file_punch_hole(file: &File, offset: u64, length: u64) -> io::Result<()> {
-    fallocate(file, FallocateMode::PunchHole, true, offset, length)
-        .map_err(|e| io::Error::from_raw_os_error(e.errno()))
+    if is_block_file(file)? {
+        Ok(discard_block(file, offset, length)?)
+    } else {
+        fallocate(file, FallocateMode::PunchHole, offset, length)
+            .map_err(|e| io::Error::from_raw_os_error(e.errno()))
+    }
 }
 
 pub(crate) fn file_write_zeroes_at(file: &File, offset: u64, length: usize) -> io::Result<usize> {
     // Try to use fallocate() first.
-    if fallocate(file, FallocateMode::ZeroRange, true, offset, length as u64).is_ok() {
+    if fallocate(file, FallocateMode::ZeroRange, offset, length as u64).is_ok() {
         return Ok(length);
     }
 

@@ -4,9 +4,9 @@
 //! A wrapper module for platform dependent code.
 
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
-        pub mod linux;
-        use linux as platform;
+    if #[cfg(unix)] {
+        pub mod unix;
+        use unix as platform;
     } else if #[cfg(windows)] {
         pub mod windows;
         use windows as platform;
@@ -15,8 +15,5 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(feature = "device")]
-pub(crate) use platform::MasterReqEndpoint;
-#[cfg(feature = "device")]
-pub(crate) use platform::SlaveReqEndpoint;
+pub(crate) use platform::PlatformConnection;
 pub use platform::SystemStream;

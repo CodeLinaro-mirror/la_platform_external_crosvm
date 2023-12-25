@@ -6,8 +6,10 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
+use base::sys::fallocate;
+use base::sys::FallocateMode;
 use base::AsRawDescriptor;
-use data_model::VolatileSlice;
+use base::VolatileSlice;
 use remain::sorted;
 use thiserror::Error as ThisError;
 
@@ -16,7 +18,6 @@ use super::fd_executor::EpollReactor;
 use super::fd_executor::RegisteredSource;
 use crate::common_executor::RawExecutor;
 use crate::mem::BackingMemory;
-use crate::AllocateMode;
 use crate::AsyncError;
 use crate::AsyncResult;
 use crate::MemRegion;
@@ -27,6 +28,9 @@ pub enum Error {
     /// An error occurred attempting to register a waker with the executor.
     #[error("An error occurred attempting to register a waker with the executor: {0}.")]
     AddingWaker(fd_executor::Error),
+    /// Failed to discard a block
+    #[error("Failed to discard a block: {0}")]
+    Discard(base::Error),
     /// An executor error occurred.
     #[error("An executor error occurred: {0}")]
     Executor(fd_executor::Error),
@@ -57,6 +61,7 @@ impl From<Error> for io::Error {
         match e {
             AddingWaker(e) => e.into(),
             Executor(e) => e.into(),
+            Discard(e) => e.into(),
             Fallocate(e) => e.into(),
             Fdatasync(e) => e.into(),
             Fsync(e) => e.into(),
@@ -68,13 +73,19 @@ impl From<Error> for io::Error {
 }
 
 /// Async wrapper for an IO source that uses the FD executor to drive async operations.
-pub struct PollSource<F>(RegisteredSource<F>);
+pub struct PollSource<F> {
+    registered_source: RegisteredSource<F>,
+}
 
 impl<F: AsRawDescriptor> PollSource<F> {
     /// Create a new `PollSource` from the given IO source.
     pub fn new(f: F, ex: &Arc<RawExecutor<EpollReactor>>) -> Result<Self> {
         RegisteredSource::new(ex, f)
-            .map(PollSource)
+            .map({
+                |f| PollSource {
+                    registered_source: f,
+                }
+            })
             .map_err(Error::Executor)
     }
 }
@@ -87,20 +98,23 @@ impl<F: AsRawDescriptor> PollSource<F> {
         mut vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
         loop {
-            // Safe because this will only modify `vec` and we check the return value.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because this will only modify `vec` and we check the return value.
                 unsafe {
                     libc::pread64(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         vec.as_mut_ptr() as *mut libc::c_void,
                         vec.len(),
                         offset as libc::off64_t,
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because this will only modify `vec` and we check the return value.
                 unsafe {
                     libc::read(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         vec.as_mut_ptr() as *mut libc::c_void,
                         vec.len(),
                     )
@@ -113,7 +127,10 @@ impl<F: AsRawDescriptor> PollSource<F> {
 
             match base::Error::last() {
                 e if e.errno() == libc::EWOULDBLOCK => {
-                    let op = self.0.wait_readable().map_err(Error::AddingWaker)?;
+                    let op = self
+                        .registered_source
+                        .wait_readable()
+                        .map_err(Error::AddingWaker)?;
                     op.await.map_err(Error::Executor)?;
                 }
                 e => return Err(Error::Read(e).into()),
@@ -134,21 +151,25 @@ impl<F: AsRawDescriptor> PollSource<F> {
             .collect::<Vec<VolatileSlice>>();
 
         loop {
-            // Safe because we trust the kernel not to write path the length given and the length is
-            // guaranteed to be valid from the pointer by io_slice_mut.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::preadv64(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         iovecs.as_mut_ptr() as *mut _,
                         iovecs.len() as i32,
                         offset as libc::off64_t,
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::readv(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         iovecs.as_mut_ptr() as *mut _,
                         iovecs.len() as i32,
                     )
@@ -161,7 +182,10 @@ impl<F: AsRawDescriptor> PollSource<F> {
 
             match base::Error::last() {
                 e if e.errno() == libc::EWOULDBLOCK => {
-                    let op = self.0.wait_readable().map_err(Error::AddingWaker)?;
+                    let op = self
+                        .registered_source
+                        .wait_readable()
+                        .map_err(Error::AddingWaker)?;
                     op.await.map_err(Error::Executor)?;
                 }
                 e => return Err(Error::Read(e).into()),
@@ -171,7 +195,10 @@ impl<F: AsRawDescriptor> PollSource<F> {
 
     /// Wait for the FD of `self` to be readable.
     pub async fn wait_readable(&self) -> AsyncResult<()> {
-        let op = self.0.wait_readable().map_err(Error::AddingWaker)?;
+        let op = self
+            .registered_source
+            .wait_readable()
+            .map_err(Error::AddingWaker)?;
         op.await.map_err(Error::Executor)?;
         Ok(())
     }
@@ -183,20 +210,23 @@ impl<F: AsRawDescriptor> PollSource<F> {
         vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
         loop {
-            // Safe because this will not modify any memory and we check the return value.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because this will not modify any memory and we check the return value.
                 unsafe {
                     libc::pwrite64(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         vec.as_ptr() as *const libc::c_void,
                         vec.len(),
                         offset as libc::off64_t,
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because this will not modify any memory and we check the return value.
                 unsafe {
                     libc::write(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         vec.as_ptr() as *const libc::c_void,
                         vec.len(),
                     )
@@ -209,7 +239,10 @@ impl<F: AsRawDescriptor> PollSource<F> {
 
             match base::Error::last() {
                 e if e.errno() == libc::EWOULDBLOCK => {
-                    let op = self.0.wait_writable().map_err(Error::AddingWaker)?;
+                    let op = self
+                        .registered_source
+                        .wait_writable()
+                        .map_err(Error::AddingWaker)?;
                     op.await.map_err(Error::Executor)?;
                 }
                 e => return Err(Error::Write(e).into()),
@@ -231,21 +264,25 @@ impl<F: AsRawDescriptor> PollSource<F> {
             .collect::<Vec<VolatileSlice>>();
 
         loop {
-            // Safe because we trust the kernel not to write path the length given and the length is
-            // guaranteed to be valid from the pointer by io_slice_mut.
             let res = if let Some(offset) = file_offset {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::pwritev64(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         iovecs.as_ptr() as *mut _,
                         iovecs.len() as i32,
                         offset as libc::off64_t,
                     )
                 }
             } else {
+                // SAFETY:
+                // Safe because we trust the kernel not to write path the length given and the length is
+                // guaranteed to be valid from the pointer by io_slice_mut.
                 unsafe {
                     libc::writev(
-                        self.0.duped_fd.as_raw_fd(),
+                        self.registered_source.duped_fd.as_raw_fd(),
                         iovecs.as_ptr() as *mut _,
                         iovecs.len() as i32,
                     )
@@ -258,7 +295,10 @@ impl<F: AsRawDescriptor> PollSource<F> {
 
             match base::Error::last() {
                 e if e.errno() == libc::EWOULDBLOCK => {
-                    let op = self.0.wait_writable().map_err(Error::AddingWaker)?;
+                    let op = self
+                        .registered_source
+                        .wait_writable()
+                        .map_err(Error::AddingWaker)?;
                     op.await.map_err(Error::Executor)?;
                 }
                 e => return Err(Error::Write(e).into()),
@@ -266,32 +306,12 @@ impl<F: AsRawDescriptor> PollSource<F> {
         }
     }
 
-    /// See `fallocate(2)` for details.
-    pub async fn fallocate(
-        &self,
-        file_offset: u64,
-        len: u64,
-        mode: AllocateMode,
-    ) -> AsyncResult<()> {
-        let mode_u32: u32 = mode.into();
-        let ret = unsafe {
-            libc::fallocate64(
-                self.0.duped_fd.as_raw_fd(),
-                mode_u32 as libc::c_int,
-                file_offset as libc::off64_t,
-                len as libc::off64_t,
-            )
-        };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(AsyncError::Poll(Error::Fallocate(base::Error::last())))
-        }
-    }
-
+    /// # Safety
+    ///
     /// Sync all completed write operations to the backing storage.
     pub async fn fsync(&self) -> AsyncResult<()> {
-        let ret = unsafe { libc::fsync(self.0.duped_fd.as_raw_fd()) };
+        // SAFETY: the duped_fd is valid and return value is checked.
+        let ret = unsafe { libc::fsync(self.registered_source.duped_fd.as_raw_fd()) };
         if ret == 0 {
             Ok(())
         } else {
@@ -299,10 +319,33 @@ impl<F: AsRawDescriptor> PollSource<F> {
         }
     }
 
+    /// punch_hole
+    pub async fn punch_hole(&self, file_offset: u64, len: u64) -> AsyncResult<()> {
+        fallocate(
+            &self.registered_source.duped_fd,
+            FallocateMode::PunchHole,
+            file_offset,
+            len,
+        )
+        .map_err(|e| AsyncError::Poll(Error::Fallocate(e)))
+    }
+
+    /// write_zeroes_at
+    pub async fn write_zeroes_at(&self, file_offset: u64, len: u64) -> AsyncResult<()> {
+        fallocate(
+            &self.registered_source.duped_fd,
+            FallocateMode::ZeroRange,
+            file_offset,
+            len,
+        )
+        .map_err(|e| AsyncError::Poll(Error::Fallocate(e)))
+    }
+
     /// Sync all data of completed write operations to the backing storage, avoiding updating extra
     /// metadata.
     pub async fn fdatasync(&self) -> AsyncResult<()> {
-        let ret = unsafe { libc::fdatasync(self.0.duped_fd.as_raw_fd()) };
+        // SAFETY: the duped_fd is valid and return value is checked.
+        let ret = unsafe { libc::fdatasync(self.registered_source.duped_fd.as_raw_fd()) };
         if ret == 0 {
             Ok(())
         } else {
@@ -312,17 +355,17 @@ impl<F: AsRawDescriptor> PollSource<F> {
 
     /// Yields the underlying IO source.
     pub fn into_source(self) -> F {
-        self.0.source
+        self.registered_source.source
     }
 
     /// Provides a mutable ref to the underlying IO source.
     pub fn as_source_mut(&mut self) -> &mut F {
-        &mut self.0.source
+        &mut self.registered_source.source
     }
 
     /// Provides a ref to the underlying IO source.
     pub fn as_source(&self) -> &F {
-        &self.0.source
+        &self.registered_source.source
     }
 }
 
@@ -330,36 +373,8 @@ impl<F: AsRawDescriptor> PollSource<F> {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-    use std::fs::OpenOptions;
-    use std::path::PathBuf;
 
     use super::*;
-
-    #[test]
-    fn fallocate() {
-        async fn go(ex: &Arc<RawExecutor<EpollReactor>>) {
-            let dir = tempfile::TempDir::new().unwrap();
-            let mut file_path = PathBuf::from(dir.path());
-            file_path.push("test");
-
-            let f = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&file_path)
-                .unwrap();
-            let source = PollSource::new(f, ex).unwrap();
-            source
-                .fallocate(0, 4096, AllocateMode::Allocate)
-                .await
-                .unwrap();
-
-            let meta_data = std::fs::metadata(&file_path).unwrap();
-            assert_eq!(meta_data.len(), 4096);
-        }
-
-        let ex = RawExecutor::<EpollReactor>::new().unwrap();
-        ex.run_until(go(&ex)).unwrap();
-    }
 
     #[test]
     fn memory_leak() {

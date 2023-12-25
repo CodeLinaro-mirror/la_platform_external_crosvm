@@ -22,13 +22,12 @@ use anyhow::Context;
 use base::debug;
 use base::error;
 #[cfg(any(target_os = "android", target_os = "linux"))]
-use base::platform::move_task_to_cgroup;
+use base::linux::move_task_to_cgroup;
 use base::warn;
 use base::AsRawDescriptor;
 use base::Event;
 use base::EventToken;
 use base::RawDescriptor;
-#[cfg(windows)]
 use base::ReadNotifier;
 #[cfg(windows)]
 use base::RecvTube;
@@ -76,7 +75,6 @@ use self::virtio_gpu::VirtioGpu;
 use self::virtio_gpu::VirtioGpuSnapshot;
 use super::copy_config;
 use super::resource_bridge::ResourceRequest;
-use super::resource_bridge::ResourceResponse;
 use super::DescriptorChain;
 use super::DeviceType;
 use super::Interrupt;
@@ -379,13 +377,7 @@ impl Frontend {
     pub fn process_resource_bridge(&mut self, resource_bridge: &Tube) -> anyhow::Result<()> {
         let response = match resource_bridge.recv() {
             Ok(ResourceRequest::GetBuffer { id }) => self.virtio_gpu.export_resource(id),
-            Ok(ResourceRequest::GetFence { seqno }) => {
-                // The seqno originated from self.backend, so it should fit in a u32.
-                match u32::try_from(seqno) {
-                    Ok(fence_id) => self.virtio_gpu.export_fence(fence_id),
-                    Err(_) => ResourceResponse::Invalid,
-                }
-            }
+            Ok(ResourceRequest::GetFence { seqno }) => self.virtio_gpu.export_fence(seqno),
             Err(e) => return Err(e).context("Error receiving resource bridge request"),
         };
 
@@ -800,7 +792,6 @@ enum WorkerToken {
     CtrlQueue,
     CursorQueue,
     Display,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     GpuControl,
     InterruptResample,
     Kill,
@@ -857,7 +848,6 @@ impl<'a> EventManager<'a> {
 struct Worker {
     interrupt: Interrupt,
     exit_evt_wrtube: SendTube,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     gpu_control_tube: Tube,
     mem: GuestMemory,
     ctrl_queue: SharedQueueReader,
@@ -870,7 +860,6 @@ struct Worker {
 }
 
 struct WorkerReturn {
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     gpu_control_tube: Tube,
     resource_bridges: ResourceBridges,
     event_devices: Vec<EventDevice>,
@@ -915,8 +904,10 @@ impl Worker {
             (&ctrl_evt, WorkerToken::CtrlQueue),
             (&cursor_evt, WorkerToken::CursorQueue),
             (&display_desc, WorkerToken::Display),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
-            (&self.gpu_control_tube, WorkerToken::GpuControl),
+            (
+                self.gpu_control_tube.get_read_notifier(),
+                WorkerToken::GpuControl,
+            ),
             (&self.kill_evt, WorkerToken::Kill),
             #[cfg(windows)]
             (
@@ -1027,7 +1018,6 @@ impl Worker {
                             error!("failed to receive ModifyWaitContext request.")
                         }
                     }
-                    #[cfg(any(target_os = "android", target_os = "linux"))]
                     WorkerToken::GpuControl => {
                         let req = match self.gpu_control_tube.recv() {
                             Ok(req) => req,
@@ -1163,8 +1153,7 @@ struct GpuActivationResources {
 
 pub struct Gpu {
     exit_evt_wrtube: SendTube,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    gpu_control_tube: Option<Tube>,
+    pub gpu_control_tube: Option<Tube>,
     mapper: Arc<Mutex<Option<Box<dyn SharedMemoryMapper>>>>,
     resource_bridges: Option<ResourceBridges>,
     event_devices: Option<Vec<EventDevice>>,
@@ -1210,7 +1199,7 @@ pub struct Gpu {
 impl Gpu {
     pub fn new(
         exit_evt_wrtube: SendTube,
-        #[cfg(any(target_os = "android", target_os = "linux"))] gpu_control_tube: Tube,
+        gpu_control_tube: Tube,
         resource_bridges: Vec<Tube>,
         display_backends: Vec<DisplayBackend>,
         gpu_parameters: &GpuParameters,
@@ -1282,7 +1271,6 @@ impl Gpu {
 
         Gpu {
             exit_evt_wrtube,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
             gpu_control_tube: Some(gpu_control_tube),
             mapper: Arc::new(Mutex::new(None)),
             resource_bridges: Some(ResourceBridges::new(resource_bridges)),
@@ -1366,7 +1354,6 @@ impl Gpu {
             .context("error cloning exit tube")
             .unwrap();
 
-        #[cfg(any(target_os = "android", target_os = "linux"))]
         let gpu_control_tube = self
             .gpu_control_tube
             .take()
@@ -1434,7 +1421,6 @@ impl Gpu {
                     Err(e) => {
                         error!("failed to build rutabaga {}", e);
                         return WorkerReturn {
-                            #[cfg(any(target_os = "android", target_os = "linux"))]
                             gpu_control_tube,
                             resource_bridges,
                             event_devices,
@@ -1459,7 +1445,6 @@ impl Gpu {
                 Some(backend) => backend,
                 None => {
                     return WorkerReturn {
-                        #[cfg(any(target_os = "android", target_os = "linux"))]
                         gpu_control_tube,
                         resource_bridges,
                         event_devices,
@@ -1483,7 +1468,6 @@ impl Gpu {
                 // Other half of channel was dropped.
                 Err(mpsc::RecvError) => {
                     return WorkerReturn {
-                        #[cfg(any(target_os = "android", target_os = "linux"))]
                         gpu_control_tube,
                         resource_bridges,
                         event_devices: virtio_gpu.display().borrow_mut().take_event_devices(),
@@ -1504,7 +1488,6 @@ impl Gpu {
             let mut worker = Worker {
                 interrupt: activation_resources.interrupt,
                 exit_evt_wrtube,
-                #[cfg(any(target_os = "android", target_os = "linux"))]
                 gpu_control_tube,
                 mem: activation_resources.mem,
                 ctrl_queue: activation_resources.ctrl_queue,
@@ -1565,7 +1548,6 @@ impl Gpu {
                 None
             };
             WorkerReturn {
-                #[cfg(any(target_os = "android", target_os = "linux"))]
                 gpu_control_tube: worker.gpu_control_tube,
                 resource_bridges: worker.resource_bridges,
                 event_devices,
@@ -1658,7 +1640,6 @@ impl VirtioDevice for Gpu {
 
         keep_rds.push(self.exit_evt_wrtube.as_raw_descriptor());
 
-        #[cfg(any(target_os = "android", target_os = "linux"))]
         if let Some(gpu_control_tube) = &self.gpu_control_tube {
             keep_rds.push(gpu_control_tube.as_raw_descriptor());
         }
@@ -1802,7 +1783,6 @@ impl VirtioDevice for Gpu {
             self.sleep_requested.store(true, Ordering::SeqCst);
             drop(activate_tx);
             let WorkerReturn {
-                #[cfg(any(target_os = "android", target_os = "linux"))]
                 gpu_control_tube,
                 resource_bridges,
                 event_devices,
@@ -1811,10 +1791,7 @@ impl VirtioDevice for Gpu {
             self.sleep_requested.store(false, Ordering::SeqCst);
 
             self.resource_bridges = Some(resource_bridges);
-            #[cfg(any(target_os = "android", target_os = "linux"))]
-            {
-                self.gpu_control_tube = Some(gpu_control_tube);
-            }
+            self.gpu_control_tube = Some(gpu_control_tube);
             self.event_devices = Some(event_devices);
 
             match activated_state {
@@ -1850,7 +1827,7 @@ impl VirtioDevice for Gpu {
         }
     }
 
-    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+    fn virtio_snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::to_value(&self.worker_snapshot)?)
     }
 

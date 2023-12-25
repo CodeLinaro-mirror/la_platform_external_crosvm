@@ -3,10 +3,15 @@
 // found in the LICENSE file.
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::PathBuf;
 
+use arch::apply_device_tree_overlays;
 use arch::CpuSet;
+use arch::DtbOverlay;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+use arch::PlatformBusResources;
 use arch::SERIAL_ADDR;
 use cros_fdt::Error;
 use cros_fdt::Fdt;
@@ -14,6 +19,7 @@ use cros_fdt::Result;
 // This is a Battery related constant
 use devices::bat::GOLDFISHBAT_MMIO_LEN;
 use devices::pl030::PL030_AMBA_ID;
+use devices::IommuDevType;
 use devices::PciAddress;
 use devices::PciInterruptPin;
 use hypervisor::PsciVersion;
@@ -55,6 +61,9 @@ const PHANDLE_RESTRICTED_DMA_POOL: u32 = 2;
 const PHANDLE_CPU0: u32 = 0x100;
 
 const PHANDLE_OPP_DOMAIN_BASE: u32 = 0x1000;
+
+// pKVM pvIOMMUs are assigned phandles starting with this number.
+const PHANDLE_PKVM_PVIOMMU: u32 = 0x2000;
 
 // These are specified by the Linux GIC bindings
 const GIC_FDT_IRQ_NUM_CELLS: u32 = 3;
@@ -208,6 +217,7 @@ fn create_gic_node(fdt: &mut Fdt, is_gicv3: bool, num_cpus: u64) -> Result<()> {
     intc_node.set_prop("phandle", PHANDLE_GIC)?;
     intc_node.set_prop("#address-cells", 2u32)?;
     intc_node.set_prop("#size-cells", 2u32)?;
+    add_symbols_entry(fdt, "intc", "/intc")?;
     Ok(())
 }
 
@@ -360,6 +370,36 @@ fn create_kvm_cpufreq_node(fdt: &mut Fdt) -> Result<()> {
     let vcf_node = fdt.root_mut().subnode_mut("cpufreq")?;
     vcf_node.set_prop("compatible", "virtual,kvm-cpufreq")?;
     Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn get_pkvm_pviommu_ids(platform_dev_resources: &Vec<PlatformBusResources>) -> Result<Vec<u32>> {
+    let mut ids = HashSet::new();
+
+    for res in platform_dev_resources {
+        for iommu in &res.iommus {
+            if let (IommuDevType::PkvmPviommu, Some(id), _) = iommu {
+                ids.insert(*id);
+            }
+        }
+    }
+
+    Ok(Vec::from_iter(ids))
+}
+
+fn create_pkvm_pviommu_node(fdt: &mut Fdt, index: usize, id: u32) -> Result<u32> {
+    let name = format!("pviommu{index}");
+    let phandle = PHANDLE_PKVM_PVIOMMU
+        .checked_add(index.try_into().unwrap())
+        .unwrap();
+
+    let iommu_node = fdt.root_mut().subnode_mut(&name)?;
+    iommu_node.set_prop("phandle", phandle)?;
+    iommu_node.set_prop("#iommu-cells", 1u32)?;
+    iommu_node.set_prop("compatible", "pkvm,pviommu")?;
+    iommu_node.set_prop("id", id)?;
+
+    Ok(phandle)
 }
 
 /// PCI host controller address range.
@@ -550,6 +590,22 @@ fn create_vmwdt_node(fdt: &mut Fdt, vmwdt_cfg: VmWdtConfig) -> Result<()> {
     Ok(())
 }
 
+// Add a node path to __symbols__ node of the FDT, so it can be referenced by an overlay.
+fn add_symbols_entry(fdt: &mut Fdt, symbol: &str, path: &str) -> Result<()> {
+    // Ensure the path points to a valid node with a defined phandle
+    let Some(target_node) = fdt.get_node(path) else {
+        return Err(Error::InvalidPath(format!("{path} does not exist")));
+    };
+    target_node
+        .get_prop::<u32>("phandle")
+        .or_else(|| target_node.get_prop("linux,phandle"))
+        .ok_or_else(|| Error::InvalidPath(format!("{path} must have a phandle")))?;
+    // Add the label -> path mapping.
+    let symbols_node = fdt.root_mut().subnode_mut("__symbols__")?;
+    symbols_node.set_prop(symbol, path)?;
+    Ok(())
+}
+
 /// Creates a flattened device tree containing all of the parameters for the
 /// kernel and loads it into the guest memory at the specified offset.
 ///
@@ -578,6 +634,9 @@ pub fn create_fdt(
     pci_irqs: Vec<(PciAddress, u32, PciInterruptPin)>,
     pci_cfg: PciConfigRegion,
     pci_ranges: &[PciRange],
+    #[cfg(any(target_os = "android", target_os = "linux"))] platform_dev_resources: Vec<
+        PlatformBusResources,
+    >,
     num_cpus: u32,
     cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
@@ -596,8 +655,10 @@ pub fn create_fdt(
     dump_device_tree_blob: Option<PathBuf>,
     vm_generator: &impl Fn(&mut Fdt, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
     dynamic_power_coefficient: BTreeMap<usize, u32>,
+    device_tree_overlays: Vec<DtbOverlay>,
 ) -> Result<()> {
     let mut fdt = Fdt::new(&[]);
+    let mut phandles_key_cache = Vec::new();
     let mut phandles = BTreeMap::new();
 
     // The whole thing is put into one giant node with some top level properties
@@ -647,6 +708,28 @@ pub fn create_fdt(
     if !cpu_frequencies.is_empty() {
         create_virt_cpufreq_node(&mut fdt, num_cpus as u64)?;
     }
+
+    let pviommu_ids = get_pkvm_pviommu_ids(&platform_dev_resources)?;
+
+    let cache_offset = phandles_key_cache.len();
+    // Hack to extend the lifetime of the Strings as keys of phandles (i.e. &str).
+    phandles_key_cache.extend(pviommu_ids.iter().map(|id| format!("pviommu{id}")));
+    let pviommu_phandle_keys = &phandles_key_cache[cache_offset..];
+
+    for (index, (id, key)) in pviommu_ids.iter().zip(pviommu_phandle_keys).enumerate() {
+        let phandle = create_pkvm_pviommu_node(&mut fdt, index, *id)?;
+        phandles.insert(key, phandle);
+    }
+
+    // Done writing base FDT, now apply DT overlays
+    apply_device_tree_overlays(
+        &mut fdt,
+        device_tree_overlays,
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        platform_dev_resources,
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        &phandles,
+    )?;
 
     let fdt_final = fdt.finish()?;
 
@@ -714,5 +797,24 @@ mod tests {
             psci_compatible(&PsciVersion::new(1, 5).unwrap()),
             vec!["arm,psci-1.0", "arm,psci-0.2"]
         );
+    }
+
+    #[test]
+    fn symbols_entries() {
+        const TEST_SYMBOL: &str = "dev";
+        const TEST_PATH: &str = "/dev";
+
+        let mut fdt = Fdt::new(&[]);
+        add_symbols_entry(&mut fdt, TEST_SYMBOL, TEST_PATH).expect_err("missing node");
+
+        fdt.root_mut().subnode_mut(TEST_SYMBOL).unwrap();
+        add_symbols_entry(&mut fdt, TEST_SYMBOL, TEST_PATH).expect_err("missing phandle");
+
+        let intc_node = fdt.get_node_mut(TEST_PATH).unwrap();
+        intc_node.set_prop("phandle", 1u32).unwrap();
+        add_symbols_entry(&mut fdt, TEST_SYMBOL, TEST_PATH).expect("valid path");
+
+        let symbols = fdt.get_node("/__symbols__").unwrap();
+        assert_eq!(symbols.get_prop::<String>(TEST_SYMBOL).unwrap(), TEST_PATH);
     }
 }
