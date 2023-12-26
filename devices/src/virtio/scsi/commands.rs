@@ -3,10 +3,13 @@
 // found in the LICENSE file.
 
 use std::cmp;
+use std::io::Read;
 use std::io::Write;
 
 use base::warn;
-use disk::AsyncDisk;
+use data_model::Be16;
+use data_model::Be32;
+use data_model::Be64;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
@@ -18,14 +21,19 @@ use crate::virtio::scsi::constants::MODE_SENSE_6;
 use crate::virtio::scsi::constants::READ_10;
 use crate::virtio::scsi::constants::READ_6;
 use crate::virtio::scsi::constants::READ_CAPACITY_10;
+use crate::virtio::scsi::constants::READ_CAPACITY_16;
 use crate::virtio::scsi::constants::REPORT_LUNS;
 use crate::virtio::scsi::constants::REPORT_SUPPORTED_TASK_MANAGEMENT_FUNCTIONS;
+use crate::virtio::scsi::constants::SERVICE_ACTION_IN_16;
 use crate::virtio::scsi::constants::SYNCHRONIZE_CACHE_10;
 use crate::virtio::scsi::constants::TEST_UNIT_READY;
 use crate::virtio::scsi::constants::TYPE_DISK;
+use crate::virtio::scsi::constants::UNMAP;
 use crate::virtio::scsi::constants::WRITE_10;
+use crate::virtio::scsi::constants::WRITE_SAME_10;
+use crate::virtio::scsi::constants::WRITE_SAME_16;
+use crate::virtio::scsi::device::AsyncLogicalUnit;
 use crate::virtio::scsi::device::ExecuteError;
-use crate::virtio::scsi::device::LogicalUnit;
 use crate::virtio::Reader;
 use crate::virtio::Writer;
 
@@ -37,9 +45,13 @@ pub enum Command {
     ModeSelect6(ModeSelect6),
     ModeSense6(ModeSense6),
     ReadCapacity10(ReadCapacity10),
+    ReadCapacity16(ReadCapacity16),
     Read10(Read10),
     Write10(Write10),
     SynchronizeCache10(SynchronizeCache10),
+    WriteSame10(WriteSame10),
+    Unmap(Unmap),
+    WriteSame16(WriteSame16),
     ReportLuns(ReportLuns),
     ReportSupportedTMFs(ReportSupportedTMFs),
 }
@@ -57,6 +69,10 @@ impl Command {
             READ_10 => Ok(Self::Read10(Self::parse_command(cdb)?)),
             WRITE_10 => Ok(Self::Write10(Self::parse_command(cdb)?)),
             SYNCHRONIZE_CACHE_10 => Ok(Self::SynchronizeCache10(Self::parse_command(cdb)?)),
+            WRITE_SAME_10 => Ok(Self::WriteSame10(Self::parse_command(cdb)?)),
+            UNMAP => Ok(Self::Unmap(Self::parse_command(cdb)?)),
+            WRITE_SAME_16 => Ok(Self::WriteSame16(Self::parse_command(cdb)?)),
+            SERVICE_ACTION_IN_16 => Self::parse_service_action_in_16(cdb),
             REPORT_LUNS => Ok(Self::ReportLuns(Self::parse_command(cdb)?)),
             MAINTENANCE_IN => Self::parse_maintenance_in(cdb),
             _ => {
@@ -82,7 +98,30 @@ impl Command {
                 Ok(Self::ReportSupportedTMFs(r))
             }
             _ => {
-                warn!("service action {:#x?} is not implemented", service_action);
+                warn!(
+                    "service action {:#x?} for MAINTENANCE_IN is not implemented",
+                    service_action
+                );
+                Err(ExecuteError::Unsupported(cdb[0]))
+            }
+        }
+    }
+
+    fn parse_service_action_in_16(cdb: &[u8]) -> Result<Self, ExecuteError> {
+        const SERVICE_ACTION_IN_16_SIZE: usize = 16;
+        // Top three bits are reserved.
+        let service_action = cdb[1] & 0x1f;
+        match service_action {
+            READ_CAPACITY_16 => {
+                let r = ReadCapacity16::read_from(&cdb[..SERVICE_ACTION_IN_16_SIZE])
+                    .ok_or(ExecuteError::ReadCommand)?;
+                Ok(Self::ReadCapacity16(r))
+            }
+            _ => {
+                warn!(
+                    "service action {:#x?} for SERVICE_ACTION_IN_16 is not implemented",
+                    service_action
+                );
                 Err(ExecuteError::Unsupported(cdb[0]))
             }
         }
@@ -92,21 +131,24 @@ impl Command {
         &self,
         reader: &mut Reader,
         writer: &mut Writer,
-        dev: LogicalUnit,
-        disk_image: &dyn AsyncDisk,
+        dev: &AsyncLogicalUnit,
     ) -> Result<(), ExecuteError> {
         match self {
             Self::TestUnitReady(_) => Ok(()), // noop as the device is ready.
-            Self::Read6(read6) => read6.emulate(writer, dev, disk_image).await,
-            Self::Inquiry(inquiry) => inquiry.emulate(writer),
-            Self::ModeSelect6(mode_select_6) => mode_select_6.emulate(),
+            Self::Read6(read6) => read6.emulate(writer, dev).await,
+            Self::Inquiry(inquiry) => inquiry.emulate(writer, dev),
+            Self::ModeSelect6(mode_select_6) => mode_select_6.emulate(reader, dev),
             Self::ModeSense6(mode_sense_6) => mode_sense_6.emulate(writer, dev),
             Self::ReadCapacity10(read_capacity_10) => read_capacity_10.emulate(writer, dev),
-            Self::Read10(read_10) => read_10.emulate(writer, dev, disk_image).await,
-            Self::Write10(write_10) => write_10.emulate(reader, dev, disk_image).await,
+            Self::ReadCapacity16(read_capacity_16) => read_capacity_16.emulate(writer, dev),
+            Self::Read10(read_10) => read_10.emulate(writer, dev).await,
+            Self::Write10(write_10) => write_10.emulate(reader, dev).await,
             Self::SynchronizeCache10(synchronize_cache_10) => {
-                synchronize_cache_10.emulate(disk_image).await
+                synchronize_cache_10.emulate(dev).await
             }
+            Self::WriteSame10(write_same_10) => write_same_10.emulate(reader, dev).await,
+            Self::Unmap(unmap) => unmap.emulate(reader, dev).await,
+            Self::WriteSame16(write_same_16) => write_same_16.emulate(reader, dev).await,
             Self::ReportLuns(report_luns) => report_luns.emulate(writer),
             Self::ReportSupportedTMFs(report_supported_tmfs) => {
                 report_supported_tmfs.emulate(writer)
@@ -123,36 +165,32 @@ pub struct TestUnitReady {
     control: u8,
 }
 
-fn check_lba_range(max_lba: u64, sector_num: u64, sector_len: usize) -> bool {
+fn check_lba_range(max_lba: u64, sector_num: u64, sector_len: usize) -> Result<(), ExecuteError> {
     // Checking `sector_num + sector_len - 1 <= max_lba`, but we are being careful about overflows
     // and underflows.
     match sector_num.checked_add(sector_len as u64) {
-        Some(v) => v <= max_lba + 1,
-        None => false,
+        Some(v) if v <= max_lba + 1 => Ok(()),
+        _ => Err(ExecuteError::LbaOutOfRange {
+            length: sector_len,
+            sector: sector_num,
+            max_lba,
+        }),
     }
 }
 
 async fn read_from_disk(
-    disk_image: &dyn AsyncDisk,
     writer: &mut Writer,
-    dev: LogicalUnit,
+    dev: &AsyncLogicalUnit,
     xfer_blocks: usize,
     lba: u64,
 ) -> Result<(), ExecuteError> {
-    let max_lba = dev.max_lba;
-    if !check_lba_range(max_lba, lba, xfer_blocks) {
-        return Err(ExecuteError::LbaOutOfRange {
-            length: xfer_blocks,
-            sector: lba,
-            max_lba,
-        });
-    }
+    check_lba_range(dev.max_lba, lba, xfer_blocks)?;
     let block_size = dev.block_size;
     let count = xfer_blocks * block_size as usize;
     let offset = lba * block_size as u64;
     let before = writer.bytes_written();
     writer
-        .write_all_from_at_fut(disk_image, count, offset)
+        .write_all_from_at_fut(&*dev.disk_image, count, offset)
         .await
         .map_err(|desc_error| {
             let resid = count - (writer.bytes_written() - before);
@@ -192,10 +230,12 @@ impl Read6 {
     async fn emulate(
         &self,
         writer: &mut Writer,
-        dev: LogicalUnit,
-        disk_image: &dyn AsyncDisk,
+        dev: &AsyncLogicalUnit,
     ) -> Result<(), ExecuteError> {
-        read_from_disk(disk_image, writer, dev, self.xfer_len(), self.lba() as u64).await
+        let xfer_len = self.xfer_len();
+        let lba = self.lba() as u64;
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "READ(6)", xfer_len, lba);
+        read_from_disk(writer, dev, xfer_len, lba).await
     }
 }
 
@@ -222,9 +262,10 @@ impl Inquiry {
         self.page_code
     }
 
-    fn emulate(&self, writer: &mut Writer) -> Result<(), ExecuteError> {
+    fn emulate(&self, writer: &mut Writer, dev: &AsyncLogicalUnit) -> Result<(), ExecuteError> {
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "INQUIRY");
         if self.vital_product_data_enabled() {
-            return self.emulate_vital_product_data_page(writer);
+            return self.emulate_vital_product_data_page(writer, dev);
         }
         // PAGE CODE should be 0 when vpd bit is 0.
         if self.page_code() != 0 {
@@ -262,7 +303,11 @@ impl Inquiry {
             .map_err(ExecuteError::Write)
     }
 
-    fn emulate_vital_product_data_page(&self, writer: &mut Writer) -> Result<(), ExecuteError> {
+    fn emulate_vital_product_data_page(
+        &self,
+        writer: &mut Writer,
+        dev: &AsyncLogicalUnit,
+    ) -> Result<(), ExecuteError> {
         let alloc_len = self.alloc_len();
         let mut outbuf = vec![0u8; cmp::max(4096, alloc_len)];
         // Peripheral
@@ -273,10 +318,11 @@ impl Inquiry {
             // Supported VPD Pages
             0x00 => {
                 // outbuf[2] byte is reserved.
-                // We only support mandatory page codes for now.
                 // 0x00: Supported VPD Pages (this command)
                 // 0x83: Device Identification
-                const SUPPORTED_VPD_PAGE_CODES: [u8; 2] = [0x00, 0x83];
+                // 0xb0: Block Limits
+                // 0xb2: Logical Block Provisioning
+                const SUPPORTED_VPD_PAGE_CODES: [u8; 4] = [0x00, 0x83, 0xb0, 0xb2];
                 let page_code_len: u8 = SUPPORTED_VPD_PAGE_CODES
                     .len()
                     .try_into()
@@ -304,6 +350,40 @@ impl Inquiry {
                 outbuf[7] = device_id_len;
                 outbuf[8..8 + device_id_len as usize].copy_from_slice(DEVICE_ID);
             }
+            // Block Limits
+            0xb0 => {
+                // Page length
+                outbuf[3] = 0x3c;
+                // We do not support a value of zero in the NUMBER OF LOGICAL BLOCKS field in the
+                // WRITE SAME command CDBs.
+                outbuf[4] = 1;
+                // skip outbuf[5]: crosvm does not support the COMPARE AND WRITE command.
+                // Maximum transfer length
+                outbuf[8..12]
+                    .copy_from_slice(&dev.max_lba.try_into().unwrap_or(u32::MAX).to_be_bytes());
+                // Maximum unmap LBA count
+                outbuf[20..24].fill(0xff);
+                // Maximum unmap block descriptor count
+                outbuf[24..28].fill(0xff);
+                // Optimal unmap granularity
+                outbuf[28..32].copy_from_slice(&128u32.to_be_bytes());
+                // Maximum WRITE SAME length
+                outbuf[36..44].copy_from_slice(&dev.max_lba.to_be_bytes());
+            }
+            // Logical Block Provisioning
+            0xb2 => {
+                // Page length
+                outbuf[3] = 4;
+                // skip outbuf[4]: crosvm does not support logical block provisioning threshold sets.
+                const UNMAP: u8 = 1 << 7;
+                const WRITE_SAME_16: u8 = 1 << 6;
+                const WRITE_SAME_10: u8 = 1 << 5;
+                outbuf[5] = UNMAP | WRITE_SAME_10 | WRITE_SAME_16;
+                // The logical unit is thin-provisioned.
+                outbuf[6] = 0x02;
+                // skip outbuf[7]: The logical block data represented by unmapped LBAs is vendor
+                // specific
+            }
             _ => {
                 warn!("unsupported vpd page code: {:#x?}", page_code);
                 return Err(ExecuteError::InvalidField);
@@ -321,6 +401,44 @@ impl Inquiry {
     }
 }
 
+// Fill in the information of the page code and return the number of bytes written to the buffer.
+fn fill_mode_page(
+    page_code: u8,
+    subpage_code: u8,
+    page_control: PageControl,
+    outbuf: &mut [u8],
+) -> Option<u8> {
+    // outbuf[0]: page code
+    // outbuf[1]: page length
+    match (page_code, subpage_code) {
+        // Vendor specific.
+        (0x00, 0x00) => None,
+        // Read-Write error recovery mode page
+        (0x01, 0x00) => {
+            const LEN: u8 = 10;
+            outbuf[0] = page_code;
+            outbuf[1] = LEN;
+            if page_control != PageControl::Changable {
+                // Automatic write reallocation enabled.
+                outbuf[3] = 0x80;
+            }
+            Some(LEN + 2)
+        }
+        // Caching.
+        (0x08, 0x00) => {
+            const LEN: u8 = 0x12;
+            outbuf[0] = page_code;
+            outbuf[1] = LEN;
+            if page_control != PageControl::Changable {
+                // Writeback cache enabled.
+                outbuf[2] = 0x04;
+            }
+            Some(LEN + 2)
+        }
+        _ => None,
+    }
+}
+
 // According to the spec, devices that implement MODE SENSE(6) shall also implement MODE SELECT(6)
 // as well.
 #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
@@ -334,9 +452,105 @@ pub struct ModeSelect6 {
 }
 
 impl ModeSelect6 {
-    fn emulate(&self) -> Result<(), ExecuteError> {
-        // TODO(b/303338922): Implement this command properly.
-        Err(ExecuteError::InvalidField)
+    fn is_valid_pf_and_sp(&self) -> bool {
+        // crosvm only support page format bit = 1 and saved pages bit = 0
+        self.pf_sp_field & 0x11 == 0x10
+    }
+
+    fn emulate(&self, reader: &mut Reader, dev: &AsyncLogicalUnit) -> Result<(), ExecuteError> {
+        #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+        #[repr(C, packed)]
+        struct BlockDescriptor {
+            _density: u8,
+            _number_of_blocks_field: [u8; 3],
+            _reserved: u8,
+            block_len_field: [u8; 3],
+        }
+
+        impl BlockDescriptor {
+            fn block_len(&self) -> u32 {
+                u32::from_be_bytes([
+                    0,
+                    self.block_len_field[0],
+                    self.block_len_field[1],
+                    self.block_len_field[2],
+                ])
+            }
+        }
+
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "MODE_SELECT(6)");
+        if !self.is_valid_pf_and_sp() {
+            return Err(ExecuteError::InvalidField);
+        }
+        // Values for the mode parameter header.
+        let [_mode_data_len, medium_type, _dev_param, block_desc_len] =
+            reader.read_obj::<[u8; 4]>().map_err(ExecuteError::Read)?;
+        if medium_type != TYPE_DISK {
+            return Err(ExecuteError::InvalidField);
+        }
+        match block_desc_len {
+            0 => (),
+            8 => {
+                let block_desc = reader
+                    .read_obj::<BlockDescriptor>()
+                    .map_err(ExecuteError::Read)?;
+                // crosvm currently does not support modifying the block size.
+                if block_desc.block_len() != dev.block_size {
+                    return Err(ExecuteError::InvalidField);
+                }
+            }
+            // crosvm does not support 2 or more block descriptors, hence block_desc_len other than
+            // 0 and 8 is considered invalid.
+            _ => return Err(ExecuteError::InvalidField),
+        };
+        while reader.available_bytes() > 0 {
+            Self::handle_mode_page(reader)?;
+        }
+        Ok(())
+    }
+
+    fn handle_mode_page(reader: &mut Reader) -> Result<(), ExecuteError> {
+        #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+        #[repr(C, packed)]
+        struct Page0Header {
+            page_code: u8,
+            page_len: u8,
+        }
+
+        #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+        #[repr(C, packed)]
+        struct SubpageHeader {
+            page_code: u8,
+            subpage_code: u8,
+            page_len_field: [u8; 2],
+        }
+
+        let is_page0 = reader.peek_obj::<u8>().map_err(ExecuteError::Read)? & 0x40 == 0;
+        let (page_code, subpage_code, page_len) = if is_page0 {
+            let header = reader
+                .read_obj::<Page0Header>()
+                .map_err(ExecuteError::Read)?;
+            (header.page_code, 0, header.page_len as u16)
+        } else {
+            let header = reader
+                .read_obj::<SubpageHeader>()
+                .map_err(ExecuteError::Read)?;
+            (
+                header.page_code,
+                header.subpage_code,
+                u16::from_be_bytes(header.page_len_field),
+            )
+        };
+        let mut outbuf = vec![0; page_len as usize];
+        fill_mode_page(page_code, subpage_code, PageControl::Current, &mut outbuf);
+        let mut input = vec![0; page_len as usize];
+        reader.read_exact(&mut input).map_err(ExecuteError::Read)?;
+        // crosvm does not allow any values to be changed.
+        if input == outbuf {
+            Ok(())
+        } else {
+            Err(ExecuteError::InvalidField)
+        }
     }
 }
 
@@ -349,6 +563,13 @@ pub struct ModeSense6 {
     subpage_code: u8,
     alloc_len: u8,
     control: u8,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PageControl {
+    Current,
+    Default,
+    Changable,
 }
 
 impl ModeSense6 {
@@ -365,15 +586,22 @@ impl ModeSense6 {
         self.page_control_and_page_code & 0x3f
     }
 
-    fn page_control(&self) -> u8 {
-        self.page_control_and_page_code >> 6
+    fn page_control(&self) -> Result<PageControl, ExecuteError> {
+        match self.page_control_and_page_code >> 6 {
+            0 => Ok(PageControl::Current),
+            1 => Ok(PageControl::Changable),
+            2 => Ok(PageControl::Default),
+            3 => Err(ExecuteError::SavingParamNotSupported),
+            _ => Err(ExecuteError::InvalidField),
+        }
     }
 
     fn subpage_code(&self) -> u8 {
         self.subpage_code
     }
 
-    fn emulate(&self, writer: &mut Writer, dev: LogicalUnit) -> Result<(), ExecuteError> {
+    fn emulate(&self, writer: &mut Writer, dev: &AsyncLogicalUnit) -> Result<(), ExecuteError> {
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "MODE_SENSE(6)");
         let alloc_len = self.alloc_len();
         let mut outbuf = vec![0u8; cmp::max(4096, alloc_len)];
         // outbuf[0]: Represents data length. Will be filled later.
@@ -386,7 +614,7 @@ impl ModeSense6 {
             // Block descriptor length.
             outbuf[3] = 8;
             // outbuf[4]: Density code is 0.
-            let sectors = dev.max_lba / dev.block_size as u64;
+            let sectors = dev.max_lba;
             // Fill in the number of sectors if not bigger than 0xffffff, leave it with 0
             // otherwise.
             if sectors <= 0xffffff {
@@ -399,12 +627,7 @@ impl ModeSense6 {
             4
         };
 
-        let page_control = self.page_control();
-        // We do not support saved values.
-        if page_control == 0b11 {
-            return Err(ExecuteError::SavingParamNotSupported);
-        }
-
+        let page_control = self.page_control()?;
         let page_code = self.page_code();
         let subpage_code = self.subpage_code();
         // The pair of the page code and the subpage code specifies which mode pages and subpages
@@ -426,7 +649,7 @@ impl ModeSense6 {
             // Return a specific mode page with subpages 0x00-0xfe.
             (_, 0xff) => {
                 for subpage_code in 0..0xff {
-                    match Self::fill_page(
+                    match fill_mode_page(
                         page_code,
                         subpage_code,
                         page_control,
@@ -438,7 +661,7 @@ impl ModeSense6 {
                 }
             }
             (_, _) => {
-                match Self::fill_page(
+                match fill_mode_page(
                     page_code,
                     subpage_code,
                     page_control,
@@ -456,9 +679,14 @@ impl ModeSense6 {
     }
 
     // Fill in mode pages with a specific subpage_code.
-    fn add_all_page_codes(subpage_code: u8, page_control: u8, outbuf: &mut [u8], idx: &mut u8) {
+    fn add_all_page_codes(
+        subpage_code: u8,
+        page_control: PageControl,
+        outbuf: &mut [u8],
+        idx: &mut u8,
+    ) {
         for page_code in 1..0x3f {
-            if let Some(n) = Self::fill_page(
+            if let Some(n) = fill_mode_page(
                 page_code,
                 subpage_code,
                 page_control,
@@ -468,47 +696,9 @@ impl ModeSense6 {
             }
         }
         // Add mode page 0 after all other mode pages were returned.
-        if let Some(n) =
-            Self::fill_page(0, subpage_code, page_control, &mut outbuf[*idx as usize..])
+        if let Some(n) = fill_mode_page(0, subpage_code, page_control, &mut outbuf[*idx as usize..])
         {
             *idx += n;
-        }
-    }
-
-    // Fill in the information of the page code and return the number of bytes written to the
-    // buffer.
-    fn fill_page(
-        page_code: u8,
-        subpage_code: u8,
-        page_control: u8,
-        outbuf: &mut [u8],
-    ) -> Option<u8> {
-        // outbuf[0]: page code
-        // outbuf[1]: page length
-        match (page_code, subpage_code) {
-            // Vendor specific.
-            (0x00, 0x00) => None,
-            // Read-Write error recovery mode page
-            (0x01, 0x00) => {
-                let len = 10;
-                outbuf[0] = page_code;
-                outbuf[1] = len;
-                if page_control != 0b01 {
-                    // Automatic write reallocation enabled.
-                    outbuf[3] = 0x80;
-                }
-                Some(len + 2)
-            }
-            // Caching.
-            (0x08, 0x00) => {
-                let len = 0x12;
-                outbuf[0] = page_code;
-                outbuf[1] = len;
-                // Writeback cache enabled.
-                outbuf[2] = 0x04;
-                Some(len + 2)
-            }
-            _ => None,
         }
     }
 }
@@ -517,36 +707,46 @@ impl ModeSense6 {
 #[repr(C, packed)]
 pub struct ReadCapacity10 {
     opcode: u8,
-    _obsolete: u8,
-    lba_bytes: [u8; 4],
+    _obsolete1: u8,
+    _obsolete2: [u8; 4],
     _reserved: [u8; 2],
-    pmi_field: u8,
+    _obsolete3: u8,
     control: u8,
 }
 
 impl ReadCapacity10 {
-    fn lba(&self) -> u32 {
-        u32::from_be_bytes(self.lba_bytes)
-    }
-
-    fn pmi(&self) -> bool {
-        self.pmi_field & 0x1 != 0
-    }
-
-    fn emulate(&self, writer: &mut Writer, dev: LogicalUnit) -> Result<(), ExecuteError> {
-        if !self.pmi() && self.lba() != 0 {
-            return Err(ExecuteError::InvalidField);
-        }
-        let block_size = dev.block_size;
+    fn emulate(&self, writer: &mut Writer, dev: &AsyncLogicalUnit) -> Result<(), ExecuteError> {
         // Returned value is the block address of the last sector.
         // If the block address exceeds u32::MAX, we return u32::MAX.
-        let block_address: u32 = (dev.max_lba / dev.block_size as u64)
-            .saturating_sub(1)
-            .try_into()
-            .unwrap_or(u32::MAX);
+        let block_address: u32 = dev.max_lba.saturating_sub(1).try_into().unwrap_or(u32::MAX);
         let mut outbuf = [0u8; 8];
         outbuf[..4].copy_from_slice(&block_address.to_be_bytes());
-        outbuf[4..8].copy_from_slice(&block_size.to_be_bytes());
+        outbuf[4..8].copy_from_slice(&dev.block_size.to_be_bytes());
+        writer.write_all(&outbuf).map_err(ExecuteError::Write)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[repr(C, packed)]
+pub struct ReadCapacity16 {
+    opcode: u8,
+    service_action_field: u8,
+    _obsolete: [u8; 8],
+    alloc_len_bytes: [u8; 4],
+    _reserved: u8,
+    control: u8,
+}
+
+impl ReadCapacity16 {
+    fn emulate(&self, writer: &mut Writer, dev: &AsyncLogicalUnit) -> Result<(), ExecuteError> {
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "READ_CAPACITY(16)");
+        let mut outbuf = [0u8; 32];
+        // Last logical block address
+        outbuf[..8].copy_from_slice(&dev.max_lba.saturating_sub(1).to_be_bytes());
+        // Block size
+        outbuf[8..12].copy_from_slice(&dev.block_size.to_be_bytes());
+        // crosvm implements logical block provisioning management.
+        outbuf[14] = 1 << 7;
         writer.write_all(&outbuf).map_err(ExecuteError::Write)
     }
 }
@@ -574,10 +774,12 @@ impl Read10 {
     async fn emulate(
         &self,
         writer: &mut Writer,
-        dev: LogicalUnit,
-        disk_image: &dyn AsyncDisk,
+        dev: &AsyncLogicalUnit,
     ) -> Result<(), ExecuteError> {
-        read_from_disk(disk_image, writer, dev, self.xfer_len(), self.lba()).await
+        let xfer_len = self.xfer_len();
+        let lba = self.lba();
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "READ(10)", lba, xfer_len);
+        read_from_disk(writer, dev, xfer_len, lba).await
     }
 }
 
@@ -604,29 +806,31 @@ impl Write10 {
     async fn emulate(
         &self,
         reader: &mut Reader,
-        dev: LogicalUnit,
-        disk_image: &dyn AsyncDisk,
+        dev: &AsyncLogicalUnit,
     ) -> Result<(), ExecuteError> {
-        write_to_disk(disk_image, reader, dev, self.xfer_len(), self.lba()).await
+        let xfer_len = self.xfer_len();
+        let lba = self.lba();
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "WRITE(10)", lba, xfer_len);
+        write_to_disk(reader, dev, xfer_len, lba).await
     }
 }
 
 async fn write_to_disk(
-    disk_image: &dyn AsyncDisk,
     reader: &mut Reader,
-    dev: LogicalUnit,
+    dev: &AsyncLogicalUnit,
     xfer_blocks: usize,
     lba: u64,
 ) -> Result<(), ExecuteError> {
     if dev.read_only {
         return Err(ExecuteError::ReadOnly);
     }
+    check_lba_range(dev.max_lba, lba, xfer_blocks)?;
     let block_size = dev.block_size;
     let count = xfer_blocks * block_size as usize;
     let offset = lba * block_size as u64;
     let before = reader.bytes_read();
     reader
-        .read_exact_to_at_fut(disk_image, count, offset)
+        .read_exact_to_at_fut(&*dev.disk_image, count, offset)
         .await
         .map_err(|desc_error| {
             let resid = count - (reader.bytes_read() - before);
@@ -646,11 +850,221 @@ pub struct SynchronizeCache10 {
 }
 
 impl SynchronizeCache10 {
-    async fn emulate(&self, disk_image: &dyn AsyncDisk) -> Result<(), ExecuteError> {
-        disk_image.fdatasync().await.map_err(|e| {
+    async fn emulate(&self, dev: &AsyncLogicalUnit) -> Result<(), ExecuteError> {
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "SYNCHRONIZE_CACHE(10)");
+        if dev.read_only {
+            return Err(ExecuteError::ReadOnly);
+        }
+        dev.disk_image.fdatasync().await.map_err(|e| {
             warn!("failed to sync: {e}");
             ExecuteError::SynchronizationError
         })
+    }
+}
+
+async fn unmap(dev: &AsyncLogicalUnit, lba: u64, nblocks: u64) -> Result<(), ExecuteError> {
+    check_lba_range(dev.max_lba, lba, nblocks as usize)?;
+    let offset = lba * dev.block_size as u64;
+    let length = nblocks * dev.block_size as u64;
+    // Ignore the errors here since the device is not strictly required to unmap the LBAs.
+    let _ = dev.disk_image.punch_hole(offset, length).await;
+    Ok(())
+}
+
+async fn write_same(
+    dev: &AsyncLogicalUnit,
+    lba: u64,
+    nblocks: u64,
+    reader: &mut Reader,
+) -> Result<(), ExecuteError> {
+    check_lba_range(dev.max_lba, lba, nblocks as usize)?;
+    // The WRITE SAME command expects the device to transfer a single logical block from the
+    // Data-Out buffer.
+    reader.split_at(dev.block_size as usize);
+    if reader.get_remaining().iter().all(|s| s.is_all_zero()) {
+        let block_size = dev.block_size as u64;
+        // Ignore the errors here since the device is not strictly required to unmap the LBAs.
+        let _ = dev
+            .disk_image
+            .write_zeroes_at(lba * block_size, nblocks * block_size)
+            .await;
+        Ok(())
+    } else {
+        // TODO(b/309376528): If the specified data is not zero, raise error for now.
+        Err(ExecuteError::InvalidField)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[repr(C, packed)]
+pub struct WriteSame10 {
+    opcode: u8,
+    wrprotect_anchor_unmap: u8,
+    lba_bytes: [u8; 4],
+    group_number_field: u8,
+    nblocks_bytes: [u8; 2],
+    control: u8,
+}
+
+impl WriteSame10 {
+    fn lba(&self) -> u32 {
+        u32::from_be_bytes(self.lba_bytes)
+    }
+
+    fn nblocks(&self) -> u16 {
+        u16::from_be_bytes(self.nblocks_bytes)
+    }
+
+    fn unmap(&self) -> bool {
+        self.wrprotect_anchor_unmap & 0x8 != 0
+    }
+
+    fn anchor(&self) -> bool {
+        self.wrprotect_anchor_unmap & 0x10 != 0
+    }
+
+    async fn emulate(
+        &self,
+        reader: &mut Reader,
+        dev: &AsyncLogicalUnit,
+    ) -> Result<(), ExecuteError> {
+        let lba = self.lba() as u64;
+        let nblocks = self.nblocks() as u64;
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "WRITE_SAME(10)", lba, nblocks);
+        if dev.read_only {
+            return Err(ExecuteError::ReadOnly);
+        }
+        if nblocks == 0 {
+            // crosvm does not allow the number of blocks to be zero.
+            return Err(ExecuteError::InvalidField);
+        }
+        if self.anchor() {
+            // crosvm currently does not support anchor operations.
+            return Err(ExecuteError::InvalidField);
+        }
+        if self.unmap() {
+            unmap(dev, lba, nblocks).await
+        } else {
+            write_same(dev, lba, nblocks, reader).await
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[repr(C, packed)]
+pub struct Unmap {
+    opcode: u8,
+    anchor_field: u8,
+    _reserved: [u8; 4],
+    group_number_field: u8,
+    param_list_len_bytes: [u8; 2],
+    control: u8,
+}
+
+impl Unmap {
+    fn anchor(&self) -> bool {
+        self.anchor_field & 0x01 != 0
+    }
+
+    fn param_list_len(&self) -> u16 {
+        u16::from_be_bytes(self.param_list_len_bytes)
+    }
+
+    async fn emulate(
+        &self,
+        reader: &mut Reader,
+        dev: &AsyncLogicalUnit,
+    ) -> Result<(), ExecuteError> {
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "UNMAP");
+        // Reject anchor == 1
+        if self.anchor() {
+            return Err(ExecuteError::InvalidField);
+        }
+        if dev.read_only {
+            return Err(ExecuteError::ReadOnly);
+        }
+        let param_list_len = self.param_list_len();
+        if 0 < param_list_len && param_list_len < 8 {
+            return Err(ExecuteError::InvalidParamLen);
+        }
+        // unmap data len
+        reader.consume(2);
+        let unmap_block_descriptors = {
+            let block_data_len = reader
+                .read_obj::<Be16>()
+                .map_err(ExecuteError::Read)?
+                .to_native();
+            // If the data length is not a multiple of 16, the last unmap block should be ignored.
+            block_data_len / 16
+        };
+        // reserved
+        reader.consume(4);
+        for _ in 0..unmap_block_descriptors {
+            let lba = reader
+                .read_obj::<Be64>()
+                .map_err(ExecuteError::Read)?
+                .to_native();
+            let nblocks = reader
+                .read_obj::<Be32>()
+                .map_err(ExecuteError::Read)?
+                .to_native() as u64;
+            // reserved
+            reader.consume(4);
+            unmap(dev, lba, nblocks).await?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[repr(C, packed)]
+pub struct WriteSame16 {
+    opcode: u8,
+    wrprotect_anchor_unmap: u8,
+    lba_bytes: [u8; 8],
+    nblocks_bytes: [u8; 4],
+    group_number_field: u8,
+    control: u8,
+}
+
+impl WriteSame16 {
+    fn lba(&self) -> u64 {
+        u64::from_be_bytes(self.lba_bytes)
+    }
+
+    fn nblocks(&self) -> u32 {
+        u32::from_be_bytes(self.nblocks_bytes)
+    }
+
+    fn unmap(&self) -> bool {
+        self.wrprotect_anchor_unmap & 0x8 != 0
+    }
+
+    fn anchor(&self) -> bool {
+        self.wrprotect_anchor_unmap & 0x10 != 0
+    }
+
+    async fn emulate(
+        &self,
+        reader: &mut Reader,
+        dev: &AsyncLogicalUnit,
+    ) -> Result<(), ExecuteError> {
+        let lba = self.lba();
+        let nblocks = self.nblocks() as u64;
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "WRITE_SAME(16)", lba, nblocks);
+        if nblocks == 0 {
+            // crosvm does not allow the number of blocks to be zero.
+            return Err(ExecuteError::InvalidField);
+        }
+        if self.anchor() {
+            // crosvm currently does not support anchor operations.
+            return Err(ExecuteError::InvalidField);
+        }
+        if self.unmap() {
+            unmap(dev, lba, nblocks).await
+        } else {
+            write_same(dev, lba, nblocks, reader).await
+        }
     }
 }
 
@@ -672,11 +1086,12 @@ impl ReportLuns {
     }
 
     fn emulate(&self, writer: &mut Writer) -> Result<(), ExecuteError> {
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "REPORT_LUNS");
         // We need at least 16 bytes.
         if self.alloc_len() < 16 {
             return Err(ExecuteError::InvalidField);
         }
-        // Each LUN takes 8 bytes and we only support LUN0 (b/300586438).
+        // Each LUN takes 8 bytes and we only support LUN0.
         let lun_list_len = 8u32;
         writer
             .write_all(&lun_list_len.to_be_bytes())
@@ -707,6 +1122,7 @@ impl ReportSupportedTMFs {
     }
 
     fn emulate(&self, writer: &mut Writer) -> Result<(), ExecuteError> {
+        let _trace = cros_tracing::trace_event!(VirtioScsi, "REPORT_SUPPORTED_TMFs");
         // The allocation length should be at least four.
         if self.alloc_len() < 4 {
             return Err(ExecuteError::InvalidField);
@@ -777,19 +1193,17 @@ mod tests {
         };
         assert_eq!(mode_sense_6.alloc_len(), 0x04);
         assert_eq!(mode_sense_6.page_code(), 0x28);
-        assert_eq!(mode_sense_6.page_control(), 0x02);
+        assert_eq!(mode_sense_6.page_control().unwrap(), PageControl::Default);
     }
 
     #[test]
     fn parse_read_capacity_10() {
         let cdb = [0x25, 0x00, 0xab, 0xcd, 0xef, 0x01, 0x00, 0x00, 0x9, 0x0];
         let command = Command::new(&cdb).unwrap();
-        let cap = match command {
-            Command::ReadCapacity10(c) => c,
+        match command {
+            Command::ReadCapacity10(_) => (),
             _ => panic!("unexpected command type: {:?}", command),
         };
-        assert_eq!(cap.lba(), 0xabcdef01);
-        assert!(cap.pmi());
     }
 
     #[test]

@@ -104,10 +104,6 @@ extern "C" fn stream_renderer_resource_detach_iov(
     unimplemented!();
 }
 #[no_mangle]
-extern "C" fn stream_renderer_create_fence(_client_fence_id: c_int, _ctx_id: u32) -> c_int {
-    unimplemented!();
-}
-#[no_mangle]
 extern "C" fn stream_renderer_ctx_attach_resource(_ctx_id: c_int, _res_handle: c_int) {
     unimplemented!();
 }

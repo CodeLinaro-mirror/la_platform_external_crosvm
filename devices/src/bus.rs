@@ -20,6 +20,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use base::debug;
 use base::error;
+use base::SharedMemory;
 use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
@@ -115,6 +116,22 @@ pub trait BusDevice: Send + Suspendable {
     fn config_register_read(&self, reg_idx: usize) -> u32 {
         0
     }
+    /// Provides a memory region to back MMIO access to the configuration
+    /// space. If the device can keep the memory region up to date, then it
+    /// should return true, after which no more calls to config_register_read
+    /// will be made. Otherwise the device should return false.
+    ///
+    /// The device must set the header type register (0x0E) before returning
+    /// from this function, and must make no further modifications to it
+    /// after returning. This is to allow the caller to manage the multi-
+    /// function device bit without worrying about race conditions.
+    ///
+    /// * `shmem` - The shared memory to use for the configuration space.
+    /// * `base` - The base address of the memory region in shmem.
+    /// * `len` - The length of the memory region.
+    fn init_pci_config_mapping(&mut self, shmem: &SharedMemory, base: usize, len: usize) -> bool {
+        false
+    }
     /// Sets a register in the virtual config space. Only used by PCI.
     /// * `reg_idx` - The index of the config register to modify.
     /// * `value` - The value to be written.
@@ -205,6 +222,8 @@ pub trait HotPlugBus {
     /// - 'None': hotplug bus isn't match with host pci device
     /// - 'Some(bus_num)': hotplug bus is match and put the device at bus_num
     fn is_match(&self, host_addr: PciAddress) -> Option<u8>;
+    /// Gets the upstream PCI Address of the hotplug bus
+    fn get_address(&self) -> Option<PciAddress>;
     /// Gets the secondary bus number of this bus
     fn get_secondary_bus_number(&self) -> Option<u8>;
     /// Add hotplug device into this bus
@@ -310,7 +329,7 @@ impl Ord for BusRange {
 
 impl PartialOrd for BusRange {
     fn partial_cmp(&self, other: &BusRange) -> Option<Ordering> {
-        self.base.partial_cmp(&other.base)
+        Some(self.cmp(other))
     }
 }
 
@@ -449,7 +468,7 @@ impl Bus {
         for device_entry in self.unique_devices() {
             match device_entry {
                 BusDeviceEntry::OuterSync(dev) => {
-                    let dev = dev.lock();
+                    let mut dev = dev.lock();
                     debug!("Snapshot on device: {}", dev.debug_label());
                     add_snapshot(
                         u32::from(dev.device_id()),
@@ -746,7 +765,7 @@ mod tests {
     }
 
     impl Suspendable for DummyDevice {
-        fn snapshot(&self) -> AnyhowResult<serde_json::Value> {
+        fn snapshot(&mut self) -> AnyhowResult<serde_json::Value> {
             serde_json::to_value(self).context("error serializing")
         }
 
@@ -802,7 +821,7 @@ mod tests {
     }
 
     impl Suspendable for ConstantDevice {
-        fn snapshot(&self) -> AnyhowResult<serde_json::Value> {
+        fn snapshot(&mut self) -> AnyhowResult<serde_json::Value> {
             serde_json::to_value(self).context("error serializing")
         }
 

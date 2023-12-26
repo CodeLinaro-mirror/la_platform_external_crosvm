@@ -21,7 +21,6 @@ video-encoder = []
 minigbm = ["rutabaga_gfx/minigbm"]
 x = ["gpu_display/x", "rutabaga_gfx/x"]
 virgl_renderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
-virgl_renderer_next = ["gpu", "rutabaga_gfx/virgl_renderer_next"]
 vtpm = ["system_api", "protobuf", "dbus"]
 gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
 registered_events = []
@@ -63,7 +62,6 @@ libc = "*"
 libvda = { path = "../media/libvda", optional = true }
 linux_input_sys = { path = "../linux_input_sys" }
 memoffset = { version = "0.6" }
-net_sys = { path = "../net_sys" }
 net_util = { path = "../net_util" }
 num-traits = "0.2"
 once_cell = "1.7.2"
@@ -82,7 +80,7 @@ system_api = { path = "../system_api", optional = true }
 thiserror = "1.0.20"
 cros_tracing = { path = "../cros_tracing" }
 swap = { path = "../swap" }
-vmm_vhost = { path = "../third_party/vmm_vhost", features = ["vmm", "device"] }
+vmm_vhost = { path = "../third_party/vmm_vhost" }
 virtio_sys = { path = "../virtio_sys" }
 vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
@@ -92,6 +90,7 @@ zerocopy = { version = "0.7", features = ["derive"] }
 fuse = {path = "../fuse" }
 libcras = { version = "*", optional = true }
 minijail = "*"
+net_sys = { path = "../net_sys" }
 p9 = "*"
 usb_util = { path = "../usb_util" }
 vfio_sys = { path = "../vfio_sys" }

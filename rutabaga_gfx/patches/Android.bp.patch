@@ -1,18 +1,16 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index 05d589ae..77c154be 100644
+index f2c450cb4..a32b9445d 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
-@@ -33,13 +33,25 @@ rust_library {
-         "libthiserror",
+@@ -29,12 +29,26 @@ rust_library {
+         "libzerocopy",
      ],
      proc_macros: ["libremain"],
--    static_libs: [
--        "libgbm",
--        "libvirglrenderer",
--    ],
 -    shared_libs: [
 -        "libdrm",
 -        "libepoxy",
+-        "libgbm",
+-        "libvirglrenderer",
 -    ],
 +    target: {
 +        host: {
@@ -35,18 +33,17 @@ index 05d589ae..77c154be 100644
 +        },
 +    },
  }
-
-@@ -71,12 +95,24 @@ rust_test {
-         "libthiserror",
+ 
+ rust_test {
+@@ -61,10 +75,24 @@ rust_test {
+         "libzerocopy",
      ],
      proc_macros: ["libremain"],
--    static_libs: [
--        "libgbm",
--        "libvirglrenderer",
--    ],
 -    shared_libs: [
 -        "libdrm",
 -        "libepoxy",
+-        "libgbm",
+-        "libvirglrenderer",
 -    ],
 +    target: {
 +        host: {

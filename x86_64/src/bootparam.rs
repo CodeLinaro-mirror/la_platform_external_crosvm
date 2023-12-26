@@ -28,19 +28,35 @@ impl<T> __IncompleteArrayField<T> {
     pub fn new() -> Self {
         __IncompleteArrayField(::std::marker::PhantomData, [])
     }
+    /// # Safety
+    ///
+    /// Caller must ensure that Self`s size, alignment and lifetime are
+    /// compatible with returned values requirements.
     #[inline]
     pub unsafe fn as_ptr(&self) -> *const T {
         ::std::mem::transmute(self)
     }
+    /// # Safety
+    ///
+    /// Caller must ensure that Self`s size, alignment and lifetime are
+    /// compatible with returned values requirements.
     #[inline]
     pub unsafe fn as_mut_ptr(&mut self) -> *mut T {
         ::std::mem::transmute(self)
     }
+    /// # Safety
+    ///
+    /// Caller must ensure that Self`s size, alignment and lifetime are
+    /// compatible with returned values requirements.
     #[inline]
     pub unsafe fn as_slice(&self, len: usize) -> &[T] {
         ::std::slice::from_raw_parts(self.as_ptr(), len)
     }
     #[inline]
+    /// # Safety
+    ///
+    /// Caller must ensure that Self`s size, alignment and lifetime are
+    /// compatible with returned values requirements.
     pub unsafe fn as_mut_slice(&mut self, len: usize) -> &mut [T] {
         ::std::slice::from_raw_parts_mut(self.as_mut_ptr(), len)
     }
@@ -184,6 +200,7 @@ pub struct edd_device_params__bindgen_ty_1__bindgen_ty_6 {
 }
 impl Default for edd_device_params__bindgen_ty_1 {
     fn default() -> Self {
+        // SAFETY: trivially safe
         unsafe { ::std::mem::zeroed() }
     }
 }
@@ -277,11 +294,13 @@ pub struct edd_device_params__bindgen_ty_2__bindgen_ty_10 {
 }
 impl Default for edd_device_params__bindgen_ty_2 {
     fn default() -> Self {
+        // SAFETY: trivially safe
         unsafe { ::std::mem::zeroed() }
     }
 }
 impl Default for edd_device_params {
     fn default() -> Self {
+        // SAFETY: trivially safe
         unsafe { ::std::mem::zeroed() }
     }
 }
@@ -298,6 +317,7 @@ pub struct edd_info {
 }
 impl Default for edd_info {
     fn default() -> Self {
+        // SAFETY: trivially safe
         unsafe { ::std::mem::zeroed() }
     }
 }
@@ -316,6 +336,7 @@ pub struct edid_info {
 }
 impl Default for edid_info {
     fn default() -> Self {
+        // SAFETY: trivially safe
         unsafe { ::std::mem::zeroed() }
     }
 }
@@ -442,6 +463,7 @@ pub struct boot_params {
 }
 impl Default for boot_params {
     fn default() -> Self {
+        // SAFETY: trivially safe
         unsafe { ::std::mem::zeroed() }
     }
 }

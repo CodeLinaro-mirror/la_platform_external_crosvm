@@ -113,7 +113,7 @@ enum Command {
     Exit,
     Status,
     ProcessForked {
-        #[serde(with = "base::platform::with_as_descriptor")]
+        #[serde(with = "base::with_as_descriptor")]
         uffd: Userfaultfd,
         reply_tube: Tube,
     },
@@ -122,7 +122,7 @@ enum Command {
 
 /// [SwapController] provides APIs to control vmm-swap.
 pub struct SwapController {
-    child_process: Child,
+    child_process: Option<Child>,
     uffd_factory: UffdFactory,
     command_tube: Tube,
     num_static_devices: u32,
@@ -226,7 +226,7 @@ impl SwapController {
                     #[cfg(feature = "log_page_fault")]
                     page_fault_logger,
                 ) {
-                    panic!("page_fault_handler_thread exited with error: {:?}", e)
+                    panic!("page_fault_handler_thread exited with error: {:#}", e)
                 }
             })
             .context("fork monitor process")?;
@@ -249,7 +249,7 @@ impl SwapController {
         };
 
         Ok(Self {
-            child_process,
+            child_process: Some(child_process),
             uffd_factory,
             command_tube: command_tube_main,
             num_static_devices: 0,
@@ -331,28 +331,19 @@ impl SwapController {
         Ok(status)
     }
 
-    /// Shutdown the monitor process.
-    ///
-    /// This blocks until the monitor process exits.
-    ///
-    /// This should be called once.
-    pub fn exit(self) -> anyhow::Result<()> {
-        self.command_tube
-            .send(&Command::Exit)
-            .context("send exit command")?;
-        self.child_process
-            .wait()
-            .context("wait monitor process shutdown")?;
-        Ok(())
-    }
-
     /// Suspend device processes using `SIGSTOP` signal.
     ///
     /// When the returned `ProcessesGuard` is dropped, the devices resume.
     ///
     /// This must be called from the main process.
     pub fn suspend_devices(&self) -> anyhow::Result<ProcessesGuard> {
-        freeze_child_processes(self.child_process.pid)
+        // child_process become none on dropping SwapController.
+        freeze_child_processes(
+            self.child_process
+                .as_ref()
+                .expect("monitor process not exist")
+                .pid,
+        )
     }
 
     /// Notify the monitor process that all static devices are forked.
@@ -381,6 +372,28 @@ impl SwapController {
             uffd_factory,
             command_tube,
         })
+    }
+}
+
+impl Drop for SwapController {
+    fn drop(&mut self) {
+        // Shutdown the monitor process.
+        // This blocks until the monitor process exits.
+        if let Err(e) = self.command_tube.send(&Command::Exit) {
+            error!(
+                "failed to sent exit command to vmm-swap monitor process: {:#}",
+                e
+            );
+            return;
+        }
+        if let Err(e) = self
+            .child_process
+            .take()
+            .expect("monitor process not exist")
+            .wait()
+        {
+            error!("failed to wait vmm-swap monitor process shutdown: {:#}", e);
+        }
     }
 }
 
@@ -622,6 +635,7 @@ fn monitor_process(
                         };
 
                         // TODO(b/272634283): Should just disable vmm-swap without crash.
+                        // SAFETY:
                         // Safe because the regions are from guest memory and uffd_list contains all
                         // the processes of crosvm.
                         unsafe { register_regions(&regions, uffd_list.get_list()) }
@@ -799,6 +813,7 @@ fn move_guest_to_staging(
     let mut pages = 0;
 
     let result = guest_memory.regions().try_for_each(|region| {
+        // SAFETY:
         // safe because:
         // * all the regions are registered to all userfaultfd
         // * no process access the guest memory
@@ -960,11 +975,11 @@ fn handle_vmm_swap<'scope, 'env>(
                 {
                     Command::ProcessForked { uffd, reply_tube } => {
                         debug!("new fork uffd: {:?}", uffd);
-                        // SAFETY: regions is generated from the guest memory
-                        // SAFETY: the uffd is from a new process.
-                        let result = if let Err(e) =
+                        let result = if let Err(e) = {
+                            // SAFETY: regions is generated from the guest memory
+                            // SAFETY: the uffd is from a new process.
                             unsafe { register_regions(regions, std::array::from_ref(&uffd)) }
-                        {
+                        } {
                             error!("failed to setup uffd: {:?}", e);
                             false
                         } else {

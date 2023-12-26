@@ -230,9 +230,9 @@ impl CrossDomainState {
             .backing_iovecs
             .as_mut()
             .ok_or(RutabagaError::InvalidIovec)?;
-
-        // Safe because we've verified the iovecs are attached and owned only by this context.
         let slice =
+            // SAFETY:
+            // Safe because we've verified the iovecs are attached and owned only by this context.
             unsafe { std::slice::from_raw_parts_mut(iovecs[0].base as *mut u8, iovecs[0].len) };
 
         match ring_write {
@@ -330,7 +330,7 @@ impl CrossDomainWorker {
                             .iter_mut()
                             .zip(cmd_receive.identifier_types.iter_mut())
                             .zip(cmd_receive.identifier_sizes.iter_mut())
-                            .zip(files.into_iter())
+                            .zip(files)
                             .take(num_files);
 
                         for (((identifier, identifier_type), identifier_size), mut file) in iter {

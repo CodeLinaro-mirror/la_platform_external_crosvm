@@ -257,7 +257,7 @@ pub struct VhostUserMsgHeader<R: Req> {
 
 impl<R: Req> Debug for VhostUserMsgHeader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Point")
+        f.debug_struct("VhostUserMsgHeader")
             .field("request", &{ self.request })
             .field("flags", &{ self.flags })
             .field("size", &{ self.size })
@@ -929,7 +929,7 @@ impl From<Protection> for VhostUserShmemMapMsgFlags {
 
 impl From<VhostUserShmemMapMsgFlags> for Protection {
     fn from(flags: VhostUserShmemMapMsgFlags) -> Self {
-        let mut prot = Protection::from(0);
+        let mut prot = Protection::default();
         if flags.contains(VhostUserShmemMapMsgFlags::MAP_R) {
             prot = prot.set_read();
         }

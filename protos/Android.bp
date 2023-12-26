@@ -36,7 +36,6 @@ rust_protobuf {
     protos: ["src/cdisk_spec.proto"],
     source_stem: "cdisk_spec",
     host_supported: true,
-    use_protobuf3: true,
     apex_available: [
         "//apex_available:platform",
         "com.android.virt",
@@ -49,7 +48,6 @@ rust_protobuf {
     protos: ["src/registered_events.proto"],
     source_stem: "registered_events",
     host_supported: true,
-    use_protobuf3: true,
     apex_available: [
         "//apex_available:platform",
         "com.android.virt",
@@ -62,5 +60,4 @@ rust_protobuf {
     protos: ["src/plugin.proto"],
     source_stem: "plugin",
     host_supported: true,
-    use_protobuf3: true,
 }

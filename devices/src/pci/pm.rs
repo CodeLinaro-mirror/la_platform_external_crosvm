@@ -10,6 +10,7 @@ use zerocopy::FromZeroes;
 
 use crate::pci::pci_configuration::PciCapConfig;
 use crate::pci::pci_configuration::PciCapConfigWriteResult;
+use crate::pci::pci_configuration::PciCapMapping;
 use crate::pci::PciCapability;
 use crate::pci::PciCapabilityID;
 
@@ -21,6 +22,7 @@ const PM_CAP_PME_SUPPORT_D3_COLD: u16 = 0x8000;
 const PM_CAP_VERSION: u16 = 0x2;
 const PM_PME_STATUS: u16 = 0x8000;
 const PM_PME_ENABLE: u16 = 0x100;
+const PM_NO_SOFT_RESET: u16 = 0x8;
 const PM_POWER_STATE_MASK: u16 = 0x3;
 const PM_POWER_STATE_D0: u16 = 0;
 const PM_POWER_STATE_D3: u16 = 0x3;
@@ -76,12 +78,14 @@ impl PciPmCap {
 
 pub struct PmConfig {
     power_control_status: u16,
+    cap_mapping: Option<PciCapMapping>,
 }
 
 impl PmConfig {
-    pub fn new() -> Self {
+    pub fn new(no_soft_reset: bool) -> Self {
         PmConfig {
-            power_control_status: 0,
+            power_control_status: if no_soft_reset { PM_NO_SOFT_RESET } else { 0 },
+            cap_mapping: None,
         }
     }
 
@@ -128,6 +132,13 @@ impl PmConfig {
             && self.power_control_status & PM_PME_ENABLE != 0
         {
             self.power_control_status |= PM_PME_STATUS;
+            if let Some(cap_mapping) = &mut self.cap_mapping {
+                cap_mapping.set_reg(
+                    PM_CAP_CONTROL_STATE_OFFSET,
+                    self.power_control_status as u32,
+                    0xffff,
+                );
+            }
             return true;
         }
 
@@ -144,12 +155,12 @@ impl PmConfig {
     }
 }
 
-pub struct PmStatusChanged {
+pub struct PmStatusChange {
     pub from: PciDevicePower,
     pub to: PciDevicePower,
 }
 
-impl PciCapConfigWriteResult for PmStatusChanged {}
+impl PciCapConfigWriteResult for PmStatusChange {}
 
 const PM_CONFIG_READ_MASK: [u32; 2] = [0, 0xffff];
 
@@ -177,9 +188,13 @@ impl PciCapConfig for PmConfig {
             self.write(offset, data);
             let to = self.get_power_status();
             if from != to {
-                return Some(Box::new(PmStatusChanged { from, to }));
+                return Some(Box::new(PmStatusChange { from, to }));
             }
         }
         None
+    }
+
+    fn set_cap_mapping(&mut self, mapping: PciCapMapping) {
+        self.cap_mapping = Some(mapping);
     }
 }
