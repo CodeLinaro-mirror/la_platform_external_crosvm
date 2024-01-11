@@ -16,6 +16,7 @@ pub mod asynchronous;
 pub(crate) mod sys;
 
 pub use asynchronous::BlockAsync;
+pub use asynchronous::DiskState;
 
 fn block_option_sparse_default() -> bool {
     true

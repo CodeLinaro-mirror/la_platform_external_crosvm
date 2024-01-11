@@ -4,7 +4,6 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::io;
 use std::io::Write;
 use std::mem::size_of;
@@ -91,7 +90,7 @@ use crate::virtio::VirtioDevice;
 use crate::virtio::Writer;
 
 const DEFAULT_QUEUE_SIZE: u16 = 256;
-const DEFAULT_NUM_QUEUES: u16 = 16;
+pub const DEFAULT_NUM_QUEUES: u16 = 16;
 
 const SECTOR_SHIFT: u8 = 9;
 const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
@@ -107,7 +106,7 @@ const DISCARD_SECTOR_ALIGNMENT: u32 = 128;
 
 #[sorted]
 #[derive(ThisError, Debug)]
-enum ExecuteError {
+pub enum ExecuteError {
     #[error("failed to copy ID string: {0}")]
     CopyId(io::Error),
     #[error("failed to perform discard or write zeroes; sector={sector} num_sectors={num_sectors} flags={flags}; {ioerr:?}")]
@@ -196,27 +195,33 @@ impl ExecuteError {
 /// This includes errors during resize and flush operations.
 #[sorted]
 #[derive(ThisError, Debug)]
-enum ControlError {
+pub enum ControlError {
+    #[error("couldn't create an async resample event: {0}")]
+    AsyncResampleCreate(AsyncError),
+    #[error("couldn't clone the resample event: {0}")]
+    CloneResampleEvent(base::Error),
     #[error("couldn't get a value from a timer for flushing: {0}")]
     FlushTimer(AsyncError),
     #[error("failed to fsync the disk: {0}")]
     FsyncDisk(disk::Error),
+    #[error("couldn't read the resample event: {0}")]
+    ReadResampleEvent(AsyncError),
 }
 
 /// Maximum length of the virtio-block ID string field.
-const ID_LEN: usize = 20;
+pub const ID_LEN: usize = 20;
 
 /// Virtio block device identifier.
 /// This is an ASCII string terminated by a \0, unless all 20 bytes are used,
 /// in which case the \0 terminator is omitted.
-type BlockId = [u8; ID_LEN];
+pub type BlockId = [u8; ID_LEN];
 
 /// Tracks the state of an anynchronous disk.
-struct DiskState {
-    disk_image: Box<dyn AsyncDisk>,
-    read_only: bool,
-    sparse: bool,
-    id: Option<BlockId>,
+pub struct DiskState {
+    pub disk_image: Box<dyn AsyncDisk>,
+    pub read_only: bool,
+    pub sparse: bool,
+    pub id: Option<BlockId>,
     /// A DiskState is owned by each worker's executor and cannot be shared by workers, thus
     /// `worker_shared_state` holds the state shared by workers in Arc.
     worker_shared_state: Arc<AsyncRwLock<WorkerSharedState>>,
@@ -225,6 +230,25 @@ struct DiskState {
 /// Disk state which can be modified by other worker threads
 struct WorkerSharedState {
     disk_size: Arc<AtomicU64>,
+}
+
+impl DiskState {
+    /// Creates a `DiskState` with the given params.
+    pub fn new(
+        disk_image: Box<dyn AsyncDisk>,
+        disk_size: Arc<AtomicU64>,
+        read_only: bool,
+        sparse: bool,
+        id: Option<BlockId>,
+    ) -> DiskState {
+        DiskState {
+            disk_image,
+            read_only,
+            sparse,
+            id,
+            worker_shared_state: Arc::new(AsyncRwLock::new(WorkerSharedState { disk_size })),
+        }
+    }
 }
 
 async fn process_one_request(
@@ -271,7 +295,7 @@ async fn process_one_request(
 }
 
 /// Process one descriptor chain asynchronously.
-async fn process_one_chain(
+pub async fn process_one_chain(
     queue: &RefCell<Queue>,
     mut avail_desc: DescriptorChain,
     disk_state: &AsyncRwLock<DiskState>,
@@ -300,14 +324,13 @@ async fn process_one_chain(
 // executor.
 async fn handle_queue(
     disk_state: Rc<AsyncRwLock<DiskState>>,
-    queue: Queue,
+    queue: Rc<RefCell<Queue>>,
     evt: EventAsync,
     interrupt: Interrupt,
     flush_timer: Rc<RefCell<TimerAsync<Timer>>>,
     flush_timer_armed: Rc<RefCell<bool>>,
     mut stop_rx: oneshot::Receiver<()>,
-) -> Queue {
-    let queue = RefCell::new(queue);
+) -> Rc<RefCell<Queue>> {
     let mut background_tasks = FuturesUnordered::new();
     let evt_future = evt.next_val().fuse();
     pin_mut!(evt_future);
@@ -331,7 +354,7 @@ async fn handle_queue(
                 // Process all the descriptors we've already popped from the queue so that we leave
                 // the queue in a consistent state.
                 background_tasks.collect::<()>().await;
-                return queue.into_inner();
+                return queue;
             }
         };
         while let Some(descriptor_chain) = queue.borrow_mut().pop() {
@@ -442,7 +465,7 @@ async fn flush_disk(
     }
 }
 
-enum WorkerCmd {
+pub enum WorkerCmd {
     StartQueue {
         index: usize,
         queue: Queue,
@@ -462,7 +485,7 @@ enum WorkerCmd {
 // `disk_state` is wrapped by `AsyncRwLock`, which provides both shared and exclusive locks. It's
 // because the state can be read from the virtqueue task while the control task is processing a
 // resizing command.
-async fn run_worker(
+pub async fn run_worker(
     ex: &Executor,
     interrupt: Interrupt,
     disk_state: &Rc<AsyncRwLock<DiskState>>,
@@ -521,7 +544,7 @@ async fn run_worker(
                         let kick_evt = queue.event().try_clone().expect("Failed to clone queue event");
                         let (handle_queue_future, remote_handle) = handle_queue(
                             Rc::clone(disk_state),
-                            queue,
+                            Rc::new(RefCell::new(queue)),
                             EventAsync::new(kick_evt, ex).expect("Failed to create async event for queue"),
                             interrupt,
                             Rc::clone(&flush_timer),
@@ -569,6 +592,7 @@ async fn run_worker(
                                         queue = fut => break queue,
                                     }
                                 };
+                                let queue = Rc::try_unwrap(queue).unwrap_or_else(|_| panic!("Rc had too many refs")).into_inner();
                                 let _ = response_tx.send(Some(queue));
                             }
                             None => { let _ = response_tx.send(None); },
@@ -584,37 +608,29 @@ async fn run_worker(
 pub struct BlockAsync {
     // We need to make boot_index public bc the field is used by the main crate to determine boot
     // order
-    boot_index: Option<usize>,
-    // `None` iff `self.worker_per_queue == false` and the worker thread is running.
-    disk_image: Option<Box<dyn DiskFile>>,
-    disk_size: Arc<AtomicU64>,
-    avail_features: u64,
-    read_only: bool,
-    sparse: bool,
-    seg_max: u32,
-    block_size: u32,
-    id: Option<BlockId>,
-    control_tube: Option<Tube>,
-    queue_sizes: Vec<u16>,
-    pub(super) executor_kind: ExecutorKind,
-    // If `worker_per_queue == true`, `worker_threads` contains the worker for each running queue
-    // by index. Otherwise, contains the monolithic worker for all queues at index 0.
-    worker_threads: BTreeMap<
-        usize,
-        (
-            WorkerThread<(Box<dyn DiskFile>, Option<Tube>)>,
-            mpsc::UnboundedSender<WorkerCmd>,
-        ),
-    >,
-    shared_state: Arc<AsyncRwLock<WorkerSharedState>>,
+    pub boot_index: Option<usize>,
+    // We keep these members crate-public as they are accessed by the vhost-user device.
+    pub(crate) disk_image: Option<Box<dyn DiskFile>>,
+    pub(crate) disk_size: Arc<AtomicU64>,
+    pub(crate) avail_features: u64,
+    pub(crate) read_only: bool,
+    pub(crate) sparse: bool,
+    pub(crate) seg_max: u32,
+    pub(crate) block_size: u32,
+    pub(crate) id: Option<BlockId>,
+    pub(crate) control_tube: Option<Tube>,
+    pub(crate) queue_sizes: Vec<u16>,
+    pub(crate) executor_kind: ExecutorKind,
+    worker_threads: Vec<(
+        WorkerThread<(Box<dyn DiskFile>, Option<Tube>)>,
+        mpsc::UnboundedSender<WorkerCmd>,
+    )>,
     // Whether to run worker threads in parallel for each queue
     worker_per_queue: bool,
-    // Indices of running queues.
-    // TODO: The worker already tracks this. Only need it here to stop queues on sleep. Maybe add a
-    // worker cmd to stop all at once, then we can delete this field.
-    activated_queues: BTreeSet<usize>,
+    // Number of queues passed to `activate`. None if device not activated.
+    num_activated_queues: Option<usize>,
     #[cfg(windows)]
-    pub(super) io_concurrency: u32,
+    pub(crate) io_concurrency: u32,
 }
 
 impl BlockAsync {
@@ -632,12 +648,7 @@ impl BlockAsync {
         let block_size = disk_option.block_size;
         let packed_queue = disk_option.packed_queue;
         let id = disk_option.id;
-        let mut worker_per_queue = disk_option.multiple_workers;
-        // Automatically disable multiple workers if the disk image can't be cloned.
-        if worker_per_queue && disk_image.try_clone().is_err() {
-            base::warn!("multiple workers requested, but not supported by disk image type");
-            worker_per_queue = false;
-        }
+        let multiple_workers = disk_option.multiple_workers;
         let executor_kind = disk_option.async_executor;
         let boot_index = disk_option.bootindex;
         #[cfg(windows)]
@@ -677,14 +688,9 @@ impl BlockAsync {
         let seg_max = get_seg_max(q_size);
         let executor_kind = executor_kind.unwrap_or_default();
 
-        let disk_size = Arc::new(AtomicU64::new(disk_size));
-        let shared_state = Arc::new(AsyncRwLock::new(WorkerSharedState {
-            disk_size: disk_size.clone(),
-        }));
-
         Ok(BlockAsync {
             disk_image: Some(disk_image),
-            disk_size,
+            disk_size: Arc::new(AtomicU64::new(disk_size)),
             avail_features,
             read_only,
             sparse,
@@ -692,12 +698,11 @@ impl BlockAsync {
             block_size,
             id,
             queue_sizes,
-            worker_threads: BTreeMap::new(),
-            shared_state,
-            worker_per_queue,
+            worker_threads: vec![],
+            worker_per_queue: multiple_workers,
             control_tube,
             executor_kind,
-            activated_queues: BTreeSet::new(),
+            num_activated_queues: None,
             boot_index,
             #[cfg(windows)]
             io_concurrency,
@@ -920,7 +925,7 @@ impl BlockAsync {
     }
 
     /// Builds and returns the config structure used to specify block features.
-    fn build_config_space(
+    pub fn build_config_space(
         disk_size: u64,
         seg_max: u32,
         block_size: u32,
@@ -940,140 +945,6 @@ impl BlockAsync {
             max_write_zeroes_seg: Le32::from(MAX_WRITE_ZEROES_SEG),
             ..Default::default()
         }
-    }
-
-    /// Get the worker for a queue, starting it if necessary.
-    // NOTE: Can't use `BTreeMap::entry` because it requires an exclusive ref for the whole branch.
-    #[allow(clippy::map_entry)]
-    fn start_worker(
-        &mut self,
-        idx: usize,
-        interrupt: Interrupt,
-    ) -> anyhow::Result<&(
-        WorkerThread<(Box<dyn DiskFile>, Option<Tube>)>,
-        mpsc::UnboundedSender<WorkerCmd>,
-    )> {
-        let key = if self.worker_per_queue { idx } else { 0 };
-        if self.worker_threads.contains_key(&key) {
-            return Ok(self.worker_threads.get(&key).unwrap());
-        }
-
-        let ex = self.create_executor();
-        let control_tube = self.control_tube.take();
-        let disk_image = if self.worker_per_queue {
-            self.disk_image
-                .as_ref()
-                .context("Failed to ref a disk image")?
-                .try_clone()
-                .context("Failed to clone a disk image")?
-        } else {
-            self.disk_image
-                .take()
-                .context("Failed to take a disk image")?
-        };
-        let read_only = self.read_only;
-        let sparse = self.sparse;
-        let id = self.id;
-        let worker_shared_state = self.shared_state.clone();
-
-        let (worker_tx, worker_rx) = mpsc::unbounded();
-        let worker_thread = WorkerThread::start("virtio_blk", move |kill_evt| {
-            let async_control =
-                control_tube.map(|c| AsyncTube::new(&ex, c).expect("failed to create async tube"));
-
-            let async_image = match disk_image.to_async_disk(&ex) {
-                Ok(d) => d,
-                Err(e) => panic!("Failed to create async disk {:#}", e),
-            };
-
-            let disk_state = Rc::new(AsyncRwLock::new(DiskState {
-                disk_image: async_image,
-                read_only,
-                sparse,
-                id,
-                worker_shared_state,
-            }));
-
-            if let Err(err_string) = ex
-                .run_until(async {
-                    let r = run_worker(
-                        &ex,
-                        interrupt,
-                        &disk_state,
-                        &async_control,
-                        worker_rx,
-                        kill_evt,
-                    )
-                    .await;
-                    // Flush any in-memory disk image state to file.
-                    if let Err(e) = disk_state.lock().await.disk_image.flush().await {
-                        error!("failed to flush disk image when stopping worker: {e:?}");
-                    }
-                    r
-                })
-                .expect("run_until failed")
-            {
-                error!("{:#}", err_string);
-            }
-
-            let disk_state = match Rc::try_unwrap(disk_state) {
-                Ok(d) => d.into_inner(),
-                Err(_) => panic!("too many refs to the disk"),
-            };
-            (
-                disk_state.disk_image.into_inner(),
-                async_control.map(Tube::from),
-            )
-        });
-        match self.worker_threads.entry(key) {
-            std::collections::btree_map::Entry::Occupied(_) => unreachable!(),
-            std::collections::btree_map::Entry::Vacant(e) => {
-                Ok(e.insert((worker_thread, worker_tx)))
-            }
-        }
-    }
-
-    pub fn start_queue(
-        &mut self,
-        idx: usize,
-        queue: Queue,
-        _mem: GuestMemory,
-        doorbell: Interrupt,
-    ) -> anyhow::Result<()> {
-        let (_, worker_tx) = self.start_worker(idx, doorbell.clone())?;
-        worker_tx
-            .unbounded_send(WorkerCmd::StartQueue {
-                index: idx,
-                queue,
-                interrupt: doorbell,
-            })
-            .expect("worker channel closed early");
-        self.activated_queues.insert(idx);
-        Ok(())
-    }
-
-    pub fn stop_queue(&mut self, idx: usize) -> anyhow::Result<Queue> {
-        // TODO: Consider stopping the worker thread if this is the last queue managed by it. Then,
-        // simplify `virtio_sleep` and/or `reset` methods.
-        let (_, worker_tx) = self
-            .worker_threads
-            .get(if self.worker_per_queue { &idx } else { &0 })
-            .context("worker not found")?;
-        let (response_tx, response_rx) = oneshot::channel();
-        worker_tx
-            .unbounded_send(WorkerCmd::StopQueue {
-                index: idx,
-                response_tx,
-            })
-            .expect("worker channel closed early");
-        let queue = cros_async::block_on(async {
-            response_rx
-                .await
-                .expect("response_rx closed early")
-                .context("queue not found")
-        })?;
-        self.activated_queues.remove(&idx);
-        Ok(queue)
     }
 }
 
@@ -1119,19 +990,118 @@ impl VirtioDevice for BlockAsync {
 
     fn activate(
         &mut self,
-        mem: GuestMemory,
+        _mem: GuestMemory,
         interrupt: Interrupt,
         queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
-        for (i, q) in queues {
-            self.start_queue(i, q, mem.clone(), interrupt.clone())?;
+        assert!(self.num_activated_queues.is_none());
+        self.num_activated_queues = Some(queues.len());
+
+        let read_only = self.read_only;
+        let sparse = self.sparse;
+        let id = self.id;
+        let disk_image = self
+            .disk_image
+            .take()
+            .context("Failed to take a disk image")?;
+
+        // If worker_per_queue is enabled and disk_image supports cloning, run workers in parallel.
+        let queues_per_worker = if self.worker_per_queue && disk_image.try_clone().is_ok() {
+            // 1 queue per 1 worker
+            queues
+                .into_iter()
+                .map(|entry| {
+                    Ok((
+                        BTreeMap::from([entry]),
+                        disk_image
+                            .try_clone()
+                            .context("Failed to clone a disk image")?,
+                    ))
+                })
+                .collect::<anyhow::Result<_>>()?
+        } else {
+            vec![(queues, disk_image)]
+        };
+
+        let shared_state = Arc::new(AsyncRwLock::new(WorkerSharedState {
+            disk_size: self.disk_size.clone(),
+        }));
+
+        let mut worker_threads = vec![];
+        for (queues, disk_image) in queues_per_worker.into_iter() {
+            let shared_state = Arc::clone(&shared_state);
+            let interrupt = interrupt.clone();
+            let control_tube = self.control_tube.take();
+            let ex = self.create_executor();
+
+            let (worker_tx, worker_rx) = mpsc::unbounded();
+            // Add commands to start all the queues before starting the worker.
+            for (index, queue) in queues.into_iter() {
+                worker_tx
+                    .unbounded_send(WorkerCmd::StartQueue {
+                        index,
+                        queue,
+                        interrupt: interrupt.clone(),
+                    })
+                    .expect("worker channel closed early");
+            }
+
+            let worker_thread = WorkerThread::start("virtio_blk", move |kill_evt| {
+                let async_control = control_tube
+                    .map(|c| AsyncTube::new(&ex, c).expect("failed to create async tube"));
+                let async_image = match disk_image.to_async_disk(&ex) {
+                    Ok(d) => d,
+                    Err(e) => panic!("Failed to create async disk {:#}", e),
+                };
+                let disk_state = Rc::new(AsyncRwLock::new(DiskState {
+                    disk_image: async_image,
+                    read_only,
+                    sparse,
+                    id,
+                    worker_shared_state: shared_state,
+                }));
+
+                if let Err(err_string) = ex
+                    .run_until(async {
+                        let r = run_worker(
+                            &ex,
+                            interrupt.clone(),
+                            &disk_state,
+                            &async_control,
+                            worker_rx,
+                            kill_evt,
+                        )
+                        .await;
+                        // Flush any in-memory disk image state to file.
+                        if let Err(e) = disk_state.lock().await.disk_image.flush().await {
+                            error!("failed to flush disk image when stopping worker: {e:?}");
+                        }
+                        r
+                    })
+                    .expect("run_until failed")
+                {
+                    error!("{:#}", err_string);
+                }
+
+                let disk_state = match Rc::try_unwrap(disk_state) {
+                    Ok(d) => d.into_inner(),
+                    Err(_) => panic!("too many refs to the disk"),
+                };
+                (
+                    disk_state.disk_image.into_inner(),
+                    async_control.map(Tube::from),
+                )
+            });
+            worker_threads.push((worker_thread, worker_tx));
         }
+
+        self.worker_threads = worker_threads;
         Ok(())
     }
 
     fn reset(&mut self) -> bool {
         let mut success = false;
-        while let Some((_, (worker_thread, _))) = self.worker_threads.pop_first() {
+        while let Some((worker_thread, _)) = self.worker_threads.pop() {
             let (disk_image, control_tube) = worker_thread.stop();
             self.disk_image = Some(disk_image);
             if let Some(control_tube) = control_tube {
@@ -1139,22 +1109,34 @@ impl VirtioDevice for BlockAsync {
             }
             success = true;
         }
-        self.activated_queues.clear();
+        self.num_activated_queues = None;
         success
     }
 
     fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
-        if self.worker_threads.is_empty() {
-            return Ok(None); // Not activated.
-        }
-
+        let num_activated_queues = match self.num_activated_queues {
+            Some(x) => x,
+            None => return Ok(None), // Not activated.
+        };
         // Reclaim the queues from workers.
         let mut queues = BTreeMap::new();
-        for index in self.activated_queues.clone() {
-            queues.insert(index, self.stop_queue(index)?);
+        for index in 0..num_activated_queues {
+            let worker_index = if self.worker_per_queue { index } else { 0 };
+            let worker_tx = &self.worker_threads[worker_index].1;
+            let (response_tx, response_rx) = oneshot::channel();
+            worker_tx
+                .unbounded_send(WorkerCmd::StopQueue { index, response_tx })
+                .expect("worker channel closed early");
+            let queue = cros_async::block_on(async {
+                response_rx
+                    .await
+                    .expect("response_rx closed early")
+                    .expect("missing queue")
+            });
+            queues.insert(index, queue);
         }
         // Shutdown the workers.
-        while let Some((_, (worker_thread, _))) = self.worker_threads.pop_first() {
+        while let Some((worker_thread, _)) = self.worker_threads.pop() {
             let (disk_image, control_tube) = worker_thread.stop();
             self.disk_image = Some(disk_image);
             if let Some(control_tube) = control_tube {
@@ -1169,9 +1151,11 @@ impl VirtioDevice for BlockAsync {
         queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
         if let Some((mem, interrupt, queues)) = queues_state {
-            for (i, q) in queues {
-                self.start_queue(i, q, mem.clone(), interrupt.clone())?
-            }
+            // TODO: activate is just what we want at the moment, but we should probably move
+            // it into a "start workers" function to make it obvious that it isn't strictly
+            // used for activate events.
+            self.num_activated_queues = None;
+            self.activate(mem, interrupt, queues)?;
         }
         Ok(())
     }
@@ -1618,12 +1602,10 @@ mod tests {
         )
         .expect("activate should succeed");
         // assert resources are consumed
-        if !enables_multiple_workers {
-            assert!(
-                b.disk_image.is_none(),
-                "BlockAsync should not have a disk image"
-            );
-        }
+        assert!(
+            b.disk_image.is_none(),
+            "BlockAsync should not have a disk image"
+        );
         assert!(
             b.control_tube.is_none(),
             "BlockAsync should not have a control tube"

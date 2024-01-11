@@ -2120,10 +2120,9 @@ pub fn do_restore(
         );
     }
     for _ in 0..vcpu_size {
-        recv_chan
-            .recv()
-            .context("Failed to recv restore response")?
-            .context("Failed to restore vcpu")?;
+        if let Err(e) = recv_chan.recv() {
+            bail!("Failed to restore vcpu: {}", e);
+        }
     }
 
     // Restore devices
