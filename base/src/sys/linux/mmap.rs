@@ -448,7 +448,7 @@ impl MemoryMapping {
     /// * Write 128 bytes to /dev/null
     ///
     /// ```
-    /// # use base::platform::MemoryMapping;
+    /// # use base::linux::MemoryMapping;
     /// # use std::fs::File;
     /// # use std::path::Path;
     /// # fn test_write_null() -> Result<(), ()> {
@@ -914,7 +914,7 @@ impl CrateMemoryMapping {
     }
 }
 
-pub trait Unix {
+pub trait MemoryMappingUnix {
     /// Remove the specified range from the mapping.
     fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()>;
     /// Tell the kernel to readahead the range.
@@ -929,7 +929,7 @@ pub trait Unix {
     fn lock_all(&self) -> Result<()>;
 }
 
-impl Unix for CrateMemoryMapping {
+impl MemoryMappingUnix for CrateMemoryMapping {
     fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()> {
         self.mapping.remove_range(mem_offset, count)
     }

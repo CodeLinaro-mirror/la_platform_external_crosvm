@@ -13,7 +13,6 @@ package {
 rust_library {
     name: "libx86_64_rust",
     defaults: ["crosvm_inner_defaults"],
-    stem: "libx86_64",
     host_supported: true,
     crate_name: "x86_64",
     cargo_env_compat: true,

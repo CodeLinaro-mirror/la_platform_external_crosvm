@@ -13,7 +13,6 @@ package {
 rust_library {
     name: "libsync_rust",
     defaults: ["crosvm_inner_defaults"],
-    stem: "libsync",
     host_supported: true,
     crate_name: "sync",
     cargo_env_compat: true,

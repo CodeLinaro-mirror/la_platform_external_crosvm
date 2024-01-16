@@ -299,7 +299,7 @@ impl<'a> VirtioDeviceBuilder for &'a ScsiOption {
         info!("Trying to attach scsi device: {}", self.path.display());
         let disk_image = self.open()?;
         Ok(Box::new(
-            virtio::ScsiDevice::new(disk_image, base_features, self.block_size, self.read_only)
+            virtio::ScsiController::new(disk_image, base_features, self.block_size, self.read_only)
                 .context("failed to create scsi device")?,
         ))
     }
@@ -1095,7 +1095,7 @@ pub fn create_fs_device(
     device_tube: Tube,
 ) -> DeviceResult {
     let max_open_files =
-        base::get_max_open_files().context("failed to get max number of open files")?;
+        base::linux::get_max_open_files().context("failed to get max number of open files")?;
     let j = if let Some(jail_config) = jail_config {
         let mut config = SandboxConfig::new(jail_config, "fs_device");
         config.limit_caps = false;
@@ -1136,7 +1136,7 @@ pub fn create_9p_device(
     mut p9_cfg: p9::Config,
 ) -> DeviceResult {
     let max_open_files =
-        base::get_max_open_files().context("failed to get max number of open files")?;
+        base::linux::get_max_open_files().context("failed to get max number of open files")?;
     let (jail, root) = if let Some(jail_config) = jail_config {
         let mut config = SandboxConfig::new(jail_config, "9p_device");
         config.limit_caps = false;

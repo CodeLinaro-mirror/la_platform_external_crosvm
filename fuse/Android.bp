@@ -43,7 +43,6 @@ rust_test {
 rust_library {
     name: "libfuse_rust",
     defaults: ["crosvm_inner_defaults"],
-    stem: "libfuse",
     host_supported: true,
     crate_name: "fuse",
     cargo_env_compat: true,

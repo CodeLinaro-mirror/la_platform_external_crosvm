@@ -16,14 +16,26 @@ pub const REQUEST_SENSE: u8 = 0x03;
 pub const READ_6: u8 = 0x08;
 /// Opcode for INQUIRY command.
 pub const INQUIRY: u8 = 0x12;
+/// Opcode for MODE SELECT(6) command.
+pub const MODE_SELECT_6: u8 = 0x15;
+/// Opcode for MODE SENSE(6) command.
+pub const MODE_SENSE_6: u8 = 0x1a;
 /// Opcode for READ CAPACITY(10) command.
 pub const READ_CAPACITY_10: u8 = 0x25;
 /// Opcode for READ(10) command.
 pub const READ_10: u8 = 0x28;
 /// Opcode for WRITE(10) command.
 pub const WRITE_10: u8 = 0x2a;
+/// Opcode for SYNCHRONIZE CACHE(10) command.
+pub const SYNCHRONIZE_CACHE_10: u8 = 0x35;
 /// Opcode for REPORT LUNS command.
 pub const REPORT_LUNS: u8 = 0xa0;
+/// Opcode for MAINTENANCE IN command.
+pub const MAINTENANCE_IN: u8 = 0xa3;
+
+// The sub-actions of MAINTENANCE IN command.
+/// REPORT SUPPORTED TASK MANAGEMENT FUNCTIONS
+pub const REPORT_SUPPORTED_TASK_MANAGEMENT_FUNCTIONS: u8 = 0x0d;
 
 // SAM status code
 /// Indicates the completion of the command without error.
