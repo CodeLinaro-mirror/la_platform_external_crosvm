@@ -1909,8 +1909,9 @@ pub struct RunCommand {
     /// Possible key values:
     ///     type=(stdout,syslog,sink,file) - Where to route the
     ///        serial device
-    ///     hardware=(serial,virtio-console,debugcon,legacy-virtio-console) - Which type
-    ///        of serial hardware to emulate. Defaults to 8250 UART
+    ///     hardware=(serial,virtio-console,debugcon,
+    ///               legacy-virtio-console) - Which type of
+    ///        serial hardware to emulate. Defaults to 8250 UART
     ///        (serial).
     ///     name=NAME - Console Port Name, used for virtio-console
     ///        as a tag for identification within the guest.
@@ -3223,7 +3224,7 @@ impl TryFrom<RunCommand> for super::config::Config {
                 .chain(vu(cmd.vhost_user_mac80211_hwsim, DeviceType::Mac80211HwSim))
                 .chain(vu(cmd.vhost_user_net, DeviceType::Net))
                 .chain(vu(cmd.vhost_user_snd, DeviceType::Sound))
-                .chain(vu(cmd.vhost_user_video_decoder, DeviceType::VideoDec))
+                .chain(vu(cmd.vhost_user_video_decoder, DeviceType::VideoDecoder))
                 .chain(vu(cmd.vhost_user_vsock, DeviceType::Vsock))
                 .chain(vu(cmd.vhost_user_wl, DeviceType::Wl)),
         );
