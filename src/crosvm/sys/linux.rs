@@ -1090,6 +1090,14 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
 
     // if --enable-fw-cfg or --fw-cfg was given, we want to enable fw_cfg
     let fw_cfg_enable = cfg.enable_fw_cfg || !cfg.fw_cfg_parameters.is_empty();
+    let (cpu_clusters, cpu_capacity) = if cfg.host_cpu_topology {
+        (
+            Arch::get_host_cpu_clusters()?,
+            Arch::get_host_cpu_capacity()?,
+        )
+    } else {
+        (cfg.cpu_clusters.clone(), cfg.cpu_capacity.clone())
+    };
 
     Ok(VmComponents {
         #[cfg(target_arch = "x86_64")]
@@ -1106,11 +1114,11 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         bootorder_fw_cfg_blob: Vec::new(),
         vcpu_count: cfg.vcpu_count.unwrap_or(1),
         vcpu_affinity: cfg.vcpu_affinity.clone(),
-        cpu_clusters: cfg.cpu_clusters.clone(),
-        cpu_capacity: cfg.cpu_capacity.clone(),
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         cpu_frequencies,
         fw_cfg_parameters: cfg.fw_cfg_parameters.clone(),
+        cpu_clusters,
+        cpu_capacity,
         no_smt: cfg.no_smt,
         hugepages: cfg.hugepages,
         hv_cfg: hypervisor::Config {
@@ -1545,6 +1553,8 @@ where
     }
     // hotplug_manager must be created before vm is started since it forks jail warden process.
     #[cfg(feature = "pci-hotplug")]
+    // TODO(293801301): Remove unused_mut after aarch64 support
+    #[allow(unused_mut)]
     let mut hotplug_manager = if cfg.pci_hotplug_slots.is_some() {
         Some(PciHotPlugManager::new(
             vm.get_memory().clone(),
@@ -1754,6 +1764,8 @@ where
     )?;
 
     #[cfg(feature = "pci-hotplug")]
+    // TODO(293801301): Remove unused_variables after aarch64 support
+    #[allow(unused_variables)]
     let pci_hotplug_slots = cfg.pci_hotplug_slots;
     #[cfg(not(feature = "pci-hotplug"))]
     #[allow(unused_variables)]
@@ -1976,10 +1988,18 @@ where
             expose_with_viommu: false,
         });
 
+        let supports_readonly_mapping = linux.vm.supports_readonly_mapping();
         let pci_root = linux.root_config.clone();
         std::thread::Builder::new()
             .name("pci_root".to_string())
-            .spawn(move || start_pci_root_worker(pci_root, hp_worker_tube, hp_vm_mem_worker_tube))?
+            .spawn(move || {
+                start_pci_root_worker(
+                    supports_readonly_mapping,
+                    pci_root,
+                    hp_worker_tube,
+                    hp_vm_mem_worker_tube,
+                )
+            })?
     };
 
     let gralloc = RutabagaGralloc::new().context("failed to create gralloc")?;
@@ -2029,17 +2049,23 @@ where
 // worker thread and push all work that locks pci root to this thread.
 #[cfg(target_arch = "x86_64")]
 fn start_pci_root_worker(
+    supports_readonly_mapping: bool,
     pci_root: Arc<Mutex<PciRoot>>,
     hp_device_tube: mpsc::Receiver<PciRootCommand>,
     vm_control_tube: Tube,
 ) {
     struct PciMmioMapperTube {
+        supports_readonly_mapping: bool,
         vm_control_tube: Tube,
         registered_regions: BTreeMap<u32, VmMemoryRegionId>,
         next_id: u32,
     }
 
     impl PciMmioMapper for PciMmioMapperTube {
+        fn supports_readonly_mapping(&self) -> bool {
+            self.supports_readonly_mapping
+        }
+
         fn add_mapping(&mut self, addr: GuestAddress, shmem: &SharedMemory) -> anyhow::Result<u32> {
             let shmem = shmem
                 .try_clone()
@@ -2064,6 +2090,7 @@ fn start_pci_root_worker(
     }
 
     let mut mapper = PciMmioMapperTube {
+        supports_readonly_mapping,
         vm_control_tube,
         registered_regions: BTreeMap::new(),
         next_id: 0,
@@ -3201,7 +3228,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     }
                 }
                 Token::VmControl { id } => {
-                    #[cfg(target_arch = "x86_64")]
+                    #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
                     let mut add_tubes = Vec::new();
                     #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
                     let mut add_irq_control_tubes = Vec::new();
