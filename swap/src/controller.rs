@@ -35,6 +35,7 @@ use base::RawDescriptor;
 use base::SendTube;
 use base::SharedMemory;
 use base::Tube;
+use base::TubeError;
 use base::WaitContext;
 use jail::create_base_minijail;
 use jail::create_sandbox_minijail;
@@ -129,6 +130,9 @@ pub struct SwapController {
     // Keep 1 page dummy mmap in the main process to make it present in all the descendant
     // processes.
     _dead_uffd_checker: DeadUffdCheckerImpl,
+    // Keep the cloned [GuestMemory] in the main process not to free it before the monitor process
+    // exits.
+    _guest_memory: GuestMemory,
 }
 
 impl SwapController {
@@ -147,6 +151,8 @@ impl SwapController {
         jail_config: &Option<JailConfig>,
     ) -> anyhow::Result<Self> {
         info!("vmm-swap is enabled. launch monitor process.");
+
+        let preserved_guest_memory = guest_memory.clone();
 
         let uffd_factory = UffdFactory::new();
         let uffd = uffd_factory.create().context("create userfaultfd")?;
@@ -226,7 +232,29 @@ impl SwapController {
                     #[cfg(feature = "log_page_fault")]
                     page_fault_logger,
                 ) {
-                    panic!("page_fault_handler_thread exited with error: {:#}", e)
+                    if let Some(PageHandlerError::Userfaultfd(UffdError::UffdClosed)) =
+                        e.downcast_ref::<PageHandlerError>()
+                    {
+                        // Userfaultfd can cause UffdError::UffdClosed if the main process
+                        // unexpectedly while it is swapping in. This is not a bug of swap monitor,
+                        // but the other feature on the main process.
+                        // Note that UffdError::UffdClosed from other processes than the main
+                        // process are derived from PageHandler::handle_page_fault() only and
+                        // handled in the loop of handle_vmm_swap().
+                        error!(
+                            "page_fault_handler_thread exited with userfaultfd closed error: {:#}",
+                            e
+                        );
+                    } else if e.is::<TubeError>() {
+                        // Tube can cause TubeError if the main process unexpectedly dies. This is
+                        // not a bug of swap monitor, but the other feature on the main process.
+                        // Even if the tube itself is broken and the main process is alive, the main
+                        // process catch that the swap monitor process exits unexpectedly and
+                        // terminates itself.
+                        error!("page_fault_handler_thread exited with tube error: {:#}", e);
+                    } else {
+                        panic!("page_fault_handler_thread exited with error: {:#}", e);
+                    }
                 }
             })
             .context("fork monitor process")?;
@@ -254,6 +282,7 @@ impl SwapController {
             command_tube: command_tube_main,
             num_static_devices: 0,
             _dead_uffd_checker: dead_uffd_checker,
+            _guest_memory: preserved_guest_memory,
         })
     }
 

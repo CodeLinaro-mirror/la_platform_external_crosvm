@@ -503,6 +503,12 @@ impl PciRootMmioState {
             return Ok(());
         }
 
+        // The optional optimizations below require the hypervisor to support read-only memory
+        // regions.
+        if !mapper.supports_readonly_mapping() {
+            return Ok(());
+        }
+
         let pagesize = base::pagesize();
         let offset = address.to_config_address(0, self.register_bit_num);
         let mmio_mapping_num = offset / pagesize as u32;
@@ -578,10 +584,15 @@ impl PciRootMmioState {
 }
 
 pub trait PciMmioMapper {
+    fn supports_readonly_mapping(&self) -> bool;
     fn add_mapping(&mut self, addr: GuestAddress, shmem: &SharedMemory) -> anyhow::Result<u32>;
 }
 
 impl<T: Vm> PciMmioMapper for T {
+    fn supports_readonly_mapping(&self) -> bool {
+        self.check_capability(hypervisor::VmCap::ReadOnlyMemoryRegion)
+    }
+
     fn add_mapping(&mut self, addr: GuestAddress, shmem: &SharedMemory) -> anyhow::Result<u32> {
         let mapping = MemoryMappingBuilder::new(base::pagesize())
             .from_shared_memory(shmem)
@@ -675,7 +686,7 @@ const PCI_RESET_CPU_BIT: u8 = 1 << 2;
 
 impl BusDevice for PciConfigIo {
     fn debug_label(&self) -> String {
-        format!("pci config io-port 0x{:03x}", self.config_address)
+        "pci config io-port".to_string()
     }
 
     fn device_id(&self) -> DeviceId {
