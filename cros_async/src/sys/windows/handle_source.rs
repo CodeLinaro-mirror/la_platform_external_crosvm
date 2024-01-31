@@ -28,7 +28,6 @@ use smallvec::SmallVec;
 use sync::Mutex;
 use thiserror::Error as ThisError;
 use winapi::um::ioapiset::CancelIoEx;
-use winapi::um::processthreadsapi::GetCurrentThreadId;
 
 use crate::mem::BackingMemory;
 use crate::mem::MemRegion;
@@ -84,41 +83,42 @@ impl From<Error> for io::Error {
     }
 }
 
+impl From<Error> for AsyncError {
+    fn from(e: Error) -> AsyncError {
+        AsyncError::SysVariants(e.into())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Used to shutdown IO running on a CancellableBlockingPool.
 pub struct HandleWrapper {
-    handles: Vec<Descriptor>,
+    handle: Descriptor,
 }
 
 impl HandleWrapper {
-    pub fn new(handles: Vec<Descriptor>) -> Arc<Mutex<HandleWrapper>> {
-        Arc::new(Mutex::new(Self { handles }))
+    pub fn new(handle: Descriptor) -> Arc<Mutex<HandleWrapper>> {
+        Arc::new(Mutex::new(Self { handle }))
     }
 
     pub fn cancel_sync_io<T>(&mut self, ret: T) -> T {
-        for handle in &self.handles {
-            // There isn't much we can do if cancel fails.
-            // SAFETY: trivially safe
-            if unsafe { CancelIoEx(handle.as_raw_descriptor(), null_mut()) } == 0 {
-                warn!(
-                    "Cancel IO for handle:{:?} failed with {}",
-                    handle.as_raw_descriptor(),
-                    SysUtilError::last()
-                );
-            }
+        // There isn't much we can do if cancel fails.
+        // SAFETY: trivially safe
+        if unsafe { CancelIoEx(self.handle.as_raw_descriptor(), null_mut()) } == 0 {
+            warn!(
+                "Cancel IO for handle:{:?} failed with {}",
+                self.handle.as_raw_descriptor(),
+                SysUtilError::last()
+            );
         }
         ret
     }
 }
 
-/// Async IO source for Windows that uses a multi-threaded, multi-handle approach to provide fast IO
-/// operations. It demuxes IO requests across a set of handles that refer to the same underlying IO
-/// source, such as a file, and executes those requests across multiple threads. Benchmarks show
-/// that this is the fastest method to perform IO on Windows, especially for file reads.
+/// Async IO source for Windows, such as a file.
 pub struct HandleSource<F: AsRawDescriptor> {
-    sources: Box<[F]>,
-    source_descriptors: Vec<Descriptor>,
+    source: F,
+    source_descriptor: Descriptor,
     blocking_pool: CancellableBlockingPool,
 }
 
@@ -129,7 +129,7 @@ impl<F: AsRawDescriptor> HandleSource<F> {
     /// threads are generally idle because they're waiting on blocking IO, so the cost is minimal.
     /// Long term, we may migrate away from this approach toward IOCP or overlapped IO.
     ///
-    /// WARNING: every `source` in `sources` MUST be a unique file object (e.g. separate handles
+    /// WARNING: `source` MUST be a unique file object (e.g. separate handles
     /// each created by CreateFile), and point at the same file on disk. This is because IO
     /// operations on the HandleSource are randomly distributed to each source.
     ///
@@ -137,21 +137,15 @@ impl<F: AsRawDescriptor> HandleSource<F> {
     /// The caller must guarantee that `F`'s handle is compatible with the underlying functions
     /// exposed on `HandleSource`. The behavior when calling unsupported functions is not defined
     /// by this struct. Note that most winapis will fail with reasonable errors.
-    pub fn new(sources: Box<[F]>) -> Result<Self> {
-        let source_count = sources.len();
-        let mut source_descriptors = Vec::with_capacity(source_count);
-
-        // Safe because consumers of the descriptors are tied to the lifetime of HandleSource.
-        for source in sources.iter() {
-            source_descriptors.push(Descriptor(source.as_raw_descriptor()));
-        }
+    pub fn new(source: F) -> Result<Self> {
+        let source_descriptor = Descriptor(source.as_raw_descriptor());
 
         Ok(Self {
-            sources,
-            source_descriptors,
+            source,
+            source_descriptor,
             blocking_pool: CancellableBlockingPool::new(
                 // WARNING: this is a safety requirement! Threads are 1:1 with sources.
-                source_count,
+                1,
                 Duration::from_secs(10),
             ),
         })
@@ -170,33 +164,13 @@ impl<F: AsRawDescriptor> HandleSource<F> {
             })
             .collect::<Result<SmallVec<[VolatileSlice; 16]>>>()
     }
-
-    // Returns a copy of all the source handles as a vector of descriptors.
-    fn as_descriptors(&self) -> Vec<Descriptor> {
-        self.sources
-            .iter()
-            .map(|i| Descriptor(i.as_raw_descriptor()))
-            .collect()
-    }
 }
 
-impl<F: AsRawDescriptor> Drop for HandleSource<F> {
-    fn drop(&mut self) {
-        if let Err(e) = self.blocking_pool.shutdown() {
-            error!("failed to clean up HandleSource: {}", e);
-        }
-    }
-}
-
-fn get_thread_file(descriptors: Vec<Descriptor>) -> ManuallyDrop<File> {
+fn get_thread_file(descriptor: Descriptor) -> ManuallyDrop<File> {
     // SAFETY: trivially safe
     // Safe because all callers must exit *before* these handles will be closed (guaranteed by
     // HandleSource's Drop impl.).
-    unsafe {
-        ManuallyDrop::new(File::from_raw_descriptor(
-            descriptors[GetCurrentThreadId() as usize % descriptors.len()].0,
-        ))
-    }
+    unsafe { ManuallyDrop::new(File::from_raw_descriptor(descriptor.0)) }
 }
 
 impl<F: AsRawDescriptor> HandleSource<F> {
@@ -206,10 +180,11 @@ impl<F: AsRawDescriptor> HandleSource<F> {
         file_offset: Option<u64>,
         mut vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
-        let handles = HandleWrapper::new(self.as_descriptors());
-        let descriptors = self.source_descriptors.clone();
+        let handles = HandleWrapper::new(self.source_descriptor);
+        let descriptors = self.source_descriptor;
 
-        self.blocking_pool
+        Ok(self
+            .blocking_pool
             .spawn(
                 move || {
                     let mut file = get_thread_file(descriptors);
@@ -224,8 +199,7 @@ impl<F: AsRawDescriptor> HandleSource<F> {
                 },
                 move || Err(handles.lock().cancel_sync_io(Error::OperationCancelled)),
             )
-            .await
-            .map_err(AsyncError::HandleSource)
+            .await?)
     }
 
     /// Reads to the given `mem` at the given offsets from the file starting at `file_offset`.
@@ -236,10 +210,11 @@ impl<F: AsRawDescriptor> HandleSource<F> {
         mem_offsets: impl IntoIterator<Item = MemRegion>,
     ) -> AsyncResult<usize> {
         let mem_offsets = mem_offsets.into_iter().collect();
-        let handles = HandleWrapper::new(self.as_descriptors());
-        let descriptors = self.source_descriptors.clone();
+        let handles = HandleWrapper::new(self.source_descriptor);
+        let descriptors = self.source_descriptor;
 
-        self.blocking_pool
+        Ok(self
+            .blocking_pool
             .spawn(
                 move || {
                     let mut file = get_thread_file(descriptors);
@@ -256,8 +231,7 @@ impl<F: AsRawDescriptor> HandleSource<F> {
                 },
                 move || Err(handles.lock().cancel_sync_io(Error::OperationCancelled)),
             )
-            .await
-            .map_err(AsyncError::HandleSource)
+            .await?)
     }
 
     /// Wait for the handle of `self` to be readable.
@@ -276,10 +250,11 @@ impl<F: AsRawDescriptor> HandleSource<F> {
         file_offset: Option<u64>,
         vec: Vec<u8>,
     ) -> AsyncResult<(usize, Vec<u8>)> {
-        let handles = HandleWrapper::new(self.as_descriptors());
-        let descriptors = self.source_descriptors.clone();
+        let handles = HandleWrapper::new(self.source_descriptor);
+        let descriptors = self.source_descriptor;
 
-        self.blocking_pool
+        Ok(self
+            .blocking_pool
             .spawn(
                 move || {
                     let mut file = get_thread_file(descriptors);
@@ -294,8 +269,7 @@ impl<F: AsRawDescriptor> HandleSource<F> {
                 },
                 move || Err(handles.lock().cancel_sync_io(Error::OperationCancelled)),
             )
-            .await
-            .map_err(AsyncError::HandleSource)
+            .await?)
     }
 
     /// Writes from the given `mem` from the given offsets to the file starting at `file_offset`.
@@ -306,10 +280,11 @@ impl<F: AsRawDescriptor> HandleSource<F> {
         mem_offsets: impl IntoIterator<Item = MemRegion>,
     ) -> AsyncResult<usize> {
         let mem_offsets = mem_offsets.into_iter().collect();
-        let handles = HandleWrapper::new(self.as_descriptors());
-        let descriptors = self.source_descriptors.clone();
+        let handles = HandleWrapper::new(self.source_descriptor);
+        let descriptors = self.source_descriptor;
 
-        self.blocking_pool
+        Ok(self
+            .blocking_pool
             .spawn(
                 move || {
                     let mut file = get_thread_file(descriptors);
@@ -326,15 +301,15 @@ impl<F: AsRawDescriptor> HandleSource<F> {
                 },
                 move || Err(handles.lock().cancel_sync_io(Error::OperationCancelled)),
             )
-            .await
-            .map_err(AsyncError::HandleSource)
+            .await?)
     }
 
     /// Deallocates the given range of a file.
     pub async fn punch_hole(&self, file_offset: u64, len: u64) -> AsyncResult<()> {
-        let handles = HandleWrapper::new(self.as_descriptors());
-        let descriptors = self.source_descriptors.clone();
-        self.blocking_pool
+        let handles = HandleWrapper::new(self.source_descriptor);
+        let descriptors = self.source_descriptor;
+        Ok(self
+            .blocking_pool
             .spawn(
                 move || {
                     let file = get_thread_file(descriptors);
@@ -344,15 +319,15 @@ impl<F: AsRawDescriptor> HandleSource<F> {
                 },
                 move || Err(handles.lock().cancel_sync_io(Error::OperationCancelled)),
             )
-            .await
-            .map_err(AsyncError::HandleSource)
+            .await?)
     }
 
     /// Fills the given range with zeroes.
     pub async fn write_zeroes_at(&self, file_offset: u64, len: u64) -> AsyncResult<()> {
-        let handles = HandleWrapper::new(self.as_descriptors());
-        let descriptors = self.source_descriptors.clone();
-        self.blocking_pool
+        let handles = HandleWrapper::new(self.source_descriptor);
+        let descriptors = self.source_descriptor;
+        Ok(self
+            .blocking_pool
             .spawn(
                 move || {
                     let mut file = get_thread_file(descriptors);
@@ -364,16 +339,16 @@ impl<F: AsRawDescriptor> HandleSource<F> {
                 },
                 move || Err(handles.lock().cancel_sync_io(Error::OperationCancelled)),
             )
-            .await
-            .map_err(AsyncError::HandleSource)
+            .await?)
     }
 
     /// Sync all completed write operations to the backing storage.
     pub async fn fsync(&self) -> AsyncResult<()> {
-        let handles = HandleWrapper::new(self.as_descriptors());
-        let descriptors = self.source_descriptors.clone();
+        let handles = HandleWrapper::new(self.source_descriptor);
+        let descriptors = self.source_descriptor;
 
-        self.blocking_pool
+        Ok(self
+            .blocking_pool
             .spawn(
                 move || {
                     let mut file = get_thread_file(descriptors);
@@ -381,8 +356,7 @@ impl<F: AsRawDescriptor> HandleSource<F> {
                 },
                 move || Err(handles.lock().cancel_sync_io(Error::OperationCancelled)),
             )
-            .await
-            .map_err(AsyncError::HandleSource)
+            .await?)
     }
 
     /// Sync all data of completed write operations to the backing storage. Currently, the
@@ -392,39 +366,27 @@ impl<F: AsRawDescriptor> HandleSource<F> {
         self.fsync().await
     }
 
-    /// Note that on Windows w/ multiple sources these functions do not make sense.
-    /// TODO(nkgold): decide on what these should mean.
-
     /// Yields the underlying IO source.
     pub fn into_source(self) -> F {
-        unimplemented!("`into_source` is not supported on Windows.")
+        self.source
     }
 
     /// Provides a mutable ref to the underlying IO source.
     pub fn as_source_mut(&mut self) -> &mut F {
-        if self.sources.len() == 1 {
-            return &mut self.sources[0];
-        }
-        // Unimplemented for multiple-source use-case
-        unimplemented!(
-            "`as_source_mut` doesn't support source len of {}",
-            self.sources.len()
-        )
+        &mut self.source
     }
 
     /// Provides a ref to the underlying IO source.
     ///
-    /// In the multi-source case, the 0th source will be returned. If sources are not
-    /// interchangeable, behavior is undefined.
+    /// If sources are not interchangeable, behavior is undefined.
     pub fn as_source(&self) -> &F {
-        &self.sources[0]
+        &self.source
     }
 
-    /// In the multi-source case, the 0th source is waited on. If sources are not interchangeable,
-    /// behavior is undefined.
+    /// If sources are not interchangeable, behavior is undefined.
     pub async fn wait_for_handle(&self) -> AsyncResult<()> {
-        let waiter = super::WaitForHandle::new(&self.sources[0]);
-        waiter.await.map_err(AsyncError::HandleSource)
+        let waiter = super::WaitForHandle::new(&self.source);
+        Ok(waiter.await?)
     }
 }
 
@@ -458,7 +420,7 @@ mod tests {
             .write(true)
             .open(temp_file.path())
             .unwrap();
-        let handle_src = HandleSource::new(vec![f].into_boxed_slice()).unwrap();
+        let handle_src = HandleSource::new(f).unwrap();
         ex.run_until(punch_hole(&handle_src)).unwrap();
 
         let mut buf = vec![0; 11];
@@ -489,7 +451,7 @@ mod tests {
             .write(true)
             .open(temp_file.path())
             .unwrap();
-        let handle_src = HandleSource::new(vec![f].into_boxed_slice()).unwrap();
+        let handle_src = HandleSource::new(f).unwrap();
         ex.run_until(punch_hole(&handle_src)).unwrap();
 
         let mut buf = vec![0; 13];
@@ -519,7 +481,7 @@ mod tests {
     //         .write(true)
     //         .open(temp_file.path())
     //         .unwrap();
-    //     let handle_src = HandleSource::new(vec![f].into_boxed_slice()).unwrap();
+    //     let handle_src = HandleSource::new(f).unwrap();
     //     ex.run_until(punch_hole(&handle_src)).unwrap();
 
     //     let mut buf = vec![0; 13];
