@@ -15,8 +15,14 @@ use std::u32;
 use base::{info, error, Event, RawDescriptor};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::GuestMemory;
-use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
+use vmm_vhost::message::{MasterReq, VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
+use vmm_vhost::{
+    connection::socket::Endpoint as SocketEndpoint, Master, VhostBackend, VhostUserMaster,
+    VhostUserMemoryRegionInfo, VringConfigData, VHOST_USER_F_PROTOCOL_FEATURES,
+};
+
+type SocketMaster = Master<SocketEndpoint<MasterReq>>;
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
 
 use crate::virtio::{ Interrupt, Queue, VirtioDevice};
@@ -25,17 +31,19 @@ const QUEUE_SIZE: u16 = 1024;
 
 pub struct Hab {
     kill_evt: Option<Event>,
-    worker_thread: Option<thread::JoinHandle<()>>,
+    worker_thread: Option<thread::JoinHandle<Worker>>,
     handler: RefCell<VhostUserHandler>,
     queue_sizes: Vec<u16>,
     dev_id : u32,
+    vu : SocketMaster,
 }
 
 impl Hab {
     pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P , device_id : u32,  numOfQueue : u32) -> Result<Hab>  {
          let socket = UnixStream::connect(&socket_path).map_err(Error::SocketConnect)?;
+        let sock_copy = socket.try_clone().expect("Couldn't clone socket");
          let allow_features = 1u64 << crate::virtio::VIRTIO_F_VERSION_1
-            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()  ;
 
         let init_features = base_features | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
         let allow_protocol_features = VhostUserProtocolFeatures::CONFIG
@@ -55,6 +63,7 @@ impl Hab {
             handler: RefCell::new(handler),
             queue_sizes,
              dev_id: device_id,
+             vu: SocketMaster::from_stream(sock_copy, numOfQueue.into()),
         })
     }
 }
@@ -116,15 +125,48 @@ impl VirtioDevice for Hab {
             error!("failed to activate queues: {}", e);
             return;
         }
+
+        let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("failed creating kill Event pair: {}", e);
+                return;
+            }
+        };
+        self.kill_evt = Some(self_kill_evt);
+
+        let worker_result = thread::Builder::new()
+            .name("vhost_user_hab".to_string())
+            .spawn(move || {
+                let mut worker = Worker {
+                    queues,
+                    mem,
+                    kill_evt,
+                };
+
+                if let Err(e) = worker.run(interrupt) {
+                    error!("failed to start a worker: {}", e);
+                }
+                worker
+            });
+
+        match worker_result {
+            Err(e) => {
+                error!("failed to spawn vhost-user-scmi worker: {}", e);
+            }
+            Ok(join_handle) => {
+                self.worker_thread = Some(join_handle);
+            }
+        }
     }
 
     fn reset(&mut self) -> bool {
-        if let Err(e) = self.handler.borrow_mut().reset(self.queue_sizes.len()) {
+
+        if let Err(e) = self.vu.reset_owner().map_err(Error::ResetOwner) {
             error!("Failed to reset HAB device: {}", e);
             false
         } else {
             true
         }
-
     }
 }
