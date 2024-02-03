@@ -49,7 +49,6 @@ members = [
     "common/audio_streams",
     "common/balloon_control",
     "common/data_model",
-    "common/p9",
     "common/sync",
     "cros_async",
     "cros_fdt",
@@ -458,7 +457,7 @@ aarch64 = { path = "aarch64" }
 
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 minijail = "*" # provided by ebuild
-p9 = "*"
+p9 = "0.2.3"
 vhost = { path = "vhost" }
 
 [target.'cfg(windows)'.dependencies]
@@ -485,7 +484,5 @@ base = { path = "base" }
 cros_async = { path = "cros_async" }
 data_model = { path = "common/data_model" }
 libcras = { path = "libcras_stub" } # ignored by ebuild
-p9 = { path = "common/p9" } # ignored by ebuild
 sync = { path = "common/sync" }
-wire_format_derive = { path = "common/p9/wire_format_derive" } # ignored by ebuild
 minijail = { path = "third_party/minijail/rust/minijail" } # ignored by ebuild
