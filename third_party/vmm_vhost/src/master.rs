@@ -251,13 +251,27 @@ impl Master {
     /// Put the device to sleep.
     pub fn sleep(&self) -> Result<()> {
         let hdr = self.send_request_header(MasterReq::SLEEP, None)?;
-        self.wait_for_ack(&hdr)
+        let reply = self.recv_reply::<VhostUserSuccess>(&hdr)?;
+        if !reply.success() {
+            Err(VhostUserError::SleepError(anyhow!(
+                "Device process responded with a failure on SLEEP."
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// Wake the device up.
     pub fn wake(&self) -> Result<()> {
         let hdr = self.send_request_header(MasterReq::WAKE, None)?;
-        self.wait_for_ack(&hdr)
+        let reply = self.recv_reply::<VhostUserSuccess>(&hdr)?;
+        if !reply.success() {
+            Err(VhostUserError::WakeError(anyhow!(
+                "Device process responded with a failure on WAKE."
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// Snapshot the device and receive serialized state of the device.
