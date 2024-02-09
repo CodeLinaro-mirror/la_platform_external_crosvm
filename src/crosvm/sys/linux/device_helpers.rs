@@ -145,10 +145,13 @@ pub trait IntoUnixStream {
 
 impl<'a> IntoUnixStream for &'a Path {
     fn into_unix_stream(self) -> Result<UnixStream> {
-        if let Some(fd) = safe_descriptor_from_path(self).context("failed to open event device")? {
+        if let Some(fd) = safe_descriptor_from_path(self)
+            .with_context(|| format!("failed to open event device '{}'", self.display()))?
+        {
             Ok(fd.into())
         } else {
-            UnixStream::connect(self).context("failed to open event device")
+            UnixStream::connect(self)
+                .with_context(|| format!("failed to open event device '{}'", self.display()))
         }
     }
 }
@@ -645,6 +648,7 @@ pub fn create_balloon_device(
     tube: Tube,
     inflate_tube: Option<Tube>,
     init_balloon_size: u64,
+    dynamic_mapping_device_tube: Tube,
     enabled_features: u64,
     #[cfg(feature = "registered_events")] registered_evt_q: Option<SendTube>,
     ws_num_bins: u8,
@@ -652,6 +656,7 @@ pub fn create_balloon_device(
     let dev = virtio::Balloon::new(
         virtio::base_features(protection_type),
         tube,
+        VmMemoryClient::new(dynamic_mapping_device_tube),
         inflate_tube,
         init_balloon_size,
         mode,

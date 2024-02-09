@@ -31,6 +31,7 @@ use crate::sys::windows::io_completion_port::CompletionPacket;
 use crate::sys::windows::io_completion_port::IoCompletionPort;
 use crate::waker::WakerToken;
 use crate::waker::WeakWake;
+use crate::AsyncError;
 use crate::AsyncResult;
 use crate::IoSource;
 
@@ -55,6 +56,12 @@ impl From<Error> for io::Error {
             ExecutorGone => io::Error::new(io::ErrorKind::Other, e),
             RemoveNonExistentOperation => io::Error::new(io::ErrorKind::Other, e),
         }
+    }
+}
+
+impl From<Error> for AsyncError {
+    fn from(e: Error) -> Self {
+        AsyncError::SysVariants(e.into())
     }
 }
 
@@ -205,9 +212,7 @@ impl common_executor::Reactor for HandleReactor {
         _ex: &Arc<RawExecutor<Self>>,
         f: F,
     ) -> AsyncResult<IoSource<F>> {
-        Ok(IoSource::Handle(super::HandleSource::new(
-            vec![f].into_boxed_slice(),
-        )?))
+        Ok(IoSource::Handle(super::HandleSource::new(f)?))
     }
 }
 

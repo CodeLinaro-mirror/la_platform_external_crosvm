@@ -15,8 +15,7 @@ These commits can be found in
 The crosvm team is submitting these merges through the ChromeOS CQ regularly, which happens
 **roughly once per week**, but time can vary depending on CQ health.
 
-Googlers can find more information on the merge process at
-[go/crosvm/playbook](http://go/crosvm/playbook)
+Googlers can find more information on the merge process at [go/crosvm-uprev-playbook].
 
 ## Building crosvm for ChromeOS
 
@@ -90,8 +89,7 @@ have been merged into the [chromiumos/platform/crosvm] repository.
 The merge will also contain all `BUG=` references that will notify your bugs about when the change
 is submitted.
 
-For more details on the process, please see [go/crosvm-playbook](http://go/crosvm-playbook) (Google
-only).
+For more details on the process, please see [go/crosvm-uprev-playbook] (Googlers only).
 
 ## Cq-Depend
 
@@ -107,6 +105,8 @@ If it cannot be avoided at all, please follow this process:
 
 ## Cherry-picking
 
+### Cherry-picking without the usual merge process
+
 If you need your changes faster than the usual merge frequency, please follow this process:
 
 1. Upload and submit your change to upstream crosvm.
@@ -116,9 +116,34 @@ If you need your changes faster than the usual merge frequency, please follow th
 **Never** submit code just to ChromeOS, as it will cause upstream to diverge and result in merge
 conflicts down the road.
 
+### Cherry-picking to release branch
+
+Your change need to be merged into [chromiumos/platform/crosvm] to cherry-pick it to a release
+branch. You should follow
+[ChromiumOS Merge Workflow](https://chromium.googlesource.com/chromiumos/docs/+/HEAD/work_on_branch.md)
+to cherry-pick your changes. Since changes are merged from [crosvm/crosvm] to
+[chromiumos/platform/crosvm] through [the merge process](#the-merge-process), you can't use gerrit
+to cherry-pick your changes but need to use git command locally.
+
+```
+$ cd chromiumos/src/platform/crosvm
+$ git branch -a | grep remotes/cros/release-R120
+  remotes/cros/release-R120-15662.B
+$ git checkout -b my-cherry-pick cros/release-R120-15662.B
+$ git cherry-pick -x $COMMIT
+$ git push cros HEAD:refs/for/release-R120-15662.B
+```
+
+`$COMMIT` is the commit hash of the original change you want to cherry-pick not the merge commit.
+Note that you push to special gerrit `refs/for/`, not pushing directly to the release branch.
+
+Also note that release branch cherry picks don't get CQ tested at all - they are submitted directly
+once you CQ+2 - so it is very important to test locally first.
+
 ## Running a Tryjob
 
 For googlers, see go/cdg-site
 
 [chromiumos/platform/crosvm]: https://chromium.googlesource.com/chromiumos/platform/crosvm
 [crosvm/crosvm]: https://chromium.googlesource.com/crosvm/crosvm
+[go/crosvm-uprev-playbook]: http://go/crosvm-uprev-playbook
