@@ -113,6 +113,7 @@ impl UdmabufDriverTrait for UnixUdmabufDriver {
             items[i].size = len as u64;
         }
 
+        // SAFETY:
         // Safe because we always allocate enough space for `udmabuf_create_list`.
         let fd = unsafe {
             let create_list = list.as_mut_ptr();
@@ -124,6 +125,7 @@ impl UdmabufDriverTrait for UnixUdmabufDriver {
             return Err(UdmabufError::DmabufCreationFail(IoError::last_os_error()));
         }
 
+        // SAFETY:
         // Safe because we validated the file exists.
         Ok(unsafe { SafeDescriptor::from_raw_descriptor(fd) })
     }
@@ -137,26 +139,36 @@ mod tests {
     #[test]
     fn test_memory_offsets() {
         let start_addr1 = GuestAddress(0x100);
-        let start_addr2 = GuestAddress(0x1100);
-        let start_addr3 = GuestAddress(0x2100);
+        let start_addr2 = GuestAddress(0x100 + pagesize() as u64);
+        let start_addr3 = GuestAddress(0x100 + 2 * pagesize() as u64);
 
         let mem = GuestMemory::new(&[
-            (start_addr1, 0x1000),
-            (start_addr2, 0x1000),
-            (start_addr3, 0x1000),
+            (start_addr1, pagesize() as u64),
+            (start_addr2, pagesize() as u64),
+            (start_addr3, pagesize() as u64),
         ])
         .unwrap();
 
         assert_eq!(memory_offset(&mem, GuestAddress(0x300), 1).unwrap(), 0x200);
         assert_eq!(
-            memory_offset(&mem, GuestAddress(0x1200), 1).unwrap(),
-            0x1100
+            memory_offset(&mem, GuestAddress(0x200 + pagesize() as u64), 1).unwrap(),
+            0x100 + pagesize() as u64,
         );
         assert_eq!(
-            memory_offset(&mem, GuestAddress(0x1100), 0x1000).unwrap(),
-            0x1000
+            memory_offset(
+                &mem,
+                GuestAddress(0x100 + pagesize() as u64),
+                pagesize() as u64
+            )
+            .unwrap(),
+            pagesize() as u64,
         );
-        assert!(memory_offset(&mem, GuestAddress(0x1100), 0x1001).is_err());
+        assert!(memory_offset(
+            &mem,
+            GuestAddress(0x100 + pagesize() as u64),
+            1 + pagesize() as u64
+        )
+        .is_err());
     }
 
     #[test]
@@ -174,7 +186,7 @@ mod tests {
         let start_addr2 = GuestAddress(0x1100);
         let start_addr3 = GuestAddress(0x2100);
 
-        let sg_list = vec![
+        let sg_list = [
             (start_addr1, 0x1000),
             (start_addr2, 0x1000),
             (start_addr3, 0x1000),

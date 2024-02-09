@@ -23,6 +23,25 @@ use tempfile::NamedTempFile;
 // System-wide suspend/resume, snapshot/restore.
 // Tests below check for snapshot/restore functionality, and suspend/resume.
 
+fn compare_snapshots(a: &Path, b: &Path) -> (bool, String) {
+    let result = std::process::Command::new("diff")
+        .arg("-qr")
+        // vcpu and irqchip have timestamps that differ even if a freshly restored VM is
+        // snapshotted before it starts running again.
+        .arg("--exclude")
+        .arg("vcpu*")
+        .arg("--exclude")
+        .arg("irqchip")
+        .arg(a)
+        .arg(b)
+        .output()
+        .unwrap();
+    (
+        result.status.success(),
+        String::from_utf8(result.stdout).unwrap(),
+    )
+}
+
 #[test]
 fn suspend_snapshot_restore_resume() -> anyhow::Result<()> {
     suspend_resume_system(false)
@@ -118,11 +137,15 @@ fn suspend_resume_system(disabled_sandbox: bool) -> anyhow::Result<()> {
         vm.exec_in_guest("cat /tmp/foo").unwrap().stdout.trim()
     );
 
-    let snap1 = std::fs::read_to_string(&snap1_path).unwrap();
-    let snap2 = std::fs::read_to_string(&snap2_path).unwrap();
-    let snap3 = std::fs::read_to_string(&snap3_path).unwrap();
-    assert_ne!(snap1, snap2);
-    assert_eq!(snap1, snap3);
+    let (equal, output) = compare_snapshots(&snap1_path, &snap2_path);
+    assert!(
+        !equal,
+        "1st and 2nd snapshot are unexpectedly equal:\n{output}"
+    );
+
+    let (equal, output) = compare_snapshots(&snap1_path, &snap3_path);
+    assert!(equal, "1st and 3rd snapshot are not equal:\n{output}");
+
     Ok(())
 }
 
@@ -167,22 +190,14 @@ fn snapshot_vhost_user() {
 
         let mut config = Config::new();
         config = config.with_stdout_hardware("legacy-virtio-console");
-        config = config.extra_args(vec![
-            "--vhost-user-blk".to_string(),
-            block_socket.path().to_str().unwrap().to_string(),
-            "--vhost-user-net".to_string(),
-            net_socket.path().to_str().unwrap().to_string(),
-            "--no-usb".to_string(),
-        ]);
+        config = config.with_vhost_user("block", block_socket.path());
+        config = config.with_vhost_user("net", net_socket.path());
+        config = config.extra_args(vec!["--no-usb".to_string()]);
         let mut vm = TestVm::new(config).unwrap();
 
         // suspend VM
         vm.suspend_full().unwrap();
         vm.snapshot(&snap_path).unwrap();
-
-        let snapshot_json = std::fs::read_to_string(&snap_path).unwrap();
-
-        assert!(snapshot_json.contains("\"device_name\":\"virtio-block\""));
     }
 
     let (_block_vu_device, _net_vu_device, block_socket, net_socket) = spin_up_vhost_user_devices();
@@ -190,11 +205,9 @@ fn snapshot_vhost_user() {
     let mut config = Config::new();
     // Start up VM with cold restore.
     config = config.with_stdout_hardware("legacy-virtio-console");
+    config = config.with_vhost_user("block", block_socket.path());
+    config = config.with_vhost_user("net", net_socket.path());
     config = config.extra_args(vec![
-        "--vhost-user-blk".to_string(),
-        block_socket.path().to_str().unwrap().to_string(),
-        "--vhost-user-net".to_string(),
-        net_socket.path().to_str().unwrap().to_string(),
         "--restore".to_string(),
         snap_path.to_str().unwrap().to_string(),
         "--no-usb".to_string(),

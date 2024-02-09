@@ -60,6 +60,10 @@ pub struct VfioOption {
     /// PCI address to use for the VFIO device in the guest.
     /// If not specified, defaults to mirroring the host PCI address.
     pub guest_address: Option<PciAddress>,
+
+    /// The symbol that labels the overlay device tree node which corresponds to this
+    /// VFIO device.
+    pub dt_symbol: Option<String>,
 }
 
 #[derive(Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -102,7 +106,9 @@ impl Default for SharedDir {
             tag: Default::default(),
             kind: Default::default(),
             ugid: (None, None),
+            // SAFETY: trivially safe
             uid_map: format!("0 {} 1", unsafe { geteuid() }),
+            // SAFETY: trivially safe
             gid_map: format!("0 {} 1", unsafe { getegid() }),
             fs_cfg: Default::default(),
             p9_cfg: Default::default(),
@@ -192,6 +198,18 @@ impl FromStr for SharedDir {
             SharedDirKind::FS => {
                 shared_dir.fs_cfg = from_key_values(&type_opts.join(","))
                     .map_err(|e| anyhow!("failed to parse fs config '{:?}': {e}", type_opts))?;
+
+                if shared_dir.fs_cfg.ascii_casefold && !shared_dir.fs_cfg.negative_timeout.is_zero()
+                {
+                    // Disallow the combination of `ascii_casefold` and `negative_timeout` because
+                    // negative dentry caches doesn't wort well in scenarios like the following:
+                    // 1. Lookup "foo", an non-existing file. Negative dentry is cached on the
+                    //    guest.
+                    // 2. Create "FOO".
+                    // 3. Lookup "foo". This needs to be successful on the casefold directory,
+                    //    but the lookup can fail due the negative cache created at 1.
+                    bail!("'negative_timeout' cannot be used with 'ascii_casefold'");
+                }
             }
             SharedDirKind::P9 => {
                 shared_dir.p9_cfg = type_opts
@@ -215,7 +233,6 @@ mod tests {
 
     use super::*;
     use crate::crosvm::config::from_key_values;
-    use crate::crosvm::config::BindMount;
     use crate::crosvm::config::DEFAULT_TOUCH_DEVICE_HEIGHT;
     use crate::crosvm::config::DEFAULT_TOUCH_DEVICE_WIDTH;
 
@@ -303,30 +320,6 @@ mod tests {
         // invalid parameter
         let coiommu_params = from_key_values::<CoIommuParameters>("unpin_invalid_param=0");
         assert!(coiommu_params.is_err());
-    }
-
-    #[test]
-    fn parse_plugin_mount_valid() {
-        let opt: BindMount = "/dev/null:/dev/zero:true".parse().unwrap();
-
-        assert_eq!(opt.src, PathBuf::from("/dev/null"));
-        assert_eq!(opt.dst, PathBuf::from("/dev/zero"));
-        assert!(opt.writable);
-    }
-
-    #[test]
-    fn parse_plugin_mount_valid_shorthand() {
-        let opt: BindMount = "/dev/null".parse().unwrap();
-        assert_eq!(opt.dst, PathBuf::from("/dev/null"));
-        assert!(!opt.writable);
-
-        let opt: BindMount = "/dev/null:/dev/zero".parse().unwrap();
-        assert_eq!(opt.dst, PathBuf::from("/dev/zero"));
-        assert!(!opt.writable);
-
-        let opt: BindMount = "/dev/null::true".parse().unwrap();
-        assert_eq!(opt.dst, PathBuf::from("/dev/null"));
-        assert!(opt.writable);
     }
 
     #[test]

@@ -8,26 +8,29 @@ use std::convert::AsRef;
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::Read;
-use std::io::Write;
 use std::marker::Send;
 use std::marker::Sync;
 use std::result;
 use std::sync::Arc;
 
 use anyhow::bail;
+use anyhow::Context;
 use base::pagesize;
 use base::AsRawDescriptor;
 use base::AsRawDescriptors;
 use base::Error as SysError;
+use base::FileReadWriteVolatile;
 use base::MappedRegion;
 use base::MemoryMapping;
 use base::MemoryMappingBuilder;
 use base::MmapError;
 use base::RawDescriptor;
 use base::SharedMemory;
+use base::VolatileMemory;
+use base::VolatileMemoryError;
+use base::VolatileSlice;
 use cros_async::mem;
 use cros_async::BackingMemory;
-use data_model::volatile_memory::*;
 use remain::sorted;
 use thiserror::Error;
 use zerocopy::AsBytes;
@@ -696,87 +699,10 @@ impl GuestMemory {
                     .map_err(Error::VolatileMemoryAccess)
             })
     }
-
-    /// Reads data from a file descriptor and writes it to guest memory.
-    ///
-    /// # Arguments
-    /// * `guest_addr` - Begin writing memory at this offset.
-    /// * `src` - Read from `src` to memory.
-    /// * `count` - Read `count` bytes from `src` to memory.
-    ///
-    /// # Examples
-    ///
-    /// * Read bytes from /dev/urandom
-    ///
-    /// ```
-    /// # use base::MemoryMapping;
-    /// # use vm_memory::{GuestAddress, GuestMemory};
-    /// # use std::fs::File;
-    /// # use std::path::Path;
-    /// # fn test_read_random() -> Result<u32, ()> {
-    /// #     let start_addr = GuestAddress(0x1000);
-    /// #     let gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
-    ///       let mut file = File::open(Path::new("/dev/urandom")).map_err(|_| ())?;
-    ///       let addr = GuestAddress(0x1010);
-    ///       gm.read_to_memory(addr, &mut file, 128).map_err(|_| ())?;
-    ///       let read_addr = addr.checked_add(8).ok_or(())?;
-    ///       let rand_val: u32 = gm.read_obj_from_addr(read_addr).map_err(|_| ())?;
-    /// #     Ok(rand_val)
-    /// # }
-    /// ```
-    pub fn read_to_memory<F: Read + AsRawDescriptor>(
-        &self,
-        guest_addr: GuestAddress,
-        src: &mut F,
-        count: usize,
-    ) -> Result<()> {
-        let (mapping, offset, _) = self.find_region(guest_addr)?;
-        mapping
-            .read_to_memory(offset, src, count)
-            .map_err(|e| Error::MemoryAccess(guest_addr, e))
-    }
-
-    /// Writes data from memory to a file descriptor.
-    ///
-    /// # Arguments
-    /// * `guest_addr` - Begin reading memory from this offset.
-    /// * `dst` - Write from memory to `dst`.
-    /// * `count` - Read `count` bytes from memory to `src`.
-    ///
-    /// # Examples
-    ///
-    /// * Write 128 bytes to /dev/null
-    ///
-    /// ```
-    /// # use base::MemoryMapping;
-    /// # use vm_memory::{GuestAddress, GuestMemory};
-    /// # use std::fs::File;
-    /// # use std::path::Path;
-    /// # fn test_write_null() -> Result<(), ()> {
-    /// #     let start_addr = GuestAddress(0x1000);
-    /// #     let gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
-    ///       let mut file = File::open(Path::new("/dev/null")).map_err(|_| ())?;
-    ///       let addr = GuestAddress(0x1010);
-    ///       gm.write_from_memory(addr, &mut file, 128).map_err(|_| ())?;
-    /// #     Ok(())
-    /// # }
-    /// ```
-    pub fn write_from_memory<F: Write + AsRawDescriptor>(
-        &self,
-        guest_addr: GuestAddress,
-        dst: &mut F,
-        count: usize,
-    ) -> Result<()> {
-        let (mapping, offset, _) = self.find_region(guest_addr)?;
-        mapping
-            .write_from_memory(offset, dst, count)
-            .map_err(|e| Error::MemoryAccess(guest_addr, e))
-    }
-
     /// Convert a GuestAddress into a pointer in the address space of this
     /// process. This should only be necessary for giving addresses to the
     /// kernel, as with vhost ioctls. Normal reads/writes to guest memory should
-    /// be done through `write_from_memory`, `read_obj_from_addr`, etc.
+    /// be done through `write_obj_at_addr`, `read_obj_from_addr`, etc.
     ///
     /// # Arguments
     /// * `guest_addr` - Guest address to convert.
@@ -795,9 +721,12 @@ impl GuestMemory {
     /// ```
     pub fn get_host_address(&self, guest_addr: GuestAddress) -> Result<*const u8> {
         let (mapping, offset, _) = self.find_region(guest_addr)?;
-        // This is safe; `find_region` already checks that offset is in
-        // bounds.
-        Ok(unsafe { mapping.as_ptr().add(offset) } as *const u8)
+        Ok(
+            // SAFETY:
+            // This is safe; `find_region` already checks that offset is in
+            // bounds.
+            unsafe { mapping.as_ptr().add(offset) } as *const u8,
+        )
     }
 
     /// Convert a GuestAddress into a pointer in the address space of this
@@ -841,9 +770,12 @@ impl GuestMemory {
             return Err(Error::InvalidGuestAddress(guest_addr));
         }
 
-        // This is safe; `find_region` already checks that offset is in
-        // bounds.
-        Ok(unsafe { mapping.as_ptr().add(offset) } as *const u8)
+        Ok(
+            //SAFETY:
+            // This is safe; `find_region` already checks that offset is in
+            // bounds.
+            unsafe { mapping.as_ptr().add(offset) } as *const u8,
+        )
     }
 
     /// Returns a reference to the region that backs the given address.
@@ -933,10 +865,22 @@ impl GuestMemory {
         };
 
         for region in self.regions.iter() {
-            metadata
-                .regions
-                .push((region.guest_base.0, region.mapping.size()));
-            self.write_from_memory(region.guest_base, w, region.mapping.size())?;
+            let hole_ranges = region
+                .scan_for_hole_ranges()
+                .context("scan_for_hole_ranges failed")?;
+            let mut offset = 0;
+            for &(is_hole, size) in &hole_ranges {
+                if !is_hole {
+                    let region_vslice = region.mapping.get_slice(offset, size)?;
+                    w.write_all_volatile(region_vslice)?;
+                }
+                offset = offset.checked_add(size).unwrap();
+            }
+            metadata.regions.push(MemoryRegionSnapshotMetadata {
+                guest_base: region.guest_base.0,
+                size: region.mapping.size(),
+                hole_ranges,
+            });
         }
 
         Ok(serde_json::to_value(metadata)?)
@@ -962,14 +906,26 @@ impl GuestMemory {
                 self.regions.len()
             );
         }
-        for (region, (guest_base, size)) in self.regions.iter().zip(metadata.regions.iter()) {
+        for (region, metadata) in self.regions.iter().zip(metadata.regions.iter()) {
+            let MemoryRegionSnapshotMetadata {
+                guest_base,
+                size,
+                hole_ranges,
+            } = metadata;
             if region.guest_base.0 != *guest_base || region.mapping.size() != *size {
                 bail!("snapshot memory regions don't match VM memory regions");
             }
-        }
 
-        for region in self.regions.iter() {
-            self.read_to_memory(region.guest_base, r, region.mapping.size())?;
+            let mut offset = 0;
+            for &(is_hole, size) in hole_ranges {
+                if !is_hole {
+                    let region_vslice = region.mapping.get_slice(offset, size)?;
+                    r.read_exact_volatile(region_vslice)?;
+                } else {
+                    region.zero_range(offset, size)?;
+                }
+                offset = offset.checked_add(size).unwrap();
+            }
         }
 
         // Should always be at EOF at this point.
@@ -982,13 +938,20 @@ impl GuestMemory {
     }
 }
 
-// TODO: Consider storing a hash of memory contents and validating it on restore.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct MemorySnapshotMetadata {
-    // Guest base and size for each memory region.
-    regions: Vec<(u64, usize)>,
+    regions: Vec<MemoryRegionSnapshotMetadata>,
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct MemoryRegionSnapshotMetadata {
+    guest_base: u64,
+    size: usize,
+    // (is_hole, size) ranges. The memory snapshot file will only store the non-hole ranges.
+    hole_ranges: Vec<(bool, usize)>,
+}
+
+// SAFETY:
 // It is safe to implement BackingMemory because GuestMemory can be mutated any time already.
 unsafe impl BackingMemory for GuestMemory {
     fn get_volatile_slice(
@@ -1181,6 +1144,125 @@ mod tests {
             if region.index == 1 {
                 assert!(mmap.read_obj::<u16>(0x0).unwrap() == 0x0420u16);
             }
+        }
+    }
+
+    #[test]
+    // Disabled for non-x86 because test infra uses qemu-user, which doesn't support MADV_REMOVE.
+    #[cfg(target_arch = "x86_64")]
+    fn snapshot_restore() {
+        let regions = &[
+            // Hole at start.
+            (GuestAddress(0x0), 0x10000),
+            // Hole at end.
+            (GuestAddress(0x10000), 0x10000),
+            // Hole in middle.
+            (GuestAddress(0x20000), 0x10000),
+            // All holes.
+            (GuestAddress(0x30000), 0x10000),
+            // No holes.
+            (GuestAddress(0x40000), 0x1000),
+        ];
+        let writes = &[
+            (GuestAddress(0x0FFF0), 1u64),
+            (GuestAddress(0x10000), 2u64),
+            (GuestAddress(0x29000), 3u64),
+            (GuestAddress(0x40000), 4u64),
+        ];
+
+        let gm = GuestMemory::new(regions).unwrap();
+        for &(addr, value) in writes {
+            gm.write_obj_at_addr(value, addr).unwrap();
+        }
+
+        let mut data = tempfile::tempfile().unwrap();
+        let metadata_json = gm.snapshot(&mut data).unwrap();
+        let metadata: MemorySnapshotMetadata =
+            serde_json::from_value(metadata_json.clone()).unwrap();
+
+        #[cfg(unix)]
+        assert_eq!(
+            metadata,
+            MemorySnapshotMetadata {
+                regions: vec![
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0,
+                        size: 0x10000,
+                        hole_ranges: vec![(true, 0xF000), (false, 0x1000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x10000,
+                        size: 0x10000,
+                        hole_ranges: vec![(false, 0x1000), (true, 0xF000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x20000,
+                        size: 0x10000,
+                        hole_ranges: vec![(true, 0x9000), (false, 0x1000), (true, 0x6000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x30000,
+                        size: 0x10000,
+                        hole_ranges: vec![(true, 0x10000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x40000,
+                        size: 0x1000,
+                        hole_ranges: vec![(false, 0x1000)]
+                    }
+                ],
+            }
+        );
+        // We can't detect the holes on Windows yet.
+        #[cfg(windows)]
+        assert_eq!(
+            metadata,
+            MemorySnapshotMetadata {
+                regions: vec![
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0,
+                        size: 0x10000,
+                        hole_ranges: vec![(false, 0x10000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x10000,
+                        size: 0x10000,
+                        hole_ranges: vec![(false, 0x10000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x20000,
+                        size: 0x10000,
+                        hole_ranges: vec![(false, 0x10000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x30000,
+                        size: 0x10000,
+                        hole_ranges: vec![(false, 0x10000)]
+                    },
+                    MemoryRegionSnapshotMetadata {
+                        guest_base: 0x40000,
+                        size: 0x1000,
+                        hole_ranges: vec![(false, 0x1000)]
+                    }
+                ],
+            }
+        );
+
+        std::mem::drop(gm);
+
+        let gm2 = GuestMemory::new(regions).unwrap();
+
+        // Write to a hole so we can assert the restore zeroes it.
+        let hole_addr = GuestAddress(0x30000);
+        gm2.write_obj_at_addr(8u64, hole_addr).unwrap();
+
+        use std::io::Seek;
+        data.seek(std::io::SeekFrom::Start(0)).unwrap();
+        gm2.restore(metadata_json, &mut data).unwrap();
+
+        assert_eq!(gm2.read_obj_from_addr::<u64>(hole_addr).unwrap(), 0);
+        for &(addr, value) in writes {
+            assert_eq!(gm2.read_obj_from_addr::<u64>(addr).unwrap(), value);
         }
     }
 }

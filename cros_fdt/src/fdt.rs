@@ -13,6 +13,8 @@ use std::io;
 use remain::sorted;
 use thiserror::Error as ThisError;
 
+use crate::path::Path;
+use crate::propval::FromFdtPropval;
 use crate::propval::ToFdtPropval;
 
 pub(crate) const SIZE_U32: usize = std::mem::size_of::<u32>();
@@ -21,6 +23,8 @@ pub(crate) const SIZE_U64: usize = std::mem::size_of::<u64>();
 #[sorted]
 #[derive(ThisError, Debug)]
 pub enum Error {
+    #[error("Error applying device tree overlay: {}", .0)]
+    ApplyOverlayError(String),
     #[error("Binary size must fit in 32 bits")]
     BinarySizeTooLarge,
     #[error("Duplicate node {}", .0)]
@@ -33,10 +37,16 @@ pub enum Error {
     FdtIoError(io::Error),
     #[error("Parse error reading FDT parameters: {}", .0)]
     FdtParseError(String),
+    #[error("Error applying FDT tree filter: {}", .0)]
+    FilterError(String),
     #[error("Invalid name string: {}", .0)]
     InvalidName(String),
+    #[error("Invalid path: {}", .0)]
+    InvalidPath(String),
     #[error("Invalid string value {}", .0)]
     InvalidString(String),
+    #[error("Expected phandle value for IOMMU of type: {}, id: {:?}", .0, .1)]
+    MissingIommuPhandle(String, Option<u32>),
     #[error("Property value is not valid")]
     PropertyValueInvalid,
     #[error("Property value size must fit in 32 bits")]
@@ -128,7 +138,7 @@ fn is_valid_node_name(name: &str) -> bool {
 }
 
 // An implementation of FDT header.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct FdtHeader {
     magic: u32,             // magic word
     total_size: u32,        // total size of DT block
@@ -210,6 +220,9 @@ impl FdtHeader {
             size_dt_strings: rdu32(input)?,
             size_dt_struct: rdu32(input)?,
         };
+        if header.magic != Self::MAGIC {
+            return Err(Error::FdtParseError("invalid header magic".into()));
+        }
         if header.version < Self::VERSION {
             return Err(Error::FdtParseError("unsupported FDT version".into()));
         }
@@ -220,14 +233,24 @@ impl FdtHeader {
                 "invalid reserved memory offset".into(),
             ));
         }
-        if header.off_dt_struct >= header.off_dt_strings {
-            return Err(Error::FdtParseError("invalid DT struct offset".into()));
+
+        let off_dt_struct_end = header
+            .off_dt_struct
+            .checked_add(header.size_dt_struct)
+            .ok_or_else(|| Error::FdtParseError("struct end offset must fit in 32 bits".into()))?;
+        if off_dt_struct_end > header.off_dt_strings {
+            return Err(Error::FdtParseError("struct and strings overlap".into()));
         }
-        if header.magic != Self::MAGIC {
-            Err(Error::FdtParseError("invalid header magic".into()))
-        } else {
-            Ok(header)
+
+        let off_dt_strings_end = header
+            .off_dt_strings
+            .checked_add(header.size_dt_strings)
+            .ok_or_else(|| Error::FdtParseError("strings end offset must fit in 32 bits".into()))?;
+        if off_dt_strings_end > header.total_size {
+            return Err(Error::FdtParseError("strings data past total size".into()));
         }
+
+        Ok(header)
     }
 }
 
@@ -434,6 +457,57 @@ impl FdtNode {
         Ok(())
     }
 
+    // Iterate over property names defined for this node.
+    pub(crate) fn prop_names(&self) -> impl std::iter::Iterator<Item = &str> {
+        self.props.keys().map(|s| s.as_str())
+    }
+
+    // Return true if a property with the given name exists.
+    pub(crate) fn has_prop(&self, name: &str) -> bool {
+        self.props.contains_key(name)
+    }
+
+    /// Read property value if it exists.
+    ///
+    /// # Arguments
+    ///
+    /// `name` - name of the property.
+    pub fn get_prop<T>(&self, name: &str) -> Option<T>
+    where
+        T: FromFdtPropval,
+    {
+        T::from_propval(self.props.get(name)?.as_slice())
+    }
+
+    // Read a phandle value (a `u32`) at some offset within a property value.
+    // Returns `None` if a phandle value cannot be constructed.
+    pub(crate) fn phandle_at_offset(&self, name: &str, offset: usize) -> Option<u32> {
+        let data = self.props.get(name)?;
+        data.get(offset..offset + SIZE_U32)
+            .and_then(u32::from_propval)
+    }
+
+    // Overwrite a phandle value (a `u32`) at some offset within a property value.
+    // Returns `Err` if the property doesn't exist, or if the property value is too short to
+    // construct a `u32` at given offset. Does not change property value size.
+    pub(crate) fn update_phandle_at_offset(
+        &mut self,
+        name: &str,
+        offset: usize,
+        phandle: u32,
+    ) -> Result<()> {
+        let propval = self
+            .props
+            .get_mut(name)
+            .ok_or_else(|| Error::InvalidName(format!("property {name} does not exist")))?;
+        if let Some(bytes) = propval.get_mut(offset..offset + SIZE_U32) {
+            bytes.copy_from_slice(phandle.to_propval()?.as_slice());
+            Ok(())
+        } else {
+            Err(Error::PropertyValueInvalid)
+        }
+    }
+
     /// Write a property.
     ///
     /// # Arguments
@@ -454,6 +528,15 @@ impl FdtNode {
         Ok(())
     }
 
+    /// Return a reference to an existing subnode with given name, or `None` if it doesn't exist.
+    ///
+    /// # Arguments
+    ///
+    /// `name` - name of the node.
+    pub fn subnode(&self, name: &str) -> Option<&FdtNode> {
+        self.subnodes.get(name)
+    }
+
     /// Create a node if it doesn't already exist, and return a mutable reference to it. Return
     /// an error if the node name is not valid.
     ///
@@ -465,6 +548,16 @@ impl FdtNode {
             self.subnodes.insert(name.into(), FdtNode::empty(name)?);
         }
         Ok(self.subnodes.get_mut(name).unwrap())
+    }
+
+    // Iterate subnode references.
+    pub(crate) fn iter_subnodes(&self) -> impl std::iter::Iterator<Item = &FdtNode> {
+        self.subnodes.values()
+    }
+
+    // Iterate mutable subnode references.
+    pub(crate) fn iter_subnodes_mut(&mut self) -> impl std::iter::Iterator<Item = &mut FdtNode> {
+        self.subnodes.values_mut()
     }
 }
 
@@ -590,7 +683,10 @@ impl Fdt {
     ///
     /// `input` - byte slice from which to load the FDT.
     pub fn from_blob(input: Blob) -> Result<Self> {
-        let header = FdtHeader::from_blob(&input[..FdtHeader::SIZE])?;
+        let header = input
+            .get(..FdtHeader::SIZE)
+            .ok_or_else(|| Error::FdtParseError("cannot extract header, input too small".into()))?;
+        let header = FdtHeader::from_blob(header)?;
         if header.total_size as usize != input.len() {
             return Err(Error::FdtParseError("input size doesn't match".into()));
         }
@@ -656,6 +752,51 @@ impl Fdt {
     pub fn root_mut(&mut self) -> &mut FdtNode {
         &mut self.root
     }
+
+    /// Return a reference to the node the path points to, or `None` if it doesn't exist.
+    ///
+    /// # Arguments
+    ///
+    /// `path` - device tree path of the target node.
+    pub fn get_node<T: TryInto<Path>>(&self, path: T) -> Option<&FdtNode> {
+        let mut result_node = &self.root;
+        let path: Path = path.try_into().ok()?;
+        for node_name in path.iter() {
+            result_node = result_node.subnodes.get(node_name)?;
+        }
+        Some(result_node)
+    }
+
+    /// Return a mutable reference to the node the path points to, or `None` if it
+    /// doesn't exist.
+    ///
+    /// # Arguments
+    ///
+    /// `path` - device tree path of the target node.
+    pub fn get_node_mut<T: TryInto<Path>>(&mut self, path: T) -> Option<&mut FdtNode> {
+        let mut result_node = &mut self.root;
+        let path: Path = path.try_into().ok()?;
+        for node_name in path.iter() {
+            result_node = result_node.subnodes.get_mut(node_name)?;
+        }
+        Some(result_node)
+    }
+
+    /// Find a device tree path to the symbol exported by the FDT. The symbol must be a node label.
+    ///
+    /// # Arguments
+    ///
+    /// `symbol` - symbol to search for.
+    pub fn symbol_to_path(&self, symbol: &str) -> Result<Path> {
+        const SYMBOLS_NODE: &str = "__symbols__";
+        let Some(symbols_node) = self.root.subnode(SYMBOLS_NODE) else {
+            return Err(Error::InvalidPath("no symbols in fdt".into()));
+        };
+        symbols_node
+            .get_prop::<String>(symbol)
+            .ok_or_else(|| Error::InvalidName(format!("filter symbol {symbol} does not exist")))?
+            .parse()
+    }
 }
 
 #[cfg(test)]
@@ -720,6 +861,45 @@ mod tests {
 
     const EXPECTED_STRINGS: [&str; 7] = ["null", "u32", "u64", "str", "strlst", "arru32", "arru64"];
 
+    const FDT_BLOB_NODES_ROOT_ONLY: [u8; 0x90] = [
+        0x00, 0x00, 0x00, 0x01, // FDT_BEGIN_NODE
+        0x00, 0x00, 0x00, 0x00, // node name ("") + padding
+        0x00, 0x00, 0x00, 0x03, // FDT_PROP (null)
+        0x00, 0x00, 0x00, 0x00, // prop len (0)
+        0x00, 0x00, 0x00, 0x00, // prop nameoff (0)
+        0x00, 0x00, 0x00, 0x03, // FDT_PROP (u32)
+        0x00, 0x00, 0x00, 0x04, // prop len (4)
+        0x00, 0x00, 0x00, 0x05, // prop nameoff (0x05)
+        0x12, 0x34, 0x56, 0x78, // prop u32 value (0x12345678)
+        0x00, 0x00, 0x00, 0x03, // FDT_PROP (u64)
+        0x00, 0x00, 0x00, 0x08, // prop len (8)
+        0x00, 0x00, 0x00, 0x09, // prop nameoff (0x09)
+        0x12, 0x34, 0x56, 0x78, // prop u64 value high (0x12345678)
+        0x87, 0x65, 0x43, 0x21, // prop u64 value low (0x87654321)
+        0x00, 0x00, 0x00, 0x03, // FDT_PROP (string)
+        0x00, 0x00, 0x00, 0x06, // prop len (6)
+        0x00, 0x00, 0x00, 0x0D, // prop nameoff (0x0D)
+        b'h', b'e', b'l', b'l', // prop str value ("hello") + padding
+        b'o', 0x00, 0x00, 0x00, // "o\0" + padding
+        0x00, 0x00, 0x00, 0x03, // FDT_PROP (string list)
+        0x00, 0x00, 0x00, 0x07, // prop len (7)
+        0x00, 0x00, 0x00, 0x11, // prop nameoff (0x11)
+        b'h', b'i', 0x00, b'b', // prop value ("hi", "bye")
+        b'y', b'e', 0x00, 0x00, // "ye\0" + padding
+        0x00, 0x00, 0x00, 0x03, // FDT_PROP (u32 array)
+        0x00, 0x00, 0x00, 0x08, // prop len (8)
+        0x00, 0x00, 0x00, 0x18, // prop nameoff (0x18)
+        0x12, 0x34, 0x56, 0x78, // prop value 0
+        0xAA, 0xBB, 0xCC, 0xDD, // prop value 1
+        0x00, 0x00, 0x00, 0x03, // FDT_PROP (u64 array)
+        0x00, 0x00, 0x00, 0x08, // prop len (8)
+        0x00, 0x00, 0x00, 0x1f, // prop nameoff (0x1F)
+        0x12, 0x34, 0x56, 0x78, // prop u64 value 0 high
+        0x87, 0x65, 0x43, 0x21, // prop u64 value 0 low
+        0x00, 0x00, 0x00, 0x02, // FDT_END_NODE
+        0x00, 0x00, 0x00, 0x09, // FDT_END
+    ];
+
     /*
     Node structure:
     /
@@ -779,6 +959,57 @@ mod tests {
     }
 
     #[test]
+    fn fdt_load_invalid_header() {
+        // HEADER is valid
+        const HEADER: [u8; 40] = [
+            0xd0, 0x0d, 0xfe, 0xed, // 0000: magic (0xd00dfeed)
+            0x00, 0x00, 0x00, 0xda, // 0004: totalsize (0xda)
+            0x00, 0x00, 0x00, 0x58, // 0008: off_dt_struct (0x58)
+            0x00, 0x00, 0x00, 0xb2, // 000C: off_dt_strings (0xb2)
+            0x00, 0x00, 0x00, 0x28, // 0010: off_mem_rsvmap (0x28)
+            0x00, 0x00, 0x00, 0x11, // 0014: version (0x11 = 17)
+            0x00, 0x00, 0x00, 0x10, // 0018: last_comp_version (0x10 = 16)
+            0x00, 0x00, 0x00, 0x00, // 001C: boot_cpuid_phys (0)
+            0x00, 0x00, 0x00, 0x28, // 0020: size_dt_strings (0x28)
+            0x00, 0x00, 0x00, 0x5a, // 0024: size_dt_struct (0x5a)
+        ];
+
+        FdtHeader::from_blob(&HEADER).unwrap();
+
+        // Header too small
+        assert!(FdtHeader::from_blob(&HEADER[..FdtHeader::SIZE - 4]).is_err());
+        assert!(FdtHeader::from_blob(&[]).is_err());
+
+        let mut invalid_header = HEADER;
+        invalid_header[0x00] = 0x00; // change magic to (0x000dfeed)
+        FdtHeader::from_blob(&invalid_header).expect_err("invalid magic");
+
+        let mut invalid_header = HEADER;
+        invalid_header[0x07] = 0x10; // make totalsize too small
+        FdtHeader::from_blob(&invalid_header).expect_err("invalid totalsize");
+
+        let mut invalid_header = HEADER;
+        invalid_header[0x0b] = 0x60; // increase off_dt_struct
+        FdtHeader::from_blob(&invalid_header).expect_err("dt struct overlaps with strings");
+
+        let mut invalid_header = HEADER;
+        invalid_header[0x27] = 0x5c; // increase size_dt_struct
+        FdtHeader::from_blob(&invalid_header).expect_err("dt struct overlaps with strings");
+
+        let mut invalid_header = HEADER;
+        invalid_header[0x13] = 0x20; // decrease off_mem_rsvmap
+        FdtHeader::from_blob(&invalid_header).expect_err("reserved memory overlaps with header");
+
+        let mut invalid_header = HEADER;
+        invalid_header[0x0f] = 0x50; // decrease off_dt_strings
+        FdtHeader::from_blob(&invalid_header).expect_err("strings start before struct");
+
+        let mut invalid_header = HEADER;
+        invalid_header[0x23] = 0x50; // increase size_dt_strings
+        FdtHeader::from_blob(&invalid_header).expect_err("strings go past totalsize");
+    }
+
+    #[test]
     fn fdt_load_resv_map() {
         let blob: &[u8] = &FDT_BLOB_RSVMAP;
         let fdt = Fdt::from_blob(blob).unwrap();
@@ -790,6 +1021,57 @@ mod tests {
         assert!(
             fdt.reserved_memory[1].address == 0x1020304050607080
                 && fdt.reserved_memory[1].size == 0x5678
+        );
+    }
+
+    #[test]
+    fn fdt_test_node_props() {
+        let mut node = FdtNode::empty("mynode").unwrap();
+        node.set_prop("myprop", 1u32).unwrap();
+        assert_eq!(node.get_prop::<u32>("myprop").unwrap(), 1u32);
+        node.set_prop("myprop", 0xabcdef9876543210u64).unwrap();
+        assert_eq!(
+            node.get_prop::<u64>("myprop").unwrap(),
+            0xabcdef9876543210u64
+        );
+        node.set_prop("myprop", ()).unwrap();
+        assert_eq!(node.get_prop::<Vec<u8>>("myprop").unwrap(), []);
+        node.set_prop("myprop", vec![1u8, 2u8, 3u8]).unwrap();
+        assert_eq!(
+            node.get_prop::<Vec<u8>>("myprop").unwrap(),
+            vec![1u8, 2u8, 3u8]
+        );
+        node.set_prop("myprop", vec![1u32, 2u32, 3u32]).unwrap();
+        assert_eq!(
+            node.get_prop::<Vec<u32>>("myprop").unwrap(),
+            vec![1u32, 2u32, 3u32]
+        );
+        node.set_prop("myprop", vec![1u64, 2u64, 3u64]).unwrap();
+        assert_eq!(
+            node.get_prop::<Vec<u64>>("myprop").unwrap(),
+            vec![1u64, 2u64, 3u64]
+        );
+        node.set_prop("myprop", "myval".to_string()).unwrap();
+        assert_eq!(
+            node.get_prop::<String>("myprop").unwrap(),
+            "myval".to_string()
+        );
+        node.set_prop(
+            "myprop",
+            vec![
+                "myval1".to_string(),
+                "myval2".to_string(),
+                "myval3".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            node.get_prop::<Vec<String>>("myprop").unwrap(),
+            vec![
+                "myval1".to_string(),
+                "myval2".to_string(),
+                "myval3".to_string()
+            ]
         );
     }
 
@@ -835,6 +1117,32 @@ mod tests {
     }
 
     #[test]
+    fn fdt_load_props() {
+        const PROP_SIZES: [(&str, usize); 7] = [
+            ("null", 0),
+            ("u32", 4),
+            ("u64", 8),
+            ("str", 6),
+            ("strlst", 7),
+            ("arru32", 8),
+            ("arru64", 8),
+        ];
+
+        let blob: &[u8] = &FDT_BLOB_STRINGS[..];
+        let strings = FdtStrings::from_blob(blob).unwrap();
+        let blob: &[u8] = &FDT_BLOB_NODES_ROOT_ONLY[..];
+        let node = FdtNode::from_blob(blob, &strings).unwrap();
+
+        assert_eq!(node.name, "");
+        assert_eq!(node.subnodes.len(), 0);
+        assert_eq!(node.props.len(), PROP_SIZES.len());
+
+        for (pname, s) in PROP_SIZES.into_iter() {
+            assert_eq!(node.get_prop::<Vec<u8>>(pname).unwrap().len(), s);
+        }
+    }
+
+    #[test]
     fn fdt_load_nodes_nested() {
         let strings_blob = &FDT_BLOB_STRINGS[..];
         let strings = FdtStrings::from_blob(strings_blob).unwrap();
@@ -863,6 +1171,51 @@ mod tests {
         assert_eq!(nested3_node.name, "nested3");
         assert_eq!(nested3_node.subnodes.len(), 0);
         assert_eq!(nested3_node.props.len(), 0);
+    }
+
+    #[test]
+    fn fdt_iter_nodes() {
+        let mut root = FdtNode::empty("").unwrap();
+        let node_a = root.subnode_mut("A").unwrap();
+        node_a.subnode_mut("B").unwrap();
+        node_a.subnode_mut("A").unwrap();
+
+        let mut root_subnodes = root.iter_subnodes();
+        let node_a = root_subnodes.next().unwrap();
+        assert_eq!(node_a.name, "A");
+        assert!(root_subnodes.next().is_none());
+
+        let mut node_a_subnodes = node_a.iter_subnodes();
+        assert_eq!(node_a_subnodes.next().unwrap().name, "A");
+        assert_eq!(node_a_subnodes.next().unwrap().name, "B");
+        assert!(node_a_subnodes.next().is_none());
+    }
+
+    #[test]
+    fn fdt_get_node() {
+        let fdt = Fdt::new(&[]);
+        assert!(fdt.get_node("/").is_some());
+        assert!(fdt.get_node("/a").is_none());
+    }
+
+    #[test]
+    fn fdt_find_nested_node() {
+        let mut fdt = Fdt::new(&[]);
+        let node1 = fdt.root.subnode_mut("N1").unwrap();
+        node1.subnode_mut("N1-1").unwrap();
+        node1.subnode_mut("N1-2").unwrap();
+        let node2 = fdt.root.subnode_mut("N2").unwrap();
+        let node2_1 = node2.subnode_mut("N2-1").unwrap();
+        node2_1.subnode_mut("N2-1-1").unwrap();
+
+        assert!(fdt.get_node("/").is_some());
+        assert!(fdt.get_node("/N1").is_some());
+        assert!(fdt.get_node("/N2").is_some());
+        assert!(fdt.get_node("/N1/N1-1").is_some());
+        assert!(fdt.get_node("/N1/N1-2").is_some());
+        assert!(fdt.get_node("/N2/N2-1").is_some());
+        assert!(fdt.get_node("/N2/N2-1/N2-1-1").is_some());
+        assert!(fdt.get_node("/N2/N2-1/A").is_none());
     }
 
     #[test]

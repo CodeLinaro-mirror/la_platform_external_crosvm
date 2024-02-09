@@ -5,52 +5,39 @@
 //! The mmap module provides a safe interface to mmap memory and ensures unmap is called when the
 //! mmap object leaves scope.
 
-use std::io;
 use std::ptr::null_mut;
 
 use libc::c_int;
-use libc::c_void;
-use libc::read;
-use libc::write;
+use libc::PROT_READ;
+use libc::PROT_WRITE;
 use log::warn;
-use remain::sorted;
 
-use super::pagesize;
 use super::Error as ErrnoError;
+use crate::pagesize;
 use crate::AsRawDescriptor;
 use crate::Descriptor;
 use crate::MappedRegion;
 use crate::MemoryMapping as CrateMemoryMapping;
 use crate::MemoryMappingBuilder;
+use crate::MmapError as Error;
+use crate::MmapResult as Result;
 use crate::Protection;
 use crate::RawDescriptor;
 use crate::SafeDescriptor;
 
-#[sorted]
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("`add_fd_mapping` is unsupported")]
-    AddFdMappingIsUnsupported,
-    #[error("requested memory out of range")]
-    InvalidAddress,
-    #[error("invalid argument provided when creating mapping")]
-    InvalidArgument,
-    #[error("requested offset is out of range of off64_t")]
-    InvalidOffset,
-    #[error("requested memory range spans past the end of the region: offset={0} count={1} region_size={2}")]
-    InvalidRange(usize, usize, usize),
-    #[error("requested memory is not page aligned")]
-    NotPageAligned,
-    #[error("failed to read from file to memory: {0}")]
-    ReadToMemory(#[source] io::Error),
-    #[error("`remove_mapping` is unsupported")]
-    RemoveMappingIsUnsupported,
-    #[error("mmap related system call failed: {0}")]
-    SystemCallFailed(#[source] ErrnoError),
-    #[error("failed to write from memory to file: {0}")]
-    WriteFromMemory(#[source] io::Error),
+impl From<Protection> for c_int {
+    #[inline(always)]
+    fn from(p: Protection) -> Self {
+        let mut value = 0;
+        if p.read {
+            value |= PROT_READ
+        }
+        if p.write {
+            value |= PROT_WRITE;
+        }
+        value
+    }
 }
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Validates that `offset`..`offset+range_size` lies within the bounds of a memory mapping of
 /// `mmap_size` bytes.  Also checks for any overflow.
@@ -73,6 +60,7 @@ impl dyn MappedRegion {
     pub fn msync(&self, offset: usize, size: usize) -> Result<()> {
         validate_includes_range(self.size(), offset, size)?;
 
+        // SAFETY:
         // Safe because the MemoryMapping/MemoryMappingArena interface ensures our pointer and size
         // are correct, and we've validated that `offset`..`offset+size` is in the range owned by
         // this `MappedRegion`.
@@ -99,11 +87,13 @@ pub struct MemoryMapping {
     size: usize,
 }
 
+// SAFETY:
 // Send and Sync aren't automatically inherited for the raw address pointer.
 // Accessing that pointer is only done through the stateless interface which
 // allows the object to be shared by multiple threads without a decrease in
 // safety.
 unsafe impl Send for MemoryMapping {}
+// SAFETY: See safety comments for impl Send
 unsafe impl Sync for MemoryMapping {}
 
 impl MemoryMapping {
@@ -121,17 +111,10 @@ impl MemoryMapping {
     /// * `size` - Size of memory region in bytes.
     /// * `prot` - Protection (e.g. readable/writable) of the memory region.
     pub fn new_protection(size: usize, prot: Protection) -> Result<MemoryMapping> {
+        // SAFETY:
         // This is safe because we are creating an anonymous mapping in a place not already used by
         // any other area in this process.
-        unsafe {
-            MemoryMapping::try_mmap(
-                None,
-                size,
-                prot.into(),
-                libc::MAP_ANONYMOUS | libc::MAP_SHARED | libc::MAP_NORESERVE,
-                None,
-            )
-        }
+        unsafe { MemoryMapping::try_mmap(None, size, prot.into(), None) }
     }
 
     /// Maps the first `size` bytes of the given `fd` as read/write.
@@ -157,28 +140,6 @@ impl MemoryMapping {
     /// * `fd` - File descriptor to mmap from.
     /// * `size` - Size of memory region in bytes.
     /// * `offset` - Offset in bytes from the beginning of `fd` to start the mmap.
-    /// * `flags` - flags passed directly to mmap.
-    /// * `prot` - Protection (e.g. readable/writable) of the memory region.
-    fn from_fd_offset_flags(
-        fd: &dyn AsRawDescriptor,
-        size: usize,
-        offset: u64,
-        flags: c_int,
-        prot: Protection,
-    ) -> Result<MemoryMapping> {
-        unsafe {
-            // This is safe because we are creating an anonymous mapping in a place not already used
-            // by any other area in this process.
-            MemoryMapping::try_mmap(None, size, prot.into(), flags, Some((fd, offset)))
-        }
-    }
-
-    /// Maps the `size` bytes starting at `offset` bytes of the given `fd` as read/write.
-    ///
-    /// # Arguments
-    /// * `fd` - File descriptor to mmap from.
-    /// * `size` - Size of memory region in bytes.
-    /// * `offset` - Offset in bytes from the beginning of `fd` to start the mmap.
     /// * `prot` - Protection (e.g. readable/writable) of the memory region.
     pub fn from_fd_offset_protection(
         fd: &dyn AsRawDescriptor,
@@ -186,7 +147,7 @@ impl MemoryMapping {
         offset: u64,
         prot: Protection,
     ) -> Result<MemoryMapping> {
-        MemoryMapping::from_fd_offset_flags(fd, size, offset, libc::MAP_SHARED, prot)
+        MemoryMapping::from_fd_offset_protection_populate(fd, size, offset, prot, false)
     }
 
     /// Maps `size` bytes starting at `offset` from the given `fd` as read/write, and requests
@@ -195,6 +156,8 @@ impl MemoryMapping {
     /// * `fd` - File descriptor to mmap from.
     /// * `size` - Size of memory region in bytes.
     /// * `offset` - Offset in bytes from the beginning of `fd` to start the mmap.
+    /// * `prot` - Protection (e.g. readable/writable) of the memory region.
+    /// * `populate` - Populate (prefault) page tables for a mapping.
     pub fn from_fd_offset_protection_populate(
         fd: &dyn AsRawDescriptor,
         size: usize,
@@ -202,11 +165,12 @@ impl MemoryMapping {
         prot: Protection,
         populate: bool,
     ) -> Result<MemoryMapping> {
-        let mut flags = libc::MAP_SHARED;
-        if populate {
-            flags |= libc::MAP_POPULATE;
+        // SAFETY:
+        // This is safe because we are creating an anonymous mapping in a place not already used
+        // by any other area in this process.
+        unsafe {
+            MemoryMapping::try_mmap_populate(None, size, prot.into(), Some((fd, offset)), populate)
         }
-        MemoryMapping::from_fd_offset_flags(fd, size, offset, flags, prot)
     }
 
     /// Creates an anonymous shared mapping of `size` bytes with `prot` protection.
@@ -226,13 +190,7 @@ impl MemoryMapping {
         size: usize,
         prot: Protection,
     ) -> Result<MemoryMapping> {
-        MemoryMapping::try_mmap(
-            Some(addr),
-            size,
-            prot.into(),
-            libc::MAP_ANONYMOUS | libc::MAP_SHARED | libc::MAP_NORESERVE,
-            None,
-        )
+        MemoryMapping::try_mmap(Some(addr), size, prot.into(), None)
     }
 
     /// Maps the `size` bytes starting at `offset` bytes of the given `fd` with
@@ -257,45 +215,65 @@ impl MemoryMapping {
         offset: u64,
         prot: Protection,
     ) -> Result<MemoryMapping> {
-        MemoryMapping::try_mmap(
-            Some(addr),
-            size,
-            prot.into(),
-            libc::MAP_SHARED | libc::MAP_NORESERVE,
-            Some((fd, offset)),
-        )
+        MemoryMapping::try_mmap(Some(addr), size, prot.into(), Some((fd, offset)))
     }
 
-    /// Helper wrapper around libc::mmap that does some basic validation, and calls
-    /// madvise with MADV_DONTDUMP on the created mmap
+    /// Helper wrapper around try_mmap_populate when without MAP_POPULATE
     unsafe fn try_mmap(
         addr: Option<*mut u8>,
         size: usize,
         prot: c_int,
-        flags: c_int,
         fd: Option<(&dyn AsRawDescriptor, u64)>,
     ) -> Result<MemoryMapping> {
-        let mut flags = flags;
-        // If addr is provided, set the FIXED flag, and validate addr alignment
+        MemoryMapping::try_mmap_populate(addr, size, prot, fd, false)
+    }
+
+    /// Helper wrapper around libc::mmap that does some basic validation, and calls
+    /// madvise with MADV_DONTDUMP on the created mmap
+    unsafe fn try_mmap_populate(
+        addr: Option<*mut u8>,
+        size: usize,
+        prot: c_int,
+        fd: Option<(&dyn AsRawDescriptor, u64)>,
+        populate: bool,
+    ) -> Result<MemoryMapping> {
+        let mut flags = libc::MAP_SHARED;
+        if populate {
+            flags |= libc::MAP_POPULATE;
+        }
+        // If addr is provided, set the (FIXED | NORESERVE) flag, and validate addr alignment.
         let addr = match addr {
             Some(addr) => {
                 if (addr as usize) % pagesize() != 0 {
                     return Err(Error::NotPageAligned);
                 }
-                flags |= libc::MAP_FIXED;
+                flags |= libc::MAP_FIXED | libc::MAP_NORESERVE;
                 addr as *mut libc::c_void
             }
             None => null_mut(),
         };
-        // If fd is provided, validate fd offset is within bounds
+        // If fd is provided, validate fd offset is within bounds. If not, it's anonymous mapping
+        // and set the (ANONYMOUS | NORESERVE) flag.
         let (fd, offset) = match fd {
             Some((fd, offset)) => {
                 if offset > libc::off64_t::max_value() as u64 {
                     return Err(Error::InvalidOffset);
                 }
+                // Map private for read-only seal. See below for upstream relax of the restriction.
+                // - https://lore.kernel.org/bpf/20231013103208.kdffpyerufr4ygnw@quack3/T/
+                // SAFETY:
+                // Safe because no third parameter is expected and we check the return result.
+                let seals = unsafe { libc::fcntl(fd.as_raw_descriptor(), libc::F_GET_SEALS) };
+                if (seals >= 0) && (seals & libc::F_SEAL_WRITE != 0) {
+                    flags &= !libc::MAP_SHARED;
+                    flags |= libc::MAP_PRIVATE;
+                }
                 (fd.as_raw_descriptor(), offset as libc::off64_t)
             }
-            None => (-1, 0),
+            None => {
+                flags |= libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
+                (-1, 0)
+            }
         };
         let addr = libc::mmap64(addr, size, prot, flags, fd, offset);
         if addr == libc::MAP_FAILED {
@@ -317,6 +295,7 @@ impl MemoryMapping {
 
     /// Madvise the kernel to unmap on fork.
     pub fn use_dontfork(&self) -> Result<()> {
+        // SAFETY:
         // This is safe because we call madvise with a valid address and size, and we check the
         // return value.
         let ret = unsafe {
@@ -343,6 +322,7 @@ impl MemoryMapping {
             return Ok(());
         }
 
+        // SAFETY:
         // This is safe because we call madvise with a valid address and size, and we check the
         // return value.
         let ret = unsafe {
@@ -361,6 +341,7 @@ impl MemoryMapping {
 
     /// Calls msync with MS_SYNC on the mapping.
     pub fn msync(&self) -> Result<()> {
+        // SAFETY:
         // This is safe since we use the exact address and length of a known
         // good memory mapping.
         let ret = unsafe {
@@ -376,130 +357,13 @@ impl MemoryMapping {
         Ok(())
     }
 
-    /// Reads data from a file descriptor and writes it to guest memory.
-    ///
-    /// # Arguments
-    /// * `mem_offset` - Begin writing memory at this offset.
-    /// * `src` - Read from `src` to memory.
-    /// * `count` - Read `count` bytes from `src` to memory.
-    ///
-    /// # Examples
-    ///
-    /// * Read bytes from /dev/urandom
-    ///
-    /// ```
-    /// # use base::MemoryMappingBuilder;
-    /// # use std::fs::File;
-    /// # use std::path::Path;
-    /// # fn test_read_random() -> Result<u32, ()> {
-    /// #     let mut mem_map = MemoryMappingBuilder::new(1024).build().unwrap();
-    ///       let mut file = File::open(Path::new("/dev/urandom")).map_err(|_| ())?;
-    ///       mem_map.read_to_memory(32, &mut file, 128).map_err(|_| ())?;
-    ///       let rand_val: u32 =  mem_map.read_obj(40).map_err(|_| ())?;
-    /// #     Ok(rand_val)
-    /// # }
-    /// ```
-    pub fn read_to_memory(
-        &self,
-        mut mem_offset: usize,
-        src: &dyn AsRawDescriptor,
-        mut count: usize,
-    ) -> Result<()> {
-        self.range_end(mem_offset, count)
-            .map_err(|_| Error::InvalidRange(mem_offset, count, self.size()))?;
-        while count > 0 {
-            // The check above ensures that no memory outside this slice will get accessed by this
-            // read call.
-            match unsafe {
-                read(
-                    src.as_raw_descriptor(),
-                    self.as_ptr().add(mem_offset) as *mut c_void,
-                    count,
-                )
-            } {
-                0 => {
-                    return Err(Error::ReadToMemory(io::Error::from(
-                        io::ErrorKind::UnexpectedEof,
-                    )))
-                }
-                r if r < 0 => return Err(Error::ReadToMemory(io::Error::last_os_error())),
-                ret => {
-                    let bytes_read = ret as usize;
-                    match count.checked_sub(bytes_read) {
-                        Some(count_remaining) => count = count_remaining,
-                        None => break,
-                    }
-                    mem_offset += ret as usize;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Writes data from memory to a file descriptor.
-    ///
-    /// # Arguments
-    /// * `mem_offset` - Begin reading memory from this offset.
-    /// * `dst` - Write from memory to `dst`.
-    /// * `count` - Read `count` bytes from memory to `src`.
-    ///
-    /// # Examples
-    ///
-    /// * Write 128 bytes to /dev/null
-    ///
-    /// ```
-    /// # use base::linux::MemoryMapping;
-    /// # use std::fs::File;
-    /// # use std::path::Path;
-    /// # fn test_write_null() -> Result<(), ()> {
-    /// #     let mut mem_map = MemoryMapping::new(1024).unwrap();
-    ///       let mut file = File::open(Path::new("/dev/null")).map_err(|_| ())?;
-    ///       mem_map.write_from_memory(32, &mut file, 128).map_err(|_| ())?;
-    /// #     Ok(())
-    /// # }
-    /// ```
-    pub fn write_from_memory(
-        &self,
-        mut mem_offset: usize,
-        dst: &dyn AsRawDescriptor,
-        mut count: usize,
-    ) -> Result<()> {
-        self.range_end(mem_offset, count)
-            .map_err(|_| Error::InvalidRange(mem_offset, count, self.size()))?;
-        while count > 0 {
-            // The check above ensures that no memory outside this slice will get accessed by this
-            // write call.
-            match unsafe {
-                write(
-                    dst.as_raw_descriptor(),
-                    self.as_ptr().add(mem_offset) as *const c_void,
-                    count,
-                )
-            } {
-                0 => {
-                    return Err(Error::WriteFromMemory(io::Error::from(
-                        io::ErrorKind::WriteZero,
-                    )))
-                }
-                ret if ret < 0 => return Err(Error::WriteFromMemory(io::Error::last_os_error())),
-                ret => {
-                    let bytes_written = ret as usize;
-                    match count.checked_sub(bytes_written) {
-                        Some(count_remaining) => count = count_remaining,
-                        None => break,
-                    }
-                    mem_offset += ret as usize;
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Uses madvise to tell the kernel to remove the specified range.  Subsequent reads
     /// to the pages in the range will return zero bytes.
     pub fn remove_range(&self, mem_offset: usize, count: usize) -> Result<()> {
         self.range_end(mem_offset, count)
             .map_err(|_| Error::InvalidRange(mem_offset, count, self.size()))?;
+        // SAFETY: Safe because all the args to madvise are valid and the return
+        // value is checked.
         let ret = unsafe {
             // madvising away the region is the same as the guest changing it.
             // Next time it is read, it may return zero pages.
@@ -532,6 +396,7 @@ impl MemoryMapping {
         // Validation
         self.range_end(mem_offset, count)
             .map_err(|_| Error::InvalidRange(mem_offset, count, self.size()))?;
+        // SAFETY:
         // Safe because populating the pages from the backed file does not affect the Rust memory
         // safety.
         let ret = unsafe {
@@ -566,6 +431,7 @@ impl MemoryMapping {
         // Validation
         self.range_end(mem_offset, count)
             .map_err(|_| Error::InvalidRange(mem_offset, count, self.size()))?;
+        // SAFETY:
         // Safe because dropping the page cache does not affect the Rust memory safety.
         let ret = unsafe {
             libc::madvise(
@@ -596,6 +462,7 @@ impl MemoryMapping {
         self.range_end(mem_offset, count)
             .map_err(|_| Error::InvalidRange(mem_offset, count, self.size()))?;
         let addr = self.addr as usize + mem_offset;
+        // SAFETY:
         // Safe because MLOCK_ONFAULT only affects the swap behavior of the kernel, so it has no
         // impact on rust semantics.
         // let ret = unsafe { libc::mlock2(addr as *mut _, count, libc::MLOCK_ONFAULT) };
@@ -636,6 +503,7 @@ impl MemoryMapping {
         // Validation
         self.range_end(mem_offset, count)
             .map_err(|_| Error::InvalidRange(mem_offset, count, self.size()))?;
+        // SAFETY:
         // Safe because munlock(2) does not affect the Rust memory safety.
         let ret = unsafe { libc::munlock((self.addr as usize + mem_offset) as *mut _, count) };
         if ret < 0 {
@@ -655,6 +523,7 @@ impl MemoryMapping {
     }
 }
 
+// SAFETY:
 // Safe because the pointer and size point to a memory range owned by this MemoryMapping that won't
 // be unmapped until it's Dropped.
 unsafe impl MappedRegion for MemoryMapping {
@@ -669,6 +538,7 @@ unsafe impl MappedRegion for MemoryMapping {
 
 impl Drop for MemoryMapping {
     fn drop(&mut self) {
+        // SAFETY:
         // This is safe because we mmap the area at addr ourselves, and nobody
         // else is holding a reference to it.
         unsafe {
@@ -684,11 +554,13 @@ pub struct MemoryMappingArena {
     size: usize,
 }
 
+// SAFETY:
 // Send and Sync aren't automatically inherited for the raw address pointer.
 // Accessing that pointer is only done through the stateless interface which
 // allows the object to be shared by multiple threads without a decrease in
 // safety.
 unsafe impl Send for MemoryMappingArena {}
+// SAFETY: See safety comments for impl Send
 unsafe impl Sync for MemoryMappingArena {}
 
 impl MemoryMappingArena {
@@ -792,6 +664,7 @@ impl MemoryMappingArena {
         }
         validate_includes_range(self.size(), offset, size)?;
 
+        // SAFETY:
         // This is safe since the range has been validated.
         let mmap = unsafe {
             match fd {
@@ -822,6 +695,7 @@ impl MemoryMappingArena {
     }
 }
 
+// SAFETY:
 // Safe because the pointer and size point to a memory range owned by this MemoryMappingArena that
 // won't be unmapped until it's Dropped.
 unsafe impl MappedRegion for MemoryMappingArena {
@@ -869,6 +743,7 @@ impl From<CrateMemoryMapping> for MemoryMappingArena {
 
 impl Drop for MemoryMappingArena {
     fn drop(&mut self) {
+        // SAFETY:
         // This is safe because we own this memory range, and nobody else is holding a reference to
         // it.
         unsafe {
@@ -884,24 +759,6 @@ impl CrateMemoryMapping {
 
     pub fn use_hugepages(&self) -> Result<()> {
         self.mapping.use_hugepages()
-    }
-
-    pub fn read_to_memory(
-        &self,
-        mem_offset: usize,
-        src: &dyn AsRawDescriptor,
-        count: usize,
-    ) -> Result<()> {
-        self.mapping.read_to_memory(mem_offset, src, count)
-    }
-
-    pub fn write_from_memory(
-        &self,
-        mem_offset: usize,
-        dst: &dyn AsRawDescriptor,
-        count: usize,
-    ) -> Result<()> {
-        self.mapping.write_from_memory(mem_offset, dst, count)
     }
 
     pub fn from_raw_ptr(addr: RawDescriptor, size: usize) -> Result<CrateMemoryMapping> {
@@ -1024,12 +881,12 @@ impl<'a> MemoryMappingBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use data_model::VolatileMemory;
-    use data_model::VolatileMemoryError;
     use tempfile::tempfile;
 
     use super::*;
     use crate::descriptor::Descriptor;
+    use crate::VolatileMemory;
+    use crate::VolatileMemoryError;
 
     #[test]
     fn basic_map() {
@@ -1077,6 +934,7 @@ mod tests {
     fn slice_addr() {
         let m = MemoryMappingBuilder::new(5).build().unwrap();
         let s = m.get_slice(2, 3).unwrap();
+        // SAFETY: all addresses are known to exist.
         assert_eq!(s.as_ptr(), unsafe { m.as_ptr().offset(2) });
     }
 

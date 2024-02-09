@@ -60,6 +60,7 @@ rust_test {
         "liblibc",
         "libserde",
         "libserde_json",
+        "libtempfile",
         "libthiserror",
         "libzerocopy",
     ],

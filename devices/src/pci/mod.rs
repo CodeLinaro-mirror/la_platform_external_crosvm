@@ -17,7 +17,7 @@ mod pci_hotplug;
 mod pci_root;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 mod pcie;
-mod pm;
+pub mod pm;
 mod pvpanic;
 mod stub;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -74,6 +74,7 @@ pub use self::pci_hotplug::NetResourceCarrier;
 pub use self::pci_hotplug::ResourceCarrier;
 pub use self::pci_root::PciConfigIo;
 pub use self::pci_root::PciConfigMmio;
+pub use self::pci_root::PciMmioMapper;
 pub use self::pci_root::PciRoot;
 pub use self::pci_root::PciRootCommand;
 pub use self::pci_root::PciVirtualConfigMmio;

@@ -33,6 +33,7 @@ use crate::virtio::vhost::user::device::wl::parse_wayland_sock;
 use crate::virtio::Gpu;
 use crate::virtio::GpuDisplayParameters;
 use crate::virtio::GpuParameters;
+use crate::virtio::Interrupt;
 
 async fn run_display(
     display: IoSource<AsyncWrapper<SafeDescriptor>>,
@@ -76,7 +77,7 @@ async fn run_resource_bridge(tube: IoSource<Tube>, state: Rc<RefCell<gpu::Fronte
 }
 
 impl GpuBackend {
-    pub fn start_platform_workers(&mut self) -> anyhow::Result<()> {
+    pub fn start_platform_workers(&mut self, _interrupt: Interrupt) -> anyhow::Result<()> {
         let state = self
             .state
             .as_ref()
@@ -98,8 +99,11 @@ impl GpuBackend {
         // Start handling the display.
         let display = clone_descriptor(&*state.borrow_mut().display().borrow())
             .map(|fd| {
-                // Safe because we just created this fd.
-                AsyncWrapper::new(unsafe { SafeDescriptor::from_raw_descriptor(fd) })
+                AsyncWrapper::new(
+                    // SAFETY:
+                    // Safe because we just created this fd.
+                    unsafe { SafeDescriptor::from_raw_descriptor(fd) },
+                )
             })
             .context("failed to clone inner WaitContext for gpu display")
             .and_then(|ctx| {
@@ -187,7 +191,7 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
         ex.spawn_blocking(move || match listener.accept() {
             Ok(stream) => resource_bridges
                 .lock()
-                .push(Tube::new_from_unix_seqpacket(stream)),
+                .push(Tube::new_from_unix_seqpacket(stream).unwrap()),
             Err(e) => {
                 let path = listener
                     .path()

@@ -42,7 +42,6 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
-use std::io::Seek;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -53,6 +52,8 @@ use acpi_tables::aml::Aml;
 use acpi_tables::sdt::SDT;
 use anyhow::Context;
 use arch::get_serial_cmdline;
+use arch::CpuSet;
+use arch::DtbOverlay;
 use arch::GetSerialCmdlineError;
 use arch::RunnableLinuxVm;
 use arch::VmComponents;
@@ -63,12 +64,15 @@ use base::warn;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use base::AsRawDescriptors;
 use base::Event;
+use base::FileGetLen;
+use base::FileReadWriteAtVolatile;
 use base::SendTube;
 use base::Tube;
 use base::TubeError;
 use chrono::Utc;
 pub use cpuid::adjust_cpuid;
 pub use cpuid::CpuIdContext;
+use devices::acpi::PM_WAKEUP_GPIO;
 use devices::Bus;
 use devices::BusDevice;
 use devices::BusDeviceObj;
@@ -690,6 +694,7 @@ impl arch::LinuxArch for X8664arch {
         #[cfg(any(target_os = "android", target_os = "linux"))] guest_suspended_cvar: Option<
             Arc<(Mutex<bool>, Condvar)>,
         >,
+        device_tree_overlays: Vec<DtbOverlay>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -746,6 +751,8 @@ impl arch::LinuxArch for X8664arch {
                 pci_devices,
                 irq_chip.as_irq_chip_mut(),
                 mmio_bus.clone(),
+                GuestAddress(pcie_cfg_mmio_range.start),
+                12,
                 io_bus.clone(),
                 system_allocator,
                 &mut vm,
@@ -991,6 +998,7 @@ impl arch::LinuxArch for X8664arch {
                     kernel_end,
                     params,
                     dump_device_tree_blob,
+                    device_tree_overlays,
                 )?;
 
                 // Configure the bootstrap VCPU for the Linux/x86 64-bit boot protocol.
@@ -1117,6 +1125,14 @@ impl arch::LinuxArch for X8664arch {
 
     fn get_host_cpu_frequencies_khz() -> Result<BTreeMap<usize, Vec<u32>>> {
         Ok(BTreeMap::new())
+    }
+
+    fn get_host_cpu_capacity() -> Result<BTreeMap<usize, u32>> {
+        Ok(BTreeMap::new())
+    }
+
+    fn get_host_cpu_clusters() -> Result<Vec<CpuSet>> {
+        Ok(Vec::new())
     }
 }
 
@@ -1381,7 +1397,9 @@ fn phys_addr(mem: &GuestMemory, vaddr: u64, sregs: &Sregs) -> Result<(u64, u64)>
 
     if sregs.efer & MSR_EFER_LMA != 0 {
         // TODO - check LA57
-        if sregs.cr4 & CR4_LA57_MASK != 0 {}
+        if sregs.cr4 & CR4_LA57_MASK != 0 {
+            todo!("handle LA57");
+        }
         let p4_ent = next_pte(mem, sregs.cr3, vaddr, 4)?;
         let p3_ent = next_pte(mem, p4_ent, vaddr, 3)?;
         // TODO check if it's a 1G page with the PSE bit in p2_ent
@@ -1493,9 +1511,7 @@ impl X8664arch {
     /// * `mem` - The memory to be used by the guest.
     /// * `bios_image` - the File object for the specified bios
     fn load_bios(mem: &GuestMemory, bios_image: &mut File) -> Result<()> {
-        let bios_image_length = bios_image
-            .seek(io::SeekFrom::End(0))
-            .map_err(Error::LoadBios)?;
+        let bios_image_length = bios_image.get_len().map_err(Error::LoadBios)?;
         if bios_image_length >= FIRST_ADDR_PAST_32BITS {
             return Err(Error::LoadBios(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1505,15 +1521,13 @@ impl X8664arch {
                 ),
             )));
         }
+
+        let guest_slice = mem
+            .get_slice_at_addr(bios_start(bios_image_length), bios_image_length as usize)
+            .map_err(Error::SetupGuestMemory)?;
         bios_image
-            .seek(io::SeekFrom::Start(0))
+            .read_exact_at_volatile(guest_slice, 0)
             .map_err(Error::LoadBios)?;
-        mem.read_to_memory(
-            bios_start(bios_image_length),
-            bios_image,
-            bios_image_length as usize,
-        )
-        .map_err(Error::SetupGuestMemory)?;
         Ok(())
     }
 
@@ -1612,6 +1626,7 @@ impl X8664arch {
         kernel_end: u64,
         params: boot_params,
         dump_device_tree_blob: Option<PathBuf>,
+        device_tree_overlays: Vec<DtbOverlay>,
     ) -> Result<()> {
         kernel_loader::load_cmdline(mem, GuestAddress(CMDLINE_OFFSET), cmdline)
             .map_err(Error::LoadCmdline)?;
@@ -1619,7 +1634,8 @@ impl X8664arch {
         let mut setup_data = Vec::<SetupData>::new();
         if let Some(android_fstab) = android_fstab {
             setup_data.push(
-                fdt::create_fdt(android_fstab, dump_device_tree_blob).map_err(Error::CreateFdt)?,
+                fdt::create_fdt(android_fstab, dump_device_tree_blob, device_tree_overlays)
+                    .map_err(Error::CreateFdt)?,
             );
         }
         setup_data.push(setup_data_rng_seed());
@@ -2090,9 +2106,16 @@ impl X8664arch {
         let addresses = root_bus.lock().get_downstream_devices();
         for address in addresses {
             if let Some(acpi_path) = pci_root.lock().acpi_path(&address) {
+                const DEEPEST_SLEEP_STATE: u32 = 3;
                 aml::Device::new(
                     (*acpi_path).into(),
-                    vec![&aml::Name::new("_ADR".into(), &address.acpi_adr())],
+                    vec![
+                        &aml::Name::new("_ADR".into(), &address.acpi_adr()),
+                        &aml::Name::new(
+                            "_PRW".into(),
+                            &aml::Package::new(vec![&PM_WAKEUP_GPIO, &DEEPEST_SLEEP_STATE]),
+                        ),
+                    ],
                 )
                 .to_aml_bytes(&mut amls);
             }
@@ -2265,12 +2288,14 @@ impl CpuIdCall {
 pub fn check_host_hybrid_support(cpuid: &CpuIdCall) -> std::result::Result<(), HybridSupportError> {
     // CPUID.0H.EAX returns maximum input value for basic CPUID information.
     //
+    // SAFETY:
     // Safe because we pass 0 for this call and the host supports the
     // `cpuid` instruction.
     let mut cpuid_entry = unsafe { (cpuid.cpuid)(0x0) };
     if cpuid_entry.eax < 0x1A {
         return Err(HybridSupportError::UnsupportedHostCpu);
     }
+    // SAFETY:
     // Safe because we pass 0x7 and 0 for this call and the host supports the
     // `cpuid` instruction.
     cpuid_entry = unsafe { (cpuid.cpuid_count)(0x7, 0) };
@@ -2282,6 +2307,7 @@ pub fn check_host_hybrid_support(cpuid: &CpuIdCall) -> std::result::Result<(), H
     // 0 is returned in all the registers.
     // For the CPU with hybrid support, its CPUID.1AH.EAX shouldn't be zero.
     //
+    // SAFETY:
     // Safe because we pass 0 for this call and the host supports the
     // `cpuid` instruction.
     cpuid_entry = unsafe { (cpuid.cpuid)(0x1A) };

@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use arch::get_serial_cmdline;
+use arch::DtbOverlay;
 use arch::GetSerialCmdlineError;
 use arch::RunnableLinuxVm;
 use arch::VmComponents;
@@ -192,6 +193,7 @@ impl arch::LinuxArch for Riscv64 {
         #[cfg(any(target_os = "android", target_os = "linux"))] _guest_suspended_cvar: Option<
             Arc<(Mutex<bool>, Condvar)>,
         >,
+        device_tree_overlays: Vec<DtbOverlay>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmRiscv64,
@@ -234,6 +236,8 @@ impl arch::LinuxArch for Riscv64 {
                 pci_devices,
                 irq_chip.as_irq_chip_mut(),
                 Arc::clone(&mmio_bus),
+                GuestAddress(RISCV64_PCI_CFG_BASE),
+                8,
                 Arc::clone(&io_bus),
                 system_allocator,
                 &mut vm,
@@ -254,14 +258,16 @@ impl arch::LinuxArch for Riscv64 {
             .into_iter()
             .map(|(dev, jail_orig)| (*(dev.into_platform_device().unwrap()), jail_orig))
             .collect();
-        let (platform_devices, mut platform_pid_debug_label_map) =
+        let (platform_devices, mut platform_pid_debug_label_map, dev_resources) =
             arch::sys::linux::generate_platform_bus(
                 platform_devices,
                 irq_chip.as_irq_chip_mut(),
                 &mmio_bus,
                 system_allocator,
+                &mut vm,
                 #[cfg(feature = "swap")]
                 swap_controller,
+                components.hv_cfg.protection_type,
             )
             .map_err(Error::CreatePlatformBus)?;
         pid_debug_label_map.append(&mut platform_pid_debug_label_map);
@@ -372,6 +378,7 @@ impl arch::LinuxArch for Riscv64 {
             pci_irqs,
             pci_cfg,
             &pci_ranges,
+            dev_resources,
             components.vcpu_count as u32,
             fdt_offset,
             aia_num_ids,
@@ -379,6 +386,7 @@ impl arch::LinuxArch for Riscv64 {
             cmdline.as_str(),
             initrd,
             timebase_freq,
+            device_tree_overlays,
         )
         .map_err(Error::CreateFdt)?;
 
@@ -451,6 +459,14 @@ impl arch::LinuxArch for Riscv64 {
 
     fn get_host_cpu_frequencies_khz() -> Result<BTreeMap<usize, Vec<u32>>> {
         Ok(BTreeMap::new())
+    }
+
+    fn get_host_cpu_capacity() -> Result<BTreeMap<usize, u32>> {
+        Ok(BTreeMap::new())
+    }
+
+    fn get_host_cpu_clusters() -> Result<Vec<CpuSet>> {
+        Ok(Vec::new())
     }
 }
 

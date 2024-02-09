@@ -49,11 +49,7 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
-    features: [
-        "default",
-        "device",
-        "vmm",
-    ],
+    features: ["default"],
     rustlibs: [
         "libanyhow",
         "libbase_rust",
@@ -85,11 +81,7 @@ rust_test {
         unit_test: true,
     },
     edition: "2021",
-    features: [
-        "default",
-        "device",
-        "vmm",
-    ],
+    features: ["default"],
     rustlibs: [
         "libanyhow",
         "libbase_rust",

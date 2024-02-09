@@ -6,6 +6,7 @@
 //! Windows ; outside of this use-case, please use [[asynchronous::AsyncConsole]] instead.
 
 pub mod asynchronous;
+mod multiport;
 mod sys;
 
 use std::collections::BTreeMap;
@@ -259,7 +260,7 @@ impl Worker {
 /// Virtio console device.
 pub struct Console {
     base_features: u64,
-    in_avail_evt: Option<Event>,
+    in_avail_evt: Event,
     worker_thread: Option<WorkerThread<Worker>>,
     input: Option<InStreamType>,
     output: Option<Box<dyn io::Write + Send>>,
@@ -282,11 +283,13 @@ impl Console {
         protection_type: ProtectionType,
         input: Option<InStreamType>,
         output: Option<Box<dyn io::Write + Send>>,
-        keep_rds: Vec<RawDescriptor>,
+        mut keep_rds: Vec<RawDescriptor>,
     ) -> Console {
+        let in_avail_evt = Event::new().expect("failed creating Event");
+        keep_rds.push(in_avail_evt.as_raw_descriptor());
         Console {
             base_features: base_features(protection_type),
-            in_avail_evt: None,
+            in_avail_evt,
             worker_thread: None,
             input,
             output,
@@ -339,13 +342,8 @@ impl VirtioDevice for Console {
         let receive_queue = queues.remove(&0).unwrap();
         let transmit_queue = queues.remove(&1).unwrap();
 
-        if self.in_avail_evt.is_none() {
-            self.in_avail_evt = Some(Event::new().context("failed creating Event")?);
-        }
         let in_avail_evt = self
             .in_avail_evt
-            .as_ref()
-            .unwrap()
             .try_clone()
             .context("failed creating input available Event pair")?;
 
@@ -358,7 +356,7 @@ impl VirtioDevice for Console {
             Some(read) => {
                 let (buffer, thread) = sys::spawn_input_thread(
                     read,
-                    self.in_avail_evt.as_ref().unwrap(),
+                    &self.in_avail_evt,
                     std::mem::take(&mut self.input_buffer),
                 );
                 self.input_thread = Some(thread);
@@ -447,7 +445,19 @@ impl VirtioDevice for Console {
         }
     }
 
-    fn virtio_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+    fn virtio_snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
+        if let Some(read) = self.input.as_mut() {
+            // If the device was not activated yet, we still read the input.
+            // It's fine to do so since the the data is not lost. It will get queued in the
+            // input_buffer and restored. When the device activates, the data will still be
+            // available, and if there's any new data, that new data will get appended.
+            let input_buffer = Arc::new(Mutex::new(std::mem::take(&mut self.input_buffer)));
+
+            let kill_evt = Event::new().unwrap();
+            let _ = kill_evt.signal();
+            sys::read_input(read, &self.in_avail_evt, input_buffer.clone(), kill_evt);
+            self.input_buffer = std::mem::take(&mut input_buffer.lock());
+        };
         serde_json::to_value(ConsoleSnapshot {
             // Snapshot base_features as a safeguard when restoring the console device. Saving this
             // info allows us to validate that the proper config was used for the console.

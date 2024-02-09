@@ -977,19 +977,22 @@ fn process_vcpu_control_messages<V>(
                     error!("Failed to send GetState: {}", e);
                 };
             }
-            VcpuControl::Snapshot(response_chan) => {
+            VcpuControl::Snapshot(snapshot_writer, response_chan) => {
                 let resp = vcpu
                     .snapshot()
+                    .and_then(|s| snapshot_writer.write_fragment(&format!("vcpu{}", vcpu.id()), &s))
                     .with_context(|| format!("Failed to snapshot Vcpu #{}", vcpu.id()));
                 if let Err(e) = response_chan.send(resp) {
                     error!("Failed to send snapshot response: {}", e);
                 }
             }
-            VcpuControl::Restore(response_chan, vcpu_data) => {
-                let resp = vcpu
-                    .restore(&vcpu_data)
+            VcpuControl::Restore(req) => {
+                let resp = req
+                    .snapshot_reader
+                    .read_fragment(&format!("vcpu{}", vcpu.id()))
+                    .and_then(|s| vcpu.restore(&s, req.host_tsc_reference_moment))
                     .with_context(|| format!("Failed to restore Vcpu #{}", vcpu.id()));
-                if let Err(e) = response_chan.send(resp) {
+                if let Err(e) = req.result_sender.send(resp) {
                     error!("Failed to send restore response: {}", e);
                 }
             }

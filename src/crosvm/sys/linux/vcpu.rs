@@ -37,7 +37,7 @@ use hypervisor::VcpuSignalHandle;
 use libc::c_int;
 #[cfg(target_arch = "riscv64")]
 use riscv64::Riscv64 as Arch;
-#[cfg(all(target_arch = "x86_64", unix))]
+#[cfg(target_arch = "x86_64")]
 use sync::Mutex;
 use vm_control::*;
 #[cfg(feature = "gdb")]
@@ -46,7 +46,7 @@ use vm_memory::GuestMemory;
 use x86_64::X8664arch as Arch;
 
 use super::ExitState;
-#[cfg(all(target_arch = "x86_64", unix))]
+#[cfg(target_arch = "x86_64")]
 use crate::crosvm::ratelimit::Ratelimit;
 
 fn bus_io_handler(bus: &Bus) -> impl FnMut(IoParams) -> Option<[u8; 8]> + '_ {
@@ -190,6 +190,7 @@ fn set_vcpu_thread_local(vcpu: Option<&dyn VcpuArch>, signal_num: c_int) {
 }
 
 pub fn setup_vcpu_signal_handler() -> Result<()> {
+    // SAFETY: trivially safe as we check return value.
     unsafe {
         extern "C" fn handle_signal(_: c_int) {
             // Use LocalKey::try_with() so we don't panic if a signal happens while the destructor
@@ -224,7 +225,7 @@ fn vcpu_loop<V>(
     from_main_tube: mpsc::Receiver<VcpuControl>,
     #[cfg(feature = "gdb")] to_gdb_tube: Option<mpsc::Sender<VcpuDebugStatusMessage>>,
     #[cfg(feature = "gdb")] guest_mem: GuestMemory,
-    #[cfg(all(target_arch = "x86_64", unix))] bus_lock_ratelimit_ctrl: Arc<Mutex<Ratelimit>>,
+    #[cfg(target_arch = "x86_64")] bus_lock_ratelimit_ctrl: Arc<Mutex<Ratelimit>>,
 ) -> ExitState
 where
     V: VcpuArch,
@@ -313,19 +314,31 @@ where
                                 error!("Failed to send GetState: {}", e);
                             };
                         }
-                        VcpuControl::Snapshot(response_chan) => {
+                        VcpuControl::Snapshot(snapshot_writer, response_chan) => {
                             let resp = vcpu
                                 .snapshot()
+                                .and_then(|s| {
+                                    snapshot_writer
+                                        .write_fragment(&format!("vcpu{}", vcpu.id()), &s)
+                                })
                                 .with_context(|| format!("Failed to snapshot Vcpu #{}", vcpu.id()));
                             if let Err(e) = response_chan.send(resp) {
                                 error!("Failed to send snapshot response: {}", e);
                             }
                         }
-                        VcpuControl::Restore(response_chan, vcpu_data) => {
-                            let resp = vcpu
-                                .restore(&vcpu_data)
+                        VcpuControl::Restore(req) => {
+                            let resp = req
+                                .snapshot_reader
+                                .read_fragment(&format!("vcpu{}", vcpu.id()))
+                                .and_then(|s| {
+                                    vcpu.restore(
+                                        &s,
+                                        #[cfg(target_arch = "x86_64")]
+                                        req.host_tsc_reference_moment,
+                                    )
+                                })
                                 .with_context(|| format!("Failed to restore Vcpu #{}", vcpu.id()));
-                            if let Err(e) = response_chan.send(resp) {
+                            if let Err(e) = req.result_sender.send(resp) {
                                 error!("Failed to send restore response: {}", e);
                             }
                         }
@@ -406,7 +419,7 @@ where
 
                     run_mode = VmRunMode::Breakpoint;
                 }
-                #[cfg(all(target_arch = "x86_64", unix))]
+                #[cfg(target_arch = "x86_64")]
                 Ok(VcpuExit::BusLock) => {
                     let delay_ns: u64 = bus_lock_ratelimit_ctrl.lock().ratelimit_calculate_delay(1);
                     thread::sleep(Duration::from_nanos(delay_ns));
@@ -475,7 +488,7 @@ pub fn run_vcpu<V>(
     enable_per_vm_core_scheduling: bool,
     cpu_config: Option<CpuConfigArch>,
     vcpu_cgroup_tasks_file: Option<File>,
-    #[cfg(all(target_arch = "x86_64", unix))] bus_lock_ratelimit_ctrl: Arc<Mutex<Ratelimit>>,
+    #[cfg(target_arch = "x86_64")] bus_lock_ratelimit_ctrl: Arc<Mutex<Ratelimit>>,
     run_mode: VmRunMode,
 ) -> Result<JoinHandle<()>>
 where
@@ -542,7 +555,7 @@ where
                     to_gdb_tube,
                     #[cfg(feature = "gdb")]
                     guest_mem,
-                    #[cfg(all(target_arch = "x86_64", unix))]
+                    #[cfg(target_arch = "x86_64")]
                     bus_lock_ratelimit_ctrl,
                 );
 
