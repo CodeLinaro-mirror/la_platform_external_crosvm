@@ -88,6 +88,7 @@ use base::WaitContext;
 use base::WorkerThread;
 use data_model::Le32;
 use data_model::Le64;
+use hypervisor::MemCacheType;
 #[cfg(feature = "minigbm")]
 use libc::EBADF;
 #[cfg(feature = "minigbm")]
@@ -584,7 +585,10 @@ impl VmRequester {
             .context("failed to allocate offset")
             .map_err(WlError::ShmemMapperError)?;
 
-        match state.mapper.add_mapping(source, offset, prot) {
+        match state
+            .mapper
+            .add_mapping(source, offset, prot, MemCacheType::CacheCoherent)
+        {
             Ok(()) => {
                 state.allocs.insert(offset, alloc);
                 Ok(offset)
@@ -887,7 +891,7 @@ impl WlVfd {
     }
 
     fn pipe_remote_read_local_write() -> WlResult<WlVfd> {
-        let (read_pipe, write_pipe) = pipe(true).map_err(WlError::NewPipe)?;
+        let (read_pipe, write_pipe) = pipe().map_err(WlError::NewPipe)?;
         let mut vfd = WlVfd::default();
         vfd.remote_pipe = Some(read_pipe);
         vfd.local_pipe = Some((VIRTIO_WL_VFD_WRITE, write_pipe));
@@ -895,7 +899,7 @@ impl WlVfd {
     }
 
     fn pipe_remote_write_local_read() -> WlResult<WlVfd> {
-        let (read_pipe, write_pipe) = pipe(true).map_err(WlError::NewPipe)?;
+        let (read_pipe, write_pipe) = pipe().map_err(WlError::NewPipe)?;
         let mut vfd = WlVfd::default();
         vfd.remote_pipe = Some(write_pipe);
         vfd.local_pipe = Some((VIRTIO_WL_VFD_READ, read_pipe));

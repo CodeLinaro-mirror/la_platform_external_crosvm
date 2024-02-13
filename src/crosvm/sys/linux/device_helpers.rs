@@ -66,6 +66,7 @@ use devices::VfioPciDevice;
 use devices::VfioPlatformDevice;
 #[cfg(feature = "vtpm")]
 use devices::VtpmProxy;
+use hypervisor::MemCacheType;
 use hypervisor::ProtectionType;
 use hypervisor::Vm;
 use jail::*;
@@ -695,13 +696,21 @@ impl VirtioDeviceBuilder for &NetParameters {
                     tap,
                     mac,
                     self.packed_queue,
+                    self.pci_address,
                 )
                 .context("failed to set up virtio-vhost networking")?,
             ) as Box<dyn VirtioDevice>
         } else {
             Box::new(
-                virtio::Net::new(features, tap, vq_pairs, mac, self.packed_queue)
-                    .context("failed to set up virtio networking")?,
+                virtio::Net::new(
+                    features,
+                    tap,
+                    vq_pairs,
+                    mac,
+                    self.packed_queue,
+                    self.pci_address,
+                )
+                .context("failed to set up virtio networking")?,
             ) as Box<dyn VirtioDevice>
         })
     }
@@ -1133,6 +1142,7 @@ pub fn create_pmem_device(
             Box::new(arena),
             /* read_only = */ disk.read_only,
             /* log_dirty_pages = */ false,
+            MemCacheType::CacheCoherent,
         )
         .context("failed to add pmem device memory")?;
 
