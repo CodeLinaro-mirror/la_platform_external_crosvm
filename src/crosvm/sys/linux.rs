@@ -149,6 +149,7 @@ use hypervisor::CpuConfigRiscv64;
 use hypervisor::CpuConfigX86_64;
 use hypervisor::Hypervisor;
 use hypervisor::HypervisorCap;
+use hypervisor::MemCacheType;
 use hypervisor::ProtectionType;
 use hypervisor::Vm;
 use hypervisor::VmCap;
@@ -897,6 +898,7 @@ fn create_file_backed_mappings(
             Box::new(memory_mapping),
             !mapping.writable,
             /* log_dirty_pages = */ false,
+            MemCacheType::CacheCoherent,
         )
         .context("failed to configure file-backed mapping")?;
     }
@@ -1063,6 +1065,8 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
 
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     let mut cpu_frequencies = BTreeMap::new();
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    let mut virt_cpufreq_socket = None;
 
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     if cfg.virt_cpufreq {
@@ -1092,6 +1096,18 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
                 panic!("No frequency domain for cpu:{}", cpu_id);
             }
         }
+
+        virt_cpufreq_socket = if let Some(path) = &cfg.virt_cpufreq_socket {
+            let file = base::open_file_or_duplicate(path, OpenOptions::new().write(true))
+                .with_context(|| {
+                    format!("failed to open virt_cpufreq_socket {}", path.display())
+                })?;
+            let fd: std::os::fd::OwnedFd = file.into();
+            let socket: std::os::unix::net::UnixStream = fd.into();
+            Some(socket)
+        } else {
+            None
+        };
     }
 
     // if --enable-fw-cfg or --fw-cfg was given, we want to enable fw_cfg
@@ -1122,6 +1138,8 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         vcpu_affinity: cfg.vcpu_affinity.clone(),
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         cpu_frequencies,
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        virt_cpufreq_socket,
         fw_cfg_parameters: cfg.fw_cfg_parameters.clone(),
         cpu_clusters,
         cpu_capacity,
@@ -2098,6 +2116,7 @@ fn start_pci_root_worker(
                     source: VmMemorySource::SharedMemory(shmem),
                     dest: VmMemoryDestination::GuestPhysicalAddress(addr.0),
                     prot: Protection::read(),
+                    cache: MemCacheType::CacheCoherent,
                 })
                 .context("failed to send request")?;
             match self.vm_control_tube.recv::<VmMemoryResponse>() {
@@ -2369,6 +2388,7 @@ fn handle_hotplug_net_add<V: VmArch, Vcpu: VcpuArch>(
         vhost_net: None,
         vq_pairs: None,
         packed_queue: false,
+        pci_address: None,
     };
     let ret = add_hotplug_net(
         linux,
