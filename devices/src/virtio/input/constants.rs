@@ -758,16 +758,3 @@ pub const VIRTIO_INPUT_CFG_PROP_BITS: u8 = 0x10;
 pub const VIRTIO_INPUT_CFG_EV_BITS: u8 = 0x11;
 pub const VIRTIO_INPUT_CFG_ABS_INFO: u8 = 0x12;
 pub const VIRTIO_INPUT_CFG_ID_DEVIDS: u8 = 0x03;
-
-// For flat device config data, should match linux/virtio_input.h
-pub const VIRTIO_INPUT_CFG_UNIT_SIZE: usize = 128;
-pub const VIRTIO_INPUT_FLAT_CFG_ID_NAME: usize = 0;
-pub const VIRTIO_INPUT_FLAT_CFG_ID_SERIAL: usize = 1;
-pub const VIRTIO_INPUT_FLAT_CFG_ID_DEVIDS: usize = 2;
-pub const VIRTIO_INPUT_FLAT_CFG_PROP_BITS: usize = 3;
-pub const VIRTIO_INPUT_FLAT_CFG_EV: usize = 4;
-pub const VIRTIO_INPUT_FLAT_CFG_ABS: usize = VIRTIO_INPUT_FLAT_CFG_EV + EV_CNT as usize;
-pub const VIRTIO_INPUT_FLAT_CFG_MAX: usize = VIRTIO_INPUT_FLAT_CFG_ABS + ABS_CNT as usize;
-
-// Feature bits
-pub const VIRTIO_INPUT_F_FLAT_CFG: u8 = 0; // Indicates flat device config
