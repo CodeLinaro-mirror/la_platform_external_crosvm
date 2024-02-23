@@ -2,6 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//Changes from Qualcomm Innovation Center, Inc. are provided under the following license:
+
+//Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+//SPDX-License-Identifier: BSD-3-Clause-Clear
+
 mod block;
 mod console;
 mod fs;
@@ -17,6 +22,7 @@ mod wl;
 mod worker;
 mod hab;
 mod scmi;
+mod glink_cma;
 
 pub use self::block::*;
 pub use self::console::*;
@@ -32,6 +38,7 @@ pub use self::vsock::*;
 pub use self::wl::*;
 pub use self::hab::*;
 pub use self::scmi::*;
+pub use self::glink_cma::*;
 
 use remain::sorted;
 use thiserror::Error as ThisError;

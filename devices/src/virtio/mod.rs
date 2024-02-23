@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Changes from Qualcomm Innovation Center are provided under the following license:
-// Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+// Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 
 //! Implements virtio devices, queues, and transport mechanisms.
@@ -105,6 +105,8 @@ const TYPE_WL: u32 = MAX_VIRTIO_DEVICE_ID;
 const TYPE_TPM: u32 = MAX_VIRTIO_DEVICE_ID - 1;
 // TODO(abhishekbh): Fix this after this device is accepted upstream.
 const TYPE_VHOST_USER: u32 = MAX_VIRTIO_DEVICE_ID - 2;
+const VIRTIO_DT_QCOM_BASE: u32 = 0xc000;
+const TYPE_QCOM_GLINK: u32 = VIRTIO_DT_QCOM_BASE + 10;
 
 pub const VIRTIO_F_VERSION_1: u32 = 32;
 pub const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
