@@ -11,13 +11,18 @@
     // "registered_events",
     "gdb",
     "geniezone",
+    "gfxstream",
+    // "gfxstream_stub" is enabled only to allow the cargo build to succeed as
+    // part of cargo_embargo. Patch files are used to remove it from the
+    // generated Android.bp files (so that the real gfxstream implementation is
+    // used).
+    "gfxstream_stub",
+    "gpu",
     "gunyah",
     "net",
     "qcow",
     "usb",
-    // TODO: Enable these in the root crate instead. May be difficult because of host-vs-device
-    // difference that are handled in patches in, e.g., the "devices" crate.
-    "rutabaga_gfx/virgl_renderer"
+    "virgl_renderer"
   ],
   "workspace": true,
   "workspace_excludes": [
@@ -155,7 +160,6 @@
     },
     "devices": {
       "no_presubmit": true,
-      "add_module_block": "devices/cargo2android_libs.bp.patch",
       "dep_blocklist": [
         // See the comment for base's "dep_blocklist" above (in this case
         // "devices_test_tests_passthroughfs_main" is the culprit).
@@ -210,9 +214,6 @@
     },
     "vhost": {
       "no_presubmit": true
-    },
-    "vm_control": {
-      "add_module_block": "vm_control/cargo2android.bp.patch"
     },
     "wire_format_derive": {
       // TODO: This is a proc macro crate. Should disable device tests by default for them.
