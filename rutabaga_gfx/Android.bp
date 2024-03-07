@@ -41,7 +41,6 @@ rust_library {
         "libgbm",
         "libgfxstream_backend",
         "libvirglrenderer",
-        // "libcutils", // TODO: needed?
     ],
 }
 
@@ -106,6 +105,5 @@ rust_test {
         "libgbm",
         "libgfxstream_backend",
         "libvirglrenderer",
-        // "libcutils", // TODO: needed?
     ],
 }
