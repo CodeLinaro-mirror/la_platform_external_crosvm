@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 use std::str::FromStr;
+use std::sync::mpsc;
 use std::sync::Arc;
 
 use base::warn;
-use once_cell::sync::Lazy;
 use resources::Alloc;
 use resources::SystemAllocator;
 use sync::Mutex;
@@ -79,8 +79,7 @@ impl PcieRootCap {
     }
 }
 
-static PCIE_ROOTS_CAP: Lazy<Mutex<Vec<Arc<Mutex<PcieRootCap>>>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
+static PCIE_ROOTS_CAP: Mutex<Vec<Arc<Mutex<PcieRootCap>>>> = Mutex::new(Vec::new());
 
 fn push_pcie_root_cap(root_cap: Arc<Mutex<PcieRootCap>>) {
     PCIE_ROOTS_CAP.lock().push(root_cap);
@@ -336,6 +335,16 @@ impl PciePort {
         }
     }
 
+    /// Has command completion pending.
+    pub fn is_cc_pending(&self) -> bool {
+        self.pcie_config.lock().cc_sender.is_some()
+    }
+
+    /// Sets a sender for notifying guest report command complete. Returns sender replaced.
+    pub fn set_cc_sender(&mut self, cc_sender: mpsc::Sender<()>) -> Option<mpsc::Sender<()>> {
+        self.pcie_config.lock().cc_sender.replace(cc_sender)
+    }
+
     pub fn trigger_hp_or_pme_interrupt(&mut self) {
         if self.pm_config.lock().should_trigger_pme() {
             self.pcie_config.lock().hp_interrupt_pending = true;
@@ -391,6 +400,7 @@ pub struct PcieConfig {
     root_cap: Arc<Mutex<PcieRootCap>>,
     port_type: PcieDevicePortType,
 
+    cc_sender: Option<mpsc::Sender<()>>,
     hp_interrupt_pending: bool,
     removed_downstream_valid: bool,
 
@@ -416,6 +426,7 @@ impl PcieConfig {
             root_cap,
             port_type,
 
+            cc_sender: None,
             hp_interrupt_pending: false,
             removed_downstream_valid: false,
 
@@ -479,6 +490,11 @@ impl PcieConfig {
 
                 if old_control != value {
                     // send Command completed events
+                    if let Some(sender) = self.cc_sender.take() {
+                        if let Err(e) = sender.send(()) {
+                            warn!("Failed to notify command complete for slot event: {:#}", &e);
+                        }
+                    }
                     self.slot_status |= PCIE_SLTSTA_CC;
                     self.trigger_cc_interrupt();
                 }

@@ -422,6 +422,19 @@ unsafe impl MappedRegion for RutabagaMemoryRegion {
     }
 }
 
+impl Display for VmMemorySource {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::VmMemorySource::*;
+
+        match self {
+            SharedMemory(..) => write!(f, "VmMemorySource::SharedMemory"),
+            Descriptor { .. } => write!(f, "VmMemorySource::Descriptor"),
+            Vulkan { .. } => write!(f, "VmMemorySource::Vulkan"),
+            ExternalMapping { .. } => write!(f, "VmMemorySource::ExternalMapping"),
+        }
+    }
+}
+
 impl VmMemorySource {
     /// Map the resource and return its mapping and size in bytes.
     pub fn map(
@@ -526,7 +539,7 @@ pub struct IoEventUpdateRequest {
 pub enum VmMemoryRequest {
     /// Prepare a shared memory region to make later operations more efficient. This
     /// may be a no-op depending on underlying platform support.
-    PrepareSharedMemoryRegion { alloc: Alloc },
+    PrepareSharedMemoryRegion { alloc: Alloc, cache: MemCacheType },
     RegisterMemory {
         /// Source of the memory to register (mapped file descriptor, shared memory region, etc.)
         source: VmMemorySource,
@@ -601,7 +614,7 @@ impl Default for VmMemoryRegionState {
     }
 }
 
-fn handle_prepared_region(
+fn try_map_to_prepared_region(
     vm: &mut impl Vm,
     region_state: &mut VmMemoryRegionState,
     source: &VmMemorySource,
@@ -628,7 +641,13 @@ fn handle_prepared_region(
             let size = shm.size() as usize;
             (Descriptor(shm.as_raw_descriptor()), 0, size)
         }
-        _ => return Some(VmMemoryResponse::Err(SysError::new(EINVAL))),
+        _ => {
+            error!(
+                "source {} is not compatible with fixed mapping into prepared memory region",
+                source
+            );
+            return Some(VmMemoryResponse::Err(SysError::new(EINVAL)));
+        }
     };
     if let Err(err) = vm.add_fd_mapping(
         *slot,
@@ -668,17 +687,21 @@ impl VmMemoryRequest {
     ) -> VmMemoryResponse {
         use self::VmMemoryRequest::*;
         match self {
-            PrepareSharedMemoryRegion { alloc } => {
-                // Currently the iommu_client is only used by virtio-gpu, and virtio-gpu
-                // is incompatible with PrepareSharedMemoryRegion because we can't use
-                // add_fd_mapping with VmMemorySource::Vulkan.
+            PrepareSharedMemoryRegion { alloc, cache } => {
+                // Currently the iommu_client is only used by virtio-gpu when used alongside GPU
+                // pci-passthrough.
+                //
+                // TODO(b/323368701): Make compatible with iommu_client by ensuring that
+                // VirtioIOMMUVfioCommand::VfioDmabufMap is submitted for both dynamic mappings and
+                // fixed mappings (i.e. whether or not try_map_to_prepared_region succeeds in
+                // RegisterMemory case below).
                 assert!(iommu_client.is_none());
 
                 if !sys::should_prepare_memory_region() {
                     return VmMemoryResponse::Ok;
                 }
 
-                match sys::prepare_shared_memory_region(vm, sys_allocator, alloc) {
+                match sys::prepare_shared_memory_region(vm, sys_allocator, alloc, cache) {
                     Ok(info) => {
                         region_state.slot_map.insert(alloc, info);
                         VmMemoryResponse::Ok
@@ -692,7 +715,8 @@ impl VmMemoryRequest {
                 prot,
                 cache,
             } => {
-                if let Some(resp) = handle_prepared_region(vm, region_state, &source, &dest, &prot)
+                if let Some(resp) =
+                    try_map_to_prepared_region(vm, region_state, &source, &dest, &prot)
                 {
                     return resp;
                 }
@@ -1281,8 +1305,8 @@ pub enum VmRequest {
     },
     /// Command to use controller.
     UsbCommand(UsbControlCommand),
-    #[cfg(feature = "gpu")]
     /// Command to modify the gpu.
+    #[cfg(feature = "gpu")]
     GpuCommand(GpuControlCommand),
     /// Command to set battery.
     BatCommand(BatteryType, BatControlCommand),
@@ -1582,7 +1606,7 @@ impl VmRequest {
         run_mode: &mut Option<VmRunMode>,
         disk_host_tubes: &[Tube],
         pm: &mut Option<Arc<Mutex<dyn PmResource + Send>>>,
-        #[cfg(feature = "gpu")] gpu_control_tube: Option<&Tube>,
+        gpu_control_tube: Option<&Tube>,
         usb_control_tube: Option<&Tube>,
         bat_control: &mut Option<BatControl>,
         kick_vcpus: impl Fn(VcpuControl),
@@ -2039,6 +2063,7 @@ fn do_snapshot(
     let snapshot_writer = SnapshotWriter::new(snapshot_path)?;
 
     // Snapshot Vcpus
+    info!("VCPUs snapshotting...");
     let (send_chan, recv_chan) = mpsc::channel();
     kick_vcpus(VcpuControl::Snapshot(
         snapshot_writer.add_namespace("vcpu")?,
@@ -2051,14 +2076,18 @@ fn do_snapshot(
             .context("Failed to recv Vcpu snapshot response")?
             .context("Failed to snapshot Vcpu")?;
     }
+    info!("VCPUs snapshotted.");
 
     // Snapshot irqchip
+    info!("Snapshotting irqchip...");
     let irqchip_snap = snapshot_irqchip()?;
     snapshot_writer
         .write_fragment("irqchip", &irqchip_snap)
         .context("Failed to write irqchip state")?;
+    info!("Snapshotted irqchip.");
 
     // Snapshot devices
+    info!("Devices snapshotting...");
     device_control_tube
         .send(&DeviceControlCommand::SnapshotDevices { snapshot_writer })
         .context("send command to devices control socket")?;
@@ -2068,6 +2097,7 @@ fn do_snapshot(
     if !matches!(resp, VmResponse::Ok) {
         bail!("unexpected SnapshotDevices response: {resp}");
     }
+    info!("Devices snapshotted.");
     Ok(())
 }
 

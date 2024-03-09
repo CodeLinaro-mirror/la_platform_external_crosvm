@@ -69,8 +69,13 @@ pub struct GpuParameters {
     // enforce that blob resources MUST be exportable as file descriptors
     pub external_blob: bool,
     pub system_blob: bool,
+    // enable use of descriptor mapping to fixed host VA within a prepared vMMU mapping (e.g. kvm
+    // user memslot)
+    pub fixed_blob_mapping: bool,
     #[serde(rename = "implicit-render-server")]
     pub allow_implicit_render_server_exec: bool,
+    // Passthrough parameters sent to the underlying renderer in a renderer-specific format.
+    pub renderer_features: Option<String>,
 }
 
 impl Default for GpuParameters {
@@ -94,7 +99,12 @@ impl Default for GpuParameters {
             capset_mask: 0,
             external_blob: false,
             system_blob: false,
+            // TODO(b/324649619): not yet fully compatible with other platforms (windows)
+            // TODO(b/246334944): gfxstream may map vulkan opaque blobs directly (without vulkano),
+            // so set the default to disabled when built with the gfxstream feature.
+            fixed_blob_mapping: cfg!(target_os = "linux") && !cfg!(feature = "gfxstream"),
             allow_implicit_render_server_exec: false,
+            renderer_features: None,
         }
     }
 }

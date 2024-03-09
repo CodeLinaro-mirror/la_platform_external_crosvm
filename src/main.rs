@@ -59,6 +59,8 @@ use vm_control::client::do_gpu_display_add;
 use vm_control::client::do_gpu_display_list;
 #[cfg(feature = "gpu")]
 use vm_control::client::do_gpu_display_remove;
+#[cfg(feature = "gpu")]
+use vm_control::client::do_gpu_set_display_mouse_mode;
 use vm_control::client::do_modify_battery;
 #[cfg(feature = "pci-hotplug")]
 use vm_control::client::do_net_add;
@@ -501,7 +503,7 @@ fn create_qcow2(cmd: cmdline::CreateQcow2Command) -> std::result::Result<(), ()>
 
 fn start_device(opts: cmdline::DeviceCommand) -> std::result::Result<(), ()> {
     if let Some(async_executor) = opts.async_executor {
-        cros_async::Executor::set_default_executor_kind(async_executor)
+        cros_async::Executor::set_default_executor_kind(async_executor.into())
             .map_err(|e| error!("Failed to set the default async executor: {:#}", e))?;
     }
 
@@ -557,11 +559,17 @@ fn gpu_display_remove(cmd: cmdline::GpuRemoveDisplaysCommand) -> ModifyGpuResult
 }
 
 #[cfg(feature = "gpu")]
+fn gpu_set_display_mouse_mode(cmd: cmdline::GpuSetDisplayMouseModeCommand) -> ModifyGpuResult {
+    do_gpu_set_display_mouse_mode(cmd.socket_path, cmd.display_id, cmd.mouse_mode)
+}
+
+#[cfg(feature = "gpu")]
 fn modify_gpu(cmd: cmdline::GpuCommand) -> std::result::Result<(), ()> {
     let result = match cmd.command {
         cmdline::GpuSubCommand::AddDisplays(cmd) => gpu_display_add(cmd),
         cmdline::GpuSubCommand::ListDisplays(cmd) => gpu_display_list(cmd),
         cmdline::GpuSubCommand::RemoveDisplays(cmd) => gpu_display_remove(cmd),
+        cmdline::GpuSubCommand::SetDisplayMouseMode(cmd) => gpu_set_display_mouse_mode(cmd),
     };
     match result {
         Ok(response) => {
@@ -681,6 +689,19 @@ fn prepare_argh_args<I: IntoIterator<Item = String>>(args_iter: I) -> Vec<String
     args
 }
 
+fn shorten_usage(help: &str) -> String {
+    let mut lines = help.lines().collect::<Vec<_>>();
+    let first_line = lines[0].split(char::is_whitespace).collect::<Vec<_>>();
+
+    // Shorten the usage line if it's for `crovm run` command that has so many options.
+    let run_usage = format!("Usage: {} run <options> KERNEL", first_line[1]);
+    if first_line[0] == "Usage:" && first_line[2] == "run" {
+        lines[0] = &run_usage;
+    }
+
+    lines.join("\n")
+}
+
 fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus> {
     let _library_watcher = sys::get_library_watcher();
 
@@ -700,7 +721,8 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
         Err(e) if e.status.is_ok() => {
             // If parsing succeeded and the user requested --help, print the usage message to stdout
             // and exit with success.
-            println!("{}", e.output);
+            let help = shorten_usage(&e.output);
+            println!("{help}");
             return Ok(CommandStatus::SuccessOrVmStop);
         }
         Err(e) => {
@@ -739,8 +761,8 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
                 // but also indicates whether the guest requested reset or stop.
                 run_vm(cmd, log_config)
             } else if let CrossPlatformCommands::Device(cmd) = command {
-                // On windows, the device command handles its own logging setup, so we can't handle it below
-                // otherwise logging will double init.
+                // On windows, the device command handles its own logging setup, so we can't handle
+                // it below otherwise logging will double init.
                 if cfg!(unix) {
                     syslog::init_with(log_config).context("failed to initialize syslog")?;
                 }
@@ -1001,6 +1023,19 @@ mod tests {
                 String::from("/partition2.img"),
                 false
             ))
+        );
+    }
+
+    #[test]
+    fn test_shorten_run_usage() {
+        let help = r"Usage: crosvm run [<KERNEL>] [options] <very long line>...
+
+Start a new crosvm instance";
+        assert_eq!(
+            shorten_usage(help),
+            r"Usage: crosvm run <options> KERNEL
+
+Start a new crosvm instance"
         );
     }
 }
