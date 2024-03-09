@@ -7,7 +7,6 @@ use std::rc::Rc;
 use std::sync::Weak;
 use std::time::Instant;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use base::error;
@@ -24,23 +23,29 @@ use winapi::shared::minwindef::LPARAM;
 use winapi::shared::minwindef::LRESULT;
 use winapi::shared::minwindef::TRUE;
 use winapi::shared::minwindef::WPARAM;
-use winapi::um::winuser::*;
+use winapi::um::winuser::VK_F4;
+use winapi::um::winuser::VK_MENU;
+use winapi::um::winuser::WM_CLOSE;
 
+use super::keyboard_input_manager::KeyboardInputManager;
 use super::math_util::Size2DCheckedCast;
-use super::mouse_input_manager::NoopMouseInputManager as MouseInputManager;
+use super::mouse_input_manager::MouseInputManager;
 use super::virtual_display_manager::NoopVirtualDisplayManager as VirtualDisplayManager;
-use super::window::BasicWindow;
 use super::window::GuiWindow;
 use super::window_manager::NoopWindowManager as WindowManager;
+use super::window_message_processor::GeneralMessage;
 use super::window_message_processor::SurfaceResources;
 use super::window_message_processor::WindowMessage;
 use super::window_message_processor::WindowPosMessage;
 use super::window_message_processor::HANDLE_WINDOW_MESSAGE_TIMEOUT;
 use super::DisplayProperties;
 use super::HostWindowSpace;
+use super::MouseMode;
 use super::VirtualDisplaySpace;
+use crate::EventDeviceKind;
 
 pub struct Surface {
+    surface_id: u32,
     mouse_input: MouseInputManager,
     window_manager: WindowManager,
     virtual_display_manager: VirtualDisplayManager,
@@ -49,7 +54,8 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn create(
+    pub fn new(
+        surface_id: u32,
         window: &GuiWindow,
         virtual_display_size: &Size2D<i32, VirtualDisplaySpace>,
         _metrics: Option<Weak<Metrics>>,
@@ -57,7 +63,11 @@ impl Surface {
         resources: SurfaceResources,
     ) -> Result<Self> {
         static CONTEXT_MESSAGE: &str = "When creating Surface";
-        info!("Creating Surface");
+        info!(
+            "Creating surface {} to associate with scanout {}",
+            surface_id,
+            window.scanout_id()
+        );
 
         let initial_host_viewport_size = window.get_client_rect().context(CONTEXT_MESSAGE)?.size;
         let virtual_display_manager =
@@ -72,20 +82,15 @@ impl Surface {
             gpu_main_display_tube,
         } = resources;
 
-        let mouse_input = match MouseInputManager::new(
+        let mouse_input = MouseInputManager::new(
             window,
             *virtual_display_manager.get_host_to_guest_transform(),
             virtual_display_size.checked_cast(),
             display_event_dispatcher,
-        ) {
-            Ok(mouse_input) => mouse_input,
-            Err(e) => bail!(
-                "Failed to create MouseInputManager during Surface creation: {:?}",
-                e
-            ),
-        };
+        );
 
         Ok(Surface {
+            surface_id,
             mouse_input,
             window_manager: WindowManager::new(
                 window,
@@ -97,6 +102,10 @@ impl Surface {
             virtual_display_manager,
             gpu_main_display_tube,
         })
+    }
+
+    pub fn surface_id(&self) -> u32 {
+        self.surface_id
     }
 
     fn handle_key_event(
@@ -117,6 +126,11 @@ impl Surface {
                 error!("Failed to post WM_CLOSE: {:?}", e);
             }
         }
+    }
+
+    fn set_mouse_mode(&mut self, window: &GuiWindow, mouse_mode: MouseMode) {
+        self.mouse_input
+            .handle_change_mouse_mode_request(window, mouse_mode);
     }
 
     fn update_host_viewport_size(
@@ -155,7 +169,7 @@ impl Surface {
 
     /// Called once when it is safe to assume all future messages targeting `window` will be
     /// dispatched to this `Surface`.
-    pub fn on_message_dispatcher_attached(&mut self, window: &GuiWindow) {
+    fn on_message_dispatcher_attached(&mut self, window: &GuiWindow) {
         // `WindowManager` relies on window messages to properly set initial window pos.
         // We might see a suboptimal UI if any error occurs here, such as having black bars. Instead
         // of crashing the emulator, we would just log the error and still allow the user to
@@ -167,6 +181,7 @@ impl Surface {
 
     /// Called whenever any window message is retrieved. Returns None if `DefWindowProcW()` should
     /// be called after our processing.
+    #[inline]
     pub fn handle_window_message(
         &mut self,
         window: &GuiWindow,
@@ -192,7 +207,6 @@ impl Surface {
             WindowMessage::HostViewportChange { l_param } => {
                 self.on_host_viewport_change(window, l_param)
             }
-            WindowMessage::WindowClose => self.on_close(window),
             // The following messages are handled by other modules.
             WindowMessage::WindowActivate { .. }
             | WindowMessage::Mouse(_)
@@ -203,6 +217,32 @@ impl Surface {
             }
         }
         ret
+    }
+
+    #[inline]
+    pub fn handle_general_message(
+        &mut self,
+        window: &GuiWindow,
+        message: &GeneralMessage,
+        keyboard_input_manager: &KeyboardInputManager,
+    ) {
+        match message {
+            GeneralMessage::MessageDispatcherAttached => {
+                self.on_message_dispatcher_attached(window)
+            }
+            GeneralMessage::RawInputEvent(raw_input) => {
+                self.mouse_input.handle_raw_input_event(window, *raw_input)
+            }
+            GeneralMessage::GuestEvent {
+                event_device_kind,
+                event,
+            } => {
+                if let EventDeviceKind::Keyboard = event_device_kind {
+                    keyboard_input_manager.handle_guest_event(window, *event);
+                }
+            }
+            GeneralMessage::SetMouseMode(mode) => self.set_mouse_mode(window, *mode),
+        }
     }
 
     /// Returns None if `DefWindowProcW()` should be called after our processing.
@@ -231,12 +271,5 @@ impl Surface {
     fn on_host_viewport_change(&mut self, window: &GuiWindow, l_param: LPARAM) {
         let new_size = size2(LOWORD(l_param as u32) as i32, HIWORD(l_param as u32) as i32);
         self.update_host_viewport_size(window, &new_size);
-    }
-
-    #[inline]
-    fn on_close(&mut self, window: &GuiWindow) {
-        if let Err(e) = window.destroy() {
-            error!("Failed to destroy window on WM_CLOSE: {:?}", e);
-        }
     }
 }

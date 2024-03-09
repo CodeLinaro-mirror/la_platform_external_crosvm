@@ -50,6 +50,7 @@ pub use vm_control::gpu::DisplayMode as GpuDisplayMode;
 pub use vm_control::gpu::DisplayParameters as GpuDisplayParameters;
 use vm_control::gpu::GpuControlCommand;
 use vm_control::gpu::GpuControlResult;
+pub use vm_control::gpu::MouseMode as GpuMouseMode;
 pub use vm_control::gpu::DEFAULT_DISPLAY_HEIGHT;
 pub use vm_control::gpu::DEFAULT_DISPLAY_WIDTH;
 pub use vm_control::gpu::DEFAULT_REFRESH_RATE;
@@ -243,6 +244,7 @@ fn build(
     rutabaga: Rutabaga,
     mapper: Arc<Mutex<Option<Box<dyn SharedMemoryMapper>>>>,
     external_blob: bool,
+    fixed_blob_mapping: bool,
     #[cfg(windows)] wndproc_thread: &mut Option<WindowProcedureThread>,
     udmabuf: bool,
     #[cfg(windows)] gpu_display_wait_descriptor_ctrl_wr: SendTube,
@@ -280,6 +282,7 @@ fn build(
         rutabaga,
         mapper,
         external_blob,
+        fixed_blob_mapping,
         udmabuf,
     )
 }
@@ -715,7 +718,12 @@ impl Frontend {
         let mut gpu_response = match resp {
             Ok(gpu_response) => gpu_response,
             Err(gpu_response) => {
-                debug!("{:?} -> {:?}", gpu_cmd, gpu_response);
+                if let Some(gpu_cmd) = gpu_cmd {
+                    error!(
+                        "error processing gpu command {:?}: {:?}",
+                        gpu_cmd, gpu_response
+                    );
+                }
                 gpu_response
             }
         };
@@ -1172,6 +1180,7 @@ pub struct Gpu {
     pci_address: Option<PciAddress>,
     pci_bar_size: u64,
     external_blob: bool,
+    fixed_blob_mapping: bool,
     rutabaga_component: RutabagaComponentType,
     #[cfg(windows)]
     wndproc_thread: Option<WindowProcedureThread>,
@@ -1179,9 +1188,9 @@ pub struct Gpu {
     udmabuf: bool,
     rutabaga_server_descriptor: Option<SafeDescriptor>,
     #[cfg(windows)]
-    /// Because the Windows GpuDisplay can't expose an epollfd, it has to inform the GPU worker which
-    /// descriptors to add to its wait context. That's what this Tube is used for (it is provided
-    /// to each display backend.
+    /// Because the Windows GpuDisplay can't expose an epollfd, it has to inform the GPU worker
+    /// which descriptors to add to its wait context. That's what this Tube is used for (it is
+    /// provided to each display backend.
     gpu_display_wait_descriptor_ctrl_wr: SendTube,
     #[cfg(windows)]
     /// The GPU worker uses this Tube to receive the descriptors that should be added to its wait
@@ -1263,7 +1272,8 @@ impl Gpu {
             .set_wsi(rutabaga_wsi)
             .set_use_external_blob(gpu_parameters.external_blob)
             .set_use_system_blob(gpu_parameters.system_blob)
-            .set_use_render_server(use_render_server);
+            .set_use_render_server(use_render_server)
+            .set_renderer_features(gpu_parameters.renderer_features.clone());
 
         #[cfg(windows)]
         let (gpu_display_wait_descriptor_ctrl_wr, gpu_display_wait_descriptor_ctrl_rd) =
@@ -1283,6 +1293,7 @@ impl Gpu {
             pci_address: gpu_parameters.pci_address,
             pci_bar_size: gpu_parameters.pci_bar_size,
             external_blob: gpu_parameters.external_blob,
+            fixed_blob_mapping: gpu_parameters.fixed_blob_mapping,
             rutabaga_component: component,
             #[cfg(windows)]
             wndproc_thread: Some(wndproc_thread),
@@ -1327,6 +1338,7 @@ impl Gpu {
             rutabaga,
             mapper,
             self.external_blob,
+            self.fixed_blob_mapping,
             #[cfg(windows)]
             &mut self.wndproc_thread,
             self.udmabuf,
@@ -1371,6 +1383,7 @@ impl Gpu {
         let display_event = self.display_event.clone();
         let event_devices = self.event_devices.take().expect("missing event_devices");
         let external_blob = self.external_blob;
+        let fixed_blob_mapping = self.fixed_blob_mapping;
         let udmabuf = self.udmabuf;
         let fence_state = Arc::new(Mutex::new(Default::default()));
 
@@ -1436,6 +1449,7 @@ impl Gpu {
                 rutabaga,
                 mapper,
                 external_blob,
+                fixed_blob_mapping,
                 #[cfg(windows)]
                 &mut wndproc_thread,
                 udmabuf,
@@ -1765,7 +1779,8 @@ impl VirtioDevice for Gpu {
     }
 
     fn expose_shmem_descriptors_with_viommu(&self) -> bool {
-        true
+        // TODO(b/323368701): integrate with fixed_blob_mapping so this can always return true.
+        !self.fixed_blob_mapping
     }
 
     // Notes on sleep/wake/snapshot/restore functionality.

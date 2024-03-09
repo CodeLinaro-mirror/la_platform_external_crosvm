@@ -19,6 +19,7 @@ use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
+use vm_control::gpu::MouseMode;
 
 mod event_device;
 mod gpu_display_stub;
@@ -31,6 +32,8 @@ mod gpu_display_x;
 #[cfg(any(windows, feature = "x"))]
 mod keycode_converter;
 mod sys;
+#[cfg(feature = "vulkan_display")]
+pub mod vulkan;
 
 pub use event_device::EventDevice;
 pub use event_device::EventDeviceKind;
@@ -219,6 +222,11 @@ trait GpuDisplaySurface {
         Ok(())
     }
 
+    /// Sets the mouse mode used on this surface.
+    fn set_mouse_mode(&mut self, _mouse_mode: MouseMode) {
+        // no-op
+    }
+
     /// Sets the position of the identified subsurface relative to its parent.
     fn set_position(&mut self, _x: u32, _y: u32) {
         // no-op
@@ -241,11 +249,6 @@ trait GpuDisplaySurface {
 
     /// Handles a compositor-specific shared memory completion event.
     fn on_shm_completion(&mut self, _shm_complete: u64) {
-        // no-op
-    }
-
-    /// Sets the scanout ID for the surface.
-    fn set_scanout_id(&mut self, _scanout_id: u32) {
         // no-op
     }
 }
@@ -285,6 +288,7 @@ trait DisplayT: AsRawDescriptor {
         &mut self,
         parent_surface_id: Option<u32>,
         surface_id: u32,
+        scanout_id: Option<u32>,
         width: u32,
         height: u32,
         surf_type: SurfaceType,
@@ -455,6 +459,7 @@ impl GpuDisplay {
     pub fn create_surface(
         &mut self,
         parent_surface_id: Option<u32>,
+        scanout_id: Option<u32>,
         width: u32,
         height: u32,
         surf_type: SurfaceType,
@@ -469,6 +474,7 @@ impl GpuDisplay {
         let new_surface = self.inner.create_surface(
             parent_surface_id,
             new_surface_id,
+            scanout_id,
             width,
             height,
             surf_type,
@@ -586,6 +592,21 @@ impl GpuDisplay {
         Ok(())
     }
 
+    /// Sets the mouse mode used on this surface.
+    pub fn set_mouse_mode(
+        &mut self,
+        surface_id: u32,
+        mouse_mode: MouseMode,
+    ) -> GpuDisplayResult<()> {
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or(GpuDisplayError::InvalidSurfaceId)?;
+
+        surface.set_mouse_mode(mouse_mode);
+        Ok(())
+    }
+
     /// Sets the position of the identified subsurface relative to its parent.
     ///
     /// The change in position will not be visible until `commit` is called for the parent surface.
@@ -596,17 +617,6 @@ impl GpuDisplay {
             .ok_or(GpuDisplayError::InvalidSurfaceId)?;
 
         surface.set_position(x, y);
-        Ok(())
-    }
-
-    /// Associates the scanout id with the given surface.
-    pub fn set_scanout_id(&mut self, surface_id: u32, scanout_id: u32) -> GpuDisplayResult<()> {
-        let surface = self
-            .surfaces
-            .get_mut(&surface_id)
-            .ok_or(GpuDisplayError::InvalidSurfaceId)?;
-
-        surface.set_scanout_id(scanout_id);
         Ok(())
     }
 }

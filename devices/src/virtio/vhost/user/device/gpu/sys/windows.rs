@@ -249,10 +249,32 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     ) = bootstrap_tube
         .recv()
         .context("failed to parse GPU backend config from bootstrap tube")?;
+
+    // TODO(b/213170185): Uncomment once sandbox is upstreamed.
+    // if sandbox::is_sandbox_target() {
+    //     sandbox::TargetServices::get()
+    //         .expect("failed to get target services")
+    //         .unwrap()
+    //         .lower_token();
+    // }
+
     let wndproc_thread = wndproc_thread_builder
         .start_thread()
         .context("Failed to create window procedure thread for vhost GPU")?;
 
+    run_gpu_device_worker(
+        config,
+        input_event_backend_config.event_devices,
+        wndproc_thread,
+    )
+}
+
+/// Run the GPU device worker.
+pub fn run_gpu_device_worker(
+    mut config: GpuBackendConfig,
+    event_devices: Vec<EventDevice>,
+    wndproc_thread: WindowProcedureThread,
+) -> anyhow::Result<()> {
     let vhost_user_tube = config
         .device_vhost_user_tube
         .expect("vhost-user gpu tube must be set");
@@ -270,9 +292,6 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
 
     let mut gpu_params = config.params.clone();
 
-    // Required to share memory across processes.
-    gpu_params.external_blob = true;
-
     // Fallback for when external_blob is not available on the machine. Currently always off.
     gpu_params.system_blob = false;
 
@@ -281,13 +300,13 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     let gpu = Rc::new(RefCell::new(Gpu::new(
         config.exit_evt_wrtube,
         config.gpu_control_device_tube,
-        /*resource_bridges=*/ Vec::new(),
+        /* resource_bridges= */ Vec::new(),
         display_backends,
         &gpu_params,
-        /*render_server_descriptor*/ None,
-        input_event_backend_config.event_devices,
+        /* render_server_descriptor */ None,
+        event_devices,
         base_features,
-        /*channels=*/ &Default::default(),
+        /* channels= */ &Default::default(),
         wndproc_thread,
     )));
 
@@ -306,14 +325,6 @@ pub fn run_gpu_device(opts: Options) -> anyhow::Result<()> {
     });
 
     let handler = DeviceRequestHandler::new(backend);
-
-    // TODO(b/213170185): Uncomment once sandbox is upstreamed.
-    // if sandbox::is_sandbox_target() {
-    //     sandbox::TargetServices::get()
-    //         .expect("failed to get target services")
-    //         .unwrap()
-    //         .lower_token();
-    // }
 
     info!("vhost-user gpu device ready, starting run loop...");
 

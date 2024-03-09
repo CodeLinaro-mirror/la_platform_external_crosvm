@@ -7,28 +7,57 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(feature = "kiwi")]
 use base::error;
-use base::warn;
+use base::info;
 use base::Tube;
 use cros_tracing::trace_event;
 use euclid::point2;
 use euclid::size2;
 use euclid::Rect;
 use linux_input_sys::virtio_input_event;
-#[cfg(feature = "kiwi")]
-use vm_control::ServiceSendToGpu;
 use winapi::shared::minwindef::LPARAM;
 use winapi::shared::minwindef::LRESULT;
 use winapi::shared::minwindef::UINT;
 use winapi::shared::minwindef::WPARAM;
-use winapi::um::winuser::*;
+use winapi::um::winuser::HRAWINPUT;
+use winapi::um::winuser::MK_XBUTTON1;
+use winapi::um::winuser::SWP_HIDEWINDOW;
+use winapi::um::winuser::SWP_SHOWWINDOW;
+use winapi::um::winuser::WINDOWPOS;
+use winapi::um::winuser::WM_ACTIVATE;
+use winapi::um::winuser::WM_DISPLAYCHANGE;
+use winapi::um::winuser::WM_ENTERSIZEMOVE;
+use winapi::um::winuser::WM_EXITSIZEMOVE;
+use winapi::um::winuser::WM_KEYDOWN;
+use winapi::um::winuser::WM_KEYUP;
+use winapi::um::winuser::WM_LBUTTONDOWN;
+use winapi::um::winuser::WM_LBUTTONUP;
+use winapi::um::winuser::WM_MBUTTONDOWN;
+use winapi::um::winuser::WM_MBUTTONUP;
+use winapi::um::winuser::WM_MOUSEACTIVATE;
+use winapi::um::winuser::WM_MOUSEMOVE;
+use winapi::um::winuser::WM_MOUSEWHEEL;
+use winapi::um::winuser::WM_RBUTTONDOWN;
+use winapi::um::winuser::WM_RBUTTONUP;
+use winapi::um::winuser::WM_SETCURSOR;
+use winapi::um::winuser::WM_SETFOCUS;
+use winapi::um::winuser::WM_SIZE;
+use winapi::um::winuser::WM_SIZING;
+use winapi::um::winuser::WM_SYSKEYDOWN;
+use winapi::um::winuser::WM_SYSKEYUP;
+use winapi::um::winuser::WM_USER;
+use winapi::um::winuser::WM_WINDOWPOSCHANGED;
+use winapi::um::winuser::WM_WINDOWPOSCHANGING;
+use winapi::um::winuser::WM_XBUTTONDOWN;
+use winapi::um::winuser::WM_XBUTTONUP;
 
 use super::keyboard_input_manager::KeyboardInputManager;
+use super::window::BasicWindow;
 use super::window::GuiWindow;
 use super::window::MessagePacket;
 use super::window_message_dispatcher::DisplayEventDispatcher;
 use super::HostWindowSpace;
+use super::MouseMode;
 use super::ObjectId;
 use super::Surface;
 use crate::EventDevice;
@@ -40,12 +69,10 @@ use crate::EventDeviceKind;
 // https://docs.microsoft.com/en-us/windows/win32/win7appqual/preventing-hangs-in-windows-applications
 pub(crate) const HANDLE_WINDOW_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Thread message for killing the window during a `WndProcThread` drop. This indicates an error
-/// within crosvm that internally causes the WndProc thread to be dropped, rather than when the
-/// user/service initiates the window to be killed.
-/// TODO(b/238678893): During such an abnormal event, window messages might not be reliable anymore.
-/// Relying on destructors might be a safer choice.
-pub(crate) const WM_USER_WNDPROC_THREAD_DROP_KILL_WINDOW_INTERNAL: UINT = WM_USER;
+/// Thread message for destroying all windows and releasing all resources during a
+/// `WindowProcedureThread` drop. This may be triggered if crosvm has encountered errors and has to
+/// shut down, or if the user/service initiates the shutdown.
+pub(crate) const WM_USER_SHUTDOWN_WNDPROC_THREAD_INTERNAL: UINT = WM_USER;
 
 // Message for handling the change in host viewport. This is sent when the host window size changes
 // and we need to render to a different part of the window. The new width and height are sent as the
@@ -71,8 +98,12 @@ pub type CreateSurfaceCallback = Box<dyn FnOnce(bool)>;
 /// Messages sent from the GPU worker thread to the WndProc thread.
 pub enum DisplaySendToWndProc {
     CreateSurface {
+        scanout_id: u32,
         function: CreateSurfaceFunction,
         callback: CreateSurfaceCallback,
+    },
+    ReleaseSurface {
+        surface_id: u32,
     },
     ImportEventDevice {
         event_device_id: ObjectId,
@@ -80,94 +111,110 @@ pub enum DisplaySendToWndProc {
     },
     /// Handle a guest -> host input_event.
     HandleEventDevice(ObjectId),
+    SetMouseMode {
+        surface_id: u32,
+        mouse_mode: MouseMode,
+    },
 }
 
-/// This class drives the underlying `Surface` object to process window messages retrieved from the
-/// message pump. Note that we rely on the owner of `WindowMessageProcessor` object to drop it
-/// before the underlying window is completely gone.
-pub(crate) struct WindowMessageProcessor {
+/// This struct wraps a `GuiWindow` that is currently not associated with any `Surface`.
+pub(crate) struct WindowResources {
     window: GuiWindow,
-    surface: Option<Surface>,
 }
 
-impl WindowMessageProcessor {
+impl WindowResources {
     /// # Safety
-    /// The owner of `WindowMessageProcessor` object is responsible for dropping it before we finish
-    /// processing `WM_NCDESTROY`, because the window handle will become invalid afterwards.
+    /// The owner of `WindowResource` object is responsible for dropping it before we finish
+    /// processing `WM_NCDESTROY` for this window, because the window handle will become invalid
+    /// afterwards.
     pub unsafe fn new(window: GuiWindow) -> Self {
-        Self {
-            window,
-            surface: None,
-        }
-    }
-
-    pub fn create_surface(
-        &mut self,
-        create_surface_func: CreateSurfaceFunction,
-        surface_resources: SurfaceResources,
-    ) -> Result<()> {
-        create_surface_func(&self.window, surface_resources)
-            .map(|surface| {
-                self.surface.replace(surface);
-                if let Some(surface) = &mut self.surface {
-                    surface.on_message_dispatcher_attached(&self.window);
-                }
-            })
-            .context("When creating surface")
-    }
-
-    pub fn handle_event_device(
-        &mut self,
-        event_device_kind: EventDeviceKind,
-        event: virtio_input_event,
-        keyboard_input_manager: &KeyboardInputManager,
-    ) {
-        if event_device_kind == EventDeviceKind::Keyboard {
-            keyboard_input_manager.handle_guest_event(event);
-        }
-    }
-
-    #[cfg(feature = "kiwi")]
-    pub fn handle_service_message(&mut self, message: &ServiceSendToGpu) {
-        match &mut self.surface {
-            Some(surface) => surface.handle_service_message(&self.window, message),
-            None => error!(
-                "Cannot handle {:?} because surface has not been created!",
-                message
-            ),
-        }
-    }
-
-    pub fn process_message(
-        &mut self,
-        packet: &MessagePacket,
-        keyboard_input_manager: &KeyboardInputManager,
-    ) -> LRESULT {
-        // Surface may read window states so we should update them first.
-        self.window.update_states(packet.msg, packet.w_param);
-
-        let surface = match &mut self.surface {
-            Some(surface) => surface,
-            None => {
-                warn!(
-                    "Skipping processing {:?} because surface has not been created!",
-                    packet
-                );
-                return self.window.default_process_message(packet);
-            }
-        };
-
-        let _trace_event = Self::new_trace_event(packet.msg);
-
-        let window_message: WindowMessage = packet.into();
-        keyboard_input_manager.handle_window_message(&window_message);
-        surface
-            .handle_window_message(&self.window, window_message)
-            .unwrap_or_else(|| self.window.default_process_message(packet))
+        Self { window }
     }
 
     pub fn window(&self) -> &GuiWindow {
         &self.window
+    }
+}
+
+/// This struct drives the underlying `Surface` object to process window messages retrieved from the
+/// message pump.
+pub(crate) struct WindowMessageProcessor {
+    window_resources: WindowResources,
+    surface: Surface,
+}
+
+impl WindowMessageProcessor {
+    /// Creates a `Surface` and associates it with the window. To dissociate them, call
+    /// `release_surface_and_take_window_resources()` below.
+    /// # Safety
+    /// The owner of `WindowMessageProcessor` object is responsible for dropping it before we finish
+    /// processing `WM_NCDESTROY` for this window, because the window handle will become invalid
+    /// afterwards.
+    pub unsafe fn new(
+        create_surface_func: CreateSurfaceFunction,
+        surface_resources: SurfaceResources,
+        window_resources: WindowResources,
+    ) -> Result<Self> {
+        create_surface_func(&window_resources.window, surface_resources)
+            .map(|surface| Self {
+                window_resources,
+                surface,
+            })
+            .context("When creating Surface")
+    }
+
+    pub fn surface_id(&self) -> u32 {
+        self.surface.surface_id()
+    }
+
+    /// Drops the associated `Surface` and turns `self` back into `WindowResources`. This also hides
+    /// the window if it hasn't been hidden.
+    /// # Safety
+    /// The owner of `WindowResources` object is responsible for dropping it before we finish
+    /// processing `WM_NCDESTROY` for this window, because the window handle will become invalid
+    /// afterwards.
+    pub unsafe fn release_surface_and_take_window_resources(self) -> WindowResources {
+        let surface_id = self.surface_id();
+        let resources = self.window_resources;
+        info!(
+            "Releasing surface {} associated with scanout {}",
+            surface_id,
+            resources.window().scanout_id(),
+        );
+        if let Err(e) = resources.window().hide_if_visible() {
+            error!("Failed to hide window before releasing surface: {:?}", e);
+        }
+        resources
+    }
+
+    pub fn process_window_message(
+        &mut self,
+        packet: &MessagePacket,
+        keyboard_input_manager: &KeyboardInputManager,
+    ) -> LRESULT {
+        // Message handlers may read window states so we should update those states first.
+        let window = &mut self.window_resources.window;
+        window.update_states(packet.msg, packet.w_param);
+
+        let _trace_event = Self::new_trace_event(packet.msg);
+
+        let window_message: WindowMessage = packet.into();
+        keyboard_input_manager.handle_window_message(window, &window_message);
+        self.surface
+            .handle_window_message(window, window_message)
+            .unwrap_or_else(|| window.default_process_message(packet))
+    }
+
+    pub fn process_general_message(
+        &mut self,
+        message: GeneralMessage,
+        keyboard_input_manager: &KeyboardInputManager,
+    ) {
+        self.surface.handle_general_message(
+            &self.window_resources.window,
+            &message,
+            keyboard_input_manager,
+        );
     }
 
     #[allow(clippy::if_same_then_else)]
@@ -202,6 +249,7 @@ impl From<UINT> for WindowVisibilityChange {
 
 /// General window messages that multiple modules may want to process, such as the window manager,
 /// input manager, IME handler, etc.
+#[derive(Debug)]
 pub enum WindowMessage {
     /// `WM_ACTIVATE`, "sent to both the window being activated and the window being deactivated."
     WindowActivate { is_activated: bool },
@@ -223,13 +271,12 @@ pub enum WindowMessage {
     DisplayChange,
     /// `WM_USER_HOST_VIEWPORT_CHANGE_INTERNAL`.
     HostViewportChange { l_param: LPARAM },
-    /// `WM_CLOSE`, "sent as a signal that a window or an application should terminate."
-    WindowClose,
     /// Not one of the general window messages we care about.
     Other(MessagePacket),
 }
 
 /// Window location and size related window messages.
+#[derive(Debug)]
 pub enum WindowPosMessage {
     /// `WM_WINDOWPOSCHANGING`, "sent to a window whose size, position, or place in the Z order is
     /// about to change."
@@ -266,12 +313,11 @@ impl std::fmt::Display for WindowPosMessage {
 }
 
 /// Mouse related window messages.
+#[derive(Debug)]
 pub enum MouseMessage {
     /// `WM_MOUSEACTIVATE`, "sent when the cursor is in an inactive window and the user presses a
     /// mouse button."
     MouseActivate { l_param: LPARAM },
-    /// `WM_INPUT`, "sent to the window that is getting raw input."
-    RawInput { l_param: LPARAM },
     /// `WM_MOUSEMOVE`, "posted to a window when the cursor moves."
     MouseMove { w_param: WPARAM, l_param: LPARAM },
     /// `WM_LBUTTONDOWN` or `WM_LBUTTONUP`, "posted when the user presses/releases the left mouse
@@ -283,10 +329,16 @@ pub enum MouseMessage {
     /// `WM_MBUTTONDOWN` or `WM_MBUTTONUP`, "posted when the user presses/releases the middle mouse
     /// button while the cursor is in the client area of a window."
     MiddleMouseButton { is_down: bool },
+    /// `WM_XBUTTONDOWN` or `WM_XBUTTONUP`, "posted when the user presses/releases the forward
+    /// mouse button while the cursor is in the client area of a window."
+    ForwardMouseButton { is_down: bool },
+    /// `WM_XBUTTONDOWN` or `WM_XBUTTONUP`, "posted when the user presses/releases the back mouse
+    /// button while the cursor is in the client area of a window."
+    BackMouseButton { is_down: bool },
     /// `WM_MOUSEWHEEL`, "sent to the focus window when the mouse wheel is rotated."
     MouseWheel { w_param: WPARAM, l_param: LPARAM },
-    /// `WM_SETCURSOR`, "sent to a window if the mouse causes the cursor to move within a window and
-    /// mouse input is not captured."
+    /// `WM_SETCURSOR`, "sent to a window if the mouse causes the cursor to move within a window
+    /// and mouse input is not captured."
     SetCursor,
 }
 
@@ -323,7 +375,6 @@ impl From<&MessagePacket> for WindowMessage {
             WM_ENTERSIZEMOVE => Self::WindowPos(WindowPosMessage::EnterSizeMove),
             WM_EXITSIZEMOVE => Self::WindowPos(WindowPosMessage::ExitSizeMove),
             WM_MOUSEACTIVATE => Self::Mouse(MouseMessage::MouseActivate { l_param }),
-            WM_INPUT => Self::Mouse(MouseMessage::RawInput { l_param }),
             WM_MOUSEMOVE => Self::Mouse(MouseMessage::MouseMove { w_param, l_param }),
             WM_LBUTTONDOWN | WM_LBUTTONUP => Self::Mouse(MouseMessage::LeftMouseButton {
                 is_down: msg == WM_LBUTTONDOWN,
@@ -334,6 +385,15 @@ impl From<&MessagePacket> for WindowMessage {
             }),
             WM_MBUTTONDOWN | WM_MBUTTONUP => Self::Mouse(MouseMessage::MiddleMouseButton {
                 is_down: msg == WM_MBUTTONDOWN,
+            }),
+            WM_XBUTTONDOWN | WM_XBUTTONUP => Self::Mouse(if w_param & MK_XBUTTON1 == MK_XBUTTON1 {
+                MouseMessage::ForwardMouseButton {
+                    is_down: msg == WM_XBUTTONDOWN,
+                }
+            } else {
+                MouseMessage::BackMouseButton {
+                    is_down: msg == WM_XBUTTONDOWN,
+                }
             }),
             WM_MOUSEWHEEL => Self::Mouse(MouseMessage::MouseWheel { w_param, l_param }),
             WM_SETCURSOR => Self::Mouse(MouseMessage::SetCursor),
@@ -346,8 +406,21 @@ impl From<&MessagePacket> for WindowMessage {
             },
             WM_DISPLAYCHANGE => Self::DisplayChange,
             WM_USER_HOST_VIEWPORT_CHANGE_INTERNAL => Self::HostViewportChange { l_param },
-            WM_CLOSE => Self::WindowClose,
             _ => Self::Other(*packet),
         }
     }
+}
+
+/// Messages that are either rerouted from other windows (e.g. WM_INPUT), or not sent/posted by the
+/// system.
+pub enum GeneralMessage {
+    /// This should be sent once when it is safe to assume all future messages targeting the GUI
+    /// window will be dispatched to this `WindowMessageProcessor`.
+    MessageDispatcherAttached,
+    RawInputEvent(HRAWINPUT),
+    GuestEvent {
+        event_device_kind: EventDeviceKind,
+        event: virtio_input_event,
+    },
+    SetMouseMode(MouseMode),
 }

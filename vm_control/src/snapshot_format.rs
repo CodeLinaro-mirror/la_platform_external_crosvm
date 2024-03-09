@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 use std::fs::File;
+use std::io::Read;
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -33,8 +35,8 @@ impl SnapshotWriter {
         Ok(Self { dir: root })
     }
 
-    /// Creates a snapshot fragment and get access to the `File` representing it.
-    pub fn raw_fragment(&self, name: &str) -> Result<File> {
+    /// Creates a snapshot fragment and get access to the `Write` impl representing it.
+    pub fn raw_fragment(&self, name: &str) -> Result<Box<dyn Write>> {
         let path = self.dir.join(name);
         let file = File::options()
             .write(true)
@@ -46,12 +48,15 @@ impl SnapshotWriter {
                     path.display()
                 )
             })?;
-        Ok(file)
+        Ok(Box::new(file))
     }
 
     /// Creates a snapshot fragment from a serialized representation of `v`.
     pub fn write_fragment<T: serde::Serialize>(&self, name: &str, v: &T) -> Result<()> {
-        Ok(serde_json::to_writer(self.raw_fragment(name)?, v)?)
+        let mut w = std::io::BufWriter::new(self.raw_fragment(name)?);
+        serde_json::to_writer(&mut w, v)?;
+        w.flush()?;
+        Ok(())
     }
 
     /// Creates new namespace and returns a `SnapshotWriter` that writes to it. Namespaces can be
@@ -80,8 +85,8 @@ impl SnapshotReader {
         Ok(Self { dir: root })
     }
 
-    /// Gets access to the `File` representing a fragment.
-    pub fn raw_fragment(&self, name: &str) -> Result<File> {
+    /// Gets access to a `Read` impl that represents a fragment.
+    pub fn raw_fragment(&self, name: &str) -> Result<Box<dyn Read>> {
         let path = self.dir.join(name);
         let file = File::open(&path).with_context(|| {
             format!(
@@ -89,12 +94,14 @@ impl SnapshotReader {
                 path.display()
             )
         })?;
-        Ok(file)
+        Ok(Box::new(file))
     }
 
     /// Reads a fragment.
     pub fn read_fragment<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<T> {
-        Ok(serde_json::from_reader(self.raw_fragment(name)?)?)
+        Ok(serde_json::from_reader(std::io::BufReader::new(
+            self.raw_fragment(name)?,
+        ))?)
     }
 
     /// Reads the names of all fragments in this namespace.

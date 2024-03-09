@@ -255,6 +255,10 @@ impl XhciBackendDevice for BackendDeviceType {
     fn free_streams(&self, ep: u8) -> Result<()> {
         multi_dispatch!(self, BackendDeviceType, HostDevice, free_streams, ep)
     }
+
+    fn stop(&mut self) {
+        multi_dispatch!(self, BackendDeviceType, HostDevice, stop)
+    }
 }
 
 pub struct DeviceState {
@@ -660,8 +664,8 @@ impl BackendDeviceType {
     ) -> Result<()> {
         let transfer_status = {
             // We need to hold the lock to avoid race condition.
-            // While we are trying to submit the transfer, another thread might want to cancel the same
-            // transfer. Holding the lock here makes sure one of them is cancelled.
+            // While we are trying to submit the transfer, another thread might want to cancel the
+            // same transfer. Holding the lock here makes sure one of them is cancelled.
             let mut state = xhci_transfer.state().lock();
             match mem::replace(&mut *state, XhciTransferState::Cancelled) {
                 XhciTransferState::Created => {
