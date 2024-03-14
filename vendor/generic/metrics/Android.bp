@@ -12,44 +12,20 @@ package {
 }
 
 rust_library {
-    name: "libmetrics",
+    name: "libmetrics_generic",
     defaults: ["crosvm_inner_defaults"],
     host_supported: true,
-    crate_name: "metrics",
+    crate_name: "metrics_generic",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
+    features: ["default"],
     rustlibs: [
         "libanyhow",
         "libbase_rust",
         "libcfg_if",
-        "libmetrics_generic",
+        "libprotobuf",
         "libserde",
-        "libsync_rust",
-    ],
-}
-
-rust_test {
-    name: "metrics_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
-    host_supported: true,
-    crate_name: "metrics",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libanyhow",
-        "libbase_rust",
-        "libcfg_if",
-        "libmetrics_generic",
-        "libserde",
-        "libsync_rust",
     ],
 }
