@@ -8,7 +8,7 @@
     {"name": "jail_test_src_lib"},
     {"name": "metrics_test_src_lib"},
     {"name": "net_util_test_src_lib"},
-    {"name": "wire_format_derive_test_src_lib"},
+    {"name": "p9_wire_format_derive_test_src_lib"},
     {"name": "x86_64_test_src_lib"}
   ],
   "presubmit": [

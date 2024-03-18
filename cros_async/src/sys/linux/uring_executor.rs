@@ -81,6 +81,7 @@ use crate::common_executor::Reactor;
 use crate::mem::BackingMemory;
 use crate::waker::WakerToken;
 use crate::waker::WeakWake;
+use crate::AsyncError;
 use crate::AsyncResult;
 use crate::IoSource;
 use crate::MemRegion;
@@ -148,6 +149,12 @@ impl From<Error> for io::Error {
             EnablingContext(e) => e.into(),
             RegisteringURingRestriction(e) => e.into(),
         }
+    }
+}
+
+impl From<Error> for AsyncError {
+    fn from(e: Error) -> AsyncError {
+        AsyncError::SysVariants(e.into())
     }
 }
 
@@ -918,7 +925,7 @@ mod tests {
             Arc::new(VecIoWrapper::from(vec![0u8; 4096])) as Arc<dyn BackingMemory + Send + Sync>;
 
         // Use pipes to create a future that will block forever.
-        let (rx, mut tx) = base::pipe(true).unwrap();
+        let (rx, mut tx) = base::pipe().unwrap();
 
         // Set up the TLS for the uring_executor by creating one.
         let ex = RawExecutor::<UringReactor>::new().unwrap();
@@ -1019,7 +1026,7 @@ mod tests {
         let bm =
             Arc::new(VecIoWrapper::from(vec![0u8; 16])) as Arc<dyn BackingMemory + Send + Sync>;
 
-        let (rx, tx) = base::pipe(true).expect("Pipe failed");
+        let (rx, tx) = base::pipe().expect("Pipe failed");
 
         let ex = RawExecutor::<UringReactor>::new().unwrap();
 
@@ -1067,7 +1074,7 @@ mod tests {
             }
         }
 
-        let (mut rx, mut tx) = base::pipe(true).expect("Pipe failed");
+        let (mut rx, mut tx) = base::pipe().expect("Pipe failed");
 
         let ex = RawExecutor::<UringReactor>::new().unwrap();
 
@@ -1173,7 +1180,7 @@ mod tests {
 
         // Leave an uncompleted operation in the queue so that the drop impl will try to drive it to
         // completion.
-        let (_rx, tx) = base::pipe(true).expect("Pipe failed");
+        let (_rx, tx) = base::pipe().expect("Pipe failed");
         let tx = ex
             .reactor
             .register_source(&ex, &tx)

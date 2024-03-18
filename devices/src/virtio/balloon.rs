@@ -49,7 +49,6 @@ use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error as ThisError;
-#[cfg(windows)]
 use vm_control::api::VmMemoryClient;
 #[cfg(feature = "registered_events")]
 use vm_control::RegisteredEventWithData;
@@ -929,7 +928,6 @@ struct WorkerReturn {
     #[cfg(feature = "registered_events")]
     registered_evt_q: Option<SendTube>,
     paused_queues: Option<PausedQueues>,
-    #[cfg(windows)]
     vm_memory_client: VmMemoryClient,
 }
 
@@ -943,7 +941,7 @@ fn run_worker(
     events_queue: Option<Queue>,
     ws_queues: (Option<Queue>, Option<Queue>),
     command_tube: Tube,
-    #[cfg(windows)] vm_memory_client: VmMemoryClient,
+    vm_memory_client: VmMemoryClient,
     release_memory_tube: Option<Tube>,
     interrupt: Interrupt,
     kill_evt: Event,
@@ -979,10 +977,7 @@ fn run_worker(
                 sys::free_memory(
                     &guest_address,
                     len,
-                    #[cfg(windows)]
                     &vm_memory_client,
-                    #[cfg(any(target_os = "android", target_os = "linux"))]
-                    &mem,
                 )
             },
             stop_rx,
@@ -1005,7 +1000,6 @@ fn run_worker(
                 sys::reclaim_memory(
                     &guest_address,
                     len,
-                    #[cfg(windows)]
                     &vm_memory_client,
                 )
             },
@@ -1058,10 +1052,7 @@ fn run_worker(
                     sys::free_memory(
                         &guest_address,
                         len,
-                        #[cfg(windows)]
                         &vm_memory_client,
-                        #[cfg(any(target_os = "android", target_os = "linux"))]
-                        &mem,
                     )
                 },
                 stop_rx,
@@ -1142,7 +1133,6 @@ fn run_worker(
         let target_reached = handle_target_reached(
             &ex,
             target_reached_evt,
-            #[cfg(windows)]
             &vm_memory_client,
         );
         pin_mut!(target_reached);
@@ -1251,7 +1241,6 @@ fn run_worker(
         release_memory_tube,
         #[cfg(feature = "registered_events")]
         registered_evt_q,
-        #[cfg(windows)]
         vm_memory_client,
     }
 }
@@ -1259,7 +1248,7 @@ fn run_worker(
 async fn handle_target_reached(
     ex: &Executor,
     target_reached_evt: Event,
-    #[cfg(windows)] vm_memory_client: &VmMemoryClient,
+    vm_memory_client: &VmMemoryClient,
 ) -> anyhow::Result<()> {
     let event_async =
         EventAsync::new(target_reached_evt, ex).context("failed to create EventAsync")?;
@@ -1270,7 +1259,6 @@ async fn handle_target_reached(
         // size yet.
         sys::balloon_target_reached(
             0,
-            #[cfg(windows)]
             vm_memory_client,
         );
     }
@@ -1284,7 +1272,6 @@ async fn handle_target_reached(
 /// Virtio device for memory balloon inflation/deflation.
 pub struct Balloon {
     command_tube: Option<Tube>,
-    #[cfg(windows)]
     vm_memory_client: Option<VmMemoryClient>,
     release_memory_tube: Option<Tube>,
     pending_adjusted_response_event: Event,
@@ -1325,7 +1312,7 @@ impl Balloon {
     pub fn new(
         base_features: u64,
         command_tube: Tube,
-        #[cfg(windows)] vm_memory_client: VmMemoryClient,
+        vm_memory_client: VmMemoryClient,
         release_memory_tube: Option<Tube>,
         init_balloon_size: u64,
         mode: BalloonMode,
@@ -1346,7 +1333,6 @@ impl Balloon {
 
         Ok(Balloon {
             command_tube: Some(command_tube),
-            #[cfg(windows)]
             vm_memory_client: Some(vm_memory_client),
             release_memory_tube,
             pending_adjusted_response_event: Event::new().map_err(BalloonError::CreatingEvent)?,
@@ -1415,10 +1401,7 @@ impl Balloon {
             {
                 self.registered_evt_q = worker_ret.registered_evt_q;
             }
-            #[cfg(windows)]
-            {
-                self.vm_memory_client = Some(worker_ret.vm_memory_client);
-            }
+            self.vm_memory_client = Some(worker_ret.vm_memory_client);
 
             if let Some(queues) = worker_ret.paused_queues {
                 StoppedWorker::WithQueues(Box::new(queues))
@@ -1485,7 +1468,6 @@ impl Balloon {
 
         let command_tube = self.command_tube.take().unwrap();
 
-        #[cfg(windows)]
         let vm_memory_client = self.vm_memory_client.take().unwrap();
         let release_memory_tube = self.release_memory_tube.take();
         #[cfg(feature = "registered_events")]
@@ -1504,7 +1486,6 @@ impl Balloon {
                 queues.events,
                 queues.ws,
                 command_tube,
-                #[cfg(windows)]
                 vm_memory_client,
                 release_memory_tube,
                 interrupt,
@@ -1747,7 +1728,6 @@ mod tests {
 
     struct BalloonContext {
         _ctrl_tube: Tube,
-        #[cfg(windows)]
         _mem_client_tube: Tube,
     }
 
@@ -1757,18 +1737,15 @@ mod tests {
 
     fn create_device() -> (BalloonContext, Balloon) {
         let (_ctrl_tube, ctrl_tube_device) = Tube::pair().unwrap();
-        #[cfg(windows)]
         let (_mem_client_tube, mem_client_tube_device) = Tube::pair().unwrap();
         (
             BalloonContext {
                 _ctrl_tube,
-                #[cfg(windows)]
                 _mem_client_tube,
             },
             Balloon::new(
                 0,
                 ctrl_tube_device,
-                #[cfg(windows)]
                 VmMemoryClient::new(mem_client_tube_device),
                 None,
                 1024,

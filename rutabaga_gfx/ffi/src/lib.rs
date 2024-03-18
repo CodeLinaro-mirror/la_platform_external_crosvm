@@ -5,47 +5,49 @@
 ///! C-bindings for the rutabaga_gfx crate
 extern crate rutabaga_gfx;
 
+use std::cell::RefCell;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::fs::File;
 use std::io::IoSliceMut;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
 use std::panic::catch_unwind;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::path::PathBuf;
 use std::ptr::copy_nonoverlapping;
 use std::ptr::null;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts;
 use std::slice::from_raw_parts_mut;
-use std::sync::Mutex;
 
 use libc::iovec;
 use libc::EINVAL;
 use libc::ESRCH;
-use once_cell::sync::OnceCell;
 use rutabaga_gfx::*;
 
 const NO_ERROR: i32 = 0;
 const RUTABAGA_WSI_SURFACELESS: u64 = 1;
 
-static S_DEBUG_HANDLER: OnceCell<Mutex<RutabagaDebugHandler>> = OnceCell::new();
+thread_local! {
+    static S_DEBUG_HANDLER: RefCell<Option<RutabagaDebugHandler>> = const { RefCell::new(None) };
+}
 
 fn log_error(debug_string: String) {
-    // Although this should be only called from a single-thread environment, add locking to
-    // to reduce the amount of unsafe code blocks.
-    if let Some(ref handler_mutex) = S_DEBUG_HANDLER.get() {
-        let cstring = CString::new(debug_string.as_str()).expect("CString creation failed");
+    S_DEBUG_HANDLER.with(|handler_cell| {
+        if let Some(handler) = &*handler_cell.borrow() {
+            let cstring = CString::new(debug_string.as_str()).expect("CString creation failed");
 
-        let debug = RutabagaDebug {
-            debug_type: RUTABAGA_DEBUG_ERROR,
-            message: cstring.as_ptr(),
-        };
+            let debug = RutabagaDebug {
+                debug_type: RUTABAGA_DEBUG_ERROR,
+                message: cstring.as_ptr(),
+            };
 
-        let handler = handler_mutex.lock().unwrap();
-        handler.call(debug);
-    }
+            handler.call(debug);
+        }
+    });
 }
 
 fn return_result<T>(result: RutabagaResult<T>) -> i32 {
@@ -64,6 +66,18 @@ macro_rules! return_on_error {
             Err(e) => {
                 log_error(e.to_string());
                 return -EINVAL;
+            }
+        }
+    };
+}
+
+macro_rules! return_on_io_error {
+    ($result:expr) => {
+        match $result {
+            Ok(t) => t,
+            Err(e) => {
+                log_error(e.to_string());
+                return -e.raw_os_error().unwrap_or(EINVAL);
             }
         }
     };
@@ -191,9 +205,9 @@ pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mu
 
         if let Some(func) = (*builder).debug_cb {
             let debug_handler = create_ffi_debug_handler((*builder).user_data, func);
-            S_DEBUG_HANDLER
-                .set(Mutex::new(debug_handler.clone()))
-                .expect("once_cell set failed");
+            S_DEBUG_HANDLER.with(|handler_cell| {
+                *handler_cell.borrow_mut() = Some(debug_handler.clone());
+            });
             debug_handler_opt = Some(debug_handler);
         }
 
@@ -590,6 +604,37 @@ pub unsafe extern "C" fn rutabaga_submit_command(
 pub extern "C" fn rutabaga_create_fence(ptr: &mut rutabaga, fence: &rutabaga_fence) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let result = ptr.create_fence(*fence);
+        return_result(result)
+    }))
+    .unwrap_or(-ESRCH)
+}
+
+#[no_mangle]
+pub extern "C" fn rutabaga_snapshot(ptr: &mut rutabaga, dir: *const c_char) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: Caller guarantees a valid C string.
+        let dir = match unsafe { CStr::from_ptr(dir) }.to_str() {
+            Ok(x) => x,
+            Err(_) => return -EINVAL,
+        };
+        let file = return_on_io_error!(File::create(Path::new(dir).join("snapshot")));
+        let result = ptr.snapshot(&mut std::io::BufWriter::new(file));
+        return_result(result)
+    }))
+    .unwrap_or(-ESRCH)
+}
+
+#[no_mangle]
+pub extern "C" fn rutabaga_restore(ptr: &mut rutabaga, dir: *const c_char) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: Caller guarantees a valid C string.
+        let dir = unsafe { CStr::from_ptr(dir) };
+        let dir = match dir.to_str() {
+            Ok(x) => x,
+            Err(_) => return -EINVAL,
+        };
+        let file = return_on_io_error!(File::open(Path::new(dir).join("snapshot")));
+        let result = ptr.restore(&mut std::io::BufReader::new(file));
         return_result(result)
     }))
     .unwrap_or(-ESRCH)

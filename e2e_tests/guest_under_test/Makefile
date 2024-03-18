@@ -39,6 +39,10 @@ $(shell mkdir -p $(TARGET))
 # Parameteters for building the kernel locally
 KERNEL_REPO ?= https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 KERNEL_BRANCH ?= linux-6.1.y
+KERNEL_SRC_BASE ?= $(TARGET)/kernel-source-$(KERNEL_BRANCH)
+KERNEL_SRC_PATCHED ?= $(KERNEL_SRC_BASE)-patched
+KERNEL_BUILD ?= $(TARGET)/kernel-build
+KERNEL_PATCHES ?= "`readlink -f ./kernel/patches`"
 
 ################################################################################
 # Main targets
@@ -56,12 +60,14 @@ x86_64_initramfs: $(TARGET)/initramfs
 
 delegate: $(TARGET)/rootfs-build/delegate
 
+readclock: $(TARGET)/rootfs-build/readclock
+
 ################################################################################
 # Build rootfs
 rootfs : ${TARGET}/rootfs
 
 # Build rootfs from Dockerfile and export into squashfs
-$(TARGET)/rootfs: $(TARGET)/rootfs-build/delegate rootfs/Dockerfile
+$(TARGET)/rootfs: $(TARGET)/rootfs-build/delegate $(TARGET)/rootfs-build/readclock rootfs/Dockerfile
 	# Build image from Dockerfile
 	DOCKER_BUILDKIT=1 docker build -t crosvm_e2e_test_guest $(TARGET)/rootfs-build \
 		-f rootfs/Dockerfile --build-arg ARCH=$(DOCKER_ARCH)
@@ -85,6 +91,13 @@ $(TARGET)/rootfs-build/delegate: rootfs/delegate/Cargo.toml rootfs/delegate/src/
 	mkdir -p $(TARGET)/rootfs-build
 	cp $(TARGET)/$(RUST_TARGET)/release/delegate $(TARGET)/rootfs-build/delegate
 
+# Build and copy readclock binary into rootfs build directory
+$(TARGET)/rootfs-build/readclock: rootfs/readclock/Cargo.toml rootfs/readclock/src/main.rs rootfs/readclock/src/lib.rs
+	rustup target add $(RUST_TARGET)
+	CARGO_TARGET_DIR=$(TARGET) RUSTFLAGS=$(RUSTFLAGS) cargo build --target $(RUST_TARGET) --release --manifest-path=rootfs/readclock/Cargo.toml
+	mkdir -p $(TARGET)/rootfs-build
+	cp $(TARGET)/$(RUST_TARGET)/release/readclock $(TARGET)/rootfs-build/readclock
+
 ################################################################################
 # Build initramfs
 
@@ -107,27 +120,32 @@ $(TARGET)/initramfs: $(TARGET)/rootfs-build/delegate initramfs/Containerfile ini
 ################################################################################
 # Build kernel
 
-kernel : $(TARGET)/bzImage
+kernel: $(TARGET)/bzImage
 
-$(TARGET)/bzImage: $(TARGET)/kernel-source $(TARGET)/kernel-build
-	cd $(TARGET)/kernel-source \
-		&& make O=$(TARGET)/kernel-build \
+# Make this target PHONY to make sure everything is up to date with the kernel's make recipe.
+# You can use custom kernel source by running:
+# make kernel KERNEL_SRC_PATCHED=${PATH_TO_YOUR_KERNEL}
+# (Note: you have to manually apply the patches applied in %-patched recipe to pass all the tests.)
+.PHONY : $(TARGET)/bzImage
+$(TARGET)/bzImage : $(KERNEL_SRC_PATCHED)
+	mkdir -p $(KERNEL_BUILD)
+	cat kernel/common.config kernel/$(KERNEL_ARCH).config > $(KERNEL_BUILD)/.config
+	make -C $(KERNEL_SRC_PATCHED) O=$(KERNEL_BUILD) \
 		ARCH=$(KERNEL_ARCH) \
 		CROSS_COMPILE=$(CROSS_COMPILE) \
 		-j$(shell nproc)\
 		olddefconfig \
 		$(KERNEL_BINARY)
+	cp $(KERNEL_BUILD)/arch/${KERNEL_ARCH}/boot/$(KERNEL_BINARY) $@
 
-	cp $(TARGET)/kernel-build/arch/${KERNEL_ARCH}/boot/$(KERNEL_BINARY) $@
+$(KERNEL_SRC_PATCHED): $(KERNEL_SRC_BASE)
+	rm -rf $@.tmp ; true # ignore failure
+	cp -r $(KERNEL_SRC_BASE) $@.tmp
+	git -C $@.tmp am $(KERNEL_PATCHES)/virtio_pvclock.patch
+	mv $@.tmp $@
 
-$(TARGET)/kernel-build: $(TARGET)/kernel-source kernel/$(KERNEL_ARCH).config kernel/common.config
-	mkdir -p $@
-	cat kernel/common.config kernel/$(KERNEL_ARCH).config > $@/.config
-	touch $@
-
-$(TARGET)/kernel-source:
+$(KERNEL_SRC_BASE):
 	rm -rf $@
 	git clone --depth 1 --branch $(KERNEL_BRANCH) $(KERNEL_REPO) $@
-
 
 .PHONY: clean all update-prebuilts

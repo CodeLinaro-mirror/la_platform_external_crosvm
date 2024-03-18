@@ -7,6 +7,7 @@
 #![cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -49,6 +50,7 @@ use hypervisor::CpuConfigAArch64;
 use hypervisor::DeviceKind;
 use hypervisor::Hypervisor;
 use hypervisor::HypervisorCap;
+use hypervisor::MemCacheType;
 use hypervisor::ProtectionType;
 use hypervisor::VcpuAArch64;
 use hypervisor::VcpuFeature;
@@ -72,7 +74,6 @@ use thiserror::Error;
 use vm_control::BatControl;
 use vm_control::BatteryType;
 use vm_memory::GuestAddress;
-#[cfg(feature = "gdb")]
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
 use vm_memory::MemoryRegionOptions;
@@ -337,6 +338,30 @@ fn fdt_address(memory_end: GuestAddress, has_bios: bool) -> GuestAddress {
     }
 }
 
+fn load_kernel(
+    guest_mem: &GuestMemory,
+    kernel_start: GuestAddress,
+    mut kernel_image: &mut File,
+) -> Result<LoadedKernel> {
+    if let Ok(elf_kernel) = kernel_loader::load_elf(
+        guest_mem,
+        kernel_start,
+        &mut kernel_image,
+        AARCH64_PHYS_MEM_START,
+    ) {
+        return Ok(elf_kernel);
+    }
+
+    if let Ok(lz4_kernel) =
+        kernel_loader::load_arm64_kernel_lz4(guest_mem, kernel_start, &mut kernel_image)
+    {
+        return Ok(lz4_kernel);
+    }
+
+    kernel_loader::load_arm64_kernel(guest_mem, kernel_start, kernel_image)
+        .map_err(Error::KernelLoadFailure)
+}
+
 pub struct AArch64;
 
 impl arch::LinuxArch for AArch64 {
@@ -424,17 +449,7 @@ impl arch::LinuxArch for AArch64 {
                 }
             }
             VmImage::Kernel(ref mut kernel_image) => {
-                let loaded_kernel = if let Ok(elf_kernel) = kernel_loader::load_elf(
-                    &mem,
-                    get_kernel_addr(),
-                    kernel_image,
-                    AARCH64_PHYS_MEM_START,
-                ) {
-                    elf_kernel
-                } else {
-                    kernel_loader::load_arm64_kernel(&mem, get_kernel_addr(), kernel_image)
-                        .map_err(Error::KernelLoadFailure)?
-                };
+                let loaded_kernel = load_kernel(&mem, get_kernel_addr(), kernel_image)?;
                 let kernel_end = loaded_kernel.address_range.end;
                 initrd = match components.initrd_image {
                     Some(initrd_file) => {
@@ -508,6 +523,7 @@ impl arch::LinuxArch for AArch64 {
                 Box::new(pvtime_mem),
                 false,
                 false,
+                MemCacheType::CacheCoherent,
             )
             .map_err(Error::MapPvtimeError)?;
         }
@@ -636,6 +652,10 @@ impl arch::LinuxArch for AArch64 {
 
         #[cfg(any(target_os = "android", target_os = "linux"))]
         if !components.cpu_frequencies.is_empty() {
+            // TODO: Revisit and optimization after benchmarking
+            let socket = components
+                .virt_cpufreq_socket
+                .map(|s| Arc::new(Mutex::new(s)));
             for vcpu in 0..vcpu_count {
                 let vcpu_affinity = match components.vcpu_affinity.clone() {
                     Some(VcpuAffinity::Global(v)) => v,
@@ -645,6 +665,7 @@ impl arch::LinuxArch for AArch64 {
 
                 let virt_cpufreq = Arc::new(Mutex::new(VirtCpufreq::new(
                     vcpu_affinity[0].try_into().unwrap(),
+                    socket.clone(),
                 )));
 
                 if vcpu as u64 * AARCH64_VIRTFREQ_SIZE + AARCH64_VIRTFREQ_SIZE
@@ -850,7 +871,7 @@ impl arch::LinuxArch for AArch64 {
     fn get_host_cpu_clusters() -> std::result::Result<Vec<CpuSet>, Self::Error> {
         let cluster_ids = Self::collect_for_each_cpu(base::logical_core_cluster_id)
             .map_err(Error::CpuTopology)?;
-        Ok(cluster_ids
+        let mut unique_clusters: Vec<CpuSet> = cluster_ids
             .iter()
             .map(|&vcpu_cluster_id| {
                 cluster_ids
@@ -860,7 +881,10 @@ impl arch::LinuxArch for AArch64 {
                     .map(|(cpu_id, _)| cpu_id)
                     .collect()
             })
-            .collect())
+            .collect();
+        unique_clusters.sort_unstable();
+        unique_clusters.dedup();
+        Ok(unique_clusters)
     }
 }
 

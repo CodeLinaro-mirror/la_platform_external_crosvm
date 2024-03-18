@@ -6,6 +6,10 @@ use base::sched_attr;
 use base::sched_setattr;
 use base::warn;
 use base::Error;
+use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+
+use sync::Mutex;
 
 use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
@@ -47,7 +51,7 @@ fn get_cpu_curfreq_khz(cpu_id: u32) -> Result<u32, Error> {
 }
 
 impl VirtCpufreq {
-    pub fn new(pcpu: u32) -> Self {
+    pub fn new(pcpu: u32, _socket: Option<Arc<Mutex<UnixStream>>>) -> Self {
         let cpu_capacity = get_cpu_capacity(pcpu).expect("Error reading capacity");
         let cpu_fmax = get_cpu_maxfreq_khz(pcpu).expect("Error reading max freq");
 
