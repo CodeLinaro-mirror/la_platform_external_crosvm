@@ -28,9 +28,13 @@ rust_test {
         "audio",
         "balloon",
         "geniezone",
+        "gfxstream",
+        "gpu",
+        "gpu_display",
         "gunyah",
         "net",
         "usb",
+        "virgl_renderer",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -54,6 +58,7 @@ rust_test {
         "libdowncast_rs",
         "libfuse_rust",
         "libfutures",
+        "libgpu_display",
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
@@ -92,23 +97,6 @@ rust_test {
         "libenumn",
         "libremain",
     ],
-    target: {
-        host: {
-            features: [
-                "gfxstream",
-                "gpu",
-                "gpu_display",
-                "virgl_renderer",
-                "virgl_renderer_next",
-            ],
-            rustlibs: [
-                "libgpu_display",
-                "librutabaga_gfx",
-            ],
-            shared_libs: ["libgfxstream_backend"],
-        },
-    },
-
 }
 
 rust_test {
@@ -129,9 +117,13 @@ rust_test {
         "audio",
         "balloon",
         "geniezone",
+        "gfxstream",
+        "gpu",
+        "gpu_display",
         "gunyah",
         "net",
         "usb",
+        "virgl_renderer",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -156,6 +148,7 @@ rust_test {
         "libdowncast_rs",
         "libfuse_rust",
         "libfutures",
+        "libgpu_display",
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
@@ -194,23 +187,6 @@ rust_test {
         "libenumn",
         "libremain",
     ],
-    target: {
-        host: {
-            features: [
-                "gfxstream",
-                "gpu",
-                "gpu_display",
-                "virgl_renderer",
-                "virgl_renderer_next",
-            ],
-            rustlibs: [
-                "libgpu_display",
-                "librutabaga_gfx",
-            ],
-            shared_libs: ["libgfxstream_backend"],
-        },
-    },
-
 }
 
 rust_library {
@@ -226,9 +202,13 @@ rust_library {
         "audio",
         "balloon",
         "geniezone",
+        "gfxstream",
+        "gpu",
+        "gpu_display",
         "gunyah",
         "net",
         "usb",
+        "virgl_renderer",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -250,6 +230,7 @@ rust_library {
         "libdowncast_rs",
         "libfuse_rust",
         "libfutures",
+        "libgpu_display",
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
@@ -287,21 +268,4 @@ rust_library {
         "libremain",
     ],
     visibility: ["//vendor:__subpackages__"],
-    target: {
-        host: {
-            features: [
-                "gfxstream",
-                "gpu",
-                "gpu_display",
-                "virgl_renderer",
-                "virgl_renderer_next",
-            ],
-            rustlibs: [
-                "libgpu_display",
-                "librutabaga_gfx",
-            ],
-            shared_libs: ["libgfxstream_backend"],
-        },
-    },
-
 }

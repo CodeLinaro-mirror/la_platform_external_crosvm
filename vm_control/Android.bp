@@ -24,6 +24,7 @@ rust_library {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "gpu",
     ],
     rustlibs: [
         "libanyhow",
@@ -49,14 +50,6 @@ rust_library {
     ],
     proc_macros: ["libremain"],
     visibility: ["//packages/modules/Virtualization/virtualizationmanager"],
-    target: {
-        host_linux: {
-            features: [
-                "gpu",
-            ],
-        },
-    },
-
 }
 
 rust_test {
@@ -78,6 +71,7 @@ rust_test {
         "gdb",
         "gdbstub",
         "gdbstub_arch",
+        "gpu",
     ],
     rustlibs: [
         "libanyhow",
@@ -102,12 +96,4 @@ rust_test {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    target: {
-        host_linux: {
-            features: [
-                "gpu",
-            ],
-        },
-    },
-
 }

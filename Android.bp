@@ -51,10 +51,14 @@ rust_binary {
         "gdbstub",
         "gdbstub_arch",
         "geniezone",
+        "gfxstream",
+        "gpu",
+        "gpu_display",
         "gunyah",
         "net",
         "qcow",
         "usb",
+        "virgl_renderer",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -123,11 +127,6 @@ rust_binary {
     },
     target: {
         host: {
-            features: [
-                "gfxstream",
-                "gpu",
-                "virgl_renderer_next",
-            ],
             strip: {
                 keep_symbols_and_debug_frame: true,
             },
@@ -185,10 +184,14 @@ rust_test {
         "gdbstub",
         "gdbstub_arch",
         "geniezone",
+        "gfxstream",
+        "gpu",
+        "gpu_display",
         "gunyah",
         "net",
         "qcow",
         "usb",
+        "virgl_renderer",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -257,11 +260,6 @@ rust_test {
     },
     target: {
         host: {
-            features: [
-                "gfxstream",
-                "gpu",
-                "virgl_renderer_next",
-            ],
             strip: {
                 keep_symbols_and_debug_frame: true,
             },

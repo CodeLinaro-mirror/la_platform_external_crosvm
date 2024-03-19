@@ -1,7 +1,0 @@
-target: {
-    host_linux: {
-        features: [
-            "gpu",
-        ],
-    },
-}
