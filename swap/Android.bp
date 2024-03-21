@@ -25,7 +25,6 @@ rust_library {
         "libbase_rust",
         "libcfg_if",
         "libcros_tracing",
-        "libdata_model",
         "libjail",
         "liblibc",
         "libnum_cpus",

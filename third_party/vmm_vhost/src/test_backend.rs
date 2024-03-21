@@ -4,9 +4,9 @@
 use std::fs::File;
 
 use crate::message::*;
+use crate::Backend;
 use crate::Error;
 use crate::Result;
-use crate::VhostUserSlaveReqHandler;
 
 pub const MAX_QUEUE_NUM: usize = 2;
 pub const MAX_VRING_NUM: usize = 256;
@@ -14,7 +14,7 @@ pub const MAX_MEM_SLOTS: usize = 32;
 pub const VIRTIO_FEATURES: u64 = 0x40000003;
 
 #[derive(Default)]
-pub struct DummySlaveReqHandler {
+pub struct TestBackend {
     pub owned: bool,
     pub features_acked: bool,
     pub acked_features: u64,
@@ -30,16 +30,16 @@ pub struct DummySlaveReqHandler {
     pub inflight_file: Option<File>,
 }
 
-impl DummySlaveReqHandler {
+impl TestBackend {
     pub fn new() -> Self {
-        DummySlaveReqHandler {
+        TestBackend {
             queue_num: MAX_QUEUE_NUM,
             ..Default::default()
         }
     }
 }
 
-impl VhostUserSlaveReqHandler for DummySlaveReqHandler {
+impl Backend for TestBackend {
     fn set_owner(&mut self) -> Result<()> {
         if self.owned {
             return Err(Error::InvalidOperation);
@@ -174,10 +174,10 @@ impl VhostUserSlaveReqHandler for DummySlaveReqHandler {
     }
 
     fn set_protocol_features(&mut self, features: u64) -> Result<()> {
-        // Note: slave that reported VHOST_USER_F_PROTOCOL_FEATURES must
+        // Note: Backend that reported VHOST_USER_F_PROTOCOL_FEATURES must
         // support this message even before VHOST_USER_SET_FEATURES was
         // called.
-        // What happens if the master calls set_features() with
+        // What happens if the frontend calls set_features() with
         // VHOST_USER_F_PROTOCOL_FEATURES cleared after calling this
         // interface?
         self.acked_protocol_features = features;
@@ -196,11 +196,6 @@ impl VhostUserSlaveReqHandler for DummySlaveReqHandler {
         } else if index as usize >= self.queue_num || index as usize > self.queue_num {
             return Err(Error::InvalidParam);
         }
-
-        // Slave must not pass data to/from the backend until ring is
-        // enabled by VHOST_USER_SET_VRING_ENABLE with parameter 1,
-        // or after it has been disabled by VHOST_USER_SET_VRING_ENABLE
-        // with parameter 0.
         self.vring_enabled[index as usize] = enable;
         Ok(())
     }

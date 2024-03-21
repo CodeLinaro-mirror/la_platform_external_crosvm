@@ -25,9 +25,9 @@
 //! Later Vhost-user protocol is introduced to complement the ioctl interface used to control the
 //! vhost implementation in the Linux kernel. It implements the control plane needed to establish
 //! virtqueues sharing with a user space process on the same host. It uses communication over a
-//! Unix domain socket to share file descriptors in the ancillary data of the message.
-//! The protocol defines 2 sides of the communication, master and slave. Master is the application
-//! that shares its virtqueues. Slave is the consumer of the virtqueues. Master and slave can be
+//! Unix domain socket to share file descriptors in the ancillary data of the message. The protocol
+//! defines 2 sides of the communication, frontend and backend. Frontend is the application that
+//! shares its virtqueues. Backend is the consumer of the virtqueues. Frontend and backend can be
 //! either a client (i.e. connecting) or server (listening) in the socket communication.
 
 use std::fs::File;
@@ -47,27 +47,29 @@ pub mod connection;
 
 mod sys;
 pub use connection::Connection;
-pub use message::MasterReq;
-pub use message::SlaveReq;
+pub use message::BackendReq;
+pub use message::FrontendReq;
 pub use sys::SystemStream;
 pub use sys::*;
 
-pub(crate) mod master;
-pub use self::master::Master;
-mod master_req_handler;
-pub use self::master_req_handler::VhostUserMasterReqHandler;
-mod slave_proxy;
-mod slave_req_handler;
-pub use self::master_req_handler::MasterReqHandler;
-pub use self::slave_proxy::Slave;
-pub use self::slave_req_handler::SlaveReqHandler;
-pub use self::slave_req_handler::SlaveReqHelper;
-pub use self::slave_req_handler::VhostUserSlaveReqHandler;
+pub(crate) mod backend_client;
+pub use backend_client::BackendClient;
+mod frontend_server;
+pub use self::frontend_server::Frontend;
+mod backend_server;
+mod frontend_client;
+pub use self::backend_server::Backend;
+pub use self::backend_server::BackendServer;
+pub use self::frontend_client::FrontendClient;
+pub use self::frontend_server::FrontendServer;
 
 /// Errors for vhost-user operations
 #[sorted]
 #[derive(Debug, ThisError)]
 pub enum Error {
+    /// Failure from the backend side.
+    #[error("backend internal error")]
+    BackendInternalError,
     /// client exited properly.
     #[error("client exited properly")]
     ClientExit,
@@ -81,6 +83,9 @@ pub enum Error {
     /// Virtio/protocol features mismatch.
     #[error("virtio features mismatch")]
     FeatureMismatch,
+    /// Failure from the frontend side.
+    #[error("frontend Internal error")]
+    FrontendInternalError,
     /// Fd array in question is too big or too small
     #[error("wrong number of attached fds")]
     IncorrectFds,
@@ -96,9 +101,6 @@ pub enum Error {
     /// Invalid parameters.
     #[error("invalid parameters")]
     InvalidParam,
-    /// Failure from the master side.
-    #[error("master Internal error")]
-    MasterInternalError,
     /// Message is too large
     #[error("oversized message")]
     OversizedMsg,
@@ -122,9 +124,6 @@ pub enum Error {
     /// Failure to serialize data.
     #[error("failed to serialize data")]
     SerializationFailed,
-    /// Failure from the slave side.
-    #[error("slave internal error")]
-    SlaveInternalError,
     /// Failure to run device specific sleep.
     #[error("Failed to run device specific sleep: {0}")]
     SleepError(anyhow::Error),
@@ -230,7 +229,7 @@ pub(crate) fn into_single_file(mut files: Vec<File>) -> Option<File> {
 }
 
 #[cfg(test)]
-mod dummy_slave;
+mod test_backend;
 
 #[cfg(test)]
 mod tests {
@@ -242,15 +241,17 @@ mod tests {
     use tempfile::tempfile;
 
     use super::*;
-    use crate::connection::tests::*;
-    use crate::dummy_slave::DummySlaveReqHandler;
-    use crate::dummy_slave::VIRTIO_FEATURES;
     use crate::message::*;
+    pub(crate) use crate::sys::tests::create_client_server_pair;
+    pub(crate) use crate::sys::tests::create_connection_pair;
+    pub(crate) use crate::sys::tests::create_pair;
+    use crate::test_backend::TestBackend;
+    use crate::test_backend::VIRTIO_FEATURES;
     use crate::VhostUserMemoryRegionInfo;
     use crate::VringConfigData;
 
     /// Utility function to process a header and a message together.
-    fn handle_request(h: &mut SlaveReqHandler<DummySlaveReqHandler>) -> Result<()> {
+    fn handle_request(h: &mut BackendServer<TestBackend>) -> Result<()> {
         // We assume that a header comes together with message body in tests so we don't wait before
         // calling `process_message()`.
         let (hdr, files) = h.recv_header()?;
@@ -258,150 +259,156 @@ mod tests {
     }
 
     #[test]
-    fn create_dummy_slave() {
-        let mut slave = DummySlaveReqHandler::new();
+    fn create_test_backend() {
+        let mut backend = TestBackend::new();
 
-        slave.set_owner().unwrap();
-        assert!(slave.set_owner().is_err());
+        backend.set_owner().unwrap();
+        assert!(backend.set_owner().is_err());
     }
 
     #[test]
     fn test_set_owner() {
-        let slave_be = DummySlaveReqHandler::new();
-        let (master, mut slave) = create_master_slave_pair(slave_be);
+        let test_backend = TestBackend::new();
+        let (backend_client, mut backend_server) = create_client_server_pair(test_backend);
 
-        assert!(!slave.as_ref().owned);
-        master.set_owner().unwrap();
-        handle_request(&mut slave).unwrap();
-        assert!(slave.as_ref().owned);
-        master.set_owner().unwrap();
-        assert!(handle_request(&mut slave).is_err());
-        assert!(slave.as_ref().owned);
+        assert!(!backend_server.as_ref().owned);
+        backend_client.set_owner().unwrap();
+        handle_request(&mut backend_server).unwrap();
+        assert!(backend_server.as_ref().owned);
+        backend_client.set_owner().unwrap();
+        assert!(handle_request(&mut backend_server).is_err());
+        assert!(backend_server.as_ref().owned);
     }
 
     #[test]
     fn test_set_features() {
         let mbar = Arc::new(Barrier::new(2));
         let sbar = mbar.clone();
-        let slave_be = DummySlaveReqHandler::new();
-        let (mut master, mut slave) = create_master_slave_pair(slave_be);
+        let test_backend = TestBackend::new();
+        let (mut backend_client, mut backend_server) = create_client_server_pair(test_backend);
 
         thread::spawn(move || {
-            handle_request(&mut slave).unwrap();
-            assert!(slave.as_ref().owned);
+            handle_request(&mut backend_server).unwrap();
+            assert!(backend_server.as_ref().owned);
 
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
-            assert_eq!(slave.as_ref().acked_features, VIRTIO_FEATURES & !0x1);
-
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
             assert_eq!(
-                slave.as_ref().acked_protocol_features,
+                backend_server.as_ref().acked_features,
+                VIRTIO_FEATURES & !0x1
+            );
+
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            assert_eq!(
+                backend_server.as_ref().acked_protocol_features,
                 VhostUserProtocolFeatures::all().bits()
             );
 
             sbar.wait();
         });
 
-        master.set_owner().unwrap();
+        backend_client.set_owner().unwrap();
 
         // set virtio features
-        let features = master.get_features().unwrap();
+        let features = backend_client.get_features().unwrap();
         assert_eq!(features, VIRTIO_FEATURES);
-        master.set_features(VIRTIO_FEATURES & !0x1).unwrap();
+        backend_client.set_features(VIRTIO_FEATURES & !0x1).unwrap();
 
         // set vhost protocol features
-        let features = master.get_protocol_features().unwrap();
+        let features = backend_client.get_protocol_features().unwrap();
         assert_eq!(features.bits(), VhostUserProtocolFeatures::all().bits());
-        master.set_protocol_features(features).unwrap();
+        backend_client.set_protocol_features(features).unwrap();
 
         mbar.wait();
     }
 
     #[test]
-    fn test_master_slave_process() {
+    fn test_client_server_process() {
         let mbar = Arc::new(Barrier::new(2));
         let sbar = mbar.clone();
-        let slave_be = DummySlaveReqHandler::new();
-        let (mut master, mut slave) = create_master_slave_pair(slave_be);
+        let test_backend = TestBackend::new();
+        let (mut backend_client, mut backend_server) = create_client_server_pair(test_backend);
 
         thread::spawn(move || {
             // set_own()
-            handle_request(&mut slave).unwrap();
-            assert!(slave.as_ref().owned);
+            handle_request(&mut backend_server).unwrap();
+            assert!(backend_server.as_ref().owned);
 
             // get/set_features()
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
-            assert_eq!(slave.as_ref().acked_features, VIRTIO_FEATURES & !0x1);
-
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
             assert_eq!(
-                slave.as_ref().acked_protocol_features,
+                backend_server.as_ref().acked_features,
+                VIRTIO_FEATURES & !0x1
+            );
+
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            assert_eq!(
+                backend_server.as_ref().acked_protocol_features,
                 VhostUserProtocolFeatures::all().bits()
             );
 
             // get_inflight_fd()
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
             // set_inflight_fd()
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             // get_queue_num()
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             // set_mem_table()
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             // get/set_config()
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
-            // set_slave_request_fd
-            handle_request(&mut slave).unwrap();
+            // set_backend_req_fd
+            handle_request(&mut backend_server).unwrap();
 
             // set_vring_enable
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             // set_log_base,set_log_fd()
-            handle_request(&mut slave).unwrap_err();
-            handle_request(&mut slave).unwrap_err();
+            handle_request(&mut backend_server).unwrap_err();
+            handle_request(&mut backend_server).unwrap_err();
 
             // set_vring_xxx
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             // get_max_mem_slots()
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             // add_mem_region()
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             // remove_mem_region()
-            handle_request(&mut slave).unwrap();
+            handle_request(&mut backend_server).unwrap();
 
             sbar.wait();
         });
 
-        master.set_owner().unwrap();
+        backend_client.set_owner().unwrap();
 
         // set virtio features
-        let features = master.get_features().unwrap();
+        let features = backend_client.get_features().unwrap();
         assert_eq!(features, VIRTIO_FEATURES);
-        master.set_features(VIRTIO_FEATURES & !0x1).unwrap();
+        backend_client.set_features(VIRTIO_FEATURES & !0x1).unwrap();
 
         // set vhost protocol features
-        let features = master.get_protocol_features().unwrap();
+        let features = backend_client.get_protocol_features().unwrap();
         assert_eq!(features.bits(), VhostUserProtocolFeatures::all().bits());
-        master.set_protocol_features(features).unwrap();
+        backend_client.set_protocol_features(features).unwrap();
 
         // Retrieve inflight I/O tracking information
-        let (inflight_info, inflight_file) = master
+        let (inflight_info, inflight_file) = backend_client
             .get_inflight_fd(&VhostUserInflight {
                 num_queues: 2,
                 queue_size: 256,
@@ -409,11 +416,11 @@ mod tests {
             })
             .unwrap();
         // Set the buffer back to the backend
-        master
+        backend_client
             .set_inflight_fd(&inflight_info, inflight_file.as_raw_descriptor())
             .unwrap();
 
-        let num = master.get_queue_num().unwrap();
+        let num = backend_client.get_queue_num().unwrap();
         assert_eq!(num, 2);
 
         let event = base::Event::new().unwrap();
@@ -424,13 +431,13 @@ mod tests {
             mmap_offset: 0,
             mmap_handle: event.as_raw_descriptor(),
         }];
-        master.set_mem_table(&mem).unwrap();
+        backend_client.set_mem_table(&mem).unwrap();
 
-        master
+        backend_client
             .set_config(0x100, VhostUserConfigFlags::WRITABLE, &[0xa5u8])
             .unwrap();
         let buf = [0x0u8; 4];
-        let (reply_body, reply_payload) = master
+        let (reply_body, reply_payload) = backend_client
             .get_config(0x100, 4, VhostUserConfigFlags::empty(), &buf)
             .unwrap();
         let offset = reply_body.offset;
@@ -448,17 +455,19 @@ mod tests {
         #[cfg(unix)]
         let descriptor = base::Event::new().unwrap();
 
-        master.set_slave_request_fd(&descriptor).unwrap();
-        master.set_vring_enable(0, true).unwrap();
+        backend_client.set_backend_req_fd(&descriptor).unwrap();
+        backend_client.set_vring_enable(0, true).unwrap();
 
         // unimplemented yet
-        master
+        backend_client
             .set_log_base(0, Some(event.as_raw_descriptor()))
             .unwrap();
-        master.set_log_fd(event.as_raw_descriptor()).unwrap();
+        backend_client
+            .set_log_fd(event.as_raw_descriptor())
+            .unwrap();
 
-        master.set_vring_num(0, 256).unwrap();
-        master.set_vring_base(0, 0).unwrap();
+        backend_client.set_vring_num(0, 256).unwrap();
+        backend_client.set_vring_base(0, 0).unwrap();
         let config = VringConfigData {
             queue_size: 128,
             flags: VhostUserVringAddrFlags::VHOST_VRING_F_LOG.bits(),
@@ -467,12 +476,12 @@ mod tests {
             avail_ring_addr: 0x3000,
             log_addr: Some(0x4000),
         };
-        master.set_vring_addr(0, &config).unwrap();
-        master.set_vring_call(0, &event).unwrap();
-        master.set_vring_kick(0, &event).unwrap();
-        master.set_vring_err(0, &event).unwrap();
+        backend_client.set_vring_addr(0, &config).unwrap();
+        backend_client.set_vring_call(0, &event).unwrap();
+        backend_client.set_vring_kick(0, &event).unwrap();
+        backend_client.set_vring_err(0, &event).unwrap();
 
-        let max_mem_slots = master.get_max_mem_slots().unwrap();
+        let max_mem_slots = backend_client.get_max_mem_slots().unwrap();
         assert_eq!(max_mem_slots, 32);
 
         let region_file = tempfile().unwrap();
@@ -483,9 +492,9 @@ mod tests {
             mmap_offset: 0,
             mmap_handle: region_file.as_raw_descriptor(),
         };
-        master.add_mem_region(&region).unwrap();
+        backend_client.add_mem_region(&region).unwrap();
 
-        master.remove_mem_region(&region).unwrap();
+        backend_client.remove_mem_region(&region).unwrap();
 
         mbar.wait();
     }

@@ -133,9 +133,6 @@ pub enum CrossPlatformCommands {
     BalloonStats(BalloonStatsCommand),
     #[cfg(feature = "balloon")]
     BalloonWs(BalloonWsCommand),
-    // TODO(b/288432539): remove once concierge is migrated
-    #[cfg(feature = "balloon")]
-    BalloonWss(BalloonWsCommand),
     Battery(BatteryCommand),
     #[cfg(feature = "composite-disk")]
     CreateComposite(CreateCompositeCommand),
@@ -622,6 +619,7 @@ pub struct GpuSetDisplayMouseModeCommand {
 #[argh(subcommand)]
 pub enum UsbSubCommand {
     Attach(UsbAttachCommand),
+    SecurityKeyAttach(UsbAttachKeyCommand),
     Detach(UsbDetachCommand),
     List(UsbListCommand),
 }
@@ -638,6 +636,18 @@ pub struct UsbAttachCommand {
     pub addr: (u8, u8, u16, u16),
     #[argh(positional)]
     /// usb device path
+    pub dev_path: String,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[derive(FromArgs)]
+/// Attach security key device
+#[argh(subcommand, name = "attach_key")]
+pub struct UsbAttachKeyCommand {
+    #[argh(positional)]
+    /// security key hidraw device path
     pub dev_path: String,
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
@@ -726,6 +736,9 @@ pub struct SnapshotTakeCommand {
     #[argh(switch)]
     /// compress the ram snapshot.
     pub compress_memory: bool,
+    #[argh(switch, arg_name = "encrypt")]
+    /// whether the snapshot should be encrypted
+    pub encrypt: bool,
 }
 
 #[derive(FromArgs)]
@@ -738,6 +751,9 @@ pub struct SnapshotRestoreCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
     pub socket_path: String,
+    /// true to require an encrypted snapshot
+    #[argh(switch, arg_name = "require_encrypted")]
+    pub require_encrypted: bool,
 }
 
 #[derive(FromArgs)]
@@ -942,42 +958,40 @@ pub struct RunCommand {
     #[serde(skip)] // TODO(b/255223604)
     pub async_executor: Option<ExecutorKind>,
 
+    #[cfg(feature = "balloon")]
     #[argh(option, arg_name = "N")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// amount to bias balance of memory between host and guest as the balloon inflates, in mib.
     pub balloon_bias_mib: Option<i64>,
 
+    #[cfg(feature = "balloon")]
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// path for balloon controller socket.
     pub balloon_control: Option<PathBuf>,
 
+    #[cfg(feature = "balloon")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// enable page reporting in balloon.
     pub balloon_page_reporting: Option<bool>,
 
+    #[cfg(feature = "balloon")]
     #[argh(option)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// set number of WS bins to use (default = 4).
     pub balloon_ws_num_bins: Option<u8>,
 
+    #[cfg(feature = "balloon")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// enable working set reporting in balloon.
     pub balloon_ws_reporting: Option<bool>,
-
-    // TODO(b/288432539): remove once concierge is migrated
-    #[argh(switch)]
-    #[serde(skip)] // TODO(b/255223604)
-    #[merge(strategy = overwrite_option)]
-    /// enable working set reporting in balloon.
-    pub balloon_wss_reporting: Option<bool>,
 
     #[argh(option)]
     /// comma separated key=value pairs for setting up battery
@@ -1441,6 +1455,7 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     pub hypervisor: Option<HypervisorKind>,
 
+    #[cfg(feature = "balloon")]
     #[argh(option, arg_name = "N")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1638,6 +1653,7 @@ pub struct RunCommand {
     /// netmask for VM subnet
     pub netmask: Option<std::net::Ipv4Addr>,
 
+    #[cfg(feature = "balloon")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1851,11 +1867,11 @@ pub struct RunCommand {
     ///     [--pstore <path=PATH,size=SIZE>]
     pub pstore: Option<Pstore>,
 
-    #[cfg(windows)]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
     /// enable virtio-pvclock.
+    /// Only available when crosvm is built with feature 'pvclock'.
     pub pvclock: Option<bool>,
 
     #[argh(option, long = "restore", arg_name = "PATH")]
@@ -2139,6 +2155,7 @@ pub struct RunCommand {
     /// (EXPERIMENTAL) enable split-irqchip support
     pub split_irqchip: Option<bool>,
 
+    #[cfg(feature = "balloon")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -2806,6 +2823,7 @@ impl TryFrom<RunCommand> for super::config::Config {
             pmem.read_only = read_only;
             cfg.pmem_devices.push(pmem);
         }
+        cfg.pvclock = cmd.pvclock.unwrap_or_default();
 
         #[cfg(windows)]
         {
@@ -2825,7 +2843,6 @@ impl TryFrom<RunCommand> for super::config::Config {
 
                 cfg.process_invariants_data_size = cmd.process_invariants_size;
             }
-            cfg.pvclock = cmd.pvclock.unwrap_or_default();
             #[cfg(windows)]
             {
                 cfg.service_pipe_name = cmd.service_pipe_name;
@@ -2873,8 +2890,6 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
             cfg.socket_path = Some(socket_path);
         }
-
-        cfg.balloon_control = cmd.balloon_control;
 
         cfg.vsock = cmd.vsock;
 
@@ -3095,12 +3110,24 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.usb = !cmd.no_usb.unwrap_or_default();
         cfg.rng = !cmd.no_rng.unwrap_or_default();
-        cfg.balloon = !cmd.no_balloon.unwrap_or_default();
-        cfg.balloon_page_reporting = cmd.balloon_page_reporting.unwrap_or_default();
-        cfg.balloon_ws_num_bins = cmd.balloon_ws_num_bins.unwrap_or(4);
-        cfg.balloon_ws_reporting = cmd.balloon_ws_reporting.unwrap_or_default()
-        // TODO(b/288432539): remove once concierge is migrated
-            | cmd.balloon_wss_reporting.unwrap_or_default();
+
+        #[cfg(feature = "balloon")]
+        {
+            cfg.balloon = !cmd.no_balloon.unwrap_or_default();
+
+            // cfg.balloon_bias is in bytes.
+            if let Some(b) = cmd.balloon_bias_mib {
+                cfg.balloon_bias = b * 1024 * 1024;
+            }
+
+            cfg.balloon_control = cmd.balloon_control;
+            cfg.balloon_page_reporting = cmd.balloon_page_reporting.unwrap_or_default();
+            cfg.balloon_ws_num_bins = cmd.balloon_ws_num_bins.unwrap_or(4);
+            cfg.balloon_ws_reporting = cmd.balloon_ws_reporting.unwrap_or_default();
+            cfg.strict_balloon = cmd.strict_balloon.unwrap_or_default();
+            cfg.init_memory = cmd.init_mem;
+        }
+
         #[cfg(feature = "audio")]
         {
             cfg.virtio_snds = cmd.virtio_snd;
@@ -3363,11 +3390,6 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.pci_hotplug_slots = cmd.pci_hotplug_slots;
         }
 
-        // cfg.balloon_bias is in bytes.
-        if let Some(b) = cmd.balloon_bias_mib {
-            cfg.balloon_bias = b * 1024 * 1024;
-        }
-
         cfg.vhost_user = cmd.vhost_user;
 
         // Convert an option from `VhostUserOption` to `VhostUserFrontendOption` with the given
@@ -3419,10 +3441,6 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.stub_pci_devices = cmd.stub_pci_device;
 
         cfg.file_backed_mappings = cmd.file_backed_mapping;
-
-        cfg.init_memory = cmd.init_mem;
-
-        cfg.strict_balloon = cmd.strict_balloon.unwrap_or_default();
 
         #[cfg(target_os = "android")]
         {

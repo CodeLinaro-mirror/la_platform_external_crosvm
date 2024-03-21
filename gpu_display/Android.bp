@@ -30,7 +30,6 @@ rust_library {
         "libanyhow",
         "libbase_rust",
         "libcfg_if",
-        "libdata_model",
         "liblibc",
         "liblinux_input_sys",
         "libserde",

@@ -37,7 +37,7 @@ pub const VHOST_USER_CONFIG_SIZE: u32 = 0x1000;
 /// Maximum number of vrings supported.
 pub const VHOST_USER_MAX_VRINGS: u64 = 0x8000u64;
 
-/// Used for the payload in Vhost Master messages.
+/// Message type. Either [[FrontendReq]] or [[BackendReq]].
 pub trait Req:
     Clone + Copy + Debug + PartialEq + Eq + PartialOrd + Ord + Into<u32> + TryFrom<u32> + Send + Sync
 {
@@ -51,19 +51,23 @@ pub enum ReqError {
     InvalidValue(u32),
 }
 
-/// Type of requests sending from masters to slaves.
+/// Type of requests sent to the backend.
+///
+/// These are called "front-end message types" in the spec, so we call them `FrontendReq` here even
+/// though it is somewhat confusing that the `BackendClient` sends `FrontendReq`s to a
+/// `BackendServer`.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, enumn::N)]
-pub enum MasterReq {
+pub enum FrontendReq {
     /// Get from the underlying vhost implementation the features bit mask.
     GET_FEATURES = 1,
     /// Enable features in the underlying vhost implementation using a bit mask.
     SET_FEATURES = 2,
-    /// Set the current Master as an owner of the session.
+    /// Set the current frontend as an owner of the session.
     SET_OWNER = 3,
     /// No longer used.
     RESET_OWNER = 4,
-    /// Set the memory map regions on the slave so it can translate the vring addresses.
+    /// Set the memory map regions on the backend so it can translate the vring addresses.
     SET_MEM_TABLE = 5,
     /// Set logging shared memory space.
     SET_LOG_BASE = 6,
@@ -89,15 +93,15 @@ pub enum MasterReq {
     SET_PROTOCOL_FEATURES = 16,
     /// Query how many queues the backend supports.
     GET_QUEUE_NUM = 17,
-    /// Signal slave to enable or disable corresponding vring.
+    /// Signal backend to enable or disable corresponding vring.
     SET_VRING_ENABLE = 18,
     /// Ask vhost user backend to broadcast a fake RARP to notify the migration is terminated
     /// for guest that does not support GUEST_ANNOUNCE.
     SEND_RARP = 19,
     /// Set host MTU value exposed to the guest.
     NET_SET_MTU = 20,
-    /// Set the socket file descriptor for slave initiated requests.
-    SET_SLAVE_REQ_FD = 21,
+    /// Set the socket file descriptor for backend initiated requests.
+    SET_BACKEND_REQ_FD = 21,
     /// Send IOTLB messages with struct vhost_iotlb_msg as payload.
     IOTLB_MSG = 22,
     /// Set the endianness of a VQ for legacy devices.
@@ -110,15 +114,15 @@ pub enum MasterReq {
     CREATE_CRYPTO_SESSION = 26,
     /// Close a session for crypto operation.
     CLOSE_CRYPTO_SESSION = 27,
-    /// Advise slave that a migration with postcopy enabled is underway.
+    /// Advise backend that a migration with postcopy enabled is underway.
     POSTCOPY_ADVISE = 28,
-    /// Advise slave that a transition to postcopy mode has happened.
+    /// Advise backend that a transition to postcopy mode has happened.
     POSTCOPY_LISTEN = 29,
     /// Advise that postcopy migration has now completed.
     POSTCOPY_END = 30,
-    /// Get a shared buffer from slave.
+    /// Get a shared buffer from backend.
     GET_INFLIGHT_FD = 31,
-    /// Send the shared inflight buffer back to slave.
+    /// Send the shared inflight buffer back to backend.
     SET_INFLIGHT_FD = 32,
     /// Sets the GPU protocol socket file descriptor.
     GPU_SET_SOCKET = 33,
@@ -140,38 +144,44 @@ pub enum MasterReq {
     /// Query the backend for its device status as defined in the VIRTIO
     /// specification.
     GET_STATUS = 40,
-    /// Get a list of the device's shared memory regions.
-    GET_SHARED_MEMORY_REGIONS = 41,
+
+    // Non-standard message types.
     /// Stop all queue handlers and save each queue state.
-    SLEEP = 42,
+    SLEEP = 1000,
     /// Start up all queue handlers with their saved queue state.
-    WAKE = 43,
+    WAKE = 1001,
     /// Request serialized state of vhost process.
-    SNAPSHOT = 44,
+    SNAPSHOT = 1002,
     /// Request to restore state of vhost process.
-    RESTORE = 45,
+    RESTORE = 1003,
+    /// Get a list of the device's shared memory regions.
+    GET_SHARED_MEMORY_REGIONS = 1004,
 }
 
-impl From<MasterReq> for u32 {
-    fn from(req: MasterReq) -> u32 {
+impl From<FrontendReq> for u32 {
+    fn from(req: FrontendReq) -> u32 {
         req as u32
     }
 }
 
-impl Req for MasterReq {}
+impl Req for FrontendReq {}
 
-impl TryFrom<u32> for MasterReq {
+impl TryFrom<u32> for FrontendReq {
     type Error = ReqError;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
-        MasterReq::n(value).ok_or(ReqError::InvalidValue(value))
+        FrontendReq::n(value).ok_or(ReqError::InvalidValue(value))
     }
 }
 
-/// Type of requests sending from slaves to masters.
+/// Type of requests sending from backends to frontends.
+///
+/// These are called "backend-end message types" in the spec, so we call them `BackendReq` here
+/// even though it is somewhat confusing that the `FrontendClient` sends `BackendReq`s to a
+/// `FrontendServer`.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, enumn::N)]
-pub enum SlaveReq {
+pub enum BackendReq {
     /// Send IOTLB messages with struct vhost_iotlb_msg as payload.
     IOTLB_MSG = 1,
     /// Notify that the virtio device's configuration space has changed.
@@ -182,37 +192,39 @@ pub enum SlaveReq {
     VRING_CALL = 4,
     /// Indicate that an error occurred on the specific vring.
     VRING_ERR = 5,
+
+    // Non-standard message types.
     /// Indicates a request to map a fd into a shared memory region.
-    SHMEM_MAP = 6,
+    SHMEM_MAP = 1000,
     /// Indicates a request to unmap part of a shared memory region.
-    SHMEM_UNMAP = 7,
+    SHMEM_UNMAP = 1001,
     /// Virtio-fs draft: map file content into the window.
-    FS_MAP = 8,
+    DEPRECATED__FS_MAP = 1002,
     /// Virtio-fs draft: unmap file content from the window.
-    FS_UNMAP = 9,
+    DEPRECATED__FS_UNMAP = 1003,
     /// Virtio-fs draft: sync file content.
-    FS_SYNC = 10,
+    DEPRECATED__FS_SYNC = 1004,
     /// Virtio-fs draft: perform a read/write from an fd directly to GPA.
-    FS_IO = 11,
+    DEPRECATED__FS_IO = 1005,
     /// Indicates a request to map GPU memory into a shared memory region.
-    GPU_MAP = 12,
+    GPU_MAP = 1006,
     /// Indicates a request to map external memory into a shared memory region.
-    EXTERNAL_MAP = 13,
+    EXTERNAL_MAP = 1007,
 }
 
-impl From<SlaveReq> for u32 {
-    fn from(req: SlaveReq) -> u32 {
+impl From<BackendReq> for u32 {
+    fn from(req: BackendReq) -> u32 {
         req as u32
     }
 }
 
-impl Req for SlaveReq {}
+impl Req for BackendReq {}
 
-impl TryFrom<u32> for SlaveReq {
+impl TryFrom<u32> for BackendReq {
     type Error = ReqError;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
-        SlaveReq::n(value).ok_or(ReqError::InvalidValue(value))
+        BackendReq::n(value).ok_or(ReqError::InvalidValue(value))
     }
 }
 
@@ -401,19 +413,19 @@ bitflags! {
         const REPLY_ACK = 0x0000_0008;
         /// Support setting MTU for virtio-net devices.
         const MTU = 0x0000_0010;
-        /// Allow the slave to send requests to the master by an optional communication channel.
-        const SLAVE_REQ = 0x0000_0020;
-        /// Support setting slave endian by SET_VRING_ENDIAN.
+        /// Allow the backend to send requests to the frontend by an optional communication channel.
+        const BACKEND_REQ = 0x0000_0020;
+        /// Support setting backend endian by SET_VRING_ENDIAN.
         const CROSS_ENDIAN = 0x0000_0040;
         /// Support crypto operations.
         const CRYPTO_SESSION = 0x0000_0080;
-        /// Support sending userfault_fd from slaves to masters.
+        /// Support sending userfault_fd from backends to frontends.
         const PAGEFAULT = 0x0000_0100;
         /// Support Virtio device configuration.
         const CONFIG = 0x0000_0200;
-        /// Allow the slave to send fds (at most 8 descriptors in each message) to the master.
-        const SLAVE_SEND_FD = 0x0000_0400;
-        /// Allow the slave to register a host notifier.
+        /// Allow the backend to send fds (at most 8 descriptors in each message) to the frontend.
+        const BACKEND_SEND_FD = 0x0000_0400;
+        /// Allow the backend to register a host notifier.
         const HOST_NOTIFIER = 0x0000_0800;
         /// Support inflight shmfd.
         const INFLIGHT_SHMFD = 0x0000_1000;
@@ -713,9 +725,9 @@ bitflags! {
     #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
     #[repr(transparent)]
     pub struct VhostUserConfigFlags: u32 {
-        /// Vhost master messages used for writeable fields.
+        /// Vhost frontend messages used for writeable fields.
         const WRITABLE = 0x1;
-        /// Vhost master messages used for live migration.
+        /// Vhost frontend messages used for live migration.
         const LIVE_MIGRATION = 0x2;
     }
 }
@@ -830,67 +842,6 @@ pub struct VhostUserIotlb {
 }
 */
 
-/// Flags for virtio-fs slave messages.
-#[repr(transparent)]
-#[derive(
-    AsBytes,
-    FromZeroes,
-    FromBytes,
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-)]
-pub struct VhostUserFSSlaveMsgFlags(u64);
-
-// Bit mask for flags in virtio-fs slave messages
-bitflags! {
-    impl VhostUserFSSlaveMsgFlags: u64 {
-        /// Empty permission.
-        const EMPTY = 0x0;
-        /// Read permission.
-        const MAP_R = 0x1;
-        /// Write permission.
-        const MAP_W = 0x2;
-    }
-}
-
-/// Max entries in one virtio-fs slave request.
-pub const VHOST_USER_FS_SLAVE_ENTRIES: usize = 8;
-
-/// Slave request message to update the MMIO window.
-#[repr(packed)]
-#[derive(Default, Copy, Clone, AsBytes, FromZeroes, FromBytes)]
-pub struct VhostUserFSSlaveMsg {
-    /// File offset.
-    pub fd_offset: [u64; VHOST_USER_FS_SLAVE_ENTRIES],
-    /// Offset into the DAX window.
-    pub cache_offset: [u64; VHOST_USER_FS_SLAVE_ENTRIES],
-    /// Size of region to map.
-    pub len: [u64; VHOST_USER_FS_SLAVE_ENTRIES],
-    /// Flags for the mmap operation
-    pub flags: [VhostUserFSSlaveMsgFlags; VHOST_USER_FS_SLAVE_ENTRIES],
-}
-
-impl VhostUserMsgValidator for VhostUserFSSlaveMsg {
-    fn is_valid(&self) -> bool {
-        for i in 0..VHOST_USER_FS_SLAVE_ENTRIES {
-            if ({ self.flags[i] }.bits() & !VhostUserFSSlaveMsgFlags::all().bits()) != 0
-                || self.fd_offset[i].checked_add(self.len[i]).is_none()
-                || self.cache_offset[i].checked_add(self.len[i]).is_none()
-            {
-                return false;
-            }
-        }
-        true
-    }
-}
-
 /// Flags for SHMEM_MAP messages.
 #[repr(transparent)]
 #[derive(
@@ -942,7 +893,7 @@ impl From<VhostUserShmemMapMsgFlags> for Protection {
     }
 }
 
-/// Slave request message to map a file into a shared memory region.
+/// Backend request message to map a file into a shared memory region.
 #[repr(C, packed)]
 #[derive(Default, Copy, Clone, AsBytes, FromZeroes, FromBytes)]
 pub struct VhostUserShmemMapMsg {
@@ -961,7 +912,7 @@ pub struct VhostUserShmemMapMsg {
 
 impl VhostUserMsgValidator for VhostUserShmemMapMsg {
     fn is_valid(&self) -> bool {
-        (self.flags.bits() & !VhostUserFSSlaveMsgFlags::all().bits() as u8) == 0
+        (self.flags.bits() & !VhostUserShmemMapMsgFlags::all().bits()) == 0
             && self.fd_offset.checked_add(self.len).is_some()
             && self.shm_offset.checked_add(self.len).is_some()
     }
@@ -987,7 +938,7 @@ impl VhostUserShmemMapMsg {
     }
 }
 
-/// Slave request message to map GPU memory into a shared memory region.
+/// Backend request message to map GPU memory into a shared memory region.
 #[repr(C, packed)]
 #[derive(Default, Copy, Clone, AsBytes, FromZeroes, FromBytes)]
 pub struct VhostUserGpuMapMsg {
@@ -1038,7 +989,7 @@ impl VhostUserGpuMapMsg {
     }
 }
 
-/// Slave request message to map external memory into a shared memory region.
+/// Backend request message to map external memory into a shared memory region.
 #[repr(C, packed)]
 #[derive(Default, Copy, Clone, AsBytes, FromZeroes, FromBytes)]
 pub struct VhostUserExternalMapMsg {
@@ -1072,7 +1023,7 @@ impl VhostUserExternalMapMsg {
     }
 }
 
-/// Slave request message to unmap part of a shared memory region.
+/// Backend request message to unmap part of a shared memory region.
 #[repr(C, packed)]
 #[derive(Default, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 pub struct VhostUserShmemUnmapMsg {
@@ -1262,31 +1213,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_master_request_code() {
-        MasterReq::try_from(0).expect_err("invalid value");
-        MasterReq::try_from(46).expect_err("invalid value");
-        MasterReq::try_from(10000).expect_err("invalid value");
+    fn check_frontend_request_code() {
+        FrontendReq::try_from(0).expect_err("invalid value");
+        FrontendReq::try_from(46).expect_err("invalid value");
+        FrontendReq::try_from(10000).expect_err("invalid value");
 
-        let code = MasterReq::try_from(MasterReq::GET_FEATURES as u32).unwrap();
+        let code = FrontendReq::try_from(FrontendReq::GET_FEATURES as u32).unwrap();
         assert_eq!(code, code.clone());
     }
 
     #[test]
-    fn check_slave_request_code() {
-        SlaveReq::try_from(0).expect_err("invalid value");
-        SlaveReq::try_from(14).expect_err("invalid value");
-        SlaveReq::try_from(10000).expect_err("invalid value");
+    fn check_backend_request_code() {
+        BackendReq::try_from(0).expect_err("invalid value");
+        BackendReq::try_from(14).expect_err("invalid value");
+        BackendReq::try_from(10000).expect_err("invalid value");
 
-        let code = SlaveReq::try_from(SlaveReq::CONFIG_CHANGE_MSG as u32).unwrap();
+        let code = BackendReq::try_from(BackendReq::CONFIG_CHANGE_MSG as u32).unwrap();
         assert_eq!(code, code.clone());
     }
 
     #[test]
     fn msg_header_ops() {
-        let mut hdr = VhostUserMsgHeader::new(MasterReq::GET_FEATURES, 0, 0x100);
-        assert_eq!(hdr.get_code(), Ok(MasterReq::GET_FEATURES));
-        hdr.set_code(MasterReq::SET_FEATURES);
-        assert_eq!(hdr.get_code(), Ok(MasterReq::SET_FEATURES));
+        let mut hdr = VhostUserMsgHeader::new(FrontendReq::GET_FEATURES, 0, 0x100);
+        assert_eq!(hdr.get_code(), Ok(FrontendReq::GET_FEATURES));
+        hdr.set_code(FrontendReq::SET_FEATURES);
+        assert_eq!(hdr.get_code(), Ok(FrontendReq::SET_FEATURES));
 
         assert_eq!(hdr.get_version(), 0x1);
 
@@ -1511,22 +1462,5 @@ mod tests {
         assert!(msg.is_valid());
         msg.flags |= 0x4;
         assert!(!msg.is_valid());
-    }
-
-    #[test]
-    fn test_vhost_user_fs_slave() {
-        let mut fs_slave = VhostUserFSSlaveMsg::default();
-
-        assert!(fs_slave.is_valid());
-
-        fs_slave.fd_offset[0] = 0xffff_ffff_ffff_ffff;
-        fs_slave.len[0] = 0x1;
-        assert!(!fs_slave.is_valid());
-
-        assert_ne!(
-            VhostUserFSSlaveMsgFlags::MAP_R,
-            VhostUserFSSlaveMsgFlags::MAP_W
-        );
-        assert_eq!(VhostUserFSSlaveMsgFlags::EMPTY.bits(), 0);
     }
 }
