@@ -12,10 +12,10 @@ package {
 }
 
 rust_library {
-    name: "libcrypto_product",
+    name: "libcrypto_generic",
     defaults: ["crosvm_inner_defaults"],
     host_supported: true,
-    crate_name: "crypto_product",
+    crate_name: "crypto_generic",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],

@@ -17,7 +17,7 @@ anyhow = "*"
 balloon_control = { path = "../common/balloon_control" }
 base = { path = "../base" }
 cfg-if = "*"
-data_model = { path = "../common/data_model" }
+crypto = { path = "../vendor/generic/crypto", package = "crypto_generic" }
 gdbstub = { version = "0.7.0", optional = true }
 gdbstub_arch = { version = "0.3.0", optional = true }
 hypervisor = { path = "../hypervisor" }

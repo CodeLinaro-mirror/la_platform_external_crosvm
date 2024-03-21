@@ -32,7 +32,7 @@ rust_library {
         "libballoon_control",
         "libbase_rust",
         "libcfg_if",
-        "libdata_model",
+        "libcrypto_generic",
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
@@ -50,6 +50,7 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    aliases: ["crypto_generic:crypto"],
     visibility: ["//packages/modules/Virtualization/virtualizationmanager"],
 }
 
@@ -79,7 +80,7 @@ rust_test {
         "libballoon_control",
         "libbase_rust",
         "libcfg_if",
-        "libdata_model",
+        "libcrypto_generic",
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
@@ -97,4 +98,5 @@ rust_test {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    aliases: ["crypto_generic:crypto"],
 }

@@ -16,11 +16,8 @@ mod local_stats;
 pub mod sys;
 
 pub use controller::MetricsController;
-// ANDROID: b/329312851 - Switch back to metrics_product when that bug is fixed.
-// pub use metrics_product::MetricEventType;
-// pub use metrics_product::*;
-pub use metrics_generic::MetricEventType;
-pub use metrics_generic::*;
+pub use metrics_product::MetricEventType;
+pub use metrics_product::*;
 
 pub type RequestHandler = MetricsRequestHandler;
 

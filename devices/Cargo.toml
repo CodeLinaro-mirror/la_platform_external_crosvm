@@ -13,6 +13,7 @@ gpu = ["gpu_display"]
 gunyah = []
 libvda-stub = ["libvda/libvda-stub"]
 net = []
+pvclock = []
 geniezone = []
 usb = []
 vaapi = ["cros-codecs/vaapi", "crc32fast"]
@@ -72,7 +73,7 @@ protos = { path = "../protos", optional = true }
 rand = "0.8"
 remain = "*"
 resources = { path = "../resources" }
-serde = { version = "1", features = [ "derive" ] }
+serde = { version = "1", features = [ "derive", "rc" ] }
 serde_json = "1"
 serde_keyvalue = { path = "../serde_keyvalue", features = ["argh_derive"] }
 smallvec = "1.6.1"

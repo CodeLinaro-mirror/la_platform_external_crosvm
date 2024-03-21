@@ -5,12 +5,12 @@
 //! Library for implementing vhost-user device executables.
 //!
 //! This crate provides
-//! * `VhostUserBackend` trait, which is a collection of methods to handle vhost-user requests, and
+//! * `VhostUserDevice` trait, which is a collection of methods to handle vhost-user requests, and
 //! * `DeviceRequestHandler` struct, which makes a connection to a VMM and starts an event loop.
 //!
 //! They are expected to be used as follows:
 //!
-//! 1. Define a struct and implement `VhostUserBackend` for it.
+//! 1. Define a struct and implement `VhostUserDevice` for it.
 //! 2. Create a `DeviceRequestHandler` with the backend struct.
 //! 3. Drive the `DeviceRequestHandler::run` async fn with an executor.
 //!
@@ -19,7 +19,7 @@
 //!   /* fields */
 //! }
 //!
-//! impl VhostUserBackend for MyBackend {
+//! impl VhostUserDevice for MyBackend {
 //!   /* implement methods */
 //! }
 //!
@@ -37,12 +37,12 @@
 //! ```
 // Implementation note:
 // This code lets us take advantage of the vmm_vhost low level implementation of the vhost user
-// protocol. DeviceRequestHandler implements the VhostUserSlaveReqHandler trait from vmm_vhost,
-// and includes some common code for setting up guest memory and managing partially configured
-// vrings. DeviceRequestHandler::run watches the vhost-user socket and then calls handle_request()
-// when it becomes readable. handle_request() reads and parses the message and then calls one of the
-// VhostUserSlaveReqHandler trait methods. These dispatch back to the supplied VhostUserBackend
-// implementation (this is what our devices implement).
+// protocol. DeviceRequestHandler implements the Backend trait from vmm_vhost, and includes some
+// common code for setting up guest memory and managing partially configured vrings.
+// DeviceRequestHandler::run watches the vhost-user socket and then calls handle_request() when it
+// becomes readable. handle_request() reads and parses the message and then calls one of the
+// Backend trait methods. These dispatch back to the supplied VhostUserDevice implementation (this
+// is what our devices implement).
 
 pub(super) mod sys;
 
@@ -89,13 +89,12 @@ use vmm_vhost::message::VhostUserShmemUnmapMsg;
 use vmm_vhost::message::VhostUserSingleMemoryRegion;
 use vmm_vhost::message::VhostUserVringAddrFlags;
 use vmm_vhost::message::VhostUserVringState;
+use vmm_vhost::BackendReq;
 use vmm_vhost::Connection;
 use vmm_vhost::Error as VhostError;
+use vmm_vhost::Frontend;
+use vmm_vhost::FrontendClient;
 use vmm_vhost::Result as VhostResult;
-use vmm_vhost::Slave;
-use vmm_vhost::SlaveReq;
-use vmm_vhost::VhostUserMasterReqHandler;
-use vmm_vhost::VhostUserSlaveReqHandler;
 use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 
 use crate::virtio::Interrupt;
@@ -122,8 +121,11 @@ pub fn vmm_va_to_gpa(maps: &[MappingInfo], vmm_va: u64) -> VhostResult<GuestAddr
     Err(VhostError::InvalidMessage)
 }
 
-/// Trait for vhost-user backend.
-pub trait VhostUserBackend {
+/// Trait for vhost-user devices. Analogous to the `VirtioDevice` trait.
+///
+/// In contrast with [[vmm_vhost::Backend]], which closely matches the vhost-user spec, this trait
+/// is designed to follow crosvm conventions for implementing devices.
+pub trait VhostUserDevice {
     /// The maximum number of queues that this backend can manage.
     fn max_queue_num(&self) -> usize;
 
@@ -181,13 +183,13 @@ pub trait VhostUserBackend {
     /// The backend is given an `Arc` instead of full ownership so that the framework can also use
     /// the connection.
     ///
-    /// This method will be called when `VhostUserProtocolFeatures::SLAVE_REQ` is
+    /// This method will be called when `VhostUserProtocolFeatures::BACKEND_REQ` is
     /// negotiated.
     fn set_backend_req_connection(&mut self, _conn: Arc<VhostBackendReqConnection>) {
         error!("set_backend_req_connection is not implemented");
     }
 
-    /// Used to stop non queue workers that `VhostUserBackend::stop_queue` can't stop. May or may
+    /// Used to stop non queue workers that `VhostUserDevice::stop_queue` can't stop. May or may
     /// not also stop all queue workers.
     fn stop_non_queue_workers(&mut self) -> anyhow::Result<()> {
         error!("sleep not implemented for vhost user device");
@@ -354,13 +356,13 @@ impl VhostUserRegularOps {
     }
 }
 
-/// A request handler for devices implementing `VhostUserBackend`.
+/// An adapter that implements `vmm_vhost::Backend` for any type implementing `VhostUserDevice`.
 pub struct DeviceRequestHandler {
     vrings: Vec<Vring>,
     owned: bool,
     vmm_maps: Option<Vec<MappingInfo>>,
     mem: Option<GuestMemory>,
-    backend: Box<dyn VhostUserBackend>,
+    backend: Box<dyn VhostUserDevice>,
     backend_req_connection: Arc<Mutex<VhostBackendReqConnectionState>>,
 }
 
@@ -372,7 +374,7 @@ pub struct DeviceRequestHandlerSnapshot {
 
 impl DeviceRequestHandler {
     /// Creates a vhost-user handler instance for `backend`.
-    pub(crate) fn new(backend: Box<dyn VhostUserBackend>) -> Self {
+    pub(crate) fn new(backend: Box<dyn VhostUserDevice>) -> Self {
         let mut vrings = Vec::with_capacity(backend.max_queue_num());
         for _ in 0..backend.max_queue_num() {
             vrings.push(Vring::new(Queue::MAX_SIZE, backend.features()));
@@ -391,7 +393,7 @@ impl DeviceRequestHandler {
     }
 }
 
-impl VhostUserSlaveReqHandler for DeviceRequestHandler {
+impl vmm_vhost::Backend for DeviceRequestHandler {
     fn set_owner(&mut self) -> VhostResult<()> {
         if self.owned {
             return Err(VhostError::InvalidOperation);
@@ -566,7 +568,7 @@ impl VhostUserSlaveReqHandler for DeviceRequestHandler {
             Ok(queue) => queue,
             Err(e) => {
                 error!("failed to activate vring: {:#}", e);
-                return Err(VhostError::SlaveInternalError);
+                return Err(VhostError::BackendInternalError);
             }
         };
 
@@ -577,7 +579,7 @@ impl VhostUserSlaveReqHandler for DeviceRequestHandler {
             .start_queue(index as usize, queue, mem, doorbell)
         {
             error!("Failed to start queue {}: {}", index, e);
-            return Err(VhostError::SlaveInternalError);
+            return Err(VhostError::BackendInternalError);
         }
 
         Ok(())
@@ -621,10 +623,9 @@ impl VhostUserSlaveReqHandler for DeviceRequestHandler {
             return Err(VhostError::InvalidOperation);
         }
 
-        // Slave must not pass data to/from the backend until ring is
-        // enabled by VHOST_USER_SET_VRING_ENABLE with parameter 1,
-        // or after it has been disabled by VHOST_USER_SET_VRING_ENABLE
-        // with parameter 0.
+        // Backend must not pass data to/from the ring until ring is enabled by
+        // VHOST_USER_SET_VRING_ENABLE with parameter 1, or after it has been disabled by
+        // VHOST_USER_SET_VRING_ENABLE with parameter 0.
         self.vrings[index as usize].enabled = enable;
 
         Ok(())
@@ -651,9 +652,9 @@ impl VhostUserSlaveReqHandler for DeviceRequestHandler {
         Ok(())
     }
 
-    fn set_slave_req_fd(&mut self, ep: Connection<SlaveReq>) {
+    fn set_backend_req_fd(&mut self, ep: Connection<BackendReq>) {
         let conn = Arc::new(VhostBackendReqConnection::new(
-            Slave::new(ep),
+            FrontendClient::new(ep),
             self.backend.get_shared_memory_region().map(|r| r.id),
         ));
 
@@ -729,12 +730,12 @@ impl VhostUserSlaveReqHandler for DeviceRequestHandler {
     fn wake(&mut self) -> VhostResult<()> {
         for (index, vring) in self.vrings.iter_mut().enumerate() {
             if let Some(queue) = vring.paused_queue.take() {
-                let mem = self.mem.clone().ok_or(VhostError::SlaveInternalError)?;
+                let mem = self.mem.clone().ok_or(VhostError::BackendInternalError)?;
                 let doorbell = vring.doorbell.clone().expect("Failed to clone doorbell");
 
                 if let Err(e) = self.backend.start_queue(index, queue, mem, doorbell) {
                     error!("Failed to start queue {}: {}", index, e);
-                    return Err(VhostError::SlaveInternalError);
+                    return Err(VhostError::BackendInternalError);
                 }
             }
         }
@@ -821,7 +822,7 @@ pub enum VhostBackendReqConnectionState {
 
 /// Keeps track of Vhost user backend request connection.
 pub struct VhostBackendReqConnection {
-    conn: Arc<Mutex<Slave>>,
+    conn: Arc<Mutex<FrontendClient>>,
     shmem_info: Mutex<Option<ShmemInfo>>,
 }
 
@@ -832,7 +833,7 @@ struct ShmemInfo {
 }
 
 impl VhostBackendReqConnection {
-    pub fn new(conn: Slave, shmid: Option<u8>) -> Self {
+    pub fn new(conn: FrontendClient, shmid: Option<u8>) -> Self {
         let shmem_info = Mutex::new(shmid.map(|shmid| ShmemInfo {
             shmid,
             mapped_regions: BTreeMap::new(),
@@ -868,7 +869,7 @@ impl VhostBackendReqConnection {
 }
 
 struct VhostShmemMapper {
-    conn: Arc<Mutex<Slave>>,
+    conn: Arc<Mutex<FrontendClient>>,
     shmem_info: ShmemInfo,
 }
 
@@ -988,8 +989,7 @@ mod tests {
     use anyhow::anyhow;
     use anyhow::bail;
     use base::Event;
-    use vmm_vhost::SlaveReqHandler;
-    use vmm_vhost::VhostUserSlaveReqHandler;
+    use vmm_vhost::BackendServer;
     use zerocopy::AsBytes;
     use zerocopy::FromBytes;
     use zerocopy::FromZeroes;
@@ -1029,7 +1029,7 @@ mod tests {
         }
     }
 
-    impl VhostUserBackend for FakeBackend {
+    impl VhostUserDevice for FakeBackend {
         fn max_queue_num(&self) -> usize {
             Self::MAX_QUEUE_NUM
         }
@@ -1198,8 +1198,8 @@ mod tests {
         }
     }
 
-    fn handle_request<S: VhostUserSlaveReqHandler>(
-        handler: &mut SlaveReqHandler<S>,
+    fn handle_request<S: vmm_vhost::Backend>(
+        handler: &mut BackendServer<S>,
     ) -> Result<(), VhostError> {
         let (hdr, files) = handler.recv_header()?;
         handler.process_message(hdr, files)

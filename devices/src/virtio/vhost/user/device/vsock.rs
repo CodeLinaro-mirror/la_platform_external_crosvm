@@ -22,7 +22,7 @@ use vhost::Vhost;
 use vhost::Vsock;
 use vm_memory::GuestMemory;
 use vmm_vhost::connection::Connection;
-use vmm_vhost::message::SlaveReq;
+use vmm_vhost::message::BackendReq;
 use vmm_vhost::message::VhostSharedMemoryRegion;
 use vmm_vhost::message::VhostUserConfigFlags;
 use vmm_vhost::message::VhostUserInflight;
@@ -33,7 +33,6 @@ use vmm_vhost::message::VhostUserVringAddrFlags;
 use vmm_vhost::message::VhostUserVringState;
 use vmm_vhost::Error;
 use vmm_vhost::Result;
-use vmm_vhost::VhostUserSlaveReqHandler;
 use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 use zerocopy::AsBytes;
 
@@ -41,7 +40,7 @@ use crate::virtio::device_constants::vsock::NUM_QUEUES;
 use crate::virtio::vhost::user::device::handler::vmm_va_to_gpa;
 use crate::virtio::vhost::user::device::handler::MappingInfo;
 use crate::virtio::vhost::user::device::handler::VhostUserRegularOps;
-use crate::virtio::vhost::user::VhostUserDevice;
+use crate::virtio::vhost::user::VhostUserDeviceBuilder;
 use crate::virtio::vhost::user::VhostUserListener;
 use crate::virtio::vhost::user::VhostUserListenerTrait;
 use crate::virtio::Queue;
@@ -91,15 +90,8 @@ impl AsRawDescriptor for VhostUserVsockDevice {
     }
 }
 
-impl VhostUserDevice for VhostUserVsockDevice {
-    fn max_queue_num(&self) -> usize {
-        NUM_QUEUES
-    }
-
-    fn into_req_handler(
-        self: Box<Self>,
-        _ex: &Executor,
-    ) -> anyhow::Result<Box<dyn vmm_vhost::VhostUserSlaveReqHandler>> {
+impl VhostUserDeviceBuilder for VhostUserVsockDevice {
+    fn build(self: Box<Self>, _ex: &Executor) -> anyhow::Result<Box<dyn vmm_vhost::Backend>> {
         let backend = VsockBackend {
             queues: [
                 QueueConfig::new(Queue::MAX_SIZE, 0),
@@ -121,11 +113,11 @@ fn convert_vhost_error(err: vhost::Error) -> Error {
     use vhost::Error::*;
     match err {
         IoctlError(e) => Error::ReqHandlerError(e),
-        _ => Error::SlaveInternalError,
+        _ => Error::BackendInternalError,
     }
 }
 
-impl VhostUserSlaveReqHandler for VsockBackend {
+impl vmm_vhost::Backend for VsockBackend {
     fn set_owner(&mut self) -> Result<()> {
         self.handle.set_owner().map_err(convert_vhost_error)
     }
@@ -400,9 +392,9 @@ impl VhostUserSlaveReqHandler for VsockBackend {
         Err(Error::InvalidOperation)
     }
 
-    fn set_slave_req_fd(&mut self, _vu_req: Connection<SlaveReq>) {
-        // We didn't set VhostUserProtocolFeatures::SLAVE_REQ
-        unreachable!("unexpected set_slave_req_fd");
+    fn set_backend_req_fd(&mut self, _vu_req: Connection<BackendReq>) {
+        // We didn't set VhostUserProtocolFeatures::BACKEND_REQ
+        unreachable!("unexpected set_backend_req_fd");
     }
 
     fn get_inflight_fd(

@@ -19,7 +19,6 @@ use hypervisor::ProtectionType;
 use sync::Mutex;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
-use vmm_vhost::VhostUserSlaveReqHandler;
 use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 use zerocopy::AsBytes;
 
@@ -30,10 +29,10 @@ use crate::virtio::console::virtio_console_config;
 use crate::virtio::copy_config;
 use crate::virtio::vhost::user::device::handler::DeviceRequestHandler;
 use crate::virtio::vhost::user::device::handler::Error as DeviceError;
-use crate::virtio::vhost::user::device::handler::VhostUserBackend;
+use crate::virtio::vhost::user::device::handler::VhostUserDevice;
 use crate::virtio::vhost::user::device::listener::sys::VhostUserListener;
 use crate::virtio::vhost::user::device::listener::VhostUserListenerTrait;
-use crate::virtio::vhost::user::device::VhostUserDevice;
+use crate::virtio::vhost::user::device::VhostUserDeviceBuilder;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::SerialHardware;
@@ -60,24 +59,8 @@ impl Drop for VhostUserConsoleDevice {
     }
 }
 
-impl VhostUserDevice for VhostUserConsoleDevice {
-    fn max_queue_num(&self) -> usize {
-        // The port 0 receive and transmit queues always exist;
-        // other queues only exist if VIRTIO_CONSOLE_F_MULTIPORT is set.
-        if self.console.is_multi_port() {
-            let port_num = self.console.max_ports();
-
-            // Extra 1 is for control port; each port has two queues (tx & rx)
-            (port_num + 1) * 2
-        } else {
-            2
-        }
-    }
-
-    fn into_req_handler(
-        self: Box<Self>,
-        ex: &Executor,
-    ) -> anyhow::Result<Box<dyn VhostUserSlaveReqHandler>> {
+impl VhostUserDeviceBuilder for VhostUserConsoleDevice {
+    fn build(self: Box<Self>, ex: &Executor) -> anyhow::Result<Box<dyn vmm_vhost::Backend>> {
         if self.raw_stdin {
             // Set stdin() to raw mode so we can send over individual keystrokes unbuffered
             std::io::stdin()
@@ -85,7 +68,7 @@ impl VhostUserDevice for VhostUserConsoleDevice {
                 .context("failed to set terminal in raw mode")?;
         }
 
-        let queue_num = self.max_queue_num();
+        let queue_num = self.console.max_queues();
         let active_queues = vec![None; queue_num];
 
         let backend = ConsoleBackend {
@@ -109,9 +92,9 @@ struct ConsoleBackend {
     active_queues: Vec<Option<Arc<Mutex<Queue>>>>,
 }
 
-impl VhostUserBackend for ConsoleBackend {
+impl VhostUserDevice for ConsoleBackend {
     fn max_queue_num(&self) -> usize {
-        self.device.max_queue_num()
+        self.device.console.max_queues()
     }
 
     fn features(&self) -> u64 {

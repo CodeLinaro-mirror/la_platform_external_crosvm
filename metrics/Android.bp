@@ -28,6 +28,7 @@ rust_library {
         "libserde",
         "libsync_rust",
     ],
+    aliases: ["metrics_generic:metrics_product"],
 }
 
 rust_test {
@@ -52,4 +53,5 @@ rust_test {
         "libserde",
         "libsync_rust",
     ],
+    aliases: ["metrics_generic:metrics_product"],
 }
