@@ -12,6 +12,8 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 
+use crate::PciAddress;
+
 pub mod asynchronous;
 pub(crate) mod sys;
 
@@ -108,8 +110,8 @@ pub struct DiskOption {
     )]
     pub io_concurrency: NonZeroU32,
     #[serde(default)]
-    /// Experimental option to run multiple worker threads in parallel. If false, only single thread
-    /// runs by default. Note this option is not effective for vhost-user blk device.
+    /// Experimental option to run multiple worker threads in parallel. If false, only single
+    /// thread runs by default. Note this option is not effective for vhost-user blk device.
     pub multiple_workers: bool,
     #[serde(default, alias = "async_executor")]
     /// The async executor kind to simulate the block device with. This option takes
@@ -125,6 +127,9 @@ pub struct DiskOption {
     /// bootable devices. For example, if bootindex=2, then the BIOS will attempt to boot from the
     /// device right after booting from the device with bootindex=1 fails.
     pub bootindex: Option<usize>,
+
+    /// Specify PCI address will be used to attach this device
+    pub pci_address: Option<PciAddress>,
 }
 
 impl Default for DiskOption {
@@ -143,12 +148,17 @@ impl Default for DiskOption {
             async_executor: None,
             packed_queue: false,
             bootindex: None,
+            pci_address: None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    use cros_async::sys::linux::ExecutorKindSys;
+    #[cfg(windows)]
+    use cros_async::sys::windows::ExecutorKindSys;
     use serde_keyvalue::*;
 
     use super::*;
@@ -197,6 +207,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -218,6 +229,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: Some(5),
+                pci_address: None,
             }
         );
 
@@ -239,6 +251,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -260,6 +273,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -281,6 +295,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -302,6 +317,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
         let params = from_block_arg("/some/path.img,sparse=false").unwrap();
@@ -321,6 +337,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -342,6 +359,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -363,6 +381,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -384,6 +403,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -405,6 +425,7 @@ mod tests {
                 multiple_workers: false,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -427,6 +448,7 @@ mod tests {
                     async_executor: None,
                     packed_queue: false,
                     bootindex: None,
+                    pci_address: None,
                 }
             );
         }
@@ -449,6 +471,7 @@ mod tests {
                 async_executor: None,
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
         let err = from_block_arg("/some/path.img,id=DISK_ID_IS_WAY_TOO_LONG").unwrap_err();
@@ -462,9 +485,9 @@ mod tests {
 
         // async-executor
         #[cfg(windows)]
-        let (ex_kind, ex_kind_opt) = (ExecutorKind::Handle, "handle");
+        let (ex_kind, ex_kind_opt) = (ExecutorKindSys::Handle.into(), "handle");
         #[cfg(any(target_os = "android", target_os = "linux"))]
-        let (ex_kind, ex_kind_opt) = (ExecutorKind::Fd, "epoll");
+        let (ex_kind, ex_kind_opt) = (ExecutorKindSys::Fd.into(), "epoll");
         let params =
             from_block_arg(&format!("/some/path.img,async-executor={ex_kind_opt}")).unwrap();
         assert_eq!(
@@ -483,6 +506,7 @@ mod tests {
                 async_executor: Some(ex_kind),
                 packed_queue: false,
                 bootindex: None,
+                pci_address: None,
             }
         );
 
@@ -504,13 +528,40 @@ mod tests {
                 async_executor: None,
                 packed_queue: true,
                 bootindex: None,
+                pci_address: None,
+            }
+        );
+
+        // pci-address
+        let params = from_block_arg("/path/to/disk.img,pci-address=00:01.1").unwrap();
+        assert_eq!(
+            params,
+            DiskOption {
+                path: "/path/to/disk.img".into(),
+                read_only: false,
+                root: false,
+                sparse: true,
+                direct: false,
+                block_size: 512,
+                id: None,
+                #[cfg(windows)]
+                io_concurrency: NonZeroU32::new(1).unwrap(),
+                multiple_workers: false,
+                async_executor: None,
+                packed_queue: false,
+                bootindex: None,
+                pci_address: Some(PciAddress {
+                    bus: 0,
+                    dev: 1,
+                    func: 1,
+                }),
             }
         );
 
         // All together
         let params = from_block_arg(&format!(
             "/some/path.img,block_size=256,ro,root,sparse=false,id=DISK_LABEL\
-            ,direct,async-executor={ex_kind_opt},packed-queue=false"
+            ,direct,async-executor={ex_kind_opt},packed-queue=false,pci-address=00:01.1"
         ))
         .unwrap();
         assert_eq!(
@@ -529,6 +580,11 @@ mod tests {
                 async_executor: Some(ex_kind),
                 packed_queue: false,
                 bootindex: None,
+                pci_address: Some(PciAddress {
+                    bus: 0,
+                    dev: 1,
+                    func: 1,
+                }),
             }
         );
     }
@@ -550,6 +606,7 @@ mod tests {
             async_executor: None,
             packed_queue: false,
             bootindex: None,
+            pci_address: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let deserialized = serde_json::from_str(&json).unwrap();
@@ -570,6 +627,7 @@ mod tests {
             async_executor: Some(ExecutorKind::default()),
             packed_queue: false,
             bootindex: None,
+            pci_address: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let deserialized = serde_json::from_str(&json).unwrap();
@@ -590,6 +648,7 @@ mod tests {
             async_executor: Some(ExecutorKind::default()),
             packed_queue: false,
             bootindex: None,
+            pci_address: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let deserialized = serde_json::from_str(&json).unwrap();

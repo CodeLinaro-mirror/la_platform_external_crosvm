@@ -24,6 +24,16 @@ if ! [ -x "$(command -v bpfmt)" ]; then
   exit 1
 fi
 
+if ! (dpkg -l meson); then
+  echo 'Error: "meson" not found. Please install.' >&2
+  exit 1
+fi
+
+if ! (dpkg -l protobuf-compiler); then
+  echo 'Error: "protobuf-compiler" not found. Please install.' >&2
+  exit 1
+fi
+
 # Use the specific rust version that crosvm upstream expects.
 #
 # TODO: Consider reading the toolchain from external/crosvm/rust-toolchain

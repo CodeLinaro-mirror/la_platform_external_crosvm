@@ -126,13 +126,11 @@ impl FromStr for SharedDir {
         // * type=TYPE - must be one of "p9" or "fs" (default: p9)
         // * uidmap=UIDMAP - a uid map in the format "inner outer count[,inner outer count]"
         //   (default: "0 <current euid> 1")
-        // * gidmap=GIDMAP - a gid map in the same format as uidmap
-        //   (default: "0 <current egid> 1")
+        // * gidmap=GIDMAP - a gid map in the same format as uidmap (default: "0 <current egid> 1")
         // * privileged_quota_uids=UIDS - Space-separated list of privileged uid values. When
-        //   performing quota-related operations, these UIDs are treated as if they have
-        //   CAP_FOWNER.
-        // * timeout=TIMEOUT - a timeout value in seconds, which indicates how long attributes
-        //   and directory contents should be considered valid (default: 5)
+        //   performing quota-related operations, these UIDs are treated as if they have CAP_FOWNER.
+        // * timeout=TIMEOUT - a timeout value in seconds, which indicates how long attributes and
+        //   directory contents should be considered valid (default: 5)
         // * cache=CACHE - one of "never", "always", or "auto" (default: auto)
         // * writeback=BOOL - indicates whether writeback caching should be enabled (default: false)
         // * uid=UID - uid of the device process in the user namespace created by minijail.
@@ -206,8 +204,8 @@ impl FromStr for SharedDir {
                     // 1. Lookup "foo", an non-existing file. Negative dentry is cached on the
                     //    guest.
                     // 2. Create "FOO".
-                    // 3. Lookup "foo". This needs to be successful on the casefold directory,
-                    //    but the lookup can fail due the negative cache created at 1.
+                    // 3. Lookup "foo". This needs to be successful on the casefold directory, but
+                    //    the lookup can fail due the negative cache created at 1.
                     bail!("'negative_timeout' cannot be used with 'ascii_casefold'");
                 }
             }
@@ -233,8 +231,6 @@ mod tests {
 
     use super::*;
     use crate::crosvm::config::from_key_values;
-    use crate::crosvm::config::DEFAULT_TOUCH_DEVICE_HEIGHT;
-    use crate::crosvm::config::DEFAULT_TOUCH_DEVICE_WIDTH;
 
     #[test]
     fn parse_coiommu_options() {
@@ -320,145 +316,6 @@ mod tests {
         // invalid parameter
         let coiommu_params = from_key_values::<CoIommuParameters>("unpin_invalid_param=0");
         assert!(coiommu_params.is_err());
-    }
-
-    #[test]
-    fn single_touch_spec_and_track_pad_spec_default_size() {
-        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &[
-                "--single-touch",
-                "/dev/single-touch-test",
-                "--trackpad",
-                "/dev/single-touch-test",
-                "/dev/null",
-            ],
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-
-        assert_eq!(
-            config.virtio_single_touch.first().unwrap().get_size(),
-            (DEFAULT_TOUCH_DEVICE_WIDTH, DEFAULT_TOUCH_DEVICE_HEIGHT)
-        );
-        assert_eq!(
-            config.virtio_trackpad.first().unwrap().get_size(),
-            (DEFAULT_TOUCH_DEVICE_WIDTH, DEFAULT_TOUCH_DEVICE_HEIGHT)
-        );
-    }
-
-    #[cfg(feature = "gpu")]
-    #[test]
-    fn single_touch_spec_default_size_from_gpu() {
-        let width = 12345u32;
-        let height = 54321u32;
-
-        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &[
-                "--single-touch",
-                "/dev/single-touch-test",
-                "--gpu",
-                &format!("width={},height={}", width, height),
-                "/dev/null",
-            ],
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-
-        assert_eq!(
-            config.virtio_single_touch.first().unwrap().get_size(),
-            (width, height)
-        );
-    }
-
-    #[test]
-    fn single_touch_spec_and_track_pad_spec_with_size() {
-        let width = 12345u32;
-        let height = 54321u32;
-        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &[
-                "--single-touch",
-                &format!("/dev/single-touch-test:{}:{}", width, height),
-                "--trackpad",
-                &format!("/dev/single-touch-test:{}:{}", width, height),
-                "/dev/null",
-            ],
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-
-        assert_eq!(
-            config.virtio_single_touch.first().unwrap().get_size(),
-            (width, height)
-        );
-        assert_eq!(
-            config.virtio_trackpad.first().unwrap().get_size(),
-            (width, height)
-        );
-    }
-
-    #[cfg(feature = "gpu")]
-    #[test]
-    fn single_touch_spec_with_size_independent_from_gpu() {
-        let touch_width = 12345u32;
-        let touch_height = 54321u32;
-        let display_width = 1234u32;
-        let display_height = 5432u32;
-        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &[
-                "--single-touch",
-                &format!("/dev/single-touch-test:{}:{}", touch_width, touch_height),
-                "--gpu",
-                &format!("width={},height={}", display_width, display_height),
-                "/dev/null",
-            ],
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-
-        assert_eq!(
-            config.virtio_single_touch.first().unwrap().get_size(),
-            (touch_width, touch_height)
-        );
-    }
-
-    #[test]
-    fn virtio_switches() {
-        let mut config: Config = crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &["--switches", "/dev/switches-test", "/dev/null"],
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-
-        assert_eq!(
-            config.virtio_switches.pop().unwrap(),
-            PathBuf::from("/dev/switches-test")
-        );
-    }
-
-    #[test]
-    fn virtio_rotary() {
-        let mut config: Config = crate::crosvm::cmdline::RunCommand::from_args(
-            &[],
-            &["--rotary", "/dev/rotary-test", "/dev/null"],
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-
-        assert_eq!(
-            config.virtio_rotary.pop().unwrap(),
-            PathBuf::from("/dev/rotary-test")
-        );
     }
 
     #[test]

@@ -62,7 +62,7 @@ impl<T: BitDepth> ResamplerContainer<T> {
         ResamplerContainer {
             // If the from and to sample rate is the same, there will be a no-op.
             //
-            // Safe because `r8b_create` returns a pointer that will be freed when this struct is
+            // SAFETY: `r8b_create` returns a pointer that will be freed when this struct is
             // dropped.
             left_resampler: unsafe {
                 r8b_create(
@@ -73,6 +73,7 @@ impl<T: BitDepth> ResamplerContainer<T> {
                     ER8BResamplerRes_r8brr24,
                 )
             },
+            // SAFETY: see above
             right_resampler: unsafe {
                 r8b_create(
                     from_sample_rate as f64,
@@ -140,7 +141,7 @@ impl<T: BitDepth> ResamplerContainer<T> {
         &mut self,
         channel: &'a mut Vec<f64>,
     ) -> Option<&'a [f64]> {
-        // Safe because `left_sampler` is a valid `CR8Resampler` pointer.
+        // SAFETY: `left_sampler` is a valid `CR8Resampler` pointer.
         unsafe { Self::sample_rate_convert_one_channel(channel, self.left_resampler) }
     }
 
@@ -148,7 +149,7 @@ impl<T: BitDepth> ResamplerContainer<T> {
         &mut self,
         channel: &'a mut Vec<f64>,
     ) -> Option<&'a [f64]> {
-        // Safe because `right_sampler` is a valid `CR8Resampler` pointer.
+        // SAFETY: `right_sampler` is a valid `CR8Resampler` pointer.
         unsafe { Self::sample_rate_convert_one_channel(channel, self.right_resampler) }
     }
 
@@ -159,9 +160,8 @@ impl<T: BitDepth> ResamplerContainer<T> {
     ///   2. `r8b_process` sets `converted_buffer_raw` to point to a valid buffer and
     ///      `samples_available` is accurate.
     ///   3. `channel` remains alive when `converted_buffer_raw` is being processed.
-    ///      `converted_buffer_raw` could point to the input `channel.as_mut_ptr()`. This is why
-    ///       the param `channel` is passed as a reference instead of the vector being moved in
-    ///       here.
+    ///      `converted_buffer_raw` could point to the input `channel.as_mut_ptr()`. This is why the
+    ///      param `channel` is passed as a reference instead of the vector being moved in here.
     unsafe fn sample_rate_convert_one_channel(
         channel: &mut Vec<f64>,
         resampler: CR8BResampler,
@@ -186,7 +186,7 @@ impl<T: BitDepth> ResamplerContainer<T> {
 
 impl<T: BitDepth> Drop for ResamplerContainer<T> {
     fn drop(&mut self) {
-        // Safe because this is calling to a FFI that was binded properly. Also
+        // SAFETY: This is calling to a FFI that was binded properly. Also
         // `left_resampler` and `right_resampler` are instantiated in the contructor.
         unsafe {
             if !self.left_resampler.is_null() {
@@ -368,8 +368,8 @@ impl PlaybackResamplerBuffer {
 
 /// Similar to `ResamplerBuffer` except for audio capture. This structure assumes:
 ///
-/// 1. That the format coming from the Window's audio enginer will be a 32bit float, any
-///    sample rate, and any number of channels.
+/// 1. That the format coming from the Window's audio enginer will be a 32bit float, any sample
+///    rate, and any number of channels.
 /// 2. The format Android requires is always 16bit int, 48kHz, and 2 channels.
 pub struct CaptureResamplerBuffer {
     resampler_container: ResamplerContainer<i16>,
@@ -429,7 +429,7 @@ impl CaptureResamplerBuffer {
 
                 if let Some(channel_converted) = channel_converted {
                     for sample in channel_converted {
-                        // Safe because `int_val` won't be infinity or NAN.
+                        // SAFETY: `int_val` won't be infinity or NAN.
                         // Also its value can be represented by an int once their fractional
                         // parts are removed.
                         let int_val = unsafe { (*sample).to_int_unchecked() };
@@ -474,10 +474,11 @@ impl CaptureResamplerBuffer {
                     .iter()
                     .zip(right_channel_converted.iter())
                 {
-                    // Safe because `left_sample` and `right_sample` won't be infinity or NAN.
+                    // SAFETY: `left_sample` and `right_sample` won't be infinity or NAN.
                     // Also their values can be represented by an int once their fractional
                     // parts are removed.
                     let left_val = unsafe { (*left_sample).to_int_unchecked() };
+                    // SAFETY: ditto
                     let right_val = unsafe { (*right_sample).to_int_unchecked() };
 
                     self.resampler_container.ring_buf.push_back(left_val);
@@ -638,7 +639,7 @@ mod test {
         )
         .unwrap();
 
-        let two_channel_samples = vec![5.0, 5.0, 2.0, 8.0];
+        let two_channel_samples = [5.0, 5.0, 2.0, 8.0];
 
         for x in (0..two_channel_samples.len()).step_by(2) {
             let left = two_channel_samples[x];
@@ -671,7 +672,7 @@ mod test {
         )
         .unwrap();
 
-        let two_channel_samples = vec![5.0, 5.0, 2.0, 8.0];
+        let two_channel_samples = [5.0, 5.0, 2.0, 8.0];
         for x in (0..two_channel_samples.len()).step_by(2) {
             let left = two_channel_samples[x];
             let right = two_channel_samples[x + 1];
@@ -706,7 +707,7 @@ mod test {
         )
         .unwrap();
 
-        let two_channel_samples = vec![5.0, 5.0, 2.0, 8.0];
+        let two_channel_samples = [5.0, 5.0, 2.0, 8.0];
         for x in (0..two_channel_samples.len()).step_by(2) {
             let left = two_channel_samples[x];
             let right = two_channel_samples[x + 1];
