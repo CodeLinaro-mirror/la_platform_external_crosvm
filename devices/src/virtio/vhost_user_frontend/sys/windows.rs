@@ -16,10 +16,10 @@ use futures::select;
 use futures::FutureExt;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 
-use crate::virtio::vhost::user::vmm::handler::BackendReqHandler;
-use crate::virtio::vhost::user::vmm::handler::BackendReqHandlerImpl;
-use crate::virtio::vhost::user::vmm::Error;
-use crate::virtio::vhost::user::vmm::Result as VhostResult;
+use crate::virtio::vhost_user_frontend::handler::BackendReqHandler;
+use crate::virtio::vhost_user_frontend::handler::BackendReqHandlerImpl;
+use crate::virtio::vhost_user_frontend::Error;
+use crate::virtio::vhost_user_frontend::Result as VhostResult;
 
 pub fn create_backend_req_handler(
     h: BackendReqHandlerImpl,
@@ -30,14 +30,9 @@ pub fn create_backend_req_handler(
 }
 
 pub async fn run_backend_request_handler(
-    handler: Option<BackendReqHandler>,
+    handler: &mut BackendReqHandler,
     ex: &Executor,
 ) -> Result<()> {
-    let mut handler = match handler {
-        Some(h) => h,
-        None => std::future::pending().await,
-    };
-
     let read_notifier = handler.get_read_notifier();
     let close_notifier = handler.get_close_notifier();
 

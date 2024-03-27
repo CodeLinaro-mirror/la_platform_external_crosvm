@@ -8,11 +8,12 @@ use cros_async::EventAsync;
 use cros_async::Executor;
 use cros_async::SelectResult;
 use futures::pin_mut;
+use futures::FutureExt;
 use vm_memory::GuestMemory;
 
 use crate::virtio::async_utils;
-use crate::virtio::vhost::user::vmm::handler::sys::run_backend_request_handler;
-use crate::virtio::vhost::user::vmm::handler::BackendReqHandler;
+use crate::virtio::vhost_user_frontend::handler::BackendReqHandler;
+use crate::virtio::vhost_user_frontend::sys::run_backend_request_handler;
 use crate::virtio::Interrupt;
 use crate::virtio::VIRTIO_MSI_NO_VECTOR;
 
@@ -42,7 +43,11 @@ impl Worker {
         let kill = async_utils::await_and_exit(&ex, kill_evt);
         pin_mut!(kill);
 
-        let req_handler = run_backend_request_handler(self.backend_req_handler.take(), &ex);
+        let req_handler = if let Some(backend_req_handler) = self.backend_req_handler.as_mut() {
+            run_backend_request_handler(backend_req_handler, &ex).left_future()
+        } else {
+            std::future::pending().right_future()
+        };
         pin_mut!(req_handler);
 
         match ex.run_until(select4(handle_non_msix_evt, resample, kill, req_handler)) {
