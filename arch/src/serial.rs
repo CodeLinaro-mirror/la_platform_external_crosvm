@@ -94,8 +94,8 @@ pub const SERIAL_ADDR: [u64; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
 /// * `com_evt_1_3` - event for com1 and com3
 /// * `com_evt_1_4` - event for com2 and com4
 /// * `serial_parameters` - definitions of serial parameter configurations.
-/// * `serial_jail` - minijail object cloned for use with each serial device.
-///   All four of the traditional PC-style serial ports (COM1-COM4) must be specified.
+/// * `serial_jail` - minijail object cloned for use with each serial device. All four of the
+///   traditional PC-style serial ports (COM1-COM4) must be specified.
 pub fn add_serial_devices(
     protection_type: ProtectionType,
     io_bus: &Bus,
@@ -178,25 +178,24 @@ pub fn get_serial_cmdline(
     serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
     serial_io_type: &str,
 ) -> GetSerialCmdlineResult<()> {
-    match serial_parameters
+    for serial_parameter in serial_parameters
         .iter()
         .filter(|(_, p)| p.console)
         .map(|(k, _)| k)
-        .next()
     {
-        Some((SerialHardware::Serial, num)) => {
-            cmdline
-                .insert("console", &format!("ttyS{}", num - 1))
-                .map_err(GetSerialCmdlineError::KernelCmdline)?;
+        match serial_parameter {
+            (SerialHardware::Serial, num) => {
+                cmdline
+                    .insert("console", &format!("ttyS{}", num - 1))
+                    .map_err(GetSerialCmdlineError::KernelCmdline)?;
+            }
+            (SerialHardware::VirtioConsole, num) | (SerialHardware::LegacyVirtioConsole, num) => {
+                cmdline
+                    .insert("console", &format!("hvc{}", num - 1))
+                    .map_err(GetSerialCmdlineError::KernelCmdline)?;
+            }
+            (SerialHardware::Debugcon, _) => {}
         }
-        Some((SerialHardware::VirtioConsole, num))
-        | Some((SerialHardware::LegacyVirtioConsole, num)) => {
-            cmdline
-                .insert("console", &format!("hvc{}", num - 1))
-                .map_err(GetSerialCmdlineError::KernelCmdline)?;
-        }
-        Some((SerialHardware::Debugcon, _)) => {}
-        None => {}
     }
 
     match serial_parameters
@@ -263,6 +262,7 @@ mod tests {
                 stdin: true,
                 out_timestamp: false,
                 debugcon_port: 0,
+                pci_address: None,
             },
         );
 
@@ -294,6 +294,7 @@ mod tests {
                 stdin: true,
                 out_timestamp: false,
                 debugcon_port: 0,
+                pci_address: None,
             },
         );
 
@@ -312,6 +313,7 @@ mod tests {
                 stdin: false,
                 out_timestamp: false,
                 debugcon_port: 0,
+                pci_address: None,
             },
         );
 
@@ -344,6 +346,7 @@ mod tests {
                 stdin: true,
                 out_timestamp: false,
                 debugcon_port: 0,
+                pci_address: None,
             },
         );
 

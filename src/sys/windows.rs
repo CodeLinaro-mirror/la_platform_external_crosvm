@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(b:240716507): There is huge chunk for code which depends on haxm, whpx or gvm to be enabled but
-// isn't marked so. Remove this when we do so.
+// TODO(b:240716507): There is huge chunk for code which depends on haxm, whpx or gvm to be enabled
+// but isn't marked so. Remove this when we do so.
 #![allow(dead_code, unused_imports, unused_variables, unreachable_code)]
 
 pub(crate) mod control_server;
@@ -106,6 +106,8 @@ use devices::virtio::vhost::user::device::gpu::sys::windows::InputEventSplitConf
 use devices::virtio::vhost::user::device::gpu::sys::windows::InputEventVmmConfig;
 #[cfg(feature = "gpu")]
 use devices::virtio::vhost::user::gpu::sys::windows::product::GpuBackendConfig as GpuBackendConfigProduct;
+#[cfg(feature = "gpu")]
+use devices::virtio::vhost::user::gpu::sys::windows::run_gpu_device_worker;
 #[cfg(feature = "audio")]
 use devices::virtio::vhost::user::snd::sys::windows::product::SndBackendConfig as SndBackendConfigProduct;
 #[cfg(feature = "balloon")]
@@ -218,10 +220,13 @@ use x86_64::X8664arch as Arch;
 
 use crate::crosvm::config::Config;
 use crate::crosvm::config::Executable;
+use crate::crosvm::config::InputDeviceOption;
 #[cfg(any(feature = "gvm", feature = "whpx"))]
 use crate::crosvm::config::IrqChipKind;
 #[cfg(feature = "gpu")]
 use crate::crosvm::config::TouchDeviceOption;
+use crate::crosvm::config::DEFAULT_TOUCH_DEVICE_HEIGHT;
+use crate::crosvm::config::DEFAULT_TOUCH_DEVICE_WIDTH;
 use crate::crosvm::sys::config::HypervisorKind;
 use crate::crosvm::sys::windows::broker::BrokerTubes;
 #[cfg(feature = "stats")]
@@ -336,39 +341,6 @@ fn create_vhost_user_gpu_device(base_features: u64, vhost_user_tube: Tube) -> De
     })
 }
 
-#[cfg(feature = "gpu")]
-fn create_gpu_device(
-    cfg: &Config,
-    gpu_parameters: &GpuParameters,
-    vm_evt_wrtube: &SendTube,
-    gpu_control_tube: Tube,
-    resource_bridges: Vec<Tube>,
-    event_devices: Vec<EventDevice>,
-    wndproc_thread: WindowProcedureThread,
-    product_args: GpuBackendConfigProduct,
-) -> DeviceResult {
-    let display_backends = vec![virtio::DisplayBackend::WinApi(
-        (&gpu_parameters.display_params[0]).into(),
-    )];
-    let features = virtio::base_features(cfg.protection_type);
-    let dev = product::create_gpu(
-        vm_evt_wrtube,
-        gpu_control_tube,
-        resource_bridges,
-        display_backends,
-        gpu_parameters,
-        event_devices,
-        features,
-        product_args,
-        wndproc_thread,
-    )?;
-
-    Ok(VirtioDeviceStub {
-        dev: Box::new(dev),
-        jail: None,
-    })
-}
-
 #[cfg(feature = "audio")]
 fn create_snd_device(
     cfg: &Config,
@@ -408,12 +380,12 @@ fn create_vhost_user_snd_device(base_features: u64, vhost_user_tube: Tube) -> De
 #[cfg(feature = "gpu")]
 fn create_multi_touch_device(
     cfg: &Config,
-    multi_touch_spec: &TouchDeviceOption,
     event_pipe: StreamChannel,
+    width: u32,
+    height: u32,
+    name: Option<&str>,
     idx: u32,
 ) -> DeviceResult {
-    let (width, height) = multi_touch_spec.get_size();
-    let name = multi_touch_spec.get_name();
     let dev = virtio::input::new_multi_touch(
         idx,
         event_pipe,
@@ -696,23 +668,48 @@ fn create_virtio_input_event_devices(
 ) -> DeviceResult<Vec<VirtioDeviceStub>> {
     let mut devs = Vec::new();
 
-    if !cfg.virtio_single_touch.is_empty() {
-        unimplemented!("--single-touch is no longer supported. Use --multi-touch instead.");
-    }
-
     // Iterate event devices, create the VMM end.
-    for (idx, pipe) in input_event_vmm_config
+    let mut multi_touch_pipes = input_event_vmm_config
         .multi_touch_pipes
         .drain(..)
-        .enumerate()
-    {
-        devs.push(create_multi_touch_device(
-            cfg,
-            &cfg.virtio_multi_touch[idx],
-            pipe,
-            idx as u32,
-        )?);
+        .enumerate();
+    for input in &cfg.virtio_input {
+        match input {
+            InputDeviceOption::SingleTouch { .. } => {
+                unimplemented!("--single-touch is no longer supported. Use --multi-touch instead.");
+            }
+            InputDeviceOption::MultiTouch {
+                width,
+                height,
+                name,
+                ..
+            } => {
+                let Some((idx, pipe)) = multi_touch_pipes.next() else {
+                    break;
+                };
+                let mut width = *width;
+                let mut height = *height;
+                if idx == 0 {
+                    if width.is_none() {
+                        width = cfg.display_input_width;
+                    }
+                    if height.is_none() {
+                        height = cfg.display_input_height;
+                    }
+                }
+                devs.push(create_multi_touch_device(
+                    cfg,
+                    pipe,
+                    width.unwrap_or(DEFAULT_TOUCH_DEVICE_WIDTH),
+                    height.unwrap_or(DEFAULT_TOUCH_DEVICE_HEIGHT),
+                    name.as_deref(),
+                    idx as u32,
+                )?);
+            }
+            _ => {}
+        }
     }
+    drop(multi_touch_pipes);
 
     product::push_mouse_device(cfg, &mut input_event_vmm_config, &mut devs)?;
 
@@ -751,39 +748,29 @@ fn create_virtio_gpu_device(
 
     product::push_gpu_control_tubes(control_tubes, &mut gpu_vmm_config);
 
-    match cfg.gpu_backend_config.take() {
-        None => {
-            // No backend config present means the backend is running in another process.
-            create_vhost_user_gpu_device(
-                virtio::base_features(cfg.protection_type),
-                gpu_vmm_config
-                    .main_vhost_user_tube
-                    .take()
-                    .expect("GPU VMM vhost-user tube should be set"),
-            )
-            .context("create vhost-user GPU device")
-        }
-        Some(backend_config) => {
-            // Backend config present, so initialize GPU in this process.
-            create_gpu_device(
-                cfg,
-                &backend_config.params,
-                &backend_config.exit_evt_wrtube,
-                backend_config.gpu_control_device_tube,
-                resource_bridges,
-                event_devices.ok_or_else(|| {
-                    anyhow!(
-                        "event devices are missing when creating virtio-gpu in the current process."
-                    )
-                })?,
-                wndproc_thread
-                    .take()
-                    .ok_or_else(|| anyhow!("Window procedure thread is missing."))?,
-                backend_config.product_config,
-            )
-            .context("create GPU device")
-        }
+    // If the GPU backend is passed, start up the vhost-user worker in the main process.
+    if let Some(backend_config) = cfg.gpu_backend_config.take() {
+        let event_devices = event_devices.ok_or_else(|| {
+            anyhow!("event devices are missing when creating virtio-gpu in the current process.")
+        })?;
+        let wndproc_thread = wndproc_thread
+            .take()
+            .ok_or_else(|| anyhow!("Window procedure thread is missing."))?;
+
+        std::thread::spawn(move || {
+            run_gpu_device_worker(backend_config, event_devices, wndproc_thread)
+        });
     }
+
+    // The GPU is always vhost-user, even if running in the main process.
+    create_vhost_user_gpu_device(
+        virtio::base_features(cfg.protection_type),
+        gpu_vmm_config
+            .main_vhost_user_tube
+            .take()
+            .expect("GPU VMM vhost-user tube should be set"),
+    )
+    .context("create vhost-user GPU device")
 }
 
 fn create_devices(
@@ -902,6 +889,8 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             &mut guest_os.pm,
             #[cfg(feature = "gpu")]
             gpu_control_tube,
+            #[cfg(not(feature = "gpu"))]
+            None,
             None,
             &mut None,
             |msg| {
@@ -1963,7 +1952,7 @@ where
 {
     info!("Creating userspace irqchip");
     let irq_chip =
-        UserspaceIrqChip::new(vcpu_count, ioapic_device_tube, /*ioapic_pins:*/ None)?;
+        UserspaceIrqChip::new(vcpu_count, ioapic_device_tube, /* ioapic_pins: */ None)?;
     Ok(irq_chip)
 }
 
@@ -2136,8 +2125,7 @@ impl<V: VcpuArch> WindowsIrqChip<V> {
 
 /// Storage for the VM TSC offset for each vcpu. Stored in a static because the tracing thread will
 /// need access to it when tracing is enabled.
-static TSC_OFFSETS: once_cell::sync::Lazy<sync::Mutex<Vec<Option<u64>>>> =
-    once_cell::sync::Lazy::new(|| sync::Mutex::new(Vec::new()));
+static TSC_OFFSETS: sync::Mutex<Vec<Option<u64>>> = sync::Mutex::new(Vec::new());
 
 /// Save the TSC offset for a particular vcpu.
 ///
@@ -2555,30 +2543,8 @@ where
         .and_then(|config| config.gpu_control_host_tube.take());
     let product_args = product::get_run_control_args(&mut cfg);
 
-    let virtio_snd_state_device_tube = create_snd_state_tube(&mut control_tubes)?;
-
-    let (virtio_snd_host_mute_tube, virtio_snd_device_mute_tube) = create_snd_mute_tube_pair()?;
-
-    let pci_devices = create_devices(
-        &mut cfg,
-        vm.get_memory(),
-        &vm_evt_wrtube,
-        &mut irq_control_tubes,
-        &mut vm_memory_control_tubes,
-        &mut control_tubes,
-        &mut disk_device_tubes,
-        balloon_device_tube,
-        pvclock_device_tube,
-        dynamic_mapping_device_tube,
-        /* inflate_tube= */ None,
-        init_balloon_size,
-        tsc_state.frequency,
-        virtio_snd_state_device_tube,
-        virtio_snd_device_mute_tube,
-    )?;
-
-    let mut vcpu_ids = Vec::new();
-
+    // We open these files before lowering the token, as in the future a stricter policy may
+    // prevent it.
     let dt_overlays = cfg
         .device_tree_overlay
         .iter()
@@ -2591,33 +2557,6 @@ where
             })
         })
         .collect::<Result<Vec<DtbOverlay>>>()?;
-
-    let windows = Arch::build_vm::<V, Vcpu>(
-        components,
-        &vm_evt_wrtube,
-        &mut sys_allocator,
-        &cfg.serial_parameters,
-        None,
-        (cfg.battery_config.as_ref().map(|t| t.type_), None),
-        vm,
-        ramoops_region,
-        pci_devices,
-        irq_chip,
-        &mut vcpu_ids,
-        cfg.dump_device_tree_blob.clone(),
-        /*debugcon_jail=*/ None,
-        None,
-        None,
-        dt_overlays,
-    )
-    .exit_context(Exit::BuildVm, "the architecture failed to build the vm")?;
-
-    #[cfg(feature = "stats")]
-    let stats = if cfg.exit_stats {
-        Some(Arc::new(Mutex::new(StatisticsCollector::new())))
-    } else {
-        None
-    };
 
     // Lower the token, locking the main process down to a stricter security policy.
     //
@@ -2647,6 +2586,57 @@ where
             .expect("Could not create sandbox!")
             .lower_token();
     }
+
+    let virtio_snd_state_device_tube = create_snd_state_tube(&mut control_tubes)?;
+
+    let (virtio_snd_host_mute_tube, virtio_snd_device_mute_tube) = create_snd_mute_tube_pair()?;
+
+    let pci_devices = create_devices(
+        &mut cfg,
+        vm.get_memory(),
+        &vm_evt_wrtube,
+        &mut irq_control_tubes,
+        &mut vm_memory_control_tubes,
+        &mut control_tubes,
+        &mut disk_device_tubes,
+        balloon_device_tube,
+        pvclock_device_tube,
+        dynamic_mapping_device_tube,
+        /* inflate_tube= */ None,
+        init_balloon_size,
+        tsc_state.frequency,
+        virtio_snd_state_device_tube,
+        virtio_snd_device_mute_tube,
+    )?;
+
+    let mut vcpu_ids = Vec::new();
+
+    let windows = Arch::build_vm::<V, Vcpu>(
+        components,
+        &vm_evt_wrtube,
+        &mut sys_allocator,
+        &cfg.serial_parameters,
+        None,
+        (cfg.battery_config.as_ref().map(|t| t.type_), None),
+        vm,
+        ramoops_region,
+        pci_devices,
+        irq_chip,
+        &mut vcpu_ids,
+        cfg.dump_device_tree_blob.clone(),
+        /* debugcon_jail= */ None,
+        None,
+        None,
+        dt_overlays,
+    )
+    .exit_context(Exit::BuildVm, "the architecture failed to build the vm")?;
+
+    #[cfg(feature = "stats")]
+    let stats = if cfg.exit_stats {
+        Some(Arc::new(Mutex::new(StatisticsCollector::new())))
+    } else {
+        None
+    };
 
     run_control(
         windows,
