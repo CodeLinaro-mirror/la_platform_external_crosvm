@@ -23,10 +23,18 @@ use std::ptr::null_mut;
 use std::slice::from_raw_parts;
 use std::slice::from_raw_parts_mut;
 
+#[cfg(unix)]
 use libc::iovec;
 use libc::EINVAL;
 use libc::ESRCH;
 use rutabaga_gfx::*;
+
+#[cfg(not(unix))]
+#[repr(C)]
+pub struct iovec {
+    pub iov_base: *mut c_void,
+    pub iov_len: usize,
+}
 
 const NO_ERROR: i32 = 0;
 const RUTABAGA_WSI_SURFACELESS: u64 = 1;
@@ -156,6 +164,7 @@ pub struct rutabaga_builder<'a> {
     pub fence_cb: rutabaga_fence_callback,
     pub debug_cb: Option<rutabaga_debug_callback>,
     pub channels: Option<&'a rutabaga_channels>,
+    pub renderer_features: *const c_char,
 }
 
 fn create_ffi_fence_handler(
@@ -232,6 +241,16 @@ pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mu
             rutabaga_channels_opt = Some(rutabaga_channels);
         }
 
+        let mut renderer_features_opt = None;
+        let renderer_features_ptr = (*builder).renderer_features;
+        if !renderer_features_ptr.is_null() {
+            let c_str_slice = CStr::from_ptr(renderer_features_ptr);
+            let result = c_str_slice.to_str();
+            let str_slice = return_on_error!(result);
+            let string = str_slice.to_owned();
+            renderer_features_opt = Some(string);
+        }
+
         let mut component_type = RutabagaComponentType::CrossDomain;
         if (*builder).capset_mask == 0 {
             component_type = RutabagaComponentType::Rutabaga2D;
@@ -248,6 +267,7 @@ pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mu
             .set_wsi(rutabaga_wsi)
             .set_debug_handler(debug_handler_opt)
             .set_rutabaga_channels(rutabaga_channels_opt)
+            .set_renderer_features(renderer_features_opt)
             .build(fence_handler, None);
 
         let rtbg = return_on_error!(result);
@@ -396,8 +416,8 @@ pub extern "C" fn rutabaga_resource_create_3d(
 /// - If `iovecs` is not null, the caller must ensure `(*iovecs).iovecs` points to a valid array of
 ///   iovecs of size `(*iovecs).num_iovecs`.
 /// - Each iovec must point to valid memory starting at `iov_base` with length `iov_len`.
-/// - Each iovec must valid until the resource's backing is explictly detached or the resource is
-///   is unreferenced.
+/// - Each iovec must valid until the resource's backing is explictly detached or the resource is is
+///   unreferenced.
 #[no_mangle]
 pub unsafe extern "C" fn rutabaga_resource_attach_backing(
     ptr: &mut rutabaga,
@@ -474,8 +494,8 @@ pub extern "C" fn rutabaga_resource_transfer_write(
 ///   iovecs of size `(*iovecs).num_iovecs`.
 /// - If `handle` is not null, the caller must ensure it is a valid OS-descriptor.  Ownership is
 ///   transfered to rutabaga.
-/// - Each iovec must valid until the resource's backing is explictly detached or the resource is
-///   is unreferenced.
+/// - Each iovec must valid until the resource's backing is explictly detached or the resource is is
+///   unreferenced.
 #[no_mangle]
 pub unsafe extern "C" fn rutabaga_resource_create_blob(
     ptr: &mut rutabaga,
@@ -500,6 +520,10 @@ pub unsafe extern "C" fn rutabaga_resource_create_blob(
         }
 
         let mut handle_opt: Option<RutabagaHandle> = None;
+
+        // Only needed on Unix, since there is no way to create a handle from guest memory on
+        // Windows.
+        #[cfg(unix)]
         if let Some(hnd) = handle {
             handle_opt = Some(RutabagaHandle {
                 os_handle: RutabagaDescriptor::from_raw_descriptor(
@@ -609,11 +633,12 @@ pub extern "C" fn rutabaga_create_fence(ptr: &mut rutabaga, fence: &rutabaga_fen
     .unwrap_or(-ESRCH)
 }
 
+/// # Safety
+/// - `dir` must be a null-terminated C-string.
 #[no_mangle]
-pub extern "C" fn rutabaga_snapshot(ptr: &mut rutabaga, dir: *const c_char) -> i32 {
+pub unsafe extern "C" fn rutabaga_snapshot(ptr: &mut rutabaga, dir: *const c_char) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: Caller guarantees a valid C string.
-        let c_str_slice = unsafe { CStr::from_ptr(dir) };
+        let c_str_slice = CStr::from_ptr(dir);
 
         let result = c_str_slice.to_str();
         let directory = return_on_error!(result);
@@ -625,11 +650,12 @@ pub extern "C" fn rutabaga_snapshot(ptr: &mut rutabaga, dir: *const c_char) -> i
     .unwrap_or(-ESRCH)
 }
 
+/// # Safety
+/// - `dir` must be a null-terminated C-string.
 #[no_mangle]
-pub extern "C" fn rutabaga_restore(ptr: &mut rutabaga, dir: *const c_char) -> i32 {
+pub unsafe extern "C" fn rutabaga_restore(ptr: &mut rutabaga, dir: *const c_char) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: Caller guarantees a valid C string.
-        let c_str_slice = unsafe { CStr::from_ptr(dir) };
+        let c_str_slice = CStr::from_ptr(dir);
 
         let result = c_str_slice.to_str();
         let directory = return_on_error!(result);

@@ -21,7 +21,6 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libanyhow",
-        "liblazy_static",
         "libsync_rust",
     ],
 }

@@ -30,20 +30,11 @@
 //! use std::io::Write;
 //!
 //! let mut cfg = LogConfig::default();
-//! cfg.pipe_formatter = Some(Box::new(|buf, rec| {
-//!     let mut level_style = buf.style();
-//!     level_style.set_color(fmt::Color::Green);
-//!     let mut style = buf.style();
-//!     style.set_color(fmt::Color::Red).set_bold(true);
-//!     writeln!(buf, "{}:{}", level_style.value(rec.level()), style.value(rec.args()))
-//! }));
 //! cfg.log_args.stderr = true;
 //! cfg.log_args.filter = String::from("info,base=debug,base::syslog=error,serial_console=false");
 //!
 //! init_with(cfg).unwrap();
 //! error!("something went horribly wrong: {}", "out of RAMs");
-//!
-//!
 //! ```
 //!
 //!
@@ -59,7 +50,6 @@ pub use env_logger::fmt;
 pub use env_logger::{self};
 pub use log::*;
 use once_cell::sync::Lazy;
-use once_cell::sync::OnceCell;
 use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
@@ -352,7 +342,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| {
     Mutex::new(state)
 });
 static LOGGING_FACADE: LoggingFacade = LoggingFacade {};
-static EARLY_INIT_CALLED: OnceCell<()> = OnceCell::new();
+static EARLY_INIT_CALLED: Mutex<bool> = Mutex::new(false);
 
 /// Initialize the syslog connection and internal variables.
 ///
@@ -372,7 +362,7 @@ pub fn init() -> Result<(), Error> {
 ///
 /// Arguments:
 /// * filter: See <https://docs.rs/env_logger/0.9/env_logger/index.html> for example filter
-///     specifications
+///   specifications
 /// * stderr: If set will output to stderr (in addition)
 /// * file:  If set will output to this file (in addition)
 /// * proc_name: proc name for Syslog implementation
@@ -394,15 +384,10 @@ pub fn init_with(cfg: LogConfig) -> Result<(), Error> {
 /// Performs early (as in, moment of process start) logging initialization. Any logging prior to
 /// this call will be SILENTLY discarded. Calling more than once per process will panic.
 pub fn early_init() {
-    let mut first_init = false;
-    let _ = EARLY_INIT_CALLED
-        .get_or_try_init(|| -> Result<(), ()> {
-            first_init = true;
-            Ok(())
-        })
-        .unwrap();
-    if first_init {
+    let mut early_init_called = EARLY_INIT_CALLED.lock();
+    if !*early_init_called {
         apply_logging_state(&LOGGING_FACADE);
+        *early_init_called = true;
     } else {
         panic!("double early init of the logging system is not permitted.");
     }
@@ -412,15 +397,10 @@ pub fn early_init() {
 /// share module state, we need a way to make sure it has been initialized
 /// with *some* configuration.
 pub fn test_only_ensure_inited() -> Result<(), Error> {
-    let mut first_init = false;
-    let _ = EARLY_INIT_CALLED
-        .get_or_try_init(|| -> Result<(), ()> {
-            first_init = true;
-            Ok(())
-        })
-        .unwrap();
-    if first_init {
+    let mut early_init_called = EARLY_INIT_CALLED.lock();
+    if !*early_init_called {
         apply_logging_state(&LOGGING_FACADE);
+        *early_init_called = true;
     }
     Ok(())
 }
