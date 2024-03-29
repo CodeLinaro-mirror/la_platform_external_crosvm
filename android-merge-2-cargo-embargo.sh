@@ -70,4 +70,4 @@ git restore Cargo.lock
 
 # Fix workstation specific path in "metrics" crate's generated files.
 # TODO(b/232150148): Find a better solution for protobuf generated files.
-sed --in-place 's/path = ".*\/out/path = "./' metrics/out/generated.rs
+sed --in-place 's/path = ".*\/out/path = "./' vendor/generic/metrics/src/out/generated.rs
