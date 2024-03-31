@@ -35,6 +35,8 @@ use devices::virtio::ipc_memory_mapper::create_ipc_mapper;
 use devices::virtio::ipc_memory_mapper::CreateIpcMapperRet;
 use devices::virtio::memory_mapper::BasicMemoryMapper;
 use devices::virtio::memory_mapper::MemoryMapperTrait;
+#[cfg(feature = "pvclock")]
+use devices::virtio::pvclock::PvClock;
 use devices::virtio::scsi::ScsiOption;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
@@ -42,7 +44,7 @@ use devices::virtio::vfio_wrapper::VfioWrapper;
 use devices::virtio::vhost::user::vmm::VhostUserVirtioDevice;
 #[cfg(feature = "net")]
 use devices::virtio::vhost::user::NetBackend;
-use devices::virtio::vhost::user::VhostUserDevice;
+use devices::virtio::vhost::user::VhostUserDeviceBuilder;
 use devices::virtio::vhost::user::VhostUserVsockDevice;
 use devices::virtio::vsock::VsockConfig;
 #[cfg(feature = "balloon")]
@@ -192,7 +194,7 @@ pub trait VirtioDeviceBuilder: Sized {
     fn create_vhost_user_device(
         self,
         _keep_rds: &mut Vec<RawDescriptor>,
-    ) -> anyhow::Result<Box<dyn VhostUserDevice>> {
+    ) -> anyhow::Result<Box<dyn VhostUserDeviceBuilder>> {
         unimplemented!()
     }
 
@@ -270,7 +272,7 @@ impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
     fn create_vhost_user_device(
         self,
         keep_rds: &mut Vec<RawDescriptor>,
-    ) -> anyhow::Result<Box<dyn VhostUserDevice>> {
+    ) -> anyhow::Result<Box<dyn VhostUserDeviceBuilder>> {
         let disk = self.disk;
         let disk_image = disk.open()?;
         let base_features = virtio::base_features(ProtectionType::Unprotected);
@@ -673,6 +675,25 @@ pub fn create_balloon_device(
     })
 }
 
+#[cfg(feature = "pvclock")]
+pub fn create_pvclock_device(
+    protection_type: ProtectionType,
+    jail_config: &Option<JailConfig>,
+    tsc_frequency: u64,
+    suspend_tube: Tube,
+) -> DeviceResult {
+    let dev = PvClock::new(
+        virtio::base_features(protection_type),
+        tsc_frequency,
+        suspend_tube,
+    );
+
+    Ok(VirtioDeviceStub {
+        dev: Box::new(dev),
+        jail: simple_jail(jail_config, "pvclock_device")?,
+    })
+}
+
 #[cfg(feature = "net")]
 impl VirtioDeviceBuilder for &NetParameters {
     const NAME: &'static str = "net";
@@ -731,7 +752,7 @@ impl VirtioDeviceBuilder for &NetParameters {
     fn create_vhost_user_device(
         self,
         keep_rds: &mut Vec<RawDescriptor>,
-    ) -> anyhow::Result<Box<dyn VhostUserDevice>> {
+    ) -> anyhow::Result<Box<dyn VhostUserDeviceBuilder>> {
         let vq_pairs = self.vq_pairs.unwrap_or(1);
         let multi_vq = vq_pairs > 1 && self.vhost_net.is_none();
         let (tap, _mac) = create_tap_for_net_device(&self.mode, multi_vq)?;
@@ -936,7 +957,7 @@ impl VirtioDeviceBuilder for &VsockConfig {
     fn create_vhost_user_device(
         self,
         keep_rds: &mut Vec<RawDescriptor>,
-    ) -> anyhow::Result<Box<dyn VhostUserDevice>> {
+    ) -> anyhow::Result<Box<dyn VhostUserDeviceBuilder>> {
         let vsock_device = VhostUserVsockDevice::new(self.cid, &self.vhost_device)?;
 
         keep_rds.push(vsock_device.as_raw_descriptor());
@@ -1230,7 +1251,7 @@ impl VirtioDeviceBuilder for &SerialParameters {
     fn create_vhost_user_device(
         self,
         keep_rds: &mut Vec<RawDescriptor>,
-    ) -> anyhow::Result<Box<dyn VhostUserDevice>> {
+    ) -> anyhow::Result<Box<dyn VhostUserDeviceBuilder>> {
         Ok(Box::new(virtio::vhost::user::create_vu_console_device(
             self, keep_rds,
         )?))

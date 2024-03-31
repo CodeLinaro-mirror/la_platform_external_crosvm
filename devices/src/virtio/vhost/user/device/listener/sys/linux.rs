@@ -11,10 +11,9 @@ use cros_async::AsyncWrapper;
 use cros_async::Executor;
 use futures::Future;
 use futures::FutureExt;
-use vmm_vhost::connection::socket::SocketListener;
 use vmm_vhost::connection::Listener;
-use vmm_vhost::SlaveReqHandler;
-use vmm_vhost::VhostUserSlaveReqHandler;
+use vmm_vhost::unix::SocketListener;
+use vmm_vhost::BackendServer;
 
 use crate::virtio::vhost::user::device::handler::sys::linux::run_handler;
 use crate::virtio::vhost::user::device::listener::VhostUserListenerTrait;
@@ -41,10 +40,10 @@ impl VhostUserListener {
 }
 
 /// Attaches to an already bound socket via `listener` and handles incoming messages from the
-/// VMM, which are dispatched to the device backend via the `VhostUserBackend` trait methods.
+/// VMM, which are dispatched to the device backend via the `VhostUserDevice` trait methods.
 async fn run_with_handler(
     mut listener: SocketListener,
-    handler: Box<dyn VhostUserSlaveReqHandler>,
+    handler: Box<dyn vmm_vhost::Backend>,
     ex: &Executor,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
@@ -58,7 +57,7 @@ async fn run_with_handler(
             .context("failed to accept an incoming connection")?
         {
             Some(connection) => {
-                let req_handler = SlaveReqHandler::new(connection, handler);
+                let req_handler = BackendServer::new(connection, handler);
                 return run_handler(req_handler, ex).await;
             }
             None => {
@@ -80,20 +79,13 @@ impl VhostUserListenerTrait for VhostUserListener {
     ///
     /// `keep_rds` can be specified to retrieve the raw descriptors that must be preserved for this
     /// listener to keep working after forking.
-    fn new(
-        path: &str,
-        _max_num_queues: usize,
-        keep_rds: Option<&mut Vec<RawDescriptor>>,
-    ) -> anyhow::Result<Self> {
+    fn new(path: &str, keep_rds: Option<&mut Vec<RawDescriptor>>) -> anyhow::Result<Self> {
         Self::new_socket(path, keep_rds)
     }
 
-    /// Returns a future that runs a `VhostUserSlaveReqHandler` using this listener.
-    ///
-    /// `ex` is the executor on which the request handler can schedule its own tasks.
     fn run_req_handler<'e>(
         self,
-        handler: Box<dyn VhostUserSlaveReqHandler>,
+        handler: Box<dyn vmm_vhost::Backend>,
         ex: &'e Executor,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'e>> {
         async { run_with_handler(self.0, handler, ex).await }.boxed_local()
