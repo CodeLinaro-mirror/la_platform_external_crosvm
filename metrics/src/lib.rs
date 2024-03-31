@@ -12,25 +12,14 @@
 //! appropriate RequestHandler.
 
 mod controller;
-mod event_types;
 mod local_stats;
-mod metrics_cleanup;
-mod metrics_requests;
-mod noop;
 pub mod sys;
-pub mod protos {
-    // ANDROID: b/259142784 - we remove metrics_out subdir b/c cargo2android
-    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
-}
 
 pub use controller::MetricsController;
-pub use event_types::MetricEventType;
-pub use metrics_cleanup::MetricsClientDestructor;
-pub use noop::*;
-#[allow(unused_imports)]
-pub use sys::*;
+pub use metrics_product::MetricEventType;
+pub use metrics_product::*;
 
-pub type RequestHandler = NoopMetricsRequestHandler;
+pub type RequestHandler = MetricsRequestHandler;
 
 pub use local_stats::collect_scoped_byte_latency_stat;
 pub use local_stats::timed_scope;
