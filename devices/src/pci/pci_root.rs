@@ -488,6 +488,14 @@ impl PciRootMmioState {
     where
         T: PciMmioMapper,
     {
+        // ANDROID(b/316956218): pKVM doesn't support readonly memslots, so return early from this
+        // function to opt-out of the optimizations that require readonly memslots. This will also
+        // affect aarch64 cuttlefish unforunately. Once we have a way to detect pKVM at runtime, we
+        // should move this check upstream.
+        if cfg!(target_arch = "aarch64") {
+            return Ok(());
+        }
+
         // The PCI spec requires that config writes are non-posted. This requires
         // uncached mappings in the guest. 32-bit ARM does not support flushing to
         // PoC from userspace. The cache maintance story for riscv is unclear, so
