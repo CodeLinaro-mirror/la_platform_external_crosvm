@@ -8,11 +8,11 @@ use std::fs::File;
 use std::path::PathBuf;
 
 use arch::apply_device_tree_overlays;
+use arch::serial::SerialDeviceInfo;
 use arch::CpuSet;
 use arch::DtbOverlay;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use arch::PlatformBusResources;
-use arch::SERIAL_ADDR;
 use cros_fdt::Error;
 use cros_fdt::Fdt;
 use cros_fdt::Result;
@@ -44,9 +44,6 @@ use crate::AARCH64_RTC_ADDR;
 use crate::AARCH64_RTC_IRQ;
 use crate::AARCH64_RTC_SIZE;
 // These are serial device related constants.
-use crate::AARCH64_SERIAL_1_3_IRQ;
-use crate::AARCH64_SERIAL_2_4_IRQ;
-use crate::AARCH64_SERIAL_SIZE;
 use crate::AARCH64_SERIAL_SPEED;
 use crate::AARCH64_VIRTFREQ_BASE;
 use crate::AARCH64_VIRTFREQ_SIZE;
@@ -136,6 +133,7 @@ fn create_resv_memory_node(
 fn create_cpu_nodes(
     fdt: &mut Fdt,
     num_cpus: u32,
+    cpu_mpidr_generator: &impl Fn(usize) -> Option<u64>,
     cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
     dynamic_power_coefficient: BTreeMap<usize, u32>,
@@ -147,14 +145,18 @@ fn create_cpu_nodes(
     cpus_node.set_prop("#size-cells", 0x0u32)?;
 
     for cpu_id in 0..num_cpus {
-        let cpu_name = format!("cpu@{:x}", cpu_id);
+        let reg = u32::try_from(
+            cpu_mpidr_generator(cpu_id.try_into().unwrap()).ok_or(Error::PropertyValueInvalid)?,
+        )
+        .map_err(|_| Error::PropertyValueTooLarge)?;
+        let cpu_name = format!("cpu@{:x}", reg);
         let cpu_node = cpus_node.subnode_mut(&cpu_name)?;
         cpu_node.set_prop("device_type", "cpu")?;
         cpu_node.set_prop("compatible", "arm,arm-v8")?;
         if num_cpus > 1 {
             cpu_node.set_prop("enable-method", "psci")?;
         }
-        cpu_node.set_prop("reg", cpu_id)?;
+        cpu_node.set_prop("reg", reg)?;
         cpu_node.set_prop("phandle", PHANDLE_CPU0 + cpu_id)?;
 
         if let Some(pwr_coefficient) = dynamic_power_coefficient.get(&(cpu_id as usize)) {
@@ -261,8 +263,8 @@ fn create_pmu_node(fdt: &mut Fdt, num_cpus: u32) -> Result<()> {
     Ok(())
 }
 
-fn create_serial_node(fdt: &mut Fdt, addr: u64, irq: u32) -> Result<()> {
-    let serial_reg_prop = [addr, AARCH64_SERIAL_SIZE];
+fn create_serial_node(fdt: &mut Fdt, addr: u64, size: u64, irq: u32) -> Result<()> {
+    let serial_reg_prop = [addr, size];
     let irq = [GIC_FDT_IRQ_TYPE_SPI, irq, IRQ_TYPE_EDGE_RISING];
 
     let serial_node = fdt
@@ -276,14 +278,10 @@ fn create_serial_node(fdt: &mut Fdt, addr: u64, irq: u32) -> Result<()> {
     Ok(())
 }
 
-fn create_serial_nodes(fdt: &mut Fdt) -> Result<()> {
-    // Note that SERIAL_ADDR contains the I/O port addresses conventionally used
-    // for serial ports on x86. This uses the same addresses (but on the MMIO bus)
-    // to simplify the shared serial code.
-    create_serial_node(fdt, SERIAL_ADDR[0], AARCH64_SERIAL_1_3_IRQ)?;
-    create_serial_node(fdt, SERIAL_ADDR[1], AARCH64_SERIAL_2_4_IRQ)?;
-    create_serial_node(fdt, SERIAL_ADDR[2], AARCH64_SERIAL_1_3_IRQ)?;
-    create_serial_node(fdt, SERIAL_ADDR[3], AARCH64_SERIAL_2_4_IRQ)?;
+fn create_serial_nodes(fdt: &mut Fdt, serial_devices: &[SerialDeviceInfo]) -> Result<()> {
+    for dev in serial_devices {
+        create_serial_node(fdt, dev.address, dev.size, dev.irq)?;
+    }
 
     Ok(())
 }
@@ -320,12 +318,15 @@ fn create_chosen_node(
     fdt: &mut Fdt,
     cmdline: &str,
     initrd: Option<(GuestAddress, usize)>,
+    stdout_path: Option<&str>,
 ) -> Result<()> {
     let chosen_node = fdt.root_mut().subnode_mut("chosen")?;
     chosen_node.set_prop("linux,pci-probe-only", 1u32)?;
     chosen_node.set_prop("bootargs", cmdline)?;
-    // Used by android bootloader for boot console output
-    chosen_node.set_prop("stdout-path", format!("/U6_16550A@{:x}", SERIAL_ADDR[0]))?;
+    if let Some(stdout_path) = stdout_path {
+        // Used by android bootloader for boot console output
+        chosen_node.set_prop("stdout-path", stdout_path)?;
+    }
 
     let mut kaslr_seed_bytes = [0u8; 8];
     OsRng.fill_bytes(&mut kaslr_seed_bytes);
@@ -631,6 +632,7 @@ pub fn create_fdt(
         PlatformBusResources,
     >,
     num_cpus: u32,
+    cpu_mpidr_generator: &impl Fn(usize) -> Option<u64>,
     cpu_clusters: Vec<CpuSet>,
     cpu_capacity: BTreeMap<usize, u32>,
     cpu_frequencies: BTreeMap<usize, Vec<u32>>,
@@ -649,6 +651,7 @@ pub fn create_fdt(
     vm_generator: &impl Fn(&mut Fdt, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
     dynamic_power_coefficient: BTreeMap<usize, u32>,
     device_tree_overlays: Vec<DtbOverlay>,
+    serial_devices: &[SerialDeviceInfo],
 ) -> Result<()> {
     let mut fdt = Fdt::new(&[]);
     let mut phandles_key_cache = Vec::new();
@@ -664,7 +667,10 @@ pub fn create_fdt(
     if let Some(android_fstab) = android_fstab {
         arch::android::create_android_fdt(&mut fdt, android_fstab)?;
     }
-    create_chosen_node(&mut fdt, cmdline, initrd)?;
+    let stdout_path = serial_devices
+        .first()
+        .map(|first_serial| format!("/U6_16550A@{:x}", first_serial.address));
+    create_chosen_node(&mut fdt, cmdline, initrd, stdout_path.as_deref())?;
     create_config_node(&mut fdt, image)?;
     create_memory_node(&mut fdt, guest_mem)?;
     let dma_pool_phandle = match swiotlb {
@@ -678,6 +684,7 @@ pub fn create_fdt(
     create_cpu_nodes(
         &mut fdt,
         num_cpus,
+        cpu_mpidr_generator,
         cpu_clusters,
         cpu_capacity,
         dynamic_power_coefficient,
@@ -688,7 +695,7 @@ pub fn create_fdt(
     if use_pmu {
         create_pmu_node(&mut fdt, num_cpus)?;
     }
-    create_serial_nodes(&mut fdt)?;
+    create_serial_nodes(&mut fdt, serial_devices)?;
     create_psci_node(&mut fdt, &psci_version)?;
     create_pci_nodes(&mut fdt, pci_irqs, pci_cfg, pci_ranges, dma_pool_phandle)?;
     create_rtc_node(&mut fdt)?;
