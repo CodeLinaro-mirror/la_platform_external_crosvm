@@ -26,6 +26,10 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     srcs: ["src/lib.rs"],
     edition: "2021",
+    features: [
+        "android_display",
+        "android_display_stub",
+    ],
     rustlibs: [
         "libanyhow",
         "libbase_rust",

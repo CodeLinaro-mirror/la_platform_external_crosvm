@@ -45,6 +45,8 @@ rust_binary {
     edition: "2021",
     features: [
         "android-sparse",
+        "android_display",
+        "android_display_stub",
         "audio",
         "balloon",
         "config-file",
@@ -177,6 +179,8 @@ rust_test {
     edition: "2021",
     features: [
         "android-sparse",
+        "android_display",
+        "android_display_stub",
         "audio",
         "balloon",
         "config-file",
