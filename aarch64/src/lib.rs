@@ -364,6 +364,16 @@ fn load_kernel(
 
 pub struct AArch64;
 
+fn get_block_size() -> u64 {
+    let page_size = base::pagesize();
+    // Each PTE entry being 8 bytes long, we can fit in one page (page_size / 8)
+    // entries.
+    let ptes_per_page = page_size / 8;
+    let block_size = page_size * ptes_per_page;
+
+    block_size as u64
+}
+
 impl arch::LinuxArch for AArch64 {
     type Error = Error;
 
@@ -376,7 +386,7 @@ impl arch::LinuxArch for AArch64 {
         let mut memory_regions = vec![(
             GuestAddress(AARCH64_PHYS_MEM_START),
             components.memory_size,
-            Default::default(),
+            MemoryRegionOptions::new().align(get_block_size()),
         )];
 
         // Allocate memory for the pVM firmware.
@@ -869,8 +879,18 @@ impl arch::LinuxArch for AArch64 {
 
     // Creates CPU cluster mask for each CPU in the host system.
     fn get_host_cpu_clusters() -> std::result::Result<Vec<CpuSet>, Self::Error> {
-        let cluster_ids = Self::collect_for_each_cpu(base::logical_core_cluster_id)
-            .map_err(Error::CpuTopology)?;
+        let cpu_capacities =
+            Self::collect_for_each_cpu(base::logical_core_capacity).map_err(Error::CpuTopology)?;
+        let mut unique_caps = Vec::new();
+        let mut cluster_ids = Vec::new();
+        for capacity in cpu_capacities {
+            if !unique_caps.contains(&capacity) {
+                unique_caps.push(capacity);
+            }
+            let idx = unique_caps.iter().position(|&r| r == capacity).unwrap();
+            cluster_ids.push(idx);
+        }
+
         let mut unique_clusters: Vec<CpuSet> = cluster_ids
             .iter()
             .map(|&vcpu_cluster_id| {

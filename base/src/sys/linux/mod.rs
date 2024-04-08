@@ -29,7 +29,6 @@ mod mmap;
 mod net;
 mod netlink;
 mod notifiers;
-pub mod panic_handler;
 pub mod platform_timer_resolution;
 mod poll;
 mod priority;
@@ -575,7 +574,6 @@ pub fn max_open_files() -> Result<u64> {
 }
 
 /// Moves the requested PID/TID to a particular cgroup
-///
 pub fn move_to_cgroup(cgroup_path: PathBuf, id_to_write: Pid, cgroup_file: &str) -> Result<()> {
     use std::io::Write;
 
@@ -641,11 +639,6 @@ pub fn logical_core_capacity(cpu_id: usize) -> Result<u32> {
         // cpu-freq is not enabled. Fall back to using the normalized capacity.
         Ok(cpu_capacity)
     }
-}
-
-/// Returns the cluster ID of a given logical core.
-pub fn logical_core_cluster_id(cpu_id: usize) -> Result<u32> {
-    parse_sysfs_cpu_info(cpu_id, "topology/physical_package_id")
 }
 
 /// Returns the maximum frequency (in kHz) of a given logical core.

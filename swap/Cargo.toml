@@ -14,7 +14,6 @@ harness = false
 
 [features]
 trace_marker = ["cros_tracing/trace_marker"]
-log_page_fault = []
 enable = ["userfaultfd", "userfaultfd-sys"]
 
 [dependencies]
@@ -22,7 +21,6 @@ anyhow = "*"
 base = { path = "../base" }
 cfg-if = "*"
 cros_tracing = { path = "../cros_tracing" }
-data_model = { path = "../common/data_model" }
 jail = { path = "../jail" }
 num_cpus = "*"
 once_cell = "*"

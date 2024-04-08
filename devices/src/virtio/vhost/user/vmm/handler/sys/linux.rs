@@ -11,16 +11,17 @@ use base::SafeDescriptor;
 use cros_async::AsyncWrapper;
 use cros_async::Executor;
 use vmm_vhost::Error as VhostError;
-use vmm_vhost::MasterReqHandler;
+use vmm_vhost::FrontendServer;
 
 use crate::virtio::vhost::user::vmm::handler::BackendReqHandler;
 use crate::virtio::vhost::user::vmm::handler::BackendReqHandlerImpl;
 use crate::virtio::vhost::user::vmm::Error;
 use crate::virtio::vhost::user::vmm::Result as VhostResult;
 
-pub fn create_backend_req_handler(h: BackendReqHandlerImpl) -> VhostResult<BackendReqHandler> {
-    let handler = MasterReqHandler::with_stream(h).map_err(Error::CreateBackendReqHandler)?;
-    Ok(handler)
+pub fn create_backend_req_handler(
+    h: BackendReqHandlerImpl,
+) -> VhostResult<(BackendReqHandler, SafeDescriptor)> {
+    FrontendServer::with_stream(h).map_err(Error::CreateBackendReqHandler)
 }
 
 pub async fn run_backend_request_handler(

@@ -9,6 +9,7 @@
 #![cfg(feature = "gfxstream")]
 
 use std::convert::TryInto;
+use std::ffi::CString;
 use std::io::IoSliceMut;
 use std::mem::size_of;
 use std::os::raw::c_char;
@@ -35,15 +36,13 @@ use crate::rutabaga_os::SafeDescriptor;
 use crate::rutabaga_utils::*;
 
 // See `virtgpu-gfxstream-renderer.h` for definitions
-const STREAM_RENDERER_PARAM_NULL: u64 = 0;
 const STREAM_RENDERER_PARAM_USER_DATA: u64 = 1;
 const STREAM_RENDERER_PARAM_RENDERER_FLAGS: u64 = 2;
 const STREAM_RENDERER_PARAM_FENCE_CALLBACK: u64 = 3;
 const STREAM_RENDERER_PARAM_WIN0_WIDTH: u64 = 4;
 const STREAM_RENDERER_PARAM_WIN0_HEIGHT: u64 = 5;
 const STREAM_RENDERER_PARAM_DEBUG_CALLBACK: u64 = 6;
-
-const STREAM_RENDERER_MAX_PARAMS: usize = 6;
+const STREAM_RENDERER_PARAM_RENDERER_FEATURES: u64 = 11;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -182,6 +181,12 @@ extern "C" {
         name: *const c_char,
         context_init: u32,
     ) -> c_int;
+
+    #[cfg(gfxstream_unstable)]
+    fn stream_renderer_snapshot(dir: *const c_char) -> c_int;
+
+    #[cfg(gfxstream_unstable)]
+    fn stream_renderer_restore(dir: *const c_char) -> c_int;
 }
 
 /// The virtio-gpu backend state tracker which supports accelerated rendering.
@@ -302,6 +307,7 @@ impl Gfxstream {
         display_width: u32,
         display_height: u32,
         gfxstream_flags: GfxstreamFlags,
+        gfxstream_features: Option<String>,
         fence_handler: RutabagaFenceHandler,
         debug_handler: Option<RutabagaDebugHandler>,
     ) -> RutabagaResult<Box<dyn RutabagaComponent>> {
@@ -312,7 +318,7 @@ impl Gfxstream {
             debug_handler,
         });
 
-        let mut stream_renderer_params: [stream_renderer_param; STREAM_RENDERER_MAX_PARAMS] = [
+        let mut stream_renderer_params = Vec::from([
             stream_renderer_param {
                 key: STREAM_RENDERER_PARAM_USER_DATA,
                 // Safe as cookie outlives the stream renderer (stream_renderer_teardown called
@@ -335,18 +341,22 @@ impl Gfxstream {
                 key: STREAM_RENDERER_PARAM_WIN0_HEIGHT,
                 value: display_height as u64,
             },
-            if use_debug {
-                stream_renderer_param {
-                    key: STREAM_RENDERER_PARAM_DEBUG_CALLBACK,
-                    value: gfxstream_debug_callback as usize as u64,
-                }
-            } else {
-                stream_renderer_param {
-                    key: STREAM_RENDERER_PARAM_NULL,
-                    value: 0,
-                }
-            },
-        ];
+        ]);
+
+        if use_debug {
+            stream_renderer_params.push(stream_renderer_param {
+                key: STREAM_RENDERER_PARAM_DEBUG_CALLBACK,
+                value: gfxstream_debug_callback as usize as u64,
+            });
+        }
+
+        let features_cstr = gfxstream_features.map(|f| CString::new(f).unwrap());
+        if let Some(features_cstr) = &features_cstr {
+            stream_renderer_params.push(stream_renderer_param {
+                key: STREAM_RENDERER_PARAM_RENDERER_FEATURES,
+                value: features_cstr.as_ptr() as u64,
+            });
+        }
 
         // TODO(b/315870313): Add safety comment
         #[allow(clippy::undocumented_unsafe_blocks)]
@@ -732,5 +742,28 @@ impl RutabagaComponent for Gfxstream {
             ctx_id,
             fence_handler,
         }))
+    }
+
+    #[cfg(gfxstream_unstable)]
+    fn snapshot(&self, directory: &str) -> RutabagaResult<()> {
+        let cstring = CString::new(directory)?;
+
+        // SAFETY:
+        // Safe because directory string is valid
+        let ret = unsafe { stream_renderer_snapshot(cstring.as_ptr() as *const c_char) };
+        ret_to_res(ret)?;
+
+        Ok(())
+    }
+
+    #[cfg(gfxstream_unstable)]
+    fn restore(&self, directory: &str) -> RutabagaResult<()> {
+        let cstring = CString::new(directory)?;
+
+        // SAFETY:
+        // Safe because directory string is valid
+        let ret = unsafe { stream_renderer_restore(cstring.as_ptr() as *const c_char) };
+        ret_to_res(ret)?;
+        Ok(())
     }
 }

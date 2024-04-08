@@ -52,6 +52,7 @@ use crate::virtio::DeviceType;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::VirtioDevice;
+use crate::PciAddress;
 use crate::SerialDevice;
 
 /// Wrapper that makes any `SerialInput` usable as an async source by providing an implementation of
@@ -156,6 +157,7 @@ impl SerialDevice for ConsolePort {
         _interrupt_evt: Event,
         _pipe_in: named_pipes::PipeConnection,
         _pipe_out: named_pipes::PipeConnection,
+        _options: SerialOptions,
         _keep_rds: Vec<RawDescriptor>,
     ) -> ConsolePort {
         unimplemented!("new_with_pipe unimplemented for ConsolePort");
@@ -294,6 +296,20 @@ impl ConsoleDevice {
         1 + self.extra_ports.len()
     }
 
+    /// Returns the maximum number of queues supported by this device.
+    pub fn max_queues(&self) -> usize {
+        // The port 0 receive and transmit queues always exist;
+        // other queues only exist if VIRTIO_CONSOLE_F_MULTIPORT is set.
+        if self.is_multi_port() {
+            let port_num = self.max_ports();
+
+            // Extra 1 is for control port; each port has two queues (tx & rx)
+            (port_num + 1) * 2
+        } else {
+            2
+        }
+    }
+
     /// Return the reference of the console port by port_id
     fn get_console_port(&mut self, port_id: usize) -> anyhow::Result<&mut ConsolePort> {
         match port_id {
@@ -402,6 +418,7 @@ impl SerialDevice for ConsoleDevice {
         _interrupt_evt: Event,
         _pipe_in: named_pipes::PipeConnection,
         _pipe_out: named_pipes::PipeConnection,
+        _options: SerialOptions,
         _keep_rds: Vec<RawDescriptor>,
     ) -> ConsoleDevice {
         unimplemented!("new_with_pipe unimplemented for ConsoleDevice");
@@ -419,6 +436,7 @@ pub struct AsyncConsole {
     state: VirtioConsoleState,
     base_features: u64,
     keep_descriptors: Vec<Descriptor>,
+    pci_address: Option<PciAddress>,
 }
 
 impl SerialDevice for AsyncConsole {
@@ -431,6 +449,7 @@ impl SerialDevice for AsyncConsole {
         options: SerialOptions,
         keep_rds: Vec<RawDescriptor>,
     ) -> AsyncConsole {
+        let pci_address = options.pci_address;
         AsyncConsole {
             state: VirtioConsoleState::Stopped(ConsoleDevice::new(
                 protection_type,
@@ -443,6 +462,7 @@ impl SerialDevice for AsyncConsole {
             )),
             base_features: base_features(protection_type),
             keep_descriptors: keep_rds.iter().copied().map(Descriptor).collect(),
+            pci_address,
         }
     }
 
@@ -452,6 +472,7 @@ impl SerialDevice for AsyncConsole {
         _interrupt_evt: Event,
         _pipe_in: named_pipes::PipeConnection,
         _pipe_out: named_pipes::PipeConnection,
+        _options: SerialOptions,
         _keep_rds: Vec<RawDescriptor>,
     ) -> AsyncConsole {
         unimplemented!("new_with_pipe unimplemented for AsyncConsole");
@@ -541,6 +562,10 @@ impl VirtioDevice for AsyncConsole {
             }));
 
         Ok(())
+    }
+
+    fn pci_address(&self) -> Option<PciAddress> {
+        self.pci_address
     }
 
     fn reset(&mut self) -> bool {

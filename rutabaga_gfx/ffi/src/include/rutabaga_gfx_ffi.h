@@ -27,7 +27,7 @@ extern "C" {
  */
 #define RUTABAGA_VERSION_MAJOR 0
 #define RUTABAGA_VERSION_MINOR 1
-#define RUTABAGA_VERSION_PATCH 2
+#define RUTABAGA_VERSION_PATCH 3
 
 /**
  * Rutabaga capsets.
@@ -163,7 +163,7 @@ struct rutabaga_command {
     uint8_t *cmd;
 
     /**
-     * Unstable, don't use until version > 0.1.2
+     * Unstable, don't use until version > 0.1.3
      */
     uint32_t num_in_fences;
     uint64_t *fence_ids;
@@ -218,6 +218,9 @@ struct rutabaga_builder {
 
     // Optional and platform specific
     struct rutabaga_channels *channels;
+
+    // Optional, renderer specific, null-terminated C-string.
+    const char *renderer_features;
 };
 
 /**
@@ -348,6 +351,7 @@ int32_t rutabaga_create_fence(struct rutabaga *ptr, const struct rutabaga_fence 
  *
  * # Safety
  * - `dir` must be a null-terminated C-string.
+ * - Unstable, don't use until version > 0.1.3
  */
 int32_t rutabaga_snapshot(struct rutabaga *ptr, const char *dir);
 
@@ -356,6 +360,7 @@ int32_t rutabaga_snapshot(struct rutabaga *ptr, const char *dir);
  *
  * # Safety
  * - `dir` must be a null-terminated C-string.
+ * - Unstable, don't use until version > 0.1.3
  */
 int32_t rutabaga_restore(struct rutabaga *ptr, const char *dir);
 

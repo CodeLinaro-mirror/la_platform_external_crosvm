@@ -180,6 +180,7 @@ pub trait VirtioDevice: Send {
     /// PCI bar into their IO address space with virtio-iommu.
     ///
     /// NOTE: Not all vm_control::VmMemorySource types are supported.
+    /// NOTE: Not yet compatible with PrepareSharedMemoryRegion (aka fixed mapping).
     fn expose_shmem_descriptors_with_viommu(&self) -> bool {
         false
     }
@@ -320,32 +321,17 @@ macro_rules! suspendable_virtio_tests {
             }
 
             #[test]
-            fn test_sleep_snapshot() {
-                let (_ctx, device) = &mut $dev();
-                let mem = memory();
-                let interrupt = interrupt();
-                let queues = create_queues(
-                    $num_queues,
-                    device
-                        .queue_max_sizes()
-                        .first()
-                        .cloned()
-                        .expect("missing queue size"),
-                    &mem,
-                );
-                device
-                    .activate(mem.clone(), interrupt.clone(), queues)
-                    .expect("failed to activate");
-                device
-                    .virtio_sleep()
-                    .expect("failed to sleep")
-                    .expect("missing queues while sleeping");
+            fn test_unactivated_sleep_snapshot_wake() {
+                let (_ctx, mut device) = $dev();
+                let sleep_result = device.virtio_sleep().expect("failed to sleep");
+                assert!(sleep_result.is_none());
                 device.virtio_snapshot().expect("failed to snapshot");
+                device.virtio_wake(None).expect("failed to wake");
             }
 
             #[test]
             fn test_sleep_snapshot_wake() {
-                let (_ctx, device) = &mut $dev();
+                let (_ctx, mut device) = $dev();
                 let mem = memory();
                 let interrupt = interrupt();
                 let queues = create_queues(
@@ -372,7 +358,7 @@ macro_rules! suspendable_virtio_tests {
 
             #[test]
             fn test_suspend_mod_restore() {
-                let (context, device) = &mut $dev();
+                let (mut context, mut device) = $dev();
                 let mem = memory();
                 let interrupt = interrupt();
                 let queues = create_queues(
@@ -392,7 +378,7 @@ macro_rules! suspendable_virtio_tests {
                     .expect("failed to sleep")
                     .expect("missing queues while sleeping");
                 // Modify device before snapshotting.
-                $modfun(context, device);
+                $modfun(&mut context, &mut device);
                 let snap = device
                     .virtio_snapshot()
                     .expect("failed to take initial snapshot");

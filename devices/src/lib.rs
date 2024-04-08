@@ -252,14 +252,26 @@ fn wake_buses(buses: &[&Bus]) {
     }
 }
 
+// Use 64MB chunks when writing the memory snapshot (if encryption is used).
+const MEMORY_SNAP_ENCRYPTED_CHUNK_SIZE_BYTES: usize = 1024 * 1024 * 64;
+
 async fn snapshot_handler(
     snapshot_writer: vm_control::SnapshotWriter,
     guest_memory: &GuestMemory,
     buses: &[&Bus],
+    compress_memory: bool,
 ) -> anyhow::Result<()> {
-    let guest_memory_metadata = guest_memory
-        .snapshot(&mut snapshot_writer.raw_fragment("mem")?)
-        .context("failed to snapshot memory")?;
+    // SAFETY:
+    // VM & devices are stopped.
+    let guest_memory_metadata = unsafe {
+        guest_memory
+            .snapshot(
+                &mut snapshot_writer
+                    .raw_fragment_with_chunk_size("mem", MEMORY_SNAP_ENCRYPTED_CHUNK_SIZE_BYTES)?,
+                compress_memory,
+            )
+            .context("failed to snapshot memory")?
+    };
     snapshot_writer.write_fragment("mem_metadata", &guest_memory_metadata)?;
     for (i, bus) in buses.iter().enumerate() {
         bus.snapshot_devices(&snapshot_writer.add_namespace(&format!("bus{i}"))?)
@@ -278,10 +290,14 @@ async fn restore_handler(
     buses: &[&Bus],
 ) -> anyhow::Result<()> {
     let guest_memory_metadata = snapshot_reader.read_fragment("mem_metadata")?;
-    guest_memory.restore(
-        guest_memory_metadata,
-        &mut snapshot_reader.raw_fragment("mem")?,
-    )?;
+    // SAFETY:
+    // VM & devices are stopped.
+    unsafe {
+        guest_memory.restore(
+            guest_memory_metadata,
+            &mut snapshot_reader.raw_fragment("mem")?,
+        )?
+    };
     for (i, bus) in buses.iter().enumerate() {
         bus.restore_devices(&snapshot_reader.namespace(&format!("bus{i}"))?)
             .context("failed to restore bus devices")?;
@@ -346,13 +362,17 @@ async fn handle_command_tube(
                             .await
                             .context("failed to reply to wake devices request")?;
                     }
-                    DeviceControlCommand::SnapshotDevices { snapshot_writer } => {
+                    DeviceControlCommand::SnapshotDevices {
+                        snapshot_writer,
+                        compress_memory,
+                    } => {
                         assert!(
                             matches!(devices_state, DevicesState::Sleep),
                             "devices must be sleeping to snapshot"
                         );
                         if let Err(e) =
-                            snapshot_handler(snapshot_writer, &guest_memory, buses).await
+                            snapshot_handler(snapshot_writer, &guest_memory, buses, compress_memory)
+                                .await
                         {
                             error!("failed to snapshot: {:#}", e);
                             command_tube

@@ -15,8 +15,8 @@ use base::Event;
 use base::RawDescriptor;
 use broker_ipc::common_child_setup;
 use broker_ipc::CommonChildStartupArgs;
+use cros_async::sys::windows::ExecutorKindSys;
 use cros_async::Executor;
-use cros_async::ExecutorKind;
 use crosvm_cli::sys::windows::exit::Exit;
 use crosvm_cli::sys::windows::exit::ExitContext;
 use crosvm_cli::sys::windows::exit::ExitContextAnyhow;
@@ -29,7 +29,7 @@ use crate::virtio::vhost::user::device::block::BlockBackend;
 use crate::virtio::vhost::user::device::handler::sys::windows::read_from_tube_transporter;
 use crate::virtio::vhost::user::device::handler::sys::windows::run_handler;
 use crate::virtio::vhost::user::device::VhostUserDevice;
-use crate::virtio::vhost::user::VhostUserBackend;
+use crate::virtio::vhost::user::VhostUserDeviceBuilder;
 use crate::virtio::BlockAsync;
 
 #[derive(FromArgs, Debug)]
@@ -67,13 +67,10 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
 
     info!("using {} IO handles.", disk_option.io_concurrency.get());
 
-    let ex = Executor::with_executor_kind(
-        *disk_option
-            .async_executor
-            .as_ref()
-            .unwrap_or(&ExecutorKind::Handle),
-    )
-    .context("failed to create executor")?;
+    let kind = disk_option
+        .async_executor
+        .unwrap_or(ExecutorKindSys::Handle.into());
+    let ex = Executor::with_executor_kind(kind.into()).context("failed to create executor")?;
 
     let block = Box::new(BlockAsync::new(
         base_features(ProtectionType::Unprotected),
@@ -95,7 +92,7 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
     //     }
 
     // This is basically the event loop.
-    let handler = block.into_req_handler(&ex)?;
+    let handler = block.build(&ex)?;
 
     info!("vhost-user disk device ready, starting run loop...");
     if let Err(e) = ex.run_until(run_handler(handler, vhost_user_tube, exit_event, &ex)) {

@@ -51,6 +51,7 @@ use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 use crate::virtio::Reader;
 use crate::virtio::VirtioDevice;
+use crate::PciAddress;
 
 pub(crate) const QUEUE_SIZE: u16 = 256;
 
@@ -270,6 +271,7 @@ pub struct Console {
     // happens, or when a restore is performed. On a fresh startup, it will be empty. On a restore,
     // it will contain whatever data was remaining in the buffer in the snapshot.
     input_buffer: VecDeque<u8>,
+    pci_address: Option<PciAddress>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -284,6 +286,7 @@ impl Console {
         input: Option<InStreamType>,
         output: Option<Box<dyn io::Write + Send>>,
         mut keep_rds: Vec<RawDescriptor>,
+        pci_address: Option<PciAddress>,
     ) -> Console {
         let in_avail_evt = Event::new().expect("failed creating Event");
         keep_rds.push(in_avail_evt.as_raw_descriptor());
@@ -296,6 +299,7 @@ impl Console {
             keep_descriptors: keep_rds.iter().map(|rd| Descriptor(*rd)).collect(),
             input_thread: None,
             input_buffer: VecDeque::new(),
+            pci_address,
         }
     }
 }
@@ -386,8 +390,14 @@ impl VirtioDevice for Console {
         Ok(())
     }
 
+    fn pci_address(&self) -> Option<PciAddress> {
+        self.pci_address
+    }
+
     fn reset(&mut self) -> bool {
-        self.input = self.input_thread.take().map(|t| t.stop());
+        if let Some(input_thread) = self.input_thread.take() {
+            self.input = Some(input_thread.stop());
+        }
         if let Some(worker_thread) = self.worker_thread.take() {
             let worker = worker_thread.stop();
             // NOTE: Even though we are reseting the device, it still makes sense to preserve the
@@ -402,7 +412,9 @@ impl VirtioDevice for Console {
     }
 
     fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
-        self.input = self.input_thread.take().map(|t| t.stop());
+        if let Some(input_thread) = self.input_thread.take() {
+            self.input = Some(input_thread.stop());
+        }
         if let Some(worker_thread) = self.worker_thread.take() {
             let worker = worker_thread.stop();
             self.input_buffer = worker
@@ -436,9 +448,9 @@ impl VirtioDevice for Console {
         match queues_state {
             None => Ok(()),
             Some((mem, interrupt, queues)) => {
-                // TODO(khei): activate is just what we want at the moment, but we should probably move
-                // it into a "start workers" function to make it obvious that it isn't strictly
-                // used for activate events.
+                // TODO(khei): activate is just what we want at the moment, but we should probably
+                // move it into a "start workers" function to make it obvious that
+                // it isn't strictly used for activate events.
                 self.activate(mem, interrupt, queues)?;
                 Ok(())
             }
@@ -478,5 +490,66 @@ impl VirtioDevice for Console {
         );
         self.input_buffer = deser.input_buffer;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use base::windows::named_pipes;
+    use tempfile::tempfile;
+    use vm_memory::GuestAddress;
+
+    use super::*;
+    use crate::suspendable_virtio_tests;
+
+    struct ConsoleContext {
+        #[cfg(windows)]
+        input_peer: named_pipes::PipeConnection,
+    }
+
+    fn modify_device(_context: &mut ConsoleContext, b: &mut Console) {
+        b.input_buffer.push_back(0);
+    }
+
+    fn create_device() -> (ConsoleContext, Console) {
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let (input, context) = (Box::new(tempfile().unwrap()), ConsoleContext {});
+        #[cfg(windows)]
+        let (input, context) = {
+            let (x, y) = named_pipes::pair(
+                &named_pipes::FramingMode::Byte,
+                &named_pipes::BlockingMode::NoWait,
+                0,
+            )
+            .unwrap();
+            (Box::new(x), ConsoleContext { input_peer: y })
+        };
+
+        let output = Box::new(tempfile().unwrap());
+        (
+            context,
+            Console::new(
+                hypervisor::ProtectionType::Unprotected,
+                Some(input),
+                Some(output),
+                Vec::new(),
+                None,
+            ),
+        )
+    }
+
+    suspendable_virtio_tests!(console, create_device, 2, modify_device);
+
+    #[test]
+    fn test_inactive_sleep_resume() {
+        let (_ctx, device) = &mut create_device();
+        let sleep_result = device.virtio_sleep().expect("failed to sleep");
+        assert!(sleep_result.is_none());
+        device.virtio_snapshot().expect("failed to snapshot");
+        device.virtio_wake(None).expect("failed to wake");
+        // Make sure the input and output haven't been dropped.
+        assert!(device.input.is_some());
+        assert!(device.output.is_some());
     }
 }

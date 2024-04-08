@@ -39,7 +39,6 @@ use base::AsRawDescriptor;
 use base::FromRawDescriptor;
 use base::Protection;
 use base::RawDescriptor;
-use data_model::zerocopy_from_reader;
 use fuse::filesystem::Context;
 use fuse::filesystem::DirectoryIterator;
 use fuse::filesystem::Entry;
@@ -162,10 +161,10 @@ ioctl_iowr_nr!(FS_IOC_GET_ENCRYPTION_POLICY_EX, 'f' as u32, 22, [u8; 9]);
 #[derive(Clone, Copy, AsBytes, FromZeroes, FromBytes)]
 struct fsxattr {
     fsx_xflags: u32,     /* xflags field value (get/set) */
-    fsx_extsize: u32,    /* extsize field value (get/set)*/
-    fsx_nextents: u32,   /* nextents field value (get)	*/
+    fsx_extsize: u32,    /* extsize field value (get/set) */
+    fsx_nextents: u32,   /* nextents field value (get) */
     fsx_projid: u32,     /* project identifier (get/set) */
-    fsx_cowextsize: u32, /* CoW extsize field value (get/set)*/
+    fsx_cowextsize: u32, /* CoW extsize field value (get/set) */
     fsx_pad: [u8; 8],
 }
 
@@ -1308,7 +1307,7 @@ impl PassthroughFs {
         #[cfg_attr(not(feature = "arc_quota"), allow(unused_variables))] ctx: Context,
         inode: Inode,
         handle: Handle,
-        r: R,
+        mut r: R,
     ) -> io::Result<IoctlReply> {
         let data: Arc<dyn AsRawDescriptor> = if self.zero_message_open.load(Ordering::Relaxed) {
             self.find_inode(inode)?
@@ -1316,7 +1315,8 @@ impl PassthroughFs {
             self.find_handle(handle, inode)?
         };
 
-        let in_attr: fsxattr = zerocopy_from_reader(r)?;
+        let mut in_attr = fsxattr::new_zeroed();
+        r.read_exact(in_attr.as_bytes_mut())?;
 
         #[cfg(feature = "arc_quota")]
         let st = stat(&*data)?;
@@ -1348,9 +1348,8 @@ impl PassthroughFs {
                 if !is_android_project_id(project_id) {
                     return Err(io::Error::from_raw_os_error(libc::EINVAL));
                 }
-                // SAFETY: data is a valid file descriptor.
-                let fd = unsafe { dbus::arg::OwnedFd::new(base::clone_descriptor(&*data)?) };
-                match proxy.set_project_id(fd, project_id) {
+                let file_clone = base::SafeDescriptor::try_from(&*data)?;
+                match proxy.set_project_id(file_clone.into(), project_id) {
                     Ok(r) => {
                         let r = SetProjectIdReply::parse_from_bytes(&r)
                             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1400,7 +1399,7 @@ impl PassthroughFs {
         #[cfg_attr(not(feature = "arc_quota"), allow(unused_variables))] ctx: Context,
         inode: Inode,
         handle: Handle,
-        r: R,
+        mut r: R,
     ) -> io::Result<IoctlReply> {
         let data: Arc<dyn AsRawDescriptor> = if self.zero_message_open.load(Ordering::Relaxed) {
             self.find_inode(inode)?
@@ -1409,7 +1408,8 @@ impl PassthroughFs {
         };
 
         // The ioctl encoding is a long but the parameter is actually an int.
-        let in_flags: c_int = zerocopy_from_reader(r)?;
+        let mut in_flags: c_int = 0;
+        r.read_exact(in_flags.as_bytes_mut())?;
 
         #[cfg(feature = "arc_quota")]
         let st = stat(&*data)?;
@@ -1439,9 +1439,8 @@ impl PassthroughFs {
                 // If the input flags contain FS_PROJINHERIT_FL, then it is a set. Otherwise it is a
                 // reset.
                 let enable = (in_flags & FS_PROJINHERIT_FL) == FS_PROJINHERIT_FL;
-                // SAFETY: data is a valid file descriptor.
-                let fd = unsafe { dbus::arg::OwnedFd::new(base::clone_descriptor(&*data)?) };
-                match proxy.set_project_inheritance_flag(fd, enable) {
+                let file_clone = base::SafeDescriptor::try_from(&*data)?;
+                match proxy.set_project_inheritance_flag(file_clone.into(), enable) {
                     Ok(r) => {
                         let r = SetProjectInheritanceFlagReply::parse_from_bytes(&r)
                             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1506,9 +1505,10 @@ impl PassthroughFs {
             let data = self.find_handle(handle, inode)?;
 
             {
-                // We can't enable verity while holding a writable fd. We don't know whether the file
-                // was opened for writing so check it here. We don't expect this to be a frequent
-                // operation so the extra latency should be fine.
+                // We can't enable verity while holding a writable fd. We don't know whether the
+                // file was opened for writing so check it here. We don't expect
+                // this to be a frequent operation so the extra latency should be
+                // fine.
                 let mut file = data.file.lock();
                 let flags = FileFlags::from_file(&*file).map_err(io::Error::from)?;
                 match flags {
@@ -1523,7 +1523,8 @@ impl PassthroughFs {
             data
         };
 
-        let mut arg: fsverity_enable_arg = zerocopy_from_reader(&mut r)?;
+        let mut arg = fsverity_enable_arg::new_zeroed();
+        r.read_exact(arg.as_bytes_mut())?;
 
         let mut salt;
         if arg.salt_size > 0 {
@@ -1566,7 +1567,7 @@ impl PassthroughFs {
         &self,
         inode: Inode,
         handle: Handle,
-        r: R,
+        mut r: R,
         out_size: u32,
     ) -> io::Result<IoctlReply> {
         let data: Arc<dyn AsRawDescriptor> = if self.zero_message_open.load(Ordering::Relaxed) {
@@ -1575,7 +1576,8 @@ impl PassthroughFs {
             self.find_handle(handle, inode)?
         };
 
-        let digest: fsverity_digest = zerocopy_from_reader(r)?;
+        let mut digest = fsverity_digest::new_zeroed();
+        r.read_exact(digest.as_bytes_mut())?;
 
         // Taken from fs/verity/fsverity_private.h.
         const FS_VERITY_MAX_DIGEST_SIZE: u16 = 64;
@@ -3712,7 +3714,8 @@ mod tests {
             );
         }
 
-        // atomic_open with flag O_RDWR | O_CREATE | O_EXCL, should return positive dentry and file handler
+        // atomic_open with flag O_RDWR | O_CREATE | O_EXCL, should return positive dentry and file
+        // handler
         let res = atomic_open(
             &fs,
             &temp_dir.path().join("dir/c.txt"),
