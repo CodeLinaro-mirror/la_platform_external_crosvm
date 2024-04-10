@@ -37,13 +37,24 @@ rust_library {
         "gfxstream_unstable",
     ],
     shared_libs: [
+        "libc++",
+        "libbase",
+    ],
+    target: {
+        android: {
+            shared_libs: [
+                "libnativewindow",
+                "libcutils",
+                "liblog",
+            ],
+        },
+    },
+    static_libs: [
         "libepoxy",
         "libgbm",
+        "libdrm",
         "libgfxstream_backend",
         "libvirglrenderer",
-    ],
-    static_libs: [
-        "libdrm",
     ],
 }
 
