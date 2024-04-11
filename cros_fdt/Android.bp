@@ -27,6 +27,7 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libanyhow",
+        "libindexmap",
         "libthiserror",
     ],
     proc_macros: ["libremain"],
@@ -43,6 +44,7 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libanyhow",
+        "libindexmap",
         "libthiserror",
     ],
     proc_macros: ["libremain"],
