@@ -24,15 +24,15 @@ if ! [ -x "$(command -v bpfmt)" ]; then
   exit 1
 fi
 
-if ! (dpkg -l meson); then
-  echo 'Error: "meson" not found. Please install.' >&2
-  exit 1
-fi
-
-if ! (dpkg -l protobuf-compiler); then
-  echo 'Error: "protobuf-compiler" not found. Please install.' >&2
-  exit 1
-fi
+# If there is need to verify installation of some packages, add them here in pkges.
+pkges='meson protobuf-compiler'
+for pkg in $pkges; do
+  result="$(dpkg-query -W --showformat='${db:Status-Status}' "$pkg" 2>&1)"
+  if [ ! $? = 0 ] || [ ! "$result" = installed ]; then
+    echo $pkg' not found. Please install.' >&2
+    exit 1
+  fi
+done
 
 # Use the specific rust version that crosvm upstream expects.
 #

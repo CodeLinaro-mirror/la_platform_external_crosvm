@@ -1,6 +1,12 @@
 {
   "tests": true,
   "features": [
+    "android_display",
+    // "android_display_stub" is enabled only to allow the cargo build to succeed as
+    // part of cargo_embargo. Patch files are used to remove it from the
+    // generated Android.bp files (so that the real display backend implementation is
+    // used).
+    "android_display_stub",
     "android-sparse",
     "audio",
     "balloon",

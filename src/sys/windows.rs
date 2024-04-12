@@ -285,7 +285,7 @@ pub enum ExitState {
 type DeviceResult<T = VirtioDeviceStub> = Result<T>;
 
 fn create_vhost_user_block_device(cfg: &Config, disk_device_tube: Tube) -> DeviceResult {
-    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+    let dev = virtio::VhostUserFrontend::new(
         virtio::DeviceType::Block,
         virtio::base_features(cfg.protection_type),
         disk_device_tube,
@@ -323,7 +323,7 @@ fn create_block_device(cfg: &Config, disk: &DiskOption, disk_device_tube: Tube) 
 
 #[cfg(feature = "gpu")]
 fn create_vhost_user_gpu_device(base_features: u64, vhost_user_tube: Tube) -> DeviceResult {
-    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+    let dev = virtio::VhostUserFrontend::new(
         virtio::DeviceType::Gpu,
         base_features,
         vhost_user_tube,
@@ -359,7 +359,7 @@ fn create_snd_device(
 
 #[cfg(feature = "audio")]
 fn create_vhost_user_snd_device(base_features: u64, vhost_user_tube: Tube) -> DeviceResult {
-    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+    let dev = virtio::VhostUserFrontend::new(
         virtio::DeviceType::Sound,
         base_features,
         vhost_user_tube,
@@ -414,7 +414,7 @@ fn create_mouse_device(cfg: &Config, event_pipe: StreamChannel, idx: u32) -> Dev
 #[cfg(feature = "slirp")]
 fn create_vhost_user_net_device(cfg: &Config, net_device_tube: Tube) -> DeviceResult {
     let features = virtio::base_features(cfg.protection_type);
-    let dev = virtio::vhost::user::vmm::VhostUserVirtioDevice::new(
+    let dev = virtio::VhostUserFrontend::new(
         virtio::DeviceType::Net,
         features,
         net_device_tube,
@@ -2099,6 +2099,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
         #[cfg(target_arch = "x86_64")]
         break_linux_pci_config_io: cfg.break_linux_pci_config_io,
+        boot_cpu: cfg.boot_cpu,
     })
 }
 
