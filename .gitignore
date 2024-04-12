@@ -1,4 +1,5 @@
 target/
+target.tmp/
 **/__pycache__
 **/*.rs.bk
 **/*.sw[po]

@@ -2,26 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-mod fs;
-mod handler;
-mod virtio_device;
-
 use remain::sorted;
 use thiserror::Error as ThisError;
-pub use virtio_device::VhostUserVirtioDevice;
 use vm_memory::GuestMemoryError;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::Error as VhostError;
-
-pub use self::handler::VhostUserHandler;
-
-cfg_if::cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
-        pub type Connection = std::os::unix::net::UnixStream;
-    } else if #[cfg(windows)] {
-        pub type Connection = base::Tube;
-    }
-}
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -53,12 +38,6 @@ pub enum Error {
     /// Failed to get vring base offset.
     #[error("failed to get vring base offset: {0}")]
     GetVringBase(VhostError),
-    /// Invalid config length is given.
-    #[error("invalid config length is given: {0}")]
-    InvalidConfigLen(usize),
-    /// Invalid config offset is given.
-    #[error("invalid config offset is given: {0}")]
-    InvalidConfigOffset(u64),
     /// MSI-X config is unavailable.
     #[error("MSI-X config is unavailable")]
     MsixConfigUnavailable,

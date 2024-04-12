@@ -173,8 +173,6 @@ fn get_swiotlb_addr(
     }
 }
 
-// Serial device requires 8 bytes of registers;
-const AARCH64_SERIAL_SIZE: u64 = 0x8;
 // This was the speed kvmtool used, not sure if it matters.
 const AARCH64_SERIAL_SPEED: u32 = 1843200;
 // The serial device gets the first interrupt line
@@ -374,6 +372,12 @@ fn get_block_size() -> u64 {
     block_size as u64
 }
 
+fn get_vcpu_mpidr_aff<Vcpu: VcpuAArch64>(vcpus: &[Vcpu], index: usize) -> Option<u64> {
+    const MPIDR_AFF_MASK: u64 = 0xff_00ff_ffff;
+
+    Some(vcpus.get(index)?.get_mpidr().ok()? & MPIDR_AFF_MASK)
+}
+
 impl arch::LinuxArch for AArch64 {
     type Error = Error;
 
@@ -508,6 +512,7 @@ impl arch::LinuxArch for AArch64 {
                     &payload,
                     fdt_offset,
                     components.hv_cfg.protection_type,
+                    components.boot_cpu,
                 )
             };
             has_pvtime &= vcpu.has_pvtime_support();
@@ -518,7 +523,7 @@ impl arch::LinuxArch for AArch64 {
 
         // Initialize Vcpus after all Vcpu objects have been created.
         for (vcpu_id, vcpu) in vcpus.iter().enumerate() {
-            vcpu.init(&Self::vcpu_features(vcpu_id, use_pmu))
+            vcpu.init(&Self::vcpu_features(vcpu_id, use_pmu, components.boot_cpu))
                 .map_err(Error::VcpuInit)?;
         }
 
@@ -632,11 +637,11 @@ impl arch::LinuxArch for AArch64 {
 
         let com_evt_1_3 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         let com_evt_2_4 = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
-        arch::add_serial_devices(
+        let serial_devices = arch::add_serial_devices(
             components.hv_cfg.protection_type,
             &mmio_bus,
-            com_evt_1_3.get_trigger(),
-            com_evt_2_4.get_trigger(),
+            (AARCH64_SERIAL_1_3_IRQ, com_evt_1_3.get_trigger()),
+            (AARCH64_SERIAL_2_4_IRQ, com_evt_2_4.get_trigger()),
             serial_parameters,
             serial_jail,
             #[cfg(feature = "swap")]
@@ -695,7 +700,7 @@ impl arch::LinuxArch for AArch64 {
         }
 
         let mut cmdline = Self::get_base_linux_cmdline();
-        get_serial_cmdline(&mut cmdline, serial_parameters, "mmio")
+        get_serial_cmdline(&mut cmdline, serial_parameters, "mmio", &serial_devices)
             .map_err(Error::GetSerialCmdline)?;
         for param in components.extra_kernel_params {
             cmdline.insert_str(&param).map_err(Error::Cmdline)?;
@@ -768,6 +773,7 @@ impl arch::LinuxArch for AArch64 {
             &pci_ranges,
             dev_resources,
             vcpu_count as u32,
+            &|n| get_vcpu_mpidr_aff(&vcpus, n),
             components.cpu_clusters,
             components.cpu_capacity,
             components.cpu_frequencies,
@@ -791,6 +797,7 @@ impl arch::LinuxArch for AArch64 {
             &|writer, phandles| vm.create_fdt(writer, phandles),
             components.dynamic_power_coefficient,
             device_tree_overlays,
+            &serial_devices,
         )
         .map_err(Error::CreateFdt)?;
 
@@ -1068,13 +1075,13 @@ impl AArch64 {
     ///
     /// * `vcpu_id` - The VM's index for `vcpu`.
     /// * `use_pmu` - Should `vcpu` be configured to use the Performance Monitor Unit.
-    fn vcpu_features(vcpu_id: usize, use_pmu: bool) -> Vec<VcpuFeature> {
+    fn vcpu_features(vcpu_id: usize, use_pmu: bool, boot_cpu: usize) -> Vec<VcpuFeature> {
         let mut features = vec![VcpuFeature::PsciV0_2];
         if use_pmu {
             features.push(VcpuFeature::PmuV3);
         }
         // Non-boot cpus are powered off initially
-        if vcpu_id != 0 {
+        if vcpu_id != boot_cpu {
             features.push(VcpuFeature::PowerOff);
         }
 
@@ -1091,6 +1098,7 @@ impl AArch64 {
         payload: &PayloadType,
         fdt_address: GuestAddress,
         protection_type: ProtectionType,
+        boot_cpu: usize,
     ) -> VcpuInitAArch64 {
         let mut regs: BTreeMap<VcpuRegAArch64, u64> = Default::default();
 
@@ -1099,7 +1107,7 @@ impl AArch64 {
         regs.insert(VcpuRegAArch64::Pstate, pstate);
 
         // Other cpus are powered off initially
-        if vcpu_id == 0 {
+        if vcpu_id == boot_cpu {
             let entry_addr = if protection_type.loads_firmware() {
                 Some(AARCH64_PROTECTED_VM_FW_START)
             } else if protection_type.runs_firmware() {
@@ -1150,7 +1158,7 @@ mod tests {
         let fdt_address = GuestAddress(0x1234);
         let prot = ProtectionType::Unprotected;
 
-        let vcpu_init = AArch64::vcpu_init(0, &payload, fdt_address, prot);
+        let vcpu_init = AArch64::vcpu_init(0, &payload, fdt_address, prot, 0);
 
         // PC: kernel image entry point
         assert_eq!(vcpu_init.regs.get(&VcpuRegAArch64::Pc), Some(&0x8080_0000));
@@ -1168,7 +1176,7 @@ mod tests {
         let fdt_address = GuestAddress(0x1234);
         let prot = ProtectionType::Unprotected;
 
-        let vcpu_init = AArch64::vcpu_init(0, &payload, fdt_address, prot);
+        let vcpu_init = AArch64::vcpu_init(0, &payload, fdt_address, prot, 0);
 
         // PC: bios image entry point
         assert_eq!(vcpu_init.regs.get(&VcpuRegAArch64::Pc), Some(&0x8020_0000));
@@ -1187,7 +1195,7 @@ mod tests {
         let fdt_address = GuestAddress(0x1234);
         let prot = ProtectionType::Protected;
 
-        let vcpu_init = AArch64::vcpu_init(0, &payload, fdt_address, prot);
+        let vcpu_init = AArch64::vcpu_init(0, &payload, fdt_address, prot, 0);
 
         // The hypervisor provides the initial value of PC, so PC should not be present in the
         // vcpu_init register map.

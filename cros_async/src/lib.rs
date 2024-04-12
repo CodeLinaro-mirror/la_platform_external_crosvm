@@ -69,8 +69,6 @@ pub mod sync;
 pub mod sys;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub use sys::linux::uring_executor::is_uring_stable;
-pub use sys::Executor;
-pub use sys::TaskHandle;
 mod common_executor;
 mod timer;
 mod waker;
@@ -89,7 +87,10 @@ pub use blocking::BlockingPool;
 pub use blocking::CancellableBlockingPool;
 pub use blocking::TimeoutAction;
 pub use event::EventAsync;
+pub use executor::Executor;
 pub use executor::ExecutorKind;
+pub(crate) use executor::ExecutorTrait;
+pub use executor::TaskHandle;
 #[cfg(windows)]
 pub use futures::executor::block_on;
 use futures::stream::FuturesUnordered;
