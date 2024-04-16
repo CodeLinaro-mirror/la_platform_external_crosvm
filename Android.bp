@@ -314,7 +314,6 @@ rust_defaults {
         },
     },
     apex_available: [
-        "//apex_available:platform",
         "com.android.virt",
     ],
     defaults_visibility: [
