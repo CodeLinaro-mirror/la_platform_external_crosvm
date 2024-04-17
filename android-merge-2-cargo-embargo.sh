@@ -40,7 +40,7 @@ done
 #
 # TODO: Consider using android's prebuilt rust binaries. Currently doesn't work
 # because they try to incorrectly use system clang and llvm.
-RUST_TOOLCHAIN="1.68.2"
+RUST_TOOLCHAIN="1.73.0"
 rustup which --toolchain $RUST_TOOLCHAIN cargo || \
   rustup toolchain install $RUST_TOOLCHAIN
 CARGO_BIN="$(dirname $(rustup which --toolchain $RUST_TOOLCHAIN cargo))"
@@ -67,7 +67,3 @@ fi
 # cargo_embargo runs. This didn't happen with cargo2android.py because it
 # ignored the lock file.
 git restore Cargo.lock
-
-# Fix workstation specific path in "metrics" crate's generated files.
-# TODO(b/232150148): Find a better solution for protobuf generated files.
-sed --in-place 's/path = ".*\/out/path = "./' vendor/generic/metrics/src/out/generated.rs

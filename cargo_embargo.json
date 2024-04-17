@@ -191,9 +191,6 @@
     "kvm_sys": {
       "no_presubmit": true
     },
-    "metrics": {
-      "copy_out": true
-    },
     "net_util": {
       "no_presubmit": true
     },
