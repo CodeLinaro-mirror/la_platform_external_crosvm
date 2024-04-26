@@ -289,7 +289,11 @@ pub struct MakeRTCommand {
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "resume")]
-/// Resumes the crosvm instance
+/// Resumes the crosvm instance. No-op if already running. When starting crosvm with `--restore`,
+/// this command can be used to wait until the restore is complete
+// Implementation note: All the restore work happens before crosvm becomes able to process incoming
+// commands, so really all commands can be used to wait for restore to complete, but few are side
+// effect free.
 pub struct ResumeCommand {
     #[argh(positional, arg_name = "VM_SOCKET")]
     /// VM Socket path
@@ -1334,9 +1338,13 @@ pub struct RunCommand {
     /// Possible key values:
     ///     backend=(2d|virglrenderer|gfxstream) - Which backend to
     ///        use for virtio-gpu (determining rendering protocol)
+    ///     max_num_displays=INT - The maximum number of concurrent
+    ///        virtual displays in this VM. This must not exceed
+    ///        VIRTIO_GPU_MAX_SCANOUTS (i.e. 16).
     ///     displays=[[GpuDisplayParameters]] - The list of virtual
-    ///         displays to create. See the possible key values for
-    ///         GpuDisplayParameters in the section below.
+    ///        displays to create when booting this VM. Displays may
+    ///        be hotplugged after booting. See the possible key
+    ///        values for GpuDisplayParameters in the section below.
     ///     context-types=LIST - The list of supported context
     ///       types, separated by ':' (default: no contexts enabled)
     ///     width=INT - The width of the virtual display connected
