@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std::arch::x86_64::CpuidResult;
+use std::collections::BTreeMap;
 
 use base::errno_result;
 use base::error;
@@ -30,10 +31,7 @@ use super::Config;
 use super::Kvm;
 use super::KvmVcpu;
 use super::KvmVm;
-use crate::get_tsc_offset_from_msr;
 use crate::host_phys_addr_bits;
-use crate::set_tsc_offset_via_msr;
-use crate::set_tsc_value_via_msr;
 use crate::ClockState;
 use crate::CpuId;
 use crate::CpuIdEntry;
@@ -51,7 +49,6 @@ use crate::PicState;
 use crate::PitChannelState;
 use crate::PitState;
 use crate::ProtectionType;
-use crate::Register;
 use crate::Regs;
 use crate::Segment;
 use crate::Sregs;
@@ -883,25 +880,36 @@ impl VcpuX86_64 for KvmVcpu {
         }
     }
 
-    fn get_xcrs(&self) -> Result<Vec<Register>> {
+    fn get_xcrs(&self) -> Result<BTreeMap<u32, u64>> {
         let mut regs: kvm_xcrs = Default::default();
         // SAFETY:
         // Safe because we know that our file is a VCPU fd, we know the kernel will only write the
         // correct amount of memory to our pointer, and we verify the return result.
         let ret = unsafe { ioctl_with_mut_ref(self, KVM_GET_XCRS(), &mut regs) };
-        if ret == 0 {
-            Ok(from_kvm_xcrs(&regs))
-        } else {
-            errno_result()
+        if ret < 0 {
+            return errno_result();
         }
+
+        Ok(regs
+            .xcrs
+            .iter()
+            .take(regs.nr_xcrs as usize)
+            .map(|kvm_xcr| (kvm_xcr.xcr, kvm_xcr.value))
+            .collect())
     }
 
-    fn set_xcrs(&self, xcrs: &[Register]) -> Result<()> {
-        let xcrs = to_kvm_xcrs(xcrs);
+    fn set_xcr(&self, xcr_index: u32, value: u64) -> Result<()> {
+        let mut kvm_xcr = kvm_xcrs {
+            nr_xcrs: 1,
+            ..Default::default()
+        };
+        kvm_xcr.xcrs[0].xcr = xcr_index;
+        kvm_xcr.xcrs[0].value = value;
+
         let ret = {
             // SAFETY:
             // Here we trust the kernel not to read past the end of the kvm_xcrs struct.
-            unsafe { ioctl_with_ref(self, KVM_SET_XCRS(), &xcrs) }
+            unsafe { ioctl_with_ref(self, KVM_SET_XCRS(), &kvm_xcr) }
         };
         if ret == 0 {
             Ok(())
@@ -910,78 +918,117 @@ impl VcpuX86_64 for KvmVcpu {
         }
     }
 
-    fn get_msrs(&self, vec: &mut Vec<Register>) -> Result<()> {
-        let msrs = to_kvm_msrs(vec);
+    fn get_msr(&self, msr_index: u32) -> Result<u64> {
+        let mut msrs = vec_with_array_field::<kvm_msrs, kvm_msr_entry>(1);
+        msrs[0].nmsrs = 1;
+
+        // SAFETY: We initialize a one-element array using `vec_with_array_field` above.
+        unsafe {
+            let msr_entries = msrs[0].entries.as_mut_slice(1);
+            msr_entries[0].index = msr_index;
+        }
+
         let ret = {
             // SAFETY:
             // Here we trust the kernel not to read or write past the end of the kvm_msrs struct.
             unsafe { ioctl_with_ref(self, KVM_GET_MSRS(), &msrs[0]) }
         };
-        // KVM_GET_MSRS actually returns the number of msr entries written.
         if ret < 0 {
             return errno_result();
         }
+
+        // KVM_GET_MSRS returns the number of msr entries written.
+        if ret != 1 {
+            return Err(base::Error::new(libc::ENOENT));
+        }
+
         // SAFETY:
         // Safe because we trust the kernel to return the correct array length on success.
-        let entries = unsafe {
-            let count = ret as usize;
-            assert!(count <= vec.len());
-            msrs[0].entries.as_slice(count)
+        let value = unsafe {
+            let msr_entries = msrs[0].entries.as_slice(1);
+            msr_entries[0].data
         };
-        vec.truncate(0);
-        vec.extend(entries.iter().map(|e| Register {
-            id: e.index,
-            value: e.data,
-        }));
-        Ok(())
+
+        Ok(value)
     }
 
-    fn get_all_msrs(&self) -> Result<Vec<Register>> {
-        let mut msrs: Vec<_> = self
-            .kvm
-            .get_msr_index_list()?
-            .into_iter()
-            .map(|i| Register { id: i, value: 0 })
-            .collect();
-        let count = msrs.len();
-        self.get_msrs(&mut msrs)?;
-        if msrs.len() != count {
+    fn get_all_msrs(&self) -> Result<BTreeMap<u32, u64>> {
+        let msr_index_list = self.kvm.get_msr_index_list()?;
+        let mut kvm_msrs = vec_with_array_field::<kvm_msrs, kvm_msr_entry>(msr_index_list.len());
+        kvm_msrs[0].nmsrs = msr_index_list.len() as u32;
+        // SAFETY:
+        // Mapping the unsized array to a slice is unsafe because the length isn't known.
+        // Providing the length used to create the struct guarantees the entire slice is valid.
+        unsafe {
+            kvm_msrs[0]
+                .entries
+                .as_mut_slice(msr_index_list.len())
+                .iter_mut()
+                .zip(msr_index_list.iter())
+                .for_each(|(msr_entry, msr_index)| msr_entry.index = *msr_index);
+        }
+
+        let ret = {
+            // SAFETY:
+            // Here we trust the kernel not to read or write past the end of the kvm_msrs struct.
+            unsafe { ioctl_with_ref(self, KVM_GET_MSRS(), &kvm_msrs[0]) }
+        };
+        if ret < 0 {
+            return errno_result();
+        }
+
+        // KVM_GET_MSRS returns the number of msr entries written.
+        let count = ret as usize;
+        if count != msr_index_list.len() {
             error!(
                 "failed to get all MSRs: requested {}, got {}",
+                msr_index_list.len(),
                 count,
-                msrs.len()
             );
             return Err(base::Error::new(libc::EPERM));
         }
+
+        // SAFETY:
+        // Safe because we trust the kernel to return the correct array length on success.
+        let msrs = unsafe {
+            BTreeMap::from_iter(
+                kvm_msrs[0]
+                    .entries
+                    .as_slice(count)
+                    .iter()
+                    .map(|kvm_msr| (kvm_msr.index, kvm_msr.data)),
+            )
+        };
+
         Ok(msrs)
     }
 
-    fn set_msrs(&self, vec: &[Register]) -> Result<()> {
-        let msrs = to_kvm_msrs(vec);
+    fn set_msr(&self, msr_index: u32, value: u64) -> Result<()> {
+        let mut kvm_msrs = vec_with_array_field::<kvm_msrs, kvm_msr_entry>(1);
+        kvm_msrs[0].nmsrs = 1;
+
+        // SAFETY: We initialize a one-element array using `vec_with_array_field` above.
+        unsafe {
+            let msr_entries = kvm_msrs[0].entries.as_mut_slice(1);
+            msr_entries[0].index = msr_index;
+            msr_entries[0].data = value;
+        }
+
         let ret = {
             // SAFETY:
             // Here we trust the kernel not to read past the end of the kvm_msrs struct.
-            unsafe { ioctl_with_ref(self, KVM_SET_MSRS(), &msrs[0]) }
+            unsafe { ioctl_with_ref(self, KVM_SET_MSRS(), &kvm_msrs[0]) }
         };
-        // KVM_SET_MSRS actually returns the number of msr entries written.
         if ret < 0 {
             return errno_result();
         }
-        let num_set = ret as usize;
-        if num_set != vec.len() {
-            if let Some(register) = vec.get(num_set) {
-                error!(
-                    "failed to set MSR {:#x?} to {:#x?}",
-                    register.id, register.value
-                );
-            } else {
-                error!(
-                    "unexpected KVM_SET_MSRS return value {num_set} (nmsrs={})",
-                    vec.len()
-                );
-            }
+
+        // KVM_SET_MSRS returns the number of msr entries written.
+        if ret != 1 {
+            error!("failed to set MSR {:#x} to {:#x}", msr_index, value);
             return Err(base::Error::new(libc::EPERM));
         }
+
         Ok(())
     }
 
@@ -1049,10 +1096,6 @@ impl VcpuX86_64 for KvmVcpu {
         Err(Error::new(ENXIO))
     }
 
-    fn set_tsc_value(&self, value: u64) -> Result<()> {
-        set_tsc_value_via_msr(self, value)
-    }
-
     fn restore_timekeeping(&self, _host_tsc_reference_moment: u64, tsc_offset: u64) -> Result<()> {
         // In theory, KVM requires no extra handling beyond restoring the TSC
         // MSR, which happens separately because TSC is in the all MSR list for
@@ -1064,16 +1107,6 @@ impl VcpuX86_64 for KvmVcpu {
         // saving/restoring TSC_KHZ somehow fixes this issue as well. Further
         // research is required.)
         self.set_tsc_offset(tsc_offset)
-    }
-
-    fn get_tsc_offset(&self) -> Result<u64> {
-        // Use the default MSR-based implementation
-        get_tsc_offset_from_msr(self)
-    }
-
-    fn set_tsc_offset(&self, offset: u64) -> Result<()> {
-        // Use the default MSR-based implementation
-        set_tsc_offset_via_msr(self, offset)
     }
 }
 
@@ -1117,25 +1150,14 @@ impl KvmVcpu {
     ///
     /// See the documentation for The kvm_run structure, and for KVM_GET_LAPIC.
     pub fn get_apic_base(&self) -> Result<u64> {
-        let mut apic_base = vec![Register {
-            id: MSR_IA32_APICBASE,
-            value: 0,
-        }];
-        self.get_msrs(&mut apic_base)?;
-        match apic_base.get(0) {
-            Some(base) => Ok(base.value),
-            None => Err(Error::new(EIO)),
-        }
+        self.get_msr(MSR_IA32_APICBASE)
     }
 
     /// X86 specific call to set the value of the APIC_BASE MSR.
     ///
     /// See the documentation for The kvm_run structure, and for KVM_GET_LAPIC.
     pub fn set_apic_base(&self, apic_base: u64) -> Result<()> {
-        self.set_msrs(&[Register {
-            id: MSR_IA32_APICBASE,
-            value: apic_base,
-        }])
+        self.set_msr(MSR_IA32_APICBASE, apic_base)
     }
 
     /// Call to get pending interrupts acknowledged by the APIC but not yet injected into the CPU.
@@ -1784,53 +1806,6 @@ impl From<&DebugRegs> for kvm_debugregs {
             ..Default::default()
         }
     }
-}
-
-fn from_kvm_xcrs(r: &kvm_xcrs) -> Vec<Register> {
-    r.xcrs
-        .iter()
-        .take(r.nr_xcrs as usize)
-        .map(|x| Register {
-            id: x.xcr,
-            value: x.value,
-        })
-        .collect()
-}
-
-fn to_kvm_xcrs(r: &[Register]) -> kvm_xcrs {
-    let mut kvm = kvm_xcrs {
-        nr_xcrs: r.len() as u32,
-        ..Default::default()
-    };
-    for (i, &xcr) in r.iter().enumerate() {
-        kvm.xcrs[i].xcr = xcr.id;
-        kvm.xcrs[i].value = xcr.value;
-    }
-    kvm
-}
-
-fn to_kvm_msrs(vec: &[Register]) -> Vec<kvm_msrs> {
-    let vec: Vec<kvm_msr_entry> = vec
-        .iter()
-        .map(|e| kvm_msr_entry {
-            index: e.id,
-            data: e.value,
-            ..Default::default()
-        })
-        .collect();
-
-    let mut msrs = vec_with_array_field::<kvm_msrs, kvm_msr_entry>(vec.len());
-    // SAFETY:
-    // Mapping the unsized array to a slice is unsafe because the length isn't known.
-    // Providing the length used to create the struct guarantees the entire slice is valid.
-    unsafe {
-        msrs[0]
-            .entries
-            .as_mut_slice(vec.len())
-            .copy_from_slice(&vec);
-    }
-    msrs[0].nmsrs = vec.len() as u32;
-    msrs
 }
 
 #[cfg(test)]
