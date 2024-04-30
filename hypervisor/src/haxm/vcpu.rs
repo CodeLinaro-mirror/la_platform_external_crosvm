@@ -5,6 +5,7 @@
 use core::ffi::c_void;
 use std::arch::x86_64::CpuidResult;
 use std::cmp::min;
+use std::collections::BTreeMap;
 use std::intrinsics::copy_nonoverlapping;
 use std::mem::size_of;
 
@@ -27,9 +28,6 @@ use libc::EOPNOTSUPP;
 use vm_memory::GuestAddress;
 
 use super::*;
-use crate::get_tsc_offset_from_msr;
-use crate::set_tsc_offset_via_msr;
-use crate::set_tsc_value_via_msr;
 use crate::CpuId;
 use crate::CpuIdEntry;
 use crate::DebugRegs;
@@ -38,7 +36,6 @@ use crate::Fpu;
 use crate::HypervHypercall;
 use crate::IoOperation;
 use crate::IoParams;
-use crate::Register;
 use crate::Regs;
 use crate::Segment;
 use crate::Sregs;
@@ -112,13 +109,7 @@ impl HaxmVcpu {
         }
 
         // Also read efer MSR
-        let mut efer = vec![Register {
-            id: IA32_EFER,
-            value: 0,
-        }];
-
-        self.get_msrs(&mut efer)?;
-        state._efer = efer[0].value as u32;
+        state._efer = self.get_msr(IA32_EFER)? as u32;
 
         Ok(VcpuState { state })
     }
@@ -131,12 +122,7 @@ impl HaxmVcpu {
         }
 
         // Also set efer MSR
-        let efer = vec![Register {
-            id: IA32_EFER,
-            value: state.state._efer as u64,
-        }];
-
-        self.set_msrs(&efer)
+        self.set_msr(IA32_EFER, state.state._efer as u64)
     }
 }
 
@@ -481,78 +467,53 @@ impl VcpuX86_64 for HaxmVcpu {
     }
 
     /// Gets the VCPU extended control registers.
-    fn get_xcrs(&self) -> Result<Vec<Register>> {
+    fn get_xcrs(&self) -> Result<BTreeMap<u32, u64>> {
+        // Haxm does not support getting XCRs
+        Err(Error::new(libc::ENXIO))
+    }
+
+    /// Sets a VCPU extended control register.
+    fn set_xcr(&self, _xcr_index: u32, _value: u64) -> Result<()> {
         // Haxm does not support setting XCRs
         Err(Error::new(libc::ENXIO))
     }
 
-    /// Sets the VCPU extended control registers.
-    fn set_xcrs(&self, _xcrs: &[Register]) -> Result<()> {
-        // Haxm does not support setting XCRs
-        Err(Error::new(libc::ENXIO))
-    }
+    /// Gets the value of one model-specific register.
+    fn get_msr(&self, msr_index: u32) -> Result<u64> {
+        let mut msr_data = hax_msr_data {
+            nr_msr: 1,
+            ..Default::default()
+        };
+        msr_data.entries[0].entry = u64::from(msr_index);
 
-    /// Gets the model-specific registers.  `msrs` specifies the MSR indexes to be queried, and
-    /// on success contains their indexes and values.
-    fn get_msrs(&self, msrs: &mut Vec<Register>) -> Result<()> {
-        // HAX_VCPU_IOCTL_GET_MSRS only allows you to set HAX_MAX_MSR_ARRAY-1 msrs at a time
-        // TODO (b/163811378): the fact that you can only set HAX_MAX_MSR_ARRAY-1 seems like a
-        // bug with HAXM, since the entries array itself is HAX_MAX_MSR_ARRAY long
-        for chunk in msrs.chunks_mut((HAX_MAX_MSR_ARRAY - 1) as usize) {
-            let chunk_size = chunk.len();
-            let hax_chunk: Vec<vmx_msr> = chunk.iter().map(vmx_msr::from).collect();
-
-            let mut msr_data = hax_msr_data {
-                nr_msr: chunk_size as u16,
-                ..Default::default()
-            };
-
-            // Copy chunk into msr_data
-            msr_data.entries[..chunk_size].copy_from_slice(&hax_chunk);
-
-            // TODO(b/315998194): Add safety comment
-            #[allow(clippy::undocumented_unsafe_blocks)]
-            let ret = unsafe { ioctl_with_mut_ref(self, HAX_VCPU_IOCTL_GET_MSRS(), &mut msr_data) };
-            if ret != 0 {
-                return errno_result();
-            }
-
-            // copy values we got from kernel
-            for (i, item) in chunk.iter_mut().enumerate().take(chunk_size) {
-                item.value = msr_data.entries[i].value;
-            }
+        // TODO(b/315998194): Add safety comment
+        #[allow(clippy::undocumented_unsafe_blocks)]
+        let ret = unsafe { ioctl_with_mut_ref(self, HAX_VCPU_IOCTL_GET_MSRS(), &mut msr_data) };
+        if ret != 0 {
+            return errno_result();
         }
 
-        Ok(())
+        Ok(msr_data.entries[0].value)
     }
 
-    fn get_all_msrs(&self) -> Result<Vec<Register>> {
+    fn get_all_msrs(&self) -> Result<BTreeMap<u32, u64>> {
         Err(Error::new(EOPNOTSUPP))
     }
 
-    /// Sets the model-specific registers.
-    fn set_msrs(&self, msrs: &[Register]) -> Result<()> {
-        // HAX_VCPU_IOCTL_GET_MSRS only allows you to set HAX_MAX_MSR_ARRAY-1 msrs at a time
-        // TODO (b/163811378): the fact that you can only set HAX_MAX_MSR_ARRAY-1 seems like a
-        // bug with HAXM, since the entries array itself is HAX_MAX_MSR_ARRAY long
-        for chunk in msrs.chunks((HAX_MAX_MSR_ARRAY - 1) as usize) {
-            let chunk_size = chunk.len();
-            let hax_chunk: Vec<vmx_msr> = chunk.iter().map(vmx_msr::from).collect();
+    /// Sets the value of one model-specific register.
+    fn set_msr(&self, msr_index: u32, value: u64) -> Result<()> {
+        let mut msr_data = hax_msr_data {
+            nr_msr: 1,
+            ..Default::default()
+        };
+        msr_data.entries[0].entry = u64::from(msr_index);
+        msr_data.entries[0].value = value;
 
-            let mut msr_data = hax_msr_data {
-                nr_msr: chunk_size as u16,
-                ..Default::default()
-            };
-
-            // Copy chunk into msr_data
-            msr_data.entries[..chunk_size].copy_from_slice(&hax_chunk);
-
-            // TODO(b/315998194): Add safety comment
-            #[allow(clippy::undocumented_unsafe_blocks)]
-            let ret = unsafe { ioctl_with_mut_ref(self, HAX_VCPU_IOCTL_SET_MSRS(), &mut msr_data) };
-            if ret != 0 {
-                return errno_result();
-            }
+        // TODO(b/315998194): Add safety comment
+        #[allow(clippy::undocumented_unsafe_blocks)]
+        let ret = unsafe { ioctl_with_mut_ref(self, HAX_VCPU_IOCTL_SET_MSRS(), &mut msr_data) };
+        if ret != 0 {
+            return errno_result();
         }
 
         Ok(())
@@ -606,16 +567,6 @@ impl VcpuX86_64 for HaxmVcpu {
         Err(Error::new(ENOENT))
     }
 
-    fn get_tsc_offset(&self) -> Result<u64> {
-        // Use the default MSR-based implementation
-        get_tsc_offset_from_msr(self)
-    }
-
-    fn set_tsc_offset(&self, offset: u64) -> Result<()> {
-        // Use the default MSR-based implementation
-        set_tsc_offset_via_msr(self, offset)
-    }
-
     fn restore_timekeeping(&self, _host_tsc_reference_moment: u64, tsc_offset: u64) -> Result<()> {
         // HAXM sets TSC_OFFSET based on what we set TSC to; however, it does
         // not yet handle syncing. This means it computes
@@ -629,10 +580,6 @@ impl VcpuX86_64 for HaxmVcpu {
         // reference moment. (Alternatively, we may just expose a way to set the
         // offset directly.)
         self.set_tsc_offset(tsc_offset)
-    }
-
-    fn set_tsc_value(&self, value: u64) -> Result<()> {
-        set_tsc_value_via_msr(self, value)
     }
 }
 
@@ -1004,24 +951,6 @@ impl From<&CpuIdEntry> for hax_cpuid_entry {
     }
 }
 
-impl From<&vmx_msr> for Register {
-    fn from(item: &vmx_msr) -> Register {
-        Register {
-            id: item.entry as u32,
-            value: item.value,
-        }
-    }
-}
-
-impl From<&Register> for vmx_msr {
-    fn from(item: &Register) -> vmx_msr {
-        vmx_msr {
-            entry: item.id as u64,
-            value: item.value,
-        }
-    }
-}
-
 // TODO(b:241252288): Enable tests disabled with dummy feature flag - enable_haxm_tests.
 #[cfg(test)]
 #[cfg(feature = "enable_haxm_tests")]
@@ -1063,42 +992,25 @@ mod tests {
     }
 
     #[test]
-    fn set_many_msrs() {
+    fn set_msr() {
         let haxm = Haxm::new().expect("failed to instantiate HAXM");
         let mem =
             GuestMemory::new(&[(GuestAddress(0), 0x1000)]).expect("failed to create guest memory");
         let vm = HaxmVm::new(&haxm, mem).expect("failed to create vm");
         let vcpu = vm.create_vcpu(0).expect("failed to create vcpu");
 
-        let mut registers: Vec<Register> = Vec::new();
-        for id in 0x300..0x3ff {
-            registers.push(Register {
-                id: 38,
-                value: id as u64,
-            });
-        }
-
-        vcpu.set_msrs(&registers).expect("failed to set registers");
+        vcpu.set_msr(38, 0x300).expect("failed to set MSR");
     }
 
     #[test]
-    fn get_many_msrs() {
+    fn get_msr() {
         let haxm = Haxm::new().expect("failed to instantiate HAXM");
         let mem =
             GuestMemory::new(&[(GuestAddress(0), 0x1000)]).expect("failed to create guest memory");
         let vm = HaxmVm::new(&haxm, mem).expect("failed to create vm");
         let vcpu = vm.create_vcpu(0).expect("failed to create vcpu");
 
-        let mut registers: Vec<Register> = Vec::new();
-        for id in 0x300..0x3ff {
-            registers.push(Register {
-                id: 38,
-                value: id as u64,
-            });
-        }
-
-        vcpu.get_msrs(&mut registers)
-            .expect("failed to get registers");
+        let _value = vcpu.get_msr(38).expect("failed to get MSR");
     }
 
     #[test]
@@ -1148,21 +1060,17 @@ mod tests {
         assert_eq!(sregs.efer, EFER_LMA | EFER_LME);
 
         // IA32_EFER register value should match
-        let mut efer_reg = vec![Register {
-            id: IA32_EFER,
-            value: 0,
-        }];
-        vcpu.get_msrs(&mut efer_reg).expect("failed to get msrs");
-        assert_eq!(efer_reg[0].value, EFER_LMA | EFER_LME);
+        let efer = vcpu.get_msr(IA32_EFER).expect("failed to get msr");
+        assert_eq!(efer, EFER_LMA | EFER_LME);
 
         // Enable SCE via set_msrs
-        efer_reg[0].value |= EFER_SCE;
-        vcpu.set_msrs(&efer_reg).expect("failed to set msrs");
+        vcpu.set_msr(IA32_EFER, efer | EFER_SCE)
+            .expect("failed to set msr");
 
         // Verify that setting stuck
         let sregs = vcpu.get_sregs().expect("failed to get sregs");
         assert_eq!(sregs.efer, EFER_SCE | EFER_LME | EFER_LMA);
-        vcpu.get_msrs(&mut efer_reg).expect("failed to get msrs");
-        assert_eq!(efer_reg[0].value, EFER_SCE | EFER_LME | EFER_LMA);
+        let new_efer = vcpu.get_msr(IA32_EFER).expect("failed to get msrs");
+        assert_eq!(new_efer, EFER_SCE | EFER_LME | EFER_LMA);
     }
 }

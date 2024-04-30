@@ -68,6 +68,7 @@ pub use self::protocol::VIRTIO_GPU_F_FENCE_PASSING;
 pub use self::protocol::VIRTIO_GPU_F_RESOURCE_BLOB;
 pub use self::protocol::VIRTIO_GPU_F_RESOURCE_UUID;
 pub use self::protocol::VIRTIO_GPU_F_VIRGL;
+pub use self::protocol::VIRTIO_GPU_MAX_SCANOUTS;
 pub use self::protocol::VIRTIO_GPU_SHM_ID_HOST_VISIBLE;
 use self::protocol::*;
 use self::virtio_gpu::to_rutabaga_descriptor;
@@ -1118,7 +1119,7 @@ pub enum DisplayBackend {
     Stub,
     #[cfg(windows)]
     /// Open a window using WinAPI.
-    WinApi(WinDisplayProperties),
+    WinApi,
     #[cfg(feature = "android_display")]
     /// The display buffer is backed by an Android surface. The surface is set via an AIDL service
     /// that the backend hosts. Currently, the AIDL service is registered to the service manager
@@ -1140,11 +1141,10 @@ impl DisplayBackend {
             DisplayBackend::X(display) => GpuDisplay::open_x(display.as_deref()),
             DisplayBackend::Stub => GpuDisplay::open_stub(),
             #[cfg(windows)]
-            DisplayBackend::WinApi(display_properties) => match wndproc_thread.take() {
+            DisplayBackend::WinApi => match wndproc_thread.take() {
                 Some(wndproc_thread) => GpuDisplay::open_winapi(
                     wndproc_thread,
                     /* win_metrics= */ None,
-                    display_properties.clone(),
                     gpu_display_wait_descriptor_ctrl,
                     None,
                 ),

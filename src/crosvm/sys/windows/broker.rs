@@ -102,8 +102,6 @@ use gpu_display::EventDevice;
 use gpu_display::WindowProcedureThread;
 #[cfg(feature = "gpu")]
 use gpu_display::WindowProcedureThreadBuilder;
-use metrics::protos::event_details::EmulatorChildProcessExitDetails;
-use metrics::protos::event_details::RecordDetails;
 use metrics::MetricEventType;
 #[cfg(all(feature = "net", feature = "slirp"))]
 use net_util::slirp::sys::windows::SlirpStartupConfig;
@@ -399,12 +397,10 @@ impl Drop for ChildCleanup {
             if self.process_type != ProcessType::Metrics {
                 let exit_code = self.child.wait();
                 if let Ok(Some(exit_code)) = exit_code {
-                    let mut details = RecordDetails::new();
-                    let mut exit_details = EmulatorChildProcessExitDetails::new();
-                    exit_details.set_exit_code(exit_code as u32);
-                    exit_details.set_process_type(self.process_type.into());
-                    details.emulator_child_process_exit_details = Some(exit_details).into();
-                    metrics::log_event_with_details(MetricEventType::ChildProcessExit, &details);
+                    metrics::log_event(MetricEventType::ChildProcessExit {
+                        exit_code: exit_code as u32,
+                        process_type: self.process_type,
+                    });
                 } else {
                     error!(
                         "Failed to log exit code for process: {:?}, couldn't get exit code",
@@ -466,10 +462,11 @@ fn get_log_path(cfg: &Config, file_name: &str) -> Option<PathBuf> {
 /// IMPORTANT NOTE: The metrics process must receive the client (second) end
 /// of the Tube pair in order to allow the connection to be properly shut
 /// down without data loss.
-fn metrics_tube_pair(metric_tubes: &mut Vec<Tube>) -> Result<Tube> {
+fn metrics_tube_pair(metric_tubes: &mut Vec<RecvTube>) -> Result<SendTube> {
     // TODO(nkgold): as written, this Tube pair won't handle ancillary data properly because the
     // PIDs are not set properly at each end; however, we don't plan to send ancillary data.
-    let (t1, t2) = Tube::pair().exit_context(Exit::CreateTube, "failed to create tube")?;
+    let (t1, t2) =
+        Tube::directional_pair().exit_context(Exit::CreateTube, "failed to create tube")?;
     metric_tubes.push(t2);
     Ok(t1)
 }
@@ -1193,7 +1190,7 @@ fn start_up_block_backends(
     exit_events: &mut Vec<Event>,
     wait_ctx: &mut WaitContext<Token>,
     main_child: &mut ChildProcess,
-    metric_tubes: &mut Vec<Tube>,
+    metric_tubes: &mut Vec<RecvTube>,
     #[cfg(feature = "process-invariants")] process_invariants: &EmulatorProcessInvariants,
 ) -> Result<Vec<ChildProcess>> {
     let mut block_children = Vec::new();
@@ -1421,7 +1418,7 @@ fn start_up_net_backend(
     wait_ctx: &mut WaitContext<Token>,
     cfg: &mut Config,
     log_args: &LogArgs,
-    metric_tubes: &mut Vec<Tube>,
+    metric_tubes: &mut Vec<RecvTube>,
     #[cfg(feature = "process-invariants")] process_invariants: &EmulatorProcessInvariants,
 ) -> Result<(ChildProcess, ChildProcess)> {
     let (host_pipe, guest_pipe) = named_pipes::pair_with_buffer_size(
@@ -1609,7 +1606,7 @@ fn start_up_snd(
     main_child: &mut ChildProcess,
     children: &mut HashMap<u32, ChildCleanup>,
     wait_ctx: &mut WaitContext<Token>,
-    metric_tubes: &mut Vec<Tube>,
+    metric_tubes: &mut Vec<RecvTube>,
     #[cfg(feature = "process-invariants")] process_invariants: &EmulatorProcessInvariants,
 ) -> Result<ChildProcess> {
     // Extract the backend config from the sound config, so it can run elsewhere.
@@ -1802,7 +1799,7 @@ fn start_up_gpu(
     main_child: &mut ChildProcess,
     children: &mut HashMap<u32, ChildCleanup>,
     wait_ctx: &mut WaitContext<Token>,
-    metric_tubes: &mut Vec<Tube>,
+    metric_tubes: &mut Vec<RecvTube>,
     wndproc_thread_builder: WindowProcedureThreadBuilder,
     #[cfg(feature = "process-invariants")] process_invariants: &EmulatorProcessInvariants,
 ) -> Result<ChildProcess> {

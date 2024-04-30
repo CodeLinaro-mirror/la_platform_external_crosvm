@@ -2,17 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use base::Tube;
+use base::RawDescriptor;
+use base::SendTube;
+use metrics_events::MetricEventType;
+use metrics_events::RecordDetails;
 
-use crate::protos::event_details::RecordDetails;
-use crate::MetricEventType;
 use crate::MetricsClientDestructor;
 
 /// This interface exists to be used and re-implemented by downstream forks. Updates shouldn't be
 /// done without ensuring they won't cause breakages in dependent codebases.
-pub fn initialize(_: Tube) {}
+pub fn initialize(_: SendTube) {}
 #[cfg(test)]
-pub fn force_initialize(_: Tube) {}
+pub fn force_initialize(_: SendTube) {}
+
+pub fn push_descriptors(_: &mut Vec<RawDescriptor>) {}
+
 pub fn get_destructor() -> MetricsClientDestructor {
     MetricsClientDestructor::new(|| {})
 }
