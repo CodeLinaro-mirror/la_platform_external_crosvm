@@ -884,6 +884,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         let mut run_mode_opt = None;
         let vcpu_size = vcpu_boxes.lock().len();
         let resp = request.execute(
+            &guest_os.vm,
             &mut run_mode_opt,
             disk_host_tubes,
             &mut guest_os.pm,
@@ -903,17 +904,6 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     msg,
                 );
             },
-            |msg, index| {
-                kick_vcpu(
-                    run_mode_arc,
-                    vcpu_control_channels,
-                    vcpu_boxes,
-                    guest_os.irq_chip.as_ref(),
-                    pvclock_host_tube,
-                    index,
-                    msg,
-                );
-            },
             force_s2idle,
             #[cfg(feature = "swap")]
             None,
@@ -921,12 +911,6 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             vcpu_size,
             irq_handler_control,
             || guest_os.irq_chip.as_ref().snapshot(vcpu_size),
-            |snapshot| {
-                guest_os
-                    .irq_chip
-                    .try_box_clone()?
-                    .restore(snapshot, vcpu_size)
-            },
         );
         (resp, run_mode_opt)
     };
@@ -1451,6 +1435,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     if let Some(path) = restore_path {
         vm_control::do_restore(
             path,
+            &guest_os.vm,
             |msg| {
                 kick_all_vcpus(
                     run_mode_arc.as_ref(),

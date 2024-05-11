@@ -1245,7 +1245,6 @@ impl From<&ClockState> for kvm_clock_data {
     fn from(state: &ClockState) -> Self {
         kvm_clock_data {
             clock: state.clock,
-            flags: state.flags,
             ..Default::default()
         }
     }
@@ -1255,7 +1254,6 @@ impl From<&kvm_clock_data> for ClockState {
     fn from(clock_data: &kvm_clock_data) -> Self {
         ClockState {
             clock: clock_data.clock,
-            flags: clock_data.flags,
         }
     }
 }
