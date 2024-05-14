@@ -4,6 +4,7 @@
 
 #![cfg(target_arch = "x86_64")]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -46,7 +47,6 @@ use hypervisor::IrqSource;
 use hypervisor::Level;
 use hypervisor::PicSelect;
 use hypervisor::PitRWMode;
-use hypervisor::Register;
 use hypervisor::Regs;
 use hypervisor::Sregs;
 use hypervisor::TriggerMode;
@@ -752,19 +752,19 @@ impl VcpuX86_64 for FakeVcpu {
     fn set_debugregs(&self, _debugregs: &DebugRegs) -> Result<()> {
         unimplemented!()
     }
-    fn get_xcrs(&self) -> Result<Vec<Register>> {
+    fn get_xcrs(&self) -> Result<BTreeMap<u32, u64>> {
         unimplemented!()
     }
-    fn set_xcrs(&self, _xcrs: &[Register]) -> Result<()> {
+    fn set_xcr(&self, _xcr_index: u32, _value: u64) -> Result<()> {
         unimplemented!()
     }
-    fn get_msrs(&self, _msrs: &mut Vec<Register>) -> Result<()> {
+    fn get_msr(&self, _msr_index: u32) -> Result<u64> {
         unimplemented!()
     }
-    fn get_all_msrs(&self) -> Result<Vec<Register>> {
+    fn get_all_msrs(&self) -> Result<BTreeMap<u32, u64>> {
         unimplemented!()
     }
-    fn set_msrs(&self, _msrs: &[Register]) -> Result<()> {
+    fn set_msr(&self, _msr_index: u32, _value: u64) -> Result<()> {
         unimplemented!()
     }
     fn set_cpuid(&self, _cpuid: &CpuId) -> Result<()> {
@@ -777,15 +777,6 @@ impl VcpuX86_64 for FakeVcpu {
         unimplemented!()
     }
     fn set_guest_debug(&self, _addrs: &[GuestAddress], _enable_singlestep: bool) -> Result<()> {
-        unimplemented!()
-    }
-    fn get_tsc_offset(&self) -> Result<u64> {
-        unimplemented!()
-    }
-    fn set_tsc_offset(&self, _offset: u64) -> Result<()> {
-        unimplemented!()
-    }
-    fn set_tsc_value(&self, _value: u64) -> Result<()> {
         unimplemented!()
     }
     fn snapshot(&self) -> anyhow::Result<VcpuSnapshot> {
