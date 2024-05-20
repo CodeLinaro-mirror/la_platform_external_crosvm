@@ -71,6 +71,7 @@ use hypervisor::IrqRoute;
 use hypervisor::IrqSource;
 pub use hypervisor::MemSlot;
 use hypervisor::Vm;
+use hypervisor::VmCap;
 use libc::EINVAL;
 use libc::EIO;
 use libc::ENODEV;
@@ -321,15 +322,6 @@ pub enum SnapshotCommand {
         snapshot_path: PathBuf,
         compress_memory: bool,
         encrypt: bool,
-    },
-}
-
-/// Commands for restore feature
-#[derive(Serialize, Deserialize, Debug)]
-pub enum RestoreCommand {
-    Apply {
-        restore_path: PathBuf,
-        require_encrypted: bool,
     },
 }
 
@@ -1337,8 +1329,6 @@ pub enum VmRequest {
     HotPlugNetCommand(NetControlCommand),
     /// Command to Snapshot devices
     Snapshot(SnapshotCommand),
-    /// Command to Restore devices
-    Restore(RestoreCommand),
     /// Register for event notification
     #[cfg(feature = "registered_events")]
     RegisterListener {
@@ -1620,6 +1610,7 @@ impl VmRequest {
     /// received this `VmRequest`.
     pub fn execute(
         &self,
+        vm: &impl Vm,
         run_mode: &mut Option<VmRunMode>,
         disk_host_tubes: &[Tube],
         pm: &mut Option<Arc<Mutex<dyn PmResource + Send>>>,
@@ -1627,14 +1618,12 @@ impl VmRequest {
         usb_control_tube: Option<&Tube>,
         bat_control: &mut Option<BatControl>,
         kick_vcpus: impl Fn(VcpuControl),
-        kick_vcpu: impl Fn(VcpuControl, usize),
         force_s2idle: bool,
         #[cfg(feature = "swap")] swap_controller: Option<&swap::SwapController>,
         device_control_tube: &Tube,
         vcpu_size: usize,
         irq_handler_control: &Tube,
         snapshot_irqchip: impl Fn() -> anyhow::Result<serde_json::Value>,
-        restore_irqchip: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
     ) -> VmResponse {
         match *self {
             VmRequest::Exit => {
@@ -1973,6 +1962,7 @@ impl VmRequest {
                 info!("Starting crosvm snapshot");
                 match do_snapshot(
                     snapshot_path.to_path_buf(),
+                    vm,
                     kick_vcpus,
                     irq_handler_control,
                     device_control_tube,
@@ -1987,31 +1977,6 @@ impl VmRequest {
                     }
                     Err(e) => {
                         error!("failed to handle snapshot: {:?}", e);
-                        VmResponse::Err(SysError::new(EIO))
-                    }
-                }
-            }
-            VmRequest::Restore(RestoreCommand::Apply {
-                ref restore_path,
-                require_encrypted,
-            }) => {
-                info!("Starting crosvm restore");
-                match do_restore(
-                    restore_path.clone(),
-                    kick_vcpus,
-                    kick_vcpu,
-                    irq_handler_control,
-                    device_control_tube,
-                    vcpu_size,
-                    restore_irqchip,
-                    require_encrypted,
-                ) {
-                    Ok(()) => {
-                        info!("Finished crosvm restore successfully");
-                        VmResponse::Ok
-                    }
-                    Err(e) => {
-                        error!("failed to handle restore: {:?}", e);
                         VmResponse::Err(SysError::new(EIO))
                     }
                 }
@@ -2035,6 +2000,7 @@ impl VmRequest {
 /// Snapshot the VM to file at `snapshot_path`
 fn do_snapshot(
     snapshot_path: PathBuf,
+    vm: &impl Vm,
     kick_vcpus: impl Fn(VcpuControl),
     irq_handler_control: &Tube,
     device_control_tube: &Tube,
@@ -2091,6 +2057,14 @@ fn do_snapshot(
 
     let snapshot_writer = SnapshotWriter::new(snapshot_path, encrypt)?;
 
+    // Snapshot hypervisor's paravirtualized clock.
+    let pvclock_snapshot = if vm.check_capability(VmCap::PvClock) {
+        serde_json::to_value(vm.get_pvclock()?)?
+    } else {
+        serde_json::Value::Null
+    };
+    snapshot_writer.write_fragment("pvclock", &pvclock_snapshot)?;
+
     // Snapshot Vcpus
     info!("VCPUs snapshotting...");
     let (send_chan, recv_chan) = mpsc::channel();
@@ -2139,6 +2113,7 @@ fn do_snapshot(
 /// because not all the `VmRequest::execute` arguments are available in the "cold restore" flow.
 pub fn do_restore(
     restore_path: PathBuf,
+    vm: &impl Vm,
     kick_vcpus: impl Fn(VcpuControl),
     kick_vcpu: impl Fn(VcpuControl, usize),
     irq_handler_control: &Tube,
@@ -2151,6 +2126,14 @@ pub fn do_restore(
     let _devices_guard = DeviceSleepGuard::new(device_control_tube)?;
 
     let snapshot_reader = SnapshotReader::new(restore_path, require_encrypted)?;
+
+    // Restore hypervisor's paravirtualized clock.
+    let pvclock_snapshot: serde_json::Value = snapshot_reader.read_fragment("pvclock")?;
+    if vm.check_capability(VmCap::PvClock) {
+        vm.set_pvclock(&serde_json::from_value(pvclock_snapshot)?)?;
+    } else {
+        anyhow::ensure!(pvclock_snapshot == serde_json::Value::Null);
+    };
 
     // Restore IrqChip
     let irq_snapshot: serde_json::Value = snapshot_reader.read_fragment("irqchip")?;
