@@ -49,6 +49,12 @@ rust_library {
                 "liblog",
             ],
         },
+        host: {
+            features: ["vulkano"],
+            rustlibs: [
+                "libvulkano",
+            ],
+        },
     },
     static_libs: [
         "libepoxy",
@@ -81,10 +87,20 @@ rust_library {
     cfgs: [
         "gfxstream_unstable",
     ],
-    features: ["gfxstream"],
+    features: [
+        "gfxstream",
+    ],
     shared_libs: [
         "libgfxstream_backend",
     ],
+    target: {
+        host: {
+            features: ["vulkano"],
+            rustlibs: [
+                "libvulkano",
+            ],
+        },
+    },
 }
 
 rust_test {
