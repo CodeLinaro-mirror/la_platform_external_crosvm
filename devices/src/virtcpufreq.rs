@@ -59,8 +59,13 @@ fn get_cpu_curfreq_khz(cpu_id: u32) -> Result<u32, Error> {
     get_cpu_info(cpu_id, "cpufreq/scaling_cur_freq")
 }
 
+fn handle_read_err(err: Error) -> String {
+    warn!("Unable to get cpufreq governor, using 100% default util factor. Err: {:?}", err);
+    "unknown_governor".to_string()
+}
+
 fn get_cpu_util_factor(cpu_id: u32) -> Result<u32, Error> {
-    let gov = get_cpu_info_str(cpu_id, "cpufreq/scaling_governor")?;
+    let gov = get_cpu_info_str(cpu_id, "cpufreq/scaling_governor").unwrap_or_else(handle_read_err);
     match gov.trim() {
         "schedutil" => Ok(CPUFREQ_GOV_SCALE_FACTOR_SCHEDUTIL),
         _ => Ok(CPUFREQ_GOV_SCALE_FACTOR_DEFAULT),
