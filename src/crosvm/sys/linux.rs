@@ -3527,6 +3527,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             #[cfg(target_arch = "x86_64")]
             bus_lock_ratelimit_ctrl,
             run_mode,
+            cfg.boost_uclamp,
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }
