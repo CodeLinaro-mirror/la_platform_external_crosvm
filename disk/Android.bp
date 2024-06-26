@@ -19,7 +19,7 @@ rust_test {
     crate_name: "disk",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/disk.rs"],
+    crate_root: "src/disk.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -62,7 +62,7 @@ rust_library {
     crate_name: "disk",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/disk.rs"],
+    crate_root: "src/disk.rs",
     edition: "2021",
     features: [
         "android-sparse",
@@ -81,7 +81,6 @@ rust_library {
         "libprotos", // Added manually
         "libserde",
         "libsync_rust",
-        "libtempfile",
         "libthiserror",
         "libuuid", // Added manually
         "libvm_memory",

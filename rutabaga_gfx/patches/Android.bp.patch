@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index b99e49886..6c37c03da 100644
+index c69e8a386..39f7306a6 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,15 +10,14 @@ index b99e49886..6c37c03da 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -35,14 +34,75 @@ rust_library {
+@@ -35,14 +34,73 @@ rust_library {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
 +    cfgs: [
 +        "gfxstream_unstable",
 +    ],
-     shared_libs: [
--        "libdrm",
++    shared_libs: [
 +        "libc++",
 +        "libbase",
 +    ],
@@ -37,15 +36,15 @@ index b99e49886..6c37c03da 100644
 +            ],
 +        },
 +    },
-+    static_libs: [
-         "libepoxy",
-         "libgbm",
+     static_libs: [
 +        "libdrm",
++        "libepoxy",
+         "libgbm",
 +        "libgfxstream_backend",
          "libvirglrenderer",
      ],
- }
- 
++}
++
 +rust_library {
 +    name: "librutabaga_gfx_gfxstream",
 +    defaults: ["crosvm_inner_defaults"],
@@ -71,9 +70,11 @@ index b99e49886..6c37c03da 100644
 +    features: [
 +        "gfxstream",
 +    ],
-+    shared_libs: [
+     shared_libs: [
+-        "libdrm",
+-        "libepoxy",
 +        "libgfxstream_backend",
-+    ],
+     ],
 +    target: {
 +        host: {
 +            features: ["vulkano"],
@@ -82,12 +83,10 @@ index b99e49886..6c37c03da 100644
 +            ],
 +        },
 +    },
-+}
-+
+ }
+ 
  rust_test {
-     name: "rutabaga_gfx_test_src_lib",
-     defaults: ["crosvm_inner_defaults"],
-@@ -59,7 +119,6 @@ rust_test {
+@@ -61,7 +119,6 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
@@ -95,17 +94,20 @@ index b99e49886..6c37c03da 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -72,9 +131,12 @@ rust_test {
+@@ -73,12 +130,13 @@ rust_test {
+         "libzerocopy",
      ],
      proc_macros: ["libremain"],
-     shared_libs: [
--        "libdrm",
-         "libepoxy",
+-    static_libs: [
++    shared_libs: [
++        "libepoxy",
          "libgbm",
 +        "libgfxstream_backend",
          "libvirglrenderer",
      ],
+-    shared_libs: [
 +    static_libs: [
-+        "libdrm",
-+    ],
+         "libdrm",
+-        "libepoxy",
+     ],
  }

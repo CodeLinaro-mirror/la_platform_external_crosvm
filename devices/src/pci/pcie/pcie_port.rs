@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 use std::str::FromStr;
-use std::sync::mpsc;
 use std::sync::Arc;
 
+use base::error;
 use base::warn;
+use base::Event;
 use resources::Alloc;
 use resources::SystemAllocator;
 use sync::Mutex;
@@ -309,6 +310,10 @@ impl PciePort {
         }
     }
 
+    pub fn get_slot_control(&self) -> u16 {
+        self.pcie_config.lock().get_slot_control()
+    }
+
     pub fn clone_interrupt(&mut self, msi_config: Arc<Mutex<MsiConfig>>) {
         if self.port_type == PcieDevicePortType::RootPort {
             self.root_cap.lock().clone_interrupt(msi_config.clone());
@@ -336,13 +341,16 @@ impl PciePort {
     }
 
     /// Has command completion pending.
-    pub fn is_cc_pending(&self) -> bool {
-        self.pcie_config.lock().cc_sender.is_some()
+    pub fn is_hpc_pending(&self) -> bool {
+        self.pcie_config.lock().hpc_sender.is_some()
     }
 
-    /// Sets a sender for notifying guest report command complete. Returns sender replaced.
-    pub fn set_cc_sender(&mut self, cc_sender: mpsc::Sender<()>) -> Option<mpsc::Sender<()>> {
-        self.pcie_config.lock().cc_sender.replace(cc_sender)
+    /// Sets a sender for hot plug or unplug complete.
+    pub fn set_hpc_sender(&mut self, event: Event) {
+        self.pcie_config
+            .lock()
+            .hpc_sender
+            .replace(HotPlugCompleteSender::new(event));
     }
 
     pub fn trigger_hp_or_pme_interrupt(&mut self) {
@@ -356,6 +364,17 @@ impl PciePort {
 
     pub fn is_host(&self) -> bool {
         self.pcie_host.is_some()
+    }
+
+    /// Checks if the slot is enabled by guest and ready for hotplug events.
+    pub fn is_hotplug_ready(&self) -> bool {
+        self.pcie_config.lock().is_hotplug_ready()
+    }
+
+    /// Gets a notification when the port is ready for hotplug.  If the port is already ready, then
+    /// the notification event is triggerred immediately.
+    pub fn get_ready_notification(&mut self) -> std::result::Result<Event, PciDeviceError> {
+        self.pcie_config.lock().get_ready_notification()
     }
 
     pub fn hot_unplug(&mut self) {
@@ -376,6 +395,10 @@ impl PciePort {
         self.pcie_config.lock().removed_downstream_valid
     }
 
+    pub fn mask_slot_status(&mut self, mask: u16) {
+        self.pcie_config.lock().mask_slot_status(mask);
+    }
+
     pub fn set_slot_status(&mut self, flag: u16) {
         self.pcie_config.lock().set_slot_status(flag);
     }
@@ -386,6 +409,32 @@ impl PciePort {
 
     pub fn prepare_hotplug(&mut self) {
         self.prepare_hotplug = true;
+    }
+}
+
+struct HotPlugCompleteSender {
+    sender: Event,
+    armed: bool,
+}
+
+impl HotPlugCompleteSender {
+    fn new(sender: Event) -> Self {
+        Self {
+            sender,
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn armed(&self) -> bool {
+        self.armed
+    }
+
+    fn signal(&self) -> base::Result<()> {
+        self.sender.signal()
     }
 }
 
@@ -400,10 +449,12 @@ pub struct PcieConfig {
     root_cap: Arc<Mutex<PcieRootCap>>,
     port_type: PcieDevicePortType,
 
-    cc_sender: Option<mpsc::Sender<()>>,
+    hpc_sender: Option<HotPlugCompleteSender>,
     hp_interrupt_pending: bool,
     removed_downstream_valid: bool,
 
+    enabled: bool,
+    hot_plug_ready_notifications: Vec<Event>,
     cap_mapping: Option<PciCapMapping>,
 }
 
@@ -426,10 +477,12 @@ impl PcieConfig {
             root_cap,
             port_type,
 
-            cc_sender: None,
+            hpc_sender: None,
             hp_interrupt_pending: false,
             removed_downstream_valid: false,
 
+            enabled: false,
+            hot_plug_ready_notifications: Vec::new(),
             cap_mapping: None,
         }
     }
@@ -450,6 +503,34 @@ impl PcieConfig {
         }
     }
 
+    // Checks if the slot is enabled by guest and ready for hotplug events.
+    fn is_hotplug_ready(&self) -> bool {
+        // The hotplug capability flags are set when the guest enables the device. Checks all flags
+        // required by the hotplug mechanism.
+        let slot_control = self.get_slot_control();
+        (slot_control & (PCIE_SLTCTL_PDCE | PCIE_SLTCTL_ABPE)) != 0
+            && (slot_control & PCIE_SLTCTL_CCIE) != 0
+            && (slot_control & PCIE_SLTCTL_HPIE) != 0
+    }
+
+    /// Gets a notification when the port is ready for hotplug. If the port is already ready, then
+    /// the notification event is triggerred immediately.
+    fn get_ready_notification(&mut self) -> std::result::Result<Event, PciDeviceError> {
+        let event = Event::new().map_err(|e| PciDeviceError::EventCreationFailed(e.errno()))?;
+        if self.is_hotplug_ready() {
+            event
+                .signal()
+                .map_err(|e| PciDeviceError::EventSignalFailed(e.errno()))?;
+        } else {
+            self.hot_plug_ready_notifications.push(
+                event
+                    .try_clone()
+                    .map_err(|e| PciDeviceError::EventCloneFailed(e.errno()))?,
+            );
+        }
+        Ok(event)
+    }
+
     fn write_pcie_cap(&mut self, offset: usize, data: &[u8]) {
         self.removed_downstream_valid = false;
         match offset {
@@ -461,6 +542,19 @@ impl PcieConfig {
                         return;
                     }
                 };
+                if !self.enabled
+                    && (value & (PCIE_SLTCTL_PDCE | PCIE_SLTCTL_ABPE)) != 0
+                    && (value & PCIE_SLTCTL_CCIE) != 0
+                    && (value & PCIE_SLTCTL_HPIE) != 0
+                {
+                    // Device is getting enabled by the guest.
+                    for notf_event in self.hot_plug_ready_notifications.drain(..) {
+                        if let Err(e) = notf_event.signal() {
+                            error!("Failed to signal hot plug ready: {}", e);
+                        }
+                    }
+                    self.enabled = true;
+                }
 
                 // if slot is populated, power indicator is off,
                 // it will detach devices
@@ -470,8 +564,8 @@ impl PcieConfig {
                     None => return,
                 }
                 if (self.slot_status & PCIE_SLTSTA_PDS != 0)
-                    && (value & PCIE_SLTCTL_PIC_OFF == PCIE_SLTCTL_PIC_OFF)
-                    && (old_control & PCIE_SLTCTL_PIC_OFF != PCIE_SLTCTL_PIC_OFF)
+                    && (value & PCIE_SLTCTL_PIC == PCIE_SLTCTL_PIC_OFF)
+                    && (old_control & PCIE_SLTCTL_PIC != PCIE_SLTCTL_PIC_OFF)
                 {
                     self.removed_downstream_valid = true;
                     self.slot_status &= !PCIE_SLTSTA_PDS;
@@ -489,10 +583,19 @@ impl PcieConfig {
                 }
 
                 if old_control != value {
-                    // send Command completed events
-                    if let Some(sender) = self.cc_sender.take() {
-                        if let Err(e) = sender.send(()) {
-                            warn!("Failed to notify command complete for slot event: {:#}", &e);
+                    let old_pic_state = old_control & PCIE_SLTCTL_PIC;
+                    let pic_state = value & PCIE_SLTCTL_PIC;
+                    if old_pic_state == PCIE_SLTCTL_PIC_BLINK && old_pic_state != pic_state {
+                        // The power indicator (PIC) is controled by the guest to indicate the power
+                        // state of the slot.
+                        // For successful hotplug: OFF => BLINK => (board enabled) => ON
+                        // For failed hotplug: OFF => BLINK => (board enable failed) => OFF
+                        // For hot unplug: ON => BLINK => (board disabled) => OFF
+                        // hot (un)plug is completed at next slot status write after it changed to
+                        // ON or OFF state.
+
+                        if let Some(sender) = self.hpc_sender.as_mut() {
+                            sender.arm();
                         }
                     }
                     self.slot_status |= PCIE_SLTSTA_CC;
@@ -502,6 +605,14 @@ impl PcieConfig {
             PCIE_SLTSTA_OFFSET => {
                 if self.slot_control.is_none() {
                     return;
+                }
+                if let Some(hpc_sender) = self.hpc_sender.as_mut() {
+                    if hpc_sender.armed() {
+                        if let Err(e) = hpc_sender.signal() {
+                            error!("Failed to send hot un/plug complete signal: {}", e);
+                        }
+                        self.hpc_sender = None;
+                    }
                 }
                 let value = match u16::read_from(data) {
                     Some(v) => v,
@@ -584,6 +695,17 @@ impl PcieConfig {
             if (self.slot_status & slot_control & (PCIE_SLTCTL_ABPE | PCIE_SLTCTL_PDCE)) != 0 {
                 trigger_interrupt(&self.msi_config)
             }
+        }
+    }
+
+    fn mask_slot_status(&mut self, mask: u16) {
+        self.slot_status &= mask;
+        if let Some(mapping) = self.cap_mapping.as_mut() {
+            mapping.set_reg(
+                PCIE_SLTCTL_OFFSET / 4,
+                (self.slot_status as u32) << 16,
+                0xffff0000,
+            );
         }
     }
 

@@ -345,7 +345,7 @@ impl<F: AsRawDescriptor> OverlappedSource<F> {
         }
         // SAFETY:
         // Safe because self.source lives as long as file.
-        let mut file = ManuallyDrop::new(unsafe {
+        let file = ManuallyDrop::new(unsafe {
             File::from_raw_descriptor(self.source.as_raw_descriptor())
         });
         // ZeroRange calls `punch_hole` which doesn't extend the File size if it needs to.
@@ -400,8 +400,10 @@ impl<F: AsRawDescriptor> OverlappedSource<F> {
     }
 
     pub async fn wait_for_handle(&self) -> AsyncResult<()> {
-        let waiter = super::WaitForHandle::new(&self.source);
-        Ok(waiter.await?)
+        base::sys::windows::async_wait_for_single_object(&self.source)
+            .await
+            .map_err(super::handle_source::Error::HandleWaitFailed)?;
+        Ok(())
     }
 }
 
@@ -429,7 +431,6 @@ mod tests {
 
     fn open_overlapped(path: &PathBuf) -> File {
         OpenOptions::new()
-            .create(true)
             .read(true)
             .write(true)
             .custom_flags(FILE_FLAG_OVERLAPPED)
@@ -437,11 +438,12 @@ mod tests {
             .unwrap()
     }
 
-    fn open_blocking(path: &PathBuf) -> File {
+    fn create_overlapped(path: &PathBuf) -> File {
         OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .read(true)
             .write(true)
+            .custom_flags(FILE_FLAG_OVERLAPPED)
             .open(path)
             .unwrap()
     }
@@ -449,10 +451,7 @@ mod tests {
     #[test]
     fn test_read_vec() {
         let (file_path, _tmpdir) = tempfile_path();
-        let mut f = open_blocking(&file_path);
-        f.write_all("data".as_bytes()).unwrap();
-        f.flush().unwrap();
-        drop(f);
+        std::fs::write(&file_path, "data").unwrap();
 
         async fn read_data(src: &OverlappedSource<File>) {
             let buf: Vec<u8> = vec![0; 4];
@@ -469,10 +468,7 @@ mod tests {
     #[test]
     fn test_read_mem() {
         let (file_path, _tmpdir) = tempfile_path();
-        let mut f = open_blocking(&file_path);
-        f.write_all("data".as_bytes()).unwrap();
-        f.flush().unwrap();
-        drop(f);
+        std::fs::write(&file_path, "data").unwrap();
 
         async fn read_data(src: &OverlappedSource<File>) {
             let mem = Arc::new(VecIoWrapper::from(vec![0; 4]));
@@ -513,15 +509,13 @@ mod tests {
         }
 
         let ex = RawExecutor::<HandleReactor>::new().unwrap();
-        let f = open_overlapped(&file_path);
+        let f = create_overlapped(&file_path);
         let src = OverlappedSource::new(f, &ex, false).unwrap();
         ex.run_until(write_data(&src)).unwrap();
         drop(src);
 
-        let mut buf = vec![0; 4];
-        let mut f = open_blocking(&file_path);
-        f.read_exact(&mut buf).unwrap();
-        assert_eq!(std::str::from_utf8(buf.as_slice()).unwrap(), "data");
+        let buf = std::fs::read(&file_path).unwrap();
+        assert_eq!(buf, b"data");
     }
 
     #[test]
@@ -551,25 +545,20 @@ mod tests {
         }
 
         let ex = RawExecutor::<HandleReactor>::new().unwrap();
-        let f = open_overlapped(&file_path);
+        let f = create_overlapped(&file_path);
         let src = OverlappedSource::new(f, &ex, false).unwrap();
         ex.run_until(write_data(&src)).unwrap();
         drop(src);
 
-        let mut buf = vec![0; 4];
-        let mut f = open_blocking(&file_path);
-        f.read_exact(&mut buf).unwrap();
-        assert_eq!(std::str::from_utf8(buf.as_slice()).unwrap(), "data");
+        let buf = std::fs::read(&file_path).unwrap();
+        assert_eq!(buf, b"data");
     }
 
     #[cfg_attr(all(target_os = "windows", target_env = "gnu"), ignore)]
     #[test]
     fn test_punch_holes() {
         let (file_path, _tmpdir) = tempfile_path();
-        let mut temp_file = open_blocking(&file_path);
-        temp_file.write_all("abcdefghijk".as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-        drop(temp_file);
+        std::fs::write(&file_path, "abcdefghijk").unwrap();
 
         async fn punch_hole(src: &OverlappedSource<File>) {
             let offset = 1;
@@ -583,13 +572,8 @@ mod tests {
         ex.run_until(punch_hole(&src)).unwrap();
         drop(src);
 
-        let mut buf = vec![0; 11];
-        let mut f = open_blocking(&file_path);
-        f.read_exact(&mut buf).unwrap();
-        assert_eq!(
-            std::str::from_utf8(buf.as_slice()).unwrap(),
-            "a\0\0\0efghijk"
-        );
+        let buf = std::fs::read(&file_path).unwrap();
+        assert_eq!(buf, b"a\0\0\0efghijk");
     }
 
     /// Test should fail because punch hole should not be allowed to allocate more memory
@@ -597,10 +581,7 @@ mod tests {
     #[test]
     fn test_punch_holes_fail_out_of_bounds() {
         let (file_path, _tmpdir) = tempfile_path();
-        let mut temp_file = open_blocking(&file_path);
-        temp_file.write_all("abcdefghijk".as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-        drop(temp_file);
+        std::fs::write(&file_path, "abcdefghijk").unwrap();
 
         async fn punch_hole(src: &OverlappedSource<File>) {
             let offset = 9;
@@ -615,7 +596,11 @@ mod tests {
         drop(src);
 
         let mut buf = vec![0; 13];
-        let mut f = open_blocking(&file_path);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file_path)
+            .unwrap();
         assert!(f.read_exact(&mut buf).is_err());
     }
 

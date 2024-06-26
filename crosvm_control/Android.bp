@@ -19,9 +19,10 @@ rust_ffi_shared {
     crate_name: "crosvm_control",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     rustlibs: [
+        "libballoon_control",
         "libbase_rust",
         "liblibc",
         "libswap",
@@ -41,9 +42,10 @@ rust_ffi_static {
     crate_name: "crosvm_control",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     rustlibs: [
+        "libballoon_control",
         "libbase_rust",
         "liblibc",
         "libswap",

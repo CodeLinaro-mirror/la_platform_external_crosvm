@@ -6,10 +6,9 @@ cfg_if::cfg_if! {
     if #[cfg(any(target_os = "android", target_os = "linux"))] {
         pub mod linux;
         use linux as platform;
-        pub use platform::{VmMsyncRequest, VmMsyncResponse, FsMappingRequest};
+        pub use platform::{VmMemoryMappingRequest, VmMemoryMappingResponse, FsMappingRequest};
         #[cfg(feature = "gpu")]
         pub use platform::gpu::UnixDisplayMode as DisplayMode;
-        pub use platform::handle_request_with_timeout;
         #[cfg(feature = "gpu")]
         pub use platform::gpu::UnixMouseMode as MouseMode;
     } else if #[cfg(windows)] {
@@ -19,11 +18,13 @@ cfg_if::cfg_if! {
         pub type DisplayMode = platform::gpu::WinDisplayMode<platform::gpu::DisplayDataProvider>;
         #[cfg(feature = "gpu")]
         pub use platform::gpu::WinMouseMode as MouseMode;
+        pub use platform::InitialAudioSessionState;
     } else {
         compile_error!("Unsupported platform");
     }
 }
 
 pub use platform::handle_request;
+pub use platform::handle_request_with_timeout;
 pub use platform::prepare_shared_memory_region;
 pub use platform::should_prepare_memory_region;

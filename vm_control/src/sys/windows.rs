@@ -8,6 +8,7 @@ pub(crate) mod gpu;
 use std::io::Result;
 use std::mem::size_of;
 use std::path::Path;
+use std::time::Duration;
 
 use base::error;
 use base::named_pipes::BlockingMode;
@@ -68,6 +69,19 @@ pub fn handle_request<T: AsRef<Path> + std::fmt::Debug>(
     }
 }
 
+pub fn handle_request_with_timeout<T: AsRef<Path> + std::fmt::Debug>(
+    request: &VmRequest,
+    socket_path: T,
+    timeout: Option<Duration>,
+) -> HandleRequestResult {
+    if timeout.is_none() {
+        handle_request(request, socket_path)
+    } else {
+        error!("handle_request_with_timeout() not implemented for Windows");
+        Err(())
+    }
+}
+
 /// Send the size header first and then the protbuf message.
 ///
 /// A helper function to keep communication with service consistent across crosvm code.
@@ -115,4 +129,13 @@ pub fn prepare_shared_memory_region(
     _cache: MemCacheType,
 ) -> std::result::Result<(u64, MemSlot), Error> {
     unimplemented!()
+}
+
+/// State of a specific audio device on boot.
+pub struct InitialAudioSessionState {
+    // Uniquely identify an audio device. In ALSA terminology, this is the card_index as opposed to
+    // a device index.
+    pub card_index: usize,
+    // GUID assigned to the device's IAudioClient
+    pub audio_client_guid: String,
 }

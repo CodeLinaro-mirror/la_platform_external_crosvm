@@ -19,6 +19,7 @@ use base::IoctlNr;
 use base::MappedRegion;
 use base::Result;
 use data_model::vec_with_array_field;
+use data_model::FlexibleArrayWrapper;
 use kvm_sys::*;
 use libc::E2BIG;
 use libc::EIO;
@@ -39,6 +40,7 @@ use crate::DebugRegs;
 use crate::DescriptorTable;
 use crate::DeviceKind;
 use crate::Fpu;
+use crate::FpuReg;
 use crate::HypervisorX86_64;
 use crate::IoapicRedirectionTableEntry;
 use crate::IoapicState;
@@ -59,7 +61,7 @@ use crate::VmX86_64;
 use crate::Xsave;
 use crate::NUM_IOAPIC_PINS;
 
-type KvmCpuId = kvm::CpuId;
+type KvmCpuId = FlexibleArrayWrapper<kvm_cpuid2, kvm_cpuid_entry2>;
 const KVM_XSAVE_MAX_SIZE: usize = 4096;
 const MSR_IA32_APICBASE: u32 = 0x0000001b;
 
@@ -411,28 +413,6 @@ impl KvmVm {
         }
     }
 
-    /// Enable userspace msr.
-    pub fn enable_userspace_msr(&self) -> Result<()> {
-        let mut cap = kvm_enable_cap {
-            cap: KVM_CAP_X86_USER_SPACE_MSR,
-            ..Default::default()
-        };
-        cap.args[0] = (KVM_MSR_EXIT_REASON_UNKNOWN
-            | KVM_MSR_EXIT_REASON_INVAL
-            | KVM_MSR_EXIT_REASON_FILTER) as u64;
-
-        // SAFETY:
-        // Safe because we know that our file is a VM fd, we know that the
-        // kernel will only read correct amount of memory from our pointer, and
-        // we verify the return result.
-        let ret = unsafe { ioctl_with_ref(self, KVM_ENABLE_CAP(), &cap) };
-        if ret < 0 {
-            errno_result()
-        } else {
-            Ok(())
-        }
-    }
-
     /// Set MSR_PLATFORM_INFO read access.
     pub fn set_platform_info_read_access(&self, allow_read: bool) -> Result<()> {
         let mut cap = kvm_enable_cap {
@@ -446,72 +426,6 @@ impl KvmVm {
         // kernel will only read correct amount of memory from our pointer, and
         // we verify the return result.
         let ret = unsafe { ioctl_with_ref(self, KVM_ENABLE_CAP(), &cap) };
-        if ret < 0 {
-            errno_result()
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Set msr filter.
-    pub fn set_msr_filter(&self, msr_list: (Vec<u32>, Vec<u32>)) -> Result<()> {
-        let mut rd_nmsrs: u32 = 0;
-        let mut wr_nmsrs: u32 = 0;
-        let mut rd_msr_bitmap: [u8; KVM_MSR_FILTER_RANGE_MAX_BYTES] =
-            [0xff; KVM_MSR_FILTER_RANGE_MAX_BYTES];
-        let mut wr_msr_bitmap: [u8; KVM_MSR_FILTER_RANGE_MAX_BYTES] =
-            [0xff; KVM_MSR_FILTER_RANGE_MAX_BYTES];
-        let (rd_msrs, wr_msrs) = msr_list;
-
-        for index in rd_msrs {
-            // currently we only consider the MSR lower than
-            // KVM_MSR_FILTER_RANGE_MAX_BITS
-            if index >= (KVM_MSR_FILTER_RANGE_MAX_BITS as u32) {
-                continue;
-            }
-            rd_nmsrs += 1;
-            rd_msr_bitmap[(index / 8) as usize] &= !(1 << (index & 0x7));
-        }
-        for index in wr_msrs {
-            // currently we only consider the MSR lower than
-            // KVM_MSR_FILTER_RANGE_MAX_BITS
-            if index >= (KVM_MSR_FILTER_RANGE_MAX_BITS as u32) {
-                continue;
-            }
-            wr_nmsrs += 1;
-            wr_msr_bitmap[(index / 8) as usize] &= !(1 << (index & 0x7));
-        }
-
-        let mut msr_filter = kvm_msr_filter {
-            flags: KVM_MSR_FILTER_DEFAULT_ALLOW,
-            ..Default::default()
-        };
-
-        let mut count = 0;
-        if rd_nmsrs > 0 {
-            msr_filter.ranges[count].flags = KVM_MSR_FILTER_READ;
-            msr_filter.ranges[count].nmsrs = KVM_MSR_FILTER_RANGE_MAX_BITS as u32;
-            msr_filter.ranges[count].base = 0x0;
-            msr_filter.ranges[count].bitmap = rd_msr_bitmap.as_mut_ptr();
-            count += 1;
-        }
-        if wr_nmsrs > 0 {
-            msr_filter.ranges[count].flags = KVM_MSR_FILTER_WRITE;
-            msr_filter.ranges[count].nmsrs = KVM_MSR_FILTER_RANGE_MAX_BITS as u32;
-            msr_filter.ranges[count].base = 0x0;
-            msr_filter.ranges[count].bitmap = wr_msr_bitmap.as_mut_ptr();
-            count += 1;
-        }
-
-        let mut ret = 0;
-        if count > 0 {
-            // SAFETY:
-            // Safe because we know that our file is a VM fd, we know that the
-            // kernel will only read correct amount of memory from our pointer, and
-            // we verify the return result.
-            ret = unsafe { ioctl_with_ref(self, KVM_X86_SET_MSR_FILTER(), &msr_filter) };
-        }
-
         if ret < 0 {
             errno_result()
         } else {
@@ -604,6 +518,25 @@ impl KvmVcpu {
         let size: usize = size.try_into().unwrap();
         Ok(size.max(KVM_XSAVE_MAX_SIZE))
     }
+
+    #[inline]
+    pub(crate) fn handle_vm_exit_arch(&self, run: &mut kvm_run) -> Option<VcpuExit> {
+        match run.exit_reason {
+            KVM_EXIT_IO => Some(VcpuExit::Io),
+            KVM_EXIT_IOAPIC_EOI => {
+                // SAFETY:
+                // Safe because the exit_reason (which comes from the kernel) told us which
+                // union field to use.
+                let vector = unsafe { run.__bindgen_anon_1.eoi.vector };
+                Some(VcpuExit::IoapicEoi { vector })
+            }
+            KVM_EXIT_HLT => Some(VcpuExit::Hlt),
+            KVM_EXIT_SET_TPR => Some(VcpuExit::SetTpr),
+            KVM_EXIT_TPR_ACCESS => Some(VcpuExit::TprAccess),
+            KVM_EXIT_X86_BUS_LOCK => Some(VcpuExit::BusLock),
+            _ => None,
+        }
+    }
 }
 
 impl VcpuX86_64 for KvmVcpu {
@@ -631,8 +564,8 @@ impl VcpuX86_64 for KvmVcpu {
     ///
     /// While this ioctl exists on PPC and MIPS as well as x86, the semantics are different and
     /// ChromeOS doesn't support PPC or MIPS.
-    fn interrupt(&self, irq: u32) -> Result<()> {
-        let interrupt = kvm_interrupt { irq };
+    fn interrupt(&self, irq: u8) -> Result<()> {
+        let interrupt = kvm_interrupt { irq: irq.into() };
         // SAFETY:
         // safe becuase we allocated the struct and we know the kernel will read
         // exactly the size of the struct
@@ -1044,11 +977,6 @@ impl VcpuX86_64 for KvmVcpu {
         } else {
             errno_result()
         }
-    }
-
-    fn get_hyperv_cpuid(&self) -> Result<CpuId> {
-        const KVM_MAX_ENTRIES: usize = 256;
-        get_cpuid_with_initial_capacity(self, KVM_GET_SUPPORTED_HV_CPUID(), KVM_MAX_ENTRIES)
     }
 
     fn set_guest_debug(&self, addrs: &[GuestAddress], enable_singlestep: bool) -> Result<()> {
@@ -1747,7 +1675,7 @@ impl From<&kvm_sregs> for Sregs {
 impl From<&kvm_fpu> for Fpu {
     fn from(r: &kvm_fpu) -> Self {
         Fpu {
-            fpr: r.fpr,
+            fpr: FpuReg::from_16byte_arrays(&r.fpr),
             fcw: r.fcw,
             fsw: r.fsw,
             ftwx: r.ftwx,
@@ -1763,7 +1691,7 @@ impl From<&kvm_fpu> for Fpu {
 impl From<&Fpu> for kvm_fpu {
     fn from(r: &Fpu) -> Self {
         kvm_fpu {
-            fpr: r.fpr,
+            fpr: FpuReg::to_16byte_arrays(&r.fpr),
             fcw: r.fcw,
             fsw: r.fsw,
             ftwx: r.ftwx,

@@ -5,7 +5,6 @@
 pub mod sys;
 
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use base::error;
 use base::AsRawDescriptors;
@@ -40,7 +39,7 @@ use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 
 thread_local! {
-    pub(crate) static NET_EXECUTOR: OnceCell<Executor> = OnceCell::new();
+    pub(crate) static NET_EXECUTOR: OnceCell<Executor> = const { OnceCell::new() };
 }
 
 // TODO(b/188947559): Come up with better way to include these constants. Compiler errors happen
@@ -112,7 +111,6 @@ pub struct NetBackend<T: TapT + IntoAsync> {
     tap: T,
     avail_features: u64,
     acked_features: u64,
-    acked_protocol_features: VhostUserProtocolFeatures,
     mtu: u16,
     #[cfg(all(windows, feature = "slirp"))]
     slirp_kill_event: base::Event,
@@ -155,11 +153,6 @@ where
     }
 
     fn ack_features(&mut self, value: u64) -> anyhow::Result<()> {
-        let unrequested_features = value & !self.avail_features;
-        if unrequested_features != 0 {
-            bail!("invalid features are given: {:#x}", unrequested_features);
-        }
-
         self.acked_features |= value;
 
         self.tap
@@ -169,24 +162,8 @@ where
         Ok(())
     }
 
-    fn acked_features(&self) -> u64 {
-        self.acked_features
-    }
-
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
         VhostUserProtocolFeatures::CONFIG
-    }
-
-    fn ack_protocol_features(&mut self, features: u64) -> anyhow::Result<()> {
-        let features = VhostUserProtocolFeatures::from_bits(features)
-            .ok_or_else(|| anyhow!("invalid protocol features are given: {:#x}", features))?;
-        let supported = self.protocol_features();
-        self.acked_protocol_features = features & supported;
-        Ok(())
-    }
-
-    fn acked_protocol_features(&self) -> u64 {
-        self.acked_protocol_features.bits()
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {

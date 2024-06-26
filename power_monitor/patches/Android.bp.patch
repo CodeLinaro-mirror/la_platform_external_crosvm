@@ -1,0 +1,27 @@
+diff --git a/power_monitor/Android.bp b/power_monitor/Android.bp
+index 524ba3aaa..dd5547d9d 100644
+--- a/power_monitor/Android.bp
++++ b/power_monitor/Android.bp
+@@ -12,6 +12,13 @@ package {
+     default_applicable_licenses: ["external_crosvm_license"],
+ }
+ 
++genrule {
++    name: "copy_power_monitor_build_out",
++    srcs: ["out/*"],
++    cmd: "cp $(in) $(genDir)",
++    out: ["generated.rs"],
++}
++
+ rust_library {
+     name: "libpower_monitor",
+     defaults: ["crosvm_inner_defaults"],
+@@ -26,5 +33,8 @@ rust_library {
+         "libprotobuf",
+         "libthiserror",
+     ],
++    srcs: [
++        ":copy_power_monitor_build_out",
++    ],
+     proc_macros: ["libremain"],
+ }

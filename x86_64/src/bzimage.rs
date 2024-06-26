@@ -19,6 +19,7 @@ use vm_memory::GuestMemoryError;
 use zerocopy::AsBytes;
 
 use crate::bootparam::boot_params;
+use crate::bootparam::XLF_KERNEL_64;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -27,6 +28,8 @@ pub enum Error {
     BadSignature,
     #[error("guest memory error {0}")]
     GuestMemoryError(GuestMemoryError),
+    #[error("image does not support 64-bit entry point")]
+    ImageNot64Bit,
     #[error("invalid setup_header_end value {0}")]
     InvalidSetupHeaderEnd(usize),
     #[error("invalid setup_sects value {0}")]
@@ -98,6 +101,10 @@ where
     // bzImage header signature "HdrS"
     if params.hdr.header != 0x53726448 {
         return Err(Error::BadSignature);
+    }
+
+    if params.hdr.xloadflags & XLF_KERNEL_64 == 0 {
+        return Err(Error::ImageNot64Bit);
     }
 
     let setup_sects = if params.hdr.setup_sects == 0 {

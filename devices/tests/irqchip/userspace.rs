@@ -39,7 +39,6 @@ use hypervisor::DebugRegs;
 use hypervisor::DeliveryMode;
 use hypervisor::DestinationMode;
 use hypervisor::Fpu;
-use hypervisor::HypervHypercall;
 use hypervisor::IoParams;
 use hypervisor::IoapicRedirectionTableEntry;
 use hypervisor::IrqRoute;
@@ -626,12 +625,12 @@ struct FakeVcpu {
     id: usize,
     requested: Arc<Mutex<bool>>,
     ready: Arc<Mutex<bool>>,
-    injected: Arc<Mutex<Option<u32>>>,
+    injected: Arc<Mutex<Option<u8>>>,
 }
 
 impl FakeVcpu {
     /// Returns and clears the last interrupt set by `interrupt`.
-    fn clear_injected(&self) -> Option<u32> {
+    fn clear_injected(&self) -> Option<u8> {
         self.injected.lock().take()
     }
 
@@ -681,15 +680,6 @@ impl Vcpu for FakeVcpu {
     fn handle_io(&self, _handle_fn: &mut dyn FnMut(IoParams) -> Option<[u8; 8]>) -> Result<()> {
         unimplemented!()
     }
-    fn handle_hyperv_hypercall(&self, _func: &mut dyn FnMut(HypervHypercall) -> u64) -> Result<()> {
-        unimplemented!()
-    }
-    fn handle_rdmsr(&self, _data: u64) -> Result<()> {
-        unimplemented!()
-    }
-    fn handle_wrmsr(&self) {
-        unimplemented!()
-    }
     fn on_suspend(&self) -> Result<()> {
         unimplemented!()
     }
@@ -707,7 +697,7 @@ impl VcpuX86_64 for FakeVcpu {
         *self.ready.lock()
     }
 
-    fn interrupt(&self, irq: u32) -> Result<()> {
+    fn interrupt(&self, irq: u8) -> Result<()> {
         *self.injected.lock() = Some(irq);
         Ok(())
     }
@@ -771,9 +761,6 @@ impl VcpuX86_64 for FakeVcpu {
         unimplemented!()
     }
     fn handle_cpuid(&mut self, _entry: &CpuIdEntry) -> Result<()> {
-        unimplemented!()
-    }
-    fn get_hyperv_cpuid(&self) -> Result<CpuId> {
         unimplemented!()
     }
     fn set_guest_debug(&self, _addrs: &[GuestAddress], _enable_singlestep: bool) -> Result<()> {

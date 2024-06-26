@@ -15,7 +15,7 @@ rust_test {
     crate_name: "hypervisor",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -23,9 +23,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -38,9 +35,6 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -49,8 +43,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -60,7 +58,7 @@ rust_test {
     crate_name: "dirty_log",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/dirty_log.rs"],
+    crate_root: "tests/dirty_log.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -68,9 +66,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -83,10 +78,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -95,8 +87,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -106,7 +102,7 @@ rust_test {
     crate_name: "hypervisor_virtualization",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/hypervisor_virtualization.rs"],
+    crate_root: "tests/hypervisor_virtualization.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -114,9 +110,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -129,10 +122,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -141,8 +131,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -152,7 +146,7 @@ rust_test {
     crate_name: "kvm",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/kvm/main.rs"],
+    crate_root: "tests/kvm/main.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -160,9 +154,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -175,10 +166,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -187,8 +175,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -198,7 +190,7 @@ rust_test {
     crate_name: "mmio_and_pio",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/mmio_and_pio.rs"],
+    crate_root: "tests/mmio_and_pio.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -206,9 +198,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -221,10 +210,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -233,8 +219,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -244,7 +234,7 @@ rust_test {
     crate_name: "read_only_memory",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/read_only_memory.rs"],
+    crate_root: "tests/read_only_memory.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -252,9 +242,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -267,10 +254,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -279,8 +263,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -290,7 +278,7 @@ rust_test {
     crate_name: "real_run_addr",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/real_run_addr.rs"],
+    crate_root: "tests/real_run_addr.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -298,9 +286,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -313,10 +298,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -325,8 +307,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -336,7 +322,7 @@ rust_test {
     crate_name: "remove_memory",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/remove_memory.rs"],
+    crate_root: "tests/remove_memory.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -344,9 +330,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -359,10 +342,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -371,8 +351,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_test {
@@ -382,7 +366,7 @@ rust_test {
     crate_name: "tsc_offsets",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/tsc_offsets.rs"],
+    crate_root: "tests/tsc_offsets.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -390,9 +374,6 @@ rust_test {
     },
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -405,10 +386,7 @@ rust_test {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
         "libhypervisor",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",
@@ -417,8 +395,12 @@ rust_test {
         "libserde_json",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy",
     ],
-    proc_macros: ["libenumn"],
+    proc_macros: [
+        "libenumn",
+        "libhypervisor_test_macro",
+    ],
 }
 
 rust_library {
@@ -428,12 +410,9 @@ rust_library {
     crate_name: "hypervisor",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     features: [
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
         "geniezone",
         "gunyah",
     ],
@@ -446,9 +425,6 @@ rust_library {
         "libdata_model",
         "libdowncast_rs",
         "libfnv",
-        "libgdbstub",
-        "libgdbstub_arch",
-        "libkvm",
         "libkvm_sys",
         "liblibc",
         "libmemoffset",

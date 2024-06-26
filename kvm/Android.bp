@@ -19,7 +19,7 @@ rust_test {
     crate_name: "dirty_log",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/dirty_log.rs"],
+    crate_root: "tests/dirty_log.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -44,7 +44,7 @@ rust_test {
     crate_name: "kvm_tests",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/kvm_tests.rs"],
+    crate_root: "tests/kvm_tests.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -69,7 +69,7 @@ rust_test {
     crate_name: "read_only_memory",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/read_only_memory.rs"],
+    crate_root: "tests/read_only_memory.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -94,7 +94,7 @@ rust_test {
     crate_name: "real_run_adder",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/real_run_adder.rs"],
+    crate_root: "tests/real_run_adder.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -119,7 +119,7 @@ rust_library {
     crate_name: "kvm",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     rustlibs: [
         "libbase_rust",

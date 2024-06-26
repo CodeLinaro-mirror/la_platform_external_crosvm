@@ -74,6 +74,44 @@ const RTC_REG_D_VRT: u8 = 0x80; // RAM and time valid
 
 pub type CmosNowFn = fn() -> DateTime<Utc>;
 
+// Alarm state shared between Cmos and the alarm worker thread.
+struct AlarmState {
+    alarm: Timer,
+    vm_control: Tube,
+    irq: IrqEdgeEvent,
+    armed_time: Instant,
+    clear_evt: Option<Event>,
+}
+
+impl AlarmState {
+    fn trigger_rtc_interrupt(&self) -> anyhow::Result<Event> {
+        self.irq.trigger().context("failed to trigger irq")?;
+
+        let elapsed = self.armed_time.elapsed().as_millis();
+        log_metric(
+            MetricEventType::RtcWakeup,
+            elapsed.try_into().unwrap_or(i64::MAX),
+        );
+
+        let msg = vm_control::VmRequest::Rtc {
+            clear_evt: Event::new().context("failed to create clear event")?,
+        };
+
+        // The Linux kernel expects wakeups to come via ACPI when ACPI is enabled. There's
+        // no real way to determine that here, so just send this unconditionally.
+        self.vm_control.send(&msg).context("send failed")?;
+
+        let vm_control::VmRequest::Rtc { clear_evt } = msg else {
+            unreachable!("message type failure");
+        };
+
+        match self.vm_control.recv().context("recv failed")? {
+            VmResponse::Ok => Ok(clear_evt),
+            resp => Err(anyhow!("unexpected rtc response: {:?}", resp)),
+        }
+    }
+}
+
 /// A CMOS/RTC device commonly seen on x86 I/O port 0x70/0x71.
 #[derive(Serialize)]
 pub struct Cmos {
@@ -82,52 +120,16 @@ pub struct Cmos {
     data: [u8; DATA_LEN],
     #[serde(skip_serializing)] // skip serializing time function.
     now_fn: CmosNowFn,
-    #[serde(skip_serializing)] // skip serializing the timer
-    alarm: Arc<Mutex<Timer>>,
+    // alarm_time is re-loaded from data on deserialization, so there's
+    // no need to explicitly serialize it.
+    #[serde(skip_serializing)]
     alarm_time: Option<DateTime<Utc>>,
-    #[serde(skip_serializing)] // skip serializing the alarm function
-    alarm_fn: Option<AlarmFn>,
+    // alarm_state fields are either constant across snapshotting or
+    // reloaded from |data| on restore, so no need to serialize.
+    #[serde(skip_serializing)]
+    alarm_state: Arc<Mutex<AlarmState>>,
     #[serde(skip_serializing)] // skip serializing the worker thread
-    worker: Option<WorkerThread<AlarmFn>>,
-    #[serde(skip_serializing)] // skip serializing the armed time
-    armed_time: Option<Arc<Mutex<Instant>>>,
-}
-
-struct AlarmFn {
-    irq: IrqEdgeEvent,
-    vm_control: Tube,
-    armed_time: Arc<Mutex<Instant>>,
-}
-
-impl AlarmFn {
-    fn new(irq: IrqEdgeEvent, vm_control: Tube) -> Self {
-        Self {
-            irq,
-            vm_control,
-            // Not actually armed, but simpler than wrapping with an Option.
-            armed_time: Arc::new(Mutex::new(Instant::now())),
-        }
-    }
-
-    fn fire(&self) -> anyhow::Result<()> {
-        self.irq.trigger().context("failed to trigger irq")?;
-
-        let elapsed = self.armed_time.lock().elapsed().as_millis();
-        log_metric(
-            MetricEventType::RtcWakeup,
-            elapsed.try_into().unwrap_or(i64::MAX),
-        );
-
-        // The Linux kernel expects wakeups to come via ACPI when ACPI is enabled. There's
-        // no real way to determine that here, so just send this unconditionally.
-        self.vm_control
-            .send(&vm_control::VmRequest::Rtc)
-            .context("send failed")?;
-        match self.vm_control.recv().context("recv failed")? {
-            VmResponse::Ok => Ok(()),
-            resp => Err(anyhow!("unexpected rtc response: {:?}", resp)),
-        }
-    }
+    worker: Option<WorkerThread<()>>,
 }
 
 impl Cmos {
@@ -141,20 +143,6 @@ impl Cmos {
         now_fn: CmosNowFn,
         vm_control: Tube,
         irq: IrqEdgeEvent,
-    ) -> anyhow::Result<Cmos> {
-        Self::new_inner(
-            mem_below_4g,
-            mem_above_4g,
-            now_fn,
-            Some(AlarmFn::new(irq, vm_control)),
-        )
-    }
-
-    fn new_inner(
-        mem_below_4g: u64,
-        mem_above_4g: u64,
-        now_fn: CmosNowFn,
-        alarm_fn: Option<AlarmFn>,
     ) -> anyhow::Result<Cmos> {
         let mut data = [0u8; DATA_LEN];
 
@@ -174,31 +162,33 @@ impl Cmos {
         data[0x5c] = (high_mem >> 8) as u8;
         data[0x5d] = (high_mem >> 16) as u8;
 
-        let armed_time = alarm_fn.as_ref().map(|a| a.armed_time.clone());
         Ok(Cmos {
             index: 0,
             data,
             now_fn,
-            alarm: Arc::new(Mutex::new(Timer::new().context("cmos timer")?)),
             alarm_time: None,
-            alarm_fn,
+            alarm_state: Arc::new(Mutex::new(AlarmState {
+                alarm: Timer::new().context("cmos timer")?,
+                irq,
+                vm_control,
+                // Not actually armed, but simpler than wrapping with an Option.
+                armed_time: Instant::now(),
+                clear_evt: None,
+            })),
             worker: None,
-            armed_time,
         })
     }
 
-    fn spawn_worker(&mut self) {
-        let alarm = self.alarm.clone();
-        let alarm_fn = self.alarm_fn.take().expect("no alarm function");
+    fn spawn_worker(&mut self, alarm_state: Arc<Mutex<AlarmState>>) {
         self.worker = Some(WorkerThread::start("CMOS_alarm", move |kill_evt| {
-            if let Err(e) = run_cmos_worker(alarm, kill_evt, &alarm_fn) {
+            if let Err(e) = run_cmos_worker(alarm_state, kill_evt) {
                 error!("Failed to spawn worker {:?}", e);
             }
-            alarm_fn
         }));
     }
 
     fn set_alarm(&mut self) {
+        let mut state = self.alarm_state.lock();
         if self.data[RTC_REG_B as usize] & RTC_REG_B_ALARM_ENABLE != 0 {
             let now = (self.now_fn)();
             let target = alarm_from_registers(now.year(), &self.data).and_then(|this_year| {
@@ -221,55 +211,64 @@ impl Cmos {
             if let Some(target) = target {
                 if Some(target) != self.alarm_time {
                     self.alarm_time = Some(target);
-
-                    if self.alarm_fn.is_some() {
-                        self.spawn_worker();
-                    }
-                    if let Some(armed_time) = self.armed_time.as_ref() {
-                        *armed_time.lock() = Instant::now();
-                    }
+                    state.armed_time = Instant::now();
 
                     let duration = target
                         .signed_duration_since(now)
                         .to_std()
                         .unwrap_or(Duration::new(0, 0));
-                    if let Err(e) = self.alarm.lock().reset(duration, None) {
+                    if let Err(e) = state.alarm.reset_oneshot(duration) {
                         error!("Failed to set alarm {:?}", e);
                     }
                 }
             }
         } else if self.alarm_time.take().is_some() {
-            if let Err(e) = self.alarm.lock().clear() {
+            if let Err(e) = state.alarm.clear() {
                 error!("Failed to clear alarm {:?}", e);
             }
+            if let Some(clear_evt) = state.clear_evt.take() {
+                if let Err(e) = clear_evt.signal() {
+                    error!("failed to clear rtc pm signal {:?}", e);
+                }
+            }
+        }
+
+        let needs_worker = self.alarm_time.is_some();
+        drop(state);
+
+        if needs_worker && self.worker.is_none() {
+            self.spawn_worker(self.alarm_state.clone());
         }
     }
 }
 
-fn run_cmos_worker(
-    alarm: Arc<Mutex<Timer>>,
-    kill_evt: Event,
-    alarm_fn: &AlarmFn,
-) -> anyhow::Result<()> {
+fn run_cmos_worker(alarm_state: Arc<Mutex<AlarmState>>, kill_evt: Event) -> anyhow::Result<()> {
     #[derive(EventToken)]
     enum Token {
         Alarm,
         Kill,
     }
 
-    let wait_ctx: WaitContext<Token> =
-        WaitContext::build_with(&[(&*alarm.lock(), Token::Alarm), (&kill_evt, Token::Kill)])
-            .context("worker context failed")?;
+    let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
+        (&alarm_state.lock().alarm, Token::Alarm),
+        (&kill_evt, Token::Kill),
+    ])
+    .context("worker context failed")?;
 
     loop {
         let events = wait_ctx.wait().context("wait failed")?;
+        let mut state = alarm_state.lock();
         for event in events.iter().filter(|e| e.is_readable) {
             match event.token {
                 Token::Alarm => {
-                    if alarm.lock().mark_waited().context("timer ack failed")? {
+                    if state.alarm.mark_waited().context("timer ack failed")? {
                         continue;
                     }
-                    alarm_fn.fire()?;
+
+                    match state.trigger_rtc_interrupt() {
+                        Ok(clear_evt) => state.clear_evt = Some(clear_evt),
+                        Err(e) => error!("Failed to send rtc {:?}", e),
+                    }
                 }
                 Token::Kill => return Ok(()),
             }
@@ -427,15 +426,13 @@ impl Suspendable for Cmos {
 
     fn sleep(&mut self) -> anyhow::Result<()> {
         if let Some(worker) = self.worker.take() {
-            self.alarm_fn = Some(worker.stop());
+            worker.stop();
         }
         Ok(())
     }
 
     fn wake(&mut self) -> anyhow::Result<()> {
-        if self.alarm_time.is_some() {
-            self.spawn_worker();
-        }
+        self.spawn_worker(self.alarm_state.clone());
         Ok(())
     }
 }
@@ -518,9 +515,14 @@ mod tests {
         timestamp_to_datetime(1483228800)
     }
 
+    fn new_cmos_for_test(now_fn: CmosNowFn) -> Cmos {
+        let irq = IrqEdgeEvent::new().unwrap();
+        Cmos::new(1024, 0, now_fn, Tube::pair().unwrap().0, irq).unwrap()
+    }
+
     #[test]
     fn cmos_write_index() {
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_party_like_its_1999, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_party_like_its_1999);
         // Write index.
         cmos.write(
             BusAccessInfo {
@@ -535,7 +537,7 @@ mod tests {
 
     #[test]
     fn cmos_write_data() {
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_party_like_its_1999, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_party_like_its_1999);
         // Write data 0x01 at index 0x41.
         cmos.write(
             BusAccessInfo {
@@ -575,7 +577,7 @@ mod tests {
 
     #[test]
     fn cmos_date_time_1999() {
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_party_like_its_1999, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_party_like_its_1999);
         assert_eq!(read_reg(&mut cmos, 0x00), 0x59); // seconds
         assert_eq!(read_reg(&mut cmos, 0x02), 0x59); // minutes
         assert_eq!(read_reg(&mut cmos, 0x04), 0x23); // hours
@@ -588,7 +590,7 @@ mod tests {
 
     #[test]
     fn cmos_date_time_2000() {
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_y2k_compliant, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_y2k_compliant);
         assert_eq!(read_reg(&mut cmos, 0x00), 0x00); // seconds
         assert_eq!(read_reg(&mut cmos, 0x02), 0x00); // minutes
         assert_eq!(read_reg(&mut cmos, 0x04), 0x00); // hours
@@ -601,7 +603,7 @@ mod tests {
 
     #[test]
     fn cmos_date_time_before_leap_second() {
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_2016_before_leap_second, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_2016_before_leap_second);
         assert_eq!(read_reg(&mut cmos, 0x00), 0x59); // seconds
         assert_eq!(read_reg(&mut cmos, 0x02), 0x59); // minutes
         assert_eq!(read_reg(&mut cmos, 0x04), 0x23); // hours
@@ -614,7 +616,7 @@ mod tests {
 
     #[test]
     fn cmos_date_time_after_leap_second() {
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_2017_after_leap_second, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_2017_after_leap_second);
         assert_eq!(read_reg(&mut cmos, 0x00), 0x00); // seconds
         assert_eq!(read_reg(&mut cmos, 0x02), 0x00); // minutes
         assert_eq!(read_reg(&mut cmos, 0x04), 0x00); // hours
@@ -629,7 +631,7 @@ mod tests {
     fn cmos_alarm() {
         // 2000-01-02T03:04:05+00:00
         let now_fn = || timestamp_to_datetime(946782245);
-        let mut cmos = Cmos::new_inner(1024, 0, now_fn, None).unwrap();
+        let mut cmos = new_cmos_for_test(now_fn);
 
         // A date later this year
         write_reg(&mut cmos, 0x01, 0x06); // seconds
@@ -671,14 +673,14 @@ mod tests {
 
     #[test]
     fn cmos_reg_d() {
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_party_like_its_1999, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_party_like_its_1999);
         assert_eq!(read_reg(&mut cmos, 0x0d), 0x80) // RAM and time are valid
     }
 
     #[test]
     fn cmos_snapshot_restore() -> anyhow::Result<()> {
         // time function doesn't matter in this case.
-        let mut cmos = Cmos::new_inner(1024, 0, test_now_party_like_its_1999, None).unwrap();
+        let mut cmos = new_cmos_for_test(test_now_party_like_its_1999);
 
         let info_index = BusAccessInfo {
             offset: 0,
@@ -715,9 +717,9 @@ mod tests {
     #[test]
     fn cmos_sleep_wake() {
         // 2000-01-02T03:04:05+00:00
+        let irq = IrqEdgeEvent::new().unwrap();
         let now_fn = || timestamp_to_datetime(946782245);
-        let alarm_fn = AlarmFn::new(IrqEdgeEvent::new().unwrap(), Tube::pair().unwrap().0);
-        let mut cmos = Cmos::new_inner(1024, 0, now_fn, Some(alarm_fn)).unwrap();
+        let mut cmos = Cmos::new(1024, 0, now_fn, Tube::pair().unwrap().0, irq).unwrap();
 
         // A date later this year
         write_reg(&mut cmos, 0x01, 0x06); // seconds
@@ -739,22 +741,22 @@ mod tests {
 
     suspendable_tests!(
         cmos1999,
-        Cmos::new_inner(1024, 0, test_now_party_like_its_1999, None).unwrap(),
+        new_cmos_for_test(test_now_party_like_its_1999),
         modify_device
     );
     suspendable_tests!(
         cmos2k,
-        Cmos::new_inner(1024, 0, test_now_y2k_compliant, None).unwrap(),
+        new_cmos_for_test(test_now_y2k_compliant),
         modify_device
     );
     suspendable_tests!(
         cmos2016,
-        Cmos::new_inner(1024, 0, test_now_2016_before_leap_second, None).unwrap(),
+        new_cmos_for_test(test_now_2016_before_leap_second),
         modify_device
     );
     suspendable_tests!(
         cmos2017,
-        Cmos::new_inner(1024, 0, test_now_2017_after_leap_second, None).unwrap(),
+        new_cmos_for_test(test_now_2017_after_leap_second),
         modify_device
     );
 }

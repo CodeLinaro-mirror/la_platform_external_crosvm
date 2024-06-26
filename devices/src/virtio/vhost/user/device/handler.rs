@@ -133,19 +133,18 @@ pub trait VhostUserDevice {
     fn features(&self) -> u64;
 
     /// Acknowledges that this set of features should be enabled.
-    fn ack_features(&mut self, value: u64) -> anyhow::Result<()>;
-
-    /// Returns the set of enabled features.
-    fn acked_features(&self) -> u64;
+    ///
+    /// Implementations only need to handle device-specific feature bits; the `DeviceRequestHandler`
+    /// framework will manage generic vhost and vring features.
+    ///
+    /// `DeviceRequestHandler` checks for valid features before calling this function, so the
+    /// features in `value` will always be a subset of those advertised by `features()`.
+    fn ack_features(&mut self, _value: u64) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     /// The set of protocol feature bits that this backend supports.
     fn protocol_features(&self) -> VhostUserProtocolFeatures;
-
-    /// Acknowledges that this set of protocol features should be enabled.
-    fn ack_protocol_features(&mut self, _value: u64) -> anyhow::Result<()>;
-
-    /// Returns the set of enabled protocol features.
-    fn acked_protocol_features(&self) -> u64;
 
     /// Reads this device configuration space at `offset`.
     fn read_config(&self, offset: u64, dst: &mut [u8]);
@@ -185,9 +184,7 @@ pub trait VhostUserDevice {
     ///
     /// This method will be called when `VhostUserProtocolFeatures::BACKEND_REQ` is
     /// negotiated.
-    fn set_backend_req_connection(&mut self, _conn: Arc<VhostBackendReqConnection>) {
-        error!("set_backend_req_connection is not implemented");
-    }
+    fn set_backend_req_connection(&mut self, _conn: Arc<VhostBackendReqConnection>) {}
 
     /// Used to stop non queue workers that `VhostUserDevice::stop_queue` can't stop. May or may
     /// not also stop all queue workers.
@@ -362,12 +359,16 @@ pub struct DeviceRequestHandler<T: VhostUserDevice> {
     owned: bool,
     vmm_maps: Option<Vec<MappingInfo>>,
     mem: Option<GuestMemory>,
+    acked_features: u64,
+    acked_protocol_features: VhostUserProtocolFeatures,
     backend: T,
     backend_req_connection: Arc<Mutex<VhostBackendReqConnectionState>>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct DeviceRequestHandlerSnapshot {
+    acked_features: u64,
+    acked_protocol_features: u64,
     vrings: Vec<VringSnapshot>,
     backend: Vec<u8>,
 }
@@ -385,6 +386,8 @@ impl<T: VhostUserDevice> DeviceRequestHandler<T> {
             owned: false,
             vmm_maps: None,
             mem: None,
+            acked_features: 0,
+            acked_protocol_features: VhostUserProtocolFeatures::empty(),
             backend,
             backend_req_connection: Arc::new(Mutex::new(
                 VhostBackendReqConnectionState::NoConnection,
@@ -416,6 +419,7 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
 
     fn reset_owner(&mut self) -> VhostResult<()> {
         self.owned = false;
+        self.acked_features = 0;
         self.backend.reset();
         Ok(())
     }
@@ -430,7 +434,9 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
             return Err(VhostError::InvalidOperation);
         }
 
-        if (features & !(self.backend.features())) != 0 {
+        let unexpected_features = features & !self.backend.features();
+        if unexpected_features != 0 {
+            error!("unexpected set_features {:#x}", unexpected_features);
             return Err(VhostError::InvalidParam);
         }
 
@@ -439,6 +445,8 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
             return Err(VhostError::InvalidOperation);
         }
 
+        self.acked_features |= features;
+
         // If VHOST_USER_F_PROTOCOL_FEATURES has not been negotiated, the ring is initialized in an
         // enabled state.
         // If VHOST_USER_F_PROTOCOL_FEATURES has been negotiated, the ring is initialized in a
@@ -446,8 +454,7 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
         // Client must not pass data to/from the backend until ring is enabled by
         // VHOST_USER_SET_VRING_ENABLE with parameter 1, or after it has been disabled by
         // VHOST_USER_SET_VRING_ENABLE with parameter 0.
-        let acked_features = self.backend.acked_features();
-        let vring_enabled = acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0;
+        let vring_enabled = self.acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0;
         for v in &mut self.vrings {
             v.enabled = vring_enabled;
         }
@@ -460,10 +467,18 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
     }
 
     fn set_protocol_features(&mut self, features: u64) -> VhostResult<()> {
-        if let Err(e) = self.backend.ack_protocol_features(features) {
-            error!("failed to set protocol features 0x{:x}: {}", features, e);
-            return Err(VhostError::InvalidOperation);
-        }
+        let features = match VhostUserProtocolFeatures::from_bits(features) {
+            Some(proto_features) => proto_features,
+            None => {
+                error!(
+                    "unsupported bits in VHOST_USER_SET_PROTOCOL_FEATURES: {:#x}",
+                    features
+                );
+                return Err(VhostError::InvalidOperation);
+            }
+        };
+        let supported = self.backend.protocol_features();
+        self.acked_protocol_features = features & supported;
         Ok(())
     }
 
@@ -567,7 +582,7 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
         let kick_evt = VhostUserRegularOps::set_vring_kick(index, file)?;
 
         // Enable any virtqueue features that were negotiated (like VIRTIO_RING_F_EVENT_IDX).
-        vring.queue.ack_features(self.backend.acked_features());
+        vring.queue.ack_features(self.acked_features);
         vring.queue.set_ready(true);
 
         let mem = self
@@ -631,7 +646,7 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
 
         // This request should be handled only when VHOST_USER_F_PROTOCOL_FEATURES
         // has been negotiated.
-        if self.backend.acked_features() & 1 << VHOST_USER_F_PROTOCOL_FEATURES == 0 {
+        if self.acked_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES == 0 {
             return Err(VhostError::InvalidOperation);
         }
 
@@ -756,6 +771,8 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
 
     fn snapshot(&mut self) -> VhostResult<Vec<u8>> {
         match serde_json::to_vec(&DeviceRequestHandlerSnapshot {
+            acked_features: self.acked_features,
+            acked_protocol_features: self.acked_protocol_features.bits(),
             vrings: self
                 .vrings
                 .iter()
@@ -778,6 +795,18 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
                 error!("Failed to deserialize DeviceRequestHandlerSnapshot: {}", e);
                 VhostError::DeserializationFailed
             })?;
+
+        self.acked_features = device_request_handler_snapshot.acked_features;
+        self.acked_protocol_features = VhostUserProtocolFeatures::from_bits(
+            device_request_handler_snapshot.acked_protocol_features,
+        )
+        .with_context(|| {
+            format!(
+                "unsupported bits in acked_protocol_features: {:#x}",
+                device_request_handler_snapshot.acked_protocol_features
+            )
+        })
+        .map_err(VhostError::RestoreError)?;
 
         let mem = self.mem.as_ref().ok_or(VhostError::InvalidOperation)?;
 
@@ -998,7 +1027,6 @@ mod tests {
     use std::sync::mpsc::channel;
     use std::sync::Barrier;
 
-    use anyhow::anyhow;
     use anyhow::bail;
     use base::Event;
     use vmm_vhost::BackendServer;
@@ -1025,7 +1053,6 @@ mod tests {
     pub(super) struct FakeBackend {
         avail_features: u64,
         acked_features: u64,
-        acked_protocol_features: VhostUserProtocolFeatures,
         active_queues: Vec<Option<Queue>>,
         allow_backend_req: bool,
         backend_conn: Option<Arc<VhostBackendReqConnection>>,
@@ -1040,7 +1067,6 @@ mod tests {
             Self {
                 avail_features: 1 << VHOST_USER_F_PROTOCOL_FEATURES,
                 acked_features: 0,
-                acked_protocol_features: VhostUserProtocolFeatures::empty(),
                 active_queues,
                 allow_backend_req: false,
                 backend_conn: None,
@@ -1069,30 +1095,12 @@ mod tests {
             Ok(())
         }
 
-        fn acked_features(&self) -> u64 {
-            self.acked_features
-        }
-
         fn protocol_features(&self) -> VhostUserProtocolFeatures {
             let mut features = VhostUserProtocolFeatures::CONFIG;
             if self.allow_backend_req {
                 features |= VhostUserProtocolFeatures::BACKEND_REQ;
             }
             features
-        }
-
-        fn ack_protocol_features(&mut self, features: u64) -> anyhow::Result<()> {
-            let features = VhostUserProtocolFeatures::from_bits(features).ok_or(anyhow!(
-                "invalid protocol features are given: 0x{:x}",
-                features
-            ))?;
-            let supported = self.protocol_features();
-            self.acked_protocol_features = features & supported;
-            Ok(())
-        }
-
-        fn acked_protocol_features(&self) -> u64 {
-            self.acked_protocol_features.bits()
         }
 
         fn read_config(&self, offset: u64, dst: &mut [u8]) {

@@ -19,7 +19,7 @@ rust_library {
     crate_name: "rutabaga_gfx",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.3",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     features: [
         "gfxstream",
@@ -57,9 +57,9 @@ rust_library {
         },
     },
     static_libs: [
+        "libdrm",
         "libepoxy",
         "libgbm",
-        "libdrm",
         "libgfxstream_backend",
         "libvirglrenderer",
     ],
@@ -110,7 +110,7 @@ rust_test {
     crate_name: "rutabaga_gfx",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.3",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
