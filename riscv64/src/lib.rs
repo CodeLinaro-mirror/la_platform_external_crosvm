@@ -22,6 +22,7 @@ use arch::VmImage;
 use base::Event;
 use base::Tube;
 use base::SendTube;
+use base::Tube;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
 use devices::Bus;
