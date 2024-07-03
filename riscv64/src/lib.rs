@@ -20,7 +20,6 @@ use arch::RunnableLinuxVm;
 use arch::VmComponents;
 use arch::VmImage;
 use base::Event;
-use base::Tube;
 use base::SendTube;
 use base::Tube;
 use devices::serial_device::SerialHardware;
