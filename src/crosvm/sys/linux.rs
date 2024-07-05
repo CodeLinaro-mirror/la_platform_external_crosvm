@@ -174,6 +174,7 @@ use resources::SystemAllocator;
 #[cfg(target_arch = "riscv64")]
 use riscv64::Riscv64 as Arch;
 use rutabaga_gfx::RutabagaGralloc;
+use rutabaga_gfx::RutabagaGrallocBackendFlags;
 use smallvec::SmallVec;
 #[cfg(feature = "swap")]
 use swap::SwapController;
@@ -2181,7 +2182,8 @@ where
             })?
     };
 
-    let gralloc = RutabagaGralloc::new().context("failed to create gralloc")?;
+    let flags = RutabagaGrallocBackendFlags::new().disable_vulkano();
+    let gralloc = RutabagaGralloc::new(flags).context("failed to create gralloc")?;
 
     run_control(
         linux,
@@ -3525,6 +3527,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             #[cfg(target_arch = "x86_64")]
             bus_lock_ratelimit_ctrl,
             run_mode,
+            cfg.boost_uclamp,
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
     }
