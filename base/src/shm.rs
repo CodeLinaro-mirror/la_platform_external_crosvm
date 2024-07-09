@@ -10,7 +10,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::descriptor::AsRawDescriptor;
-use crate::descriptor::IntoRawDescriptor;
 use crate::descriptor::SafeDescriptor;
 use crate::Error;
 use crate::RawDescriptor;
@@ -57,8 +56,10 @@ impl SharedMemory {
     /// Clones the SharedMemory. The new SharedMemory will refer to the same
     /// underlying object as the original.
     pub fn try_clone(&self) -> Result<SharedMemory> {
-        let shmem_descriptor = SafeDescriptor::try_from(self as &dyn AsRawDescriptor)?;
-        SharedMemory::from_safe_descriptor(shmem_descriptor, self.size())
+        Ok(SharedMemory {
+            descriptor: self.descriptor.try_clone()?,
+            size: self.size,
+        })
     }
 }
 
@@ -68,12 +69,6 @@ impl SharedMemory {
 impl AsRawDescriptor for SharedMemory {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.descriptor.as_raw_descriptor()
-    }
-}
-
-impl IntoRawDescriptor for SharedMemory {
-    fn into_raw_descriptor(self) -> RawDescriptor {
-        self.descriptor.into_raw_descriptor()
     }
 }
 
