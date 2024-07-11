@@ -57,9 +57,7 @@ rust_library {
         },
     },
     static_libs: [
-        "libdrm",
         "libepoxy",
-        "libgbm",
         "libgfxstream_backend",
         "libvirglrenderer",
     ],
@@ -132,11 +130,7 @@ rust_test {
     proc_macros: ["libremain"],
     shared_libs: [
         "libepoxy",
-        "libgbm",
         "libgfxstream_backend",
         "libvirglrenderer",
-    ],
-    static_libs: [
-        "libdrm",
     ],
 }
