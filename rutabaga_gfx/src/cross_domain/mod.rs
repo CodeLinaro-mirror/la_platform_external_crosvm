@@ -751,11 +751,12 @@ impl RutabagaContext for CrossDomainContext {
         }
     }
 
-    fn submit_cmd(&mut self, mut commands: &mut [u8], fence_ids: &[u64]) -> RutabagaResult<()> {
-        if !fence_ids.is_empty() {
-            return Err(RutabagaError::Unsupported);
-        }
-
+    fn submit_cmd(
+        &mut self,
+        mut commands: &mut [u8],
+        _fence_ids: &[u64],
+        _shareable_fences: Vec<RutabagaHandle>,
+    ) -> RutabagaResult<()> {
         while !commands.is_empty() {
             let hdr = CrossDomainHeader::read_from_prefix(commands.as_bytes())
                 .ok_or(RutabagaError::InvalidCommandBuffer)?;
@@ -862,7 +863,10 @@ impl RutabagaContext for CrossDomainContext {
             .remove(&resource.resource_id);
     }
 
-    fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
+    fn context_create_fence(
+        &mut self,
+        fence: RutabagaFence,
+    ) -> RutabagaResult<Option<RutabagaHandle>> {
         match fence.ring_idx as u32 {
             CROSS_DOMAIN_QUERY_RING => self.fence_handler.call(fence),
             CROSS_DOMAIN_CHANNEL_RING => {
@@ -873,7 +877,7 @@ impl RutabagaContext for CrossDomainContext {
             _ => return Err(RutabagaError::SpecViolation("unexpected ring type")),
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn component_type(&self) -> RutabagaComponentType {

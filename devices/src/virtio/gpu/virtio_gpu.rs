@@ -848,7 +848,7 @@ impl VirtioGpu {
     }
 
     /// If supported, export the fence with the given `fence_id` to a file.
-    pub fn export_fence(&self, fence_id: u64) -> ResourceResponse {
+    pub fn export_fence(&mut self, fence_id: u64) -> ResourceResponse {
         match self.rutabaga.export_fence(fence_id) {
             Ok(handle) => ResourceResponse::Resource(ResourceInfo::Fence {
                 handle: to_safe_descriptor(handle.os_handle),
@@ -873,7 +873,7 @@ impl VirtioGpu {
                 index
             );
             Ok(OkCapsetInfo {
-                capset_id: u32::max_value(),
+                capset_id: u32::MAX,
                 version: 0,
                 size: 0,
             })
