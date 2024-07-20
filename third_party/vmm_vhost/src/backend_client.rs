@@ -246,32 +246,6 @@ impl BackendClient {
         self.wait_for_ack(&hdr)
     }
 
-    /// Put the device to sleep.
-    pub fn sleep(&self) -> Result<()> {
-        let hdr = self.send_request_header(FrontendReq::SLEEP, None)?;
-        let reply = self.recv_reply::<VhostUserSuccess>(&hdr)?;
-        if !reply.success() {
-            Err(VhostUserError::SleepError(anyhow!(
-                "Device process responded with a failure on SLEEP."
-            )))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Wake the device up.
-    pub fn wake(&self) -> Result<()> {
-        let hdr = self.send_request_header(FrontendReq::WAKE, None)?;
-        let reply = self.recv_reply::<VhostUserSuccess>(&hdr)?;
-        if !reply.success() {
-            Err(VhostUserError::WakeError(anyhow!(
-                "Device process responded with a failure on WAKE."
-            )))
-        } else {
-            Ok(())
-        }
-    }
-
     /// Snapshot the device and receive serialized state of the device.
     pub fn snapshot(&self) -> Result<Vec<u8>> {
         let hdr = self.send_request_header(FrontendReq::SNAPSHOT, None)?;
@@ -286,22 +260,10 @@ impl BackendClient {
     }
 
     /// Restore the device.
-    pub fn restore(&mut self, data_bytes: &[u8], queue_evts: Option<Vec<Event>>) -> Result<()> {
+    pub fn restore(&mut self, data_bytes: &[u8]) -> Result<()> {
         let body = VhostUserEmptyMsg;
 
-        let queue_evt_fds: Option<Vec<RawDescriptor>> = queue_evts.as_ref().map(|queue_evts| {
-            queue_evts
-                .iter()
-                .map(|queue_evt| queue_evt.as_raw_descriptor())
-                .collect()
-        });
-
-        let hdr = self.send_request_with_payload(
-            FrontendReq::RESTORE,
-            &body,
-            data_bytes,
-            queue_evt_fds.as_deref(),
-        )?;
+        let hdr = self.send_request_with_payload(FrontendReq::RESTORE, &body, data_bytes, None)?;
         let reply = self.recv_reply::<VhostUserSuccess>(&hdr)?;
         if !reply.success() {
             Err(VhostUserError::RestoreError(anyhow!(
@@ -319,12 +281,7 @@ impl BackendClient {
         }
         let hdr = self.send_request_header(FrontendReq::GET_PROTOCOL_FEATURES, None)?;
         let val = self.recv_reply::<VhostUserU64>(&hdr)?;
-        // Should we support forward compatibility?
-        // If so just mask out unrecognized flags instead of return errors.
-        match VhostUserProtocolFeatures::from_bits(val.value) {
-            Some(val) => Ok(val),
-            None => Err(VhostUserError::InvalidMessage),
-        }
+        Ok(VhostUserProtocolFeatures::from_bits_truncate(val.value))
     }
 
     /// Enable protocol features in the underlying vhost implementation.
@@ -727,6 +684,7 @@ mod tests {
     use crate::tests::create_pair;
 
     const BUFFER_SIZE: usize = 0x1001;
+    const INVALID_PROTOCOL_FEATURE: u64 = 1 << 63;
 
     #[test]
     fn create_backend_client() {
@@ -815,7 +773,8 @@ mod tests {
 
         let pfeatures = VhostUserProtocolFeatures::all();
         let hdr = VhostUserMsgHeader::new(FrontendReq::GET_PROTOCOL_FEATURES, 0x4, 8);
-        let msg = VhostUserU64::new(pfeatures.bits());
+        // Unknown feature bits should be ignored.
+        let msg = VhostUserU64::new(pfeatures.bits() | INVALID_PROTOCOL_FEATURE);
         peer.send_message(&hdr, &msg, None).unwrap();
         let features = backend_client.get_protocol_features().unwrap();
         assert_eq!(features, pfeatures);
