@@ -65,6 +65,6 @@ rust_library {
     ],
     visibility: [
         "//packages/modules/Virtualization/authfs",
-        "//packages/modules/Virtualization/zipfuse",
+        "//packages/modules/Virtualization/guest/zipfuse",
     ],
 }
