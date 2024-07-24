@@ -64,7 +64,8 @@ rust_library {
         "libremain",
     ],
     visibility: [
-        "//packages/modules/Virtualization/authfs",
+        "//packages/modules/Virtualization/guest/authfs",
         "//packages/modules/Virtualization/guest/zipfuse",
+        "//packages/modules/Virtualization/tests/authfs",
     ],
 }
