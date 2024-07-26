@@ -40,7 +40,7 @@ noncoherent-dma = []
 argh = "0.1.7"
 async-task = "4"
 acpi_tables = {path = "../acpi_tables" }
-anyhow = "*"
+anyhow = "1"
 async-trait = "0.1.36"
 audio_streams = "*"
 audio_util = { path = "../audio_util" }
@@ -63,7 +63,7 @@ gpu_display = { path = "../gpu_display", optional = true }
 rutabaga_gfx = { path = "../rutabaga_gfx" }
 hypervisor = { path = "../hypervisor" }
 kvm_sys = { path = "../kvm_sys" }
-libc = "*"
+libc = "0.2"
 libvda = { path = "../media/libvda", optional = true }
 linux_input_sys = { path = "../linux_input_sys" }
 memoffset = { version = "0.6" }
@@ -75,7 +75,7 @@ power_monitor = { path = "../power_monitor" }
 protobuf = { version = "3.2", optional = true }
 protos = { path = "../protos", optional = true }
 rand = "0.8"
-remain = "*"
+remain = "0.2"
 resources = { path = "../resources" }
 serde = { version = "1", features = [ "derive", "rc" ] }
 serde_json = "1"
@@ -95,10 +95,11 @@ zerocopy = { version = "0.7", features = ["derive"] }
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 android_audio = { path = "../android_audio" }
 fuse = {path = "../fuse" }
+jail = { path = "../jail" }
 libcras = { version = "*", optional = true }
 minijail = "*"
 net_sys = { path = "../net_sys" }
-p9 = "*"
+p9 = "0.2"
 usb_util = { path = "../usb_util" }
 vfio_sys = { path = "../vfio_sys" }
 vhost = { path = "../vhost" }
@@ -108,10 +109,10 @@ broker_ipc = { path = "../broker_ipc" }
 tube_transporter = { path = "../tube_transporter" }
 win_audio = { path = "../win_audio"}
 win_util = { path = "../win_util"}
-winapi = "*"
+winapi = "0.3"
 
 [dependencies.futures]
-version = "*"
+version = "0.3"
 features = ["async-await", "std"]
 default-features = false
 

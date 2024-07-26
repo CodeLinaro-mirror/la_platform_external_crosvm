@@ -19,7 +19,7 @@ rust_library {
     crate_name: "x86_64",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     features: [
         "gdb",
@@ -73,7 +73,7 @@ rust_test {
     crate_name: "x86_64",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -132,7 +132,7 @@ rust_test {
     crate_name: "integration",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/integration/main.rs"],
+    crate_root: "tests/integration/main.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -192,7 +192,7 @@ rust_test {
     crate_name: "linux",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/linux.rs"],
+    crate_root: "tests/linux.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {

@@ -19,7 +19,7 @@ rust_library {
     crate_name: "crosvm_cli",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     rustlibs: [
         "libanyhow",

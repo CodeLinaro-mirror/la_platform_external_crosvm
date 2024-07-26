@@ -5,7 +5,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use argh::FromArgs;
@@ -73,8 +72,6 @@ impl VhostUserDeviceBuilder for VhostUserConsoleDevice {
 
         let backend = ConsoleBackend {
             device: *self,
-            acked_features: 0,
-            acked_protocol_features: VhostUserProtocolFeatures::empty(),
             ex: ex.clone(),
             active_queues,
         };
@@ -86,8 +83,6 @@ impl VhostUserDeviceBuilder for VhostUserConsoleDevice {
 
 struct ConsoleBackend {
     device: VhostUserConsoleDevice,
-    acked_features: u64,
-    acked_protocol_features: VhostUserProtocolFeatures,
     ex: Executor,
     active_queues: Vec<Option<Arc<Mutex<Queue>>>>,
 }
@@ -101,35 +96,8 @@ impl VhostUserDevice for ConsoleBackend {
         self.device.console.avail_features() | 1 << VHOST_USER_F_PROTOCOL_FEATURES
     }
 
-    fn ack_features(&mut self, value: u64) -> anyhow::Result<()> {
-        let unrequested_features = value & !self.features();
-        if unrequested_features != 0 {
-            bail!("invalid features are given: {:#x}", unrequested_features);
-        }
-
-        self.acked_features |= value;
-
-        Ok(())
-    }
-
-    fn acked_features(&self) -> u64 {
-        self.acked_features
-    }
-
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
         VhostUserProtocolFeatures::CONFIG | VhostUserProtocolFeatures::MQ
-    }
-
-    fn ack_protocol_features(&mut self, features: u64) -> anyhow::Result<()> {
-        let features = VhostUserProtocolFeatures::from_bits(features)
-            .ok_or_else(|| anyhow!("invalid protocol features are given: {:#x}", features))?;
-        let supported = self.protocol_features();
-        self.acked_protocol_features = features & supported;
-        Ok(())
-    }
-
-    fn acked_protocol_features(&self) -> u64 {
-        self.acked_protocol_features.bits()
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {

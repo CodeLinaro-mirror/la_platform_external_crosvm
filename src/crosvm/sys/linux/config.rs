@@ -137,6 +137,11 @@ impl FromStr for SharedDir {
         //   (default: 0)
         // * gid=GID - gid of the device process in the user namespace created by minijail.
         //   (default: 0)
+        // * max_dynamic_perm=uint - number of maximum number of dynamic permissions paths (default:
+        //   0) This feature is arc_quota specific feature.
+        // * max_dynamic_xattr=uint - number of maximum number of dynamic xattr paths (default: 0).
+        //   This feature is arc_quota specific feature.
+        //
         // These two options (uid/gid) are useful when the crosvm process has no
         // CAP_SETGID/CAP_SETUID but an identity mapping of the current user/group
         // between the VM and the host is required.
@@ -218,6 +223,12 @@ impl FromStr for SharedDir {
         }
         Ok(shared_dir)
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, serde_keyvalue::FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct PmemExt2Option {
+    pub path: PathBuf,
 }
 
 #[cfg(test)]
@@ -760,5 +771,20 @@ mod tests {
                 .fs_cfg
                 .use_dax
         );
+    }
+
+    #[test]
+    fn parse_pmem_ext2() {
+        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &["--pmem-ext2", "/path/to/dir", "/dev/null"],
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+        let opt = config.pmem_ext2.first().unwrap();
+
+        assert_eq!(opt.path, PathBuf::from("/path/to/dir"));
     }
 }

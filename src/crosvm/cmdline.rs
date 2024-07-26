@@ -9,6 +9,7 @@ cfg_if::cfg_if! {
 
         use crate::crosvm::sys::config::VfioOption;
         use crate::crosvm::sys::config::SharedDir;
+        use crate::crosvm::sys::config::PmemExt2Option;
     }
 }
 
@@ -66,6 +67,7 @@ use serde::Serialize;
 #[cfg(feature = "gpu")]
 use serde_keyvalue::FromKeyValues;
 
+use super::config::PmemOption;
 #[cfg(feature = "gpu")]
 use super::gpu_config::fixup_gpu_display_options;
 #[cfg(feature = "gpu")]
@@ -1194,8 +1196,9 @@ pub struct RunCommand {
     #[argh(option, short = 'd', arg_name = "PATH[,key=value[,key=value[,...]]]")]
     #[serde(skip)] // Deprecated - use `block` instead.
     #[merge(strategy = append)]
+    // (DEPRECATED): Use `block` instead.
     /// path to a disk image followed by optional comma-separated
-    /// options.  Deprecated - use `block` instead.
+    /// options.
     /// Valid keys:
     ///    sparse=BOOL - Indicates whether the disk should support
     ///        the discard operation (default: true)
@@ -1807,11 +1810,40 @@ pub struct RunCommand {
     /// absolute path to a directory that will become root filesystem for the plugin process.
     pub plugin_root: Option<PathBuf>,
 
+    #[argh(option)]
+    #[serde(default)]
+    #[merge(strategy = append)]
+    /// parameters for setting up a virtio-pmem device.
+    /// Valid keys:
+    ///     path=PATH - Path to the disk image. Can be specified
+    ///         without the key as the first argument.
+    ///     ro=BOOL - Whether the pmem device should be read-only.
+    ///         (default: false)
+    ///     vma-size=BYTES - (Experimental) Size in bytes
+    ///        of an anonymous virtual memory area that is
+    ///        created to back this device. When this
+    ///        option is specified, the disk image path
+    ///        is used to name the memory area
+    ///     swap-interval-ms=NUM - (Experimental) Interval
+    ///        in milliseconds for periodic swap out of
+    ///        memory mapping created by this device. 0
+    ///        means the memory mapping won't be swapped
+    ///        out by crosvm
+    pub pmem: Vec<PmemOption>,
+
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = append)]
+    /// (DEPRECATED): Use --pmem instead.
     /// path to a disk image
-    pub pmem_device: Vec<DiskOption>,
+    pmem_device: Vec<DiskOption>,
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[argh(option, arg_name = "PATH")]
+    #[serde(default)]
+    #[merge(strategy = append)]
+    /// (EXPERIMENTAL): construct an ext2 file system on a pmem device from the given directory
+    pub pmem_ext2: Vec<PmemExt2Option>,
 
     #[cfg(feature = "process-invariants")]
     #[argh(option, arg_name = "PATH")]
@@ -1874,6 +1906,7 @@ pub struct RunCommand {
     ///     [--pstore <path=PATH,size=SIZE>]
     pub pstore: Option<Pstore>,
 
+    #[cfg(feature = "pvclock")]
     #[argh(switch)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1890,8 +1923,9 @@ pub struct RunCommand {
     #[argh(option, arg_name = "PATH[,key=value[,key=value[,...]]]", short = 'r')]
     #[serde(skip)] // Deprecated - use `block` instead.
     #[merge(strategy = overwrite_option)]
+    // (DEPRECATED): Use `block` instead.
     /// path to a disk image followed by optional comma-separated
-    /// options.  Deprecated - use `block` instead.
+    /// options.
     /// Valid keys:
     ///     sparse=BOOL - Indicates whether the disk should support
     ///         the discard operation (default: true)
@@ -1917,14 +1951,16 @@ pub struct RunCommand {
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = append)]
+    /// (DEPRECATED): Use --pmem instead.
     /// path to a writable disk image
     rw_pmem_device: Vec<DiskOption>,
 
     #[argh(option, arg_name = "PATH[,key=value[,key=value[,...]]]")]
     #[serde(skip)] // Deprecated - use `block` instead.
     #[merge(strategy = append)]
+    // (DEPRECATED): Use `block` instead.
     /// path to a read-write disk image followed by optional
-    /// comma-separated options. Deprecated - use `block` instead.
+    /// comma-separated options.
     /// Valid keys:
     ///     sparse=BOOL - Indicates whether the disk should support
     ///        the discard operation (default: true)
@@ -1938,8 +1974,9 @@ pub struct RunCommand {
     #[argh(option, arg_name = "PATH[,key=value[,key=value[,...]]]")]
     #[serde(skip)] // Deprecated - use `block` instead.
     #[merge(strategy = overwrite_option)]
+    // (DEPRECATED) Use `block` instead.
     /// path to a read-write root disk image followed by optional
-    /// comma-separated options.  Deprecated - use `block` instead.
+    /// comma-separated options.
     /// Valid keys:
     ///     sparse=BOOL - Indicates whether the disk should support
     ///       the discard operation (default: true)
@@ -2093,6 +2130,18 @@ pub struct RunCommand {
     ///        namespace created by minijail. (default: 0)
     ///     gid=GID - gid of the device process in the user
     ///        namespace created by minijail. (default: 0)
+    ///     max_dynamic_perm=uint - Indicates maximum number of
+    ///        dynamic permissions that the shared directory allows.
+    ///         (default: 0). The fuse server will return EPERM
+    ///         Error when FS_IOC_SETPERMISSION ioctl is called
+    ///         in the device if current dyamic permission path is
+    ///         lager or equal to this value.
+    ///     max_dynamic_xattr=uint - Indicates maximum number of
+    ///        dynamic xattrs that the shared directory allows.
+    ///         (default: 0). The fuse server will return EPERM
+    ///         Error when FS_IOC_SETPATHXATTR ioctl is called
+    ///         in the device if current dyamic permission path is
+    ///         lager or equal to this value.
     ///     Options uid and gid are useful when the crosvm process
     ///     has no CAP_SETGID/CAP_SETUID but an identity mapping of
     ///     the current user/group between the VM and the host is
@@ -2680,13 +2729,13 @@ impl TryFrom<RunCommand> for super::config::Config {
         #[cfg(target_arch = "aarch64")]
         {
             if cmd.mte.unwrap_or_default()
-                && !(cmd.pmem_device.is_empty()
+                && !(cmd.pmem.is_empty()
+                    && cmd.pmem_device.is_empty()
                     && cmd.pstore.is_none()
                     && cmd.rw_pmem_device.is_empty())
             {
                 return Err(
-                    "--mte cannot be specified together with --pmem-device, --pstore or --rw-pmem-device"
-                        .to_string(),
+                    "--mte cannot be specified together with --pstore or pmem flags".to_string(),
                 );
             }
             cfg.mte = cmd.mte.unwrap_or_default();
@@ -2758,6 +2807,13 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.serial_parameters.insert(key, serial_params);
         }
 
+        if !(cmd.root.is_none()
+            && cmd.rwroot.is_none()
+            && cmd.disk.is_empty()
+            && cmd.rwdisk.is_empty())
+        {
+            log::warn!("Deprecated disk flags such as --[rw]disk or --[rw]root are passed. Use --block instead.");
+        }
         // Aggregate all the disks with the expected read-only and root values according to the
         // option they have been passed with.
         let mut disks = cmd
@@ -2788,51 +2844,82 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         // Sort all our disks by index.
         disks.sort_by_key(|d| d.index);
-
-        // Check that we don't have more than one root disk.
-        if disks.iter().filter(|d| d.disk_option.root).count() > 1
-            || cmd.scsi_block.iter().filter(|s| s.root).count() > 1
-            || disks.iter().any(|d| d.disk_option.root) && cmd.scsi_block.iter().any(|s| s.root)
-        {
-            return Err("only one root disk can be specified".to_string());
-        }
-
-        // If we have a root disk, add the corresponding command-line parameters.
-        if let Some(d) = disks.iter().find(|d| d.disk_option.root) {
-            if d.index >= 26 {
-                return Err("ran out of letters for to assign to root disk".to_string());
-            }
-            cfg.params.push(format!(
-                "root=/dev/vd{} {}",
-                char::from(b'a' + d.index as u8),
-                if d.disk_option.read_only { "ro" } else { "rw" }
-            ));
-        }
-
-        // Pass the sorted disks to the VM config.
         cfg.disks = disks.into_iter().map(|d| d.disk_option).collect();
-
-        // If we have a root scsi disk, add the corresponding command-line parameters.
-        if let Some((i, s)) = cmd.scsi_block.iter().enumerate().find(|(_, s)| s.root) {
-            cfg.params.push(format!(
-                "root=/dev/sd{} {}",
-                char::from(b'a' + i as u8),
-                if s.read_only { "ro" } else { "rw" }
-            ));
-        }
 
         cfg.scsis = cmd.scsi_block;
 
-        for (mut pmem, read_only) in cmd
-            .pmem_device
-            .into_iter()
-            .map(|p| (p, true))
-            .chain(cmd.rw_pmem_device.into_iter().map(|p| (p, false)))
-        {
-            pmem.read_only = read_only;
-            cfg.pmem_devices.push(pmem);
+        cfg.pmems = cmd.pmem;
+
+        if !cmd.pmem_device.is_empty() || !cmd.rw_pmem_device.is_empty() {
+            log::warn!(
+                "--pmem-device and --rw-pmem-device are deprecated. Please use --pmem instead."
+            );
         }
-        cfg.pvclock = cmd.pvclock.unwrap_or_default();
+
+        // Convert the deprecated `pmem_device` and `rw_pmem_device` into `pmem_devices`.
+        for disk_option in cmd.pmem_device.into_iter() {
+            cfg.pmems.push(PmemOption {
+                path: disk_option.path,
+                ro: true, // read-only
+                ..PmemOption::default()
+            });
+        }
+        for disk_option in cmd.rw_pmem_device.into_iter() {
+            cfg.pmems.push(PmemOption {
+                path: disk_option.path,
+                ro: false, // writable
+                ..PmemOption::default()
+            });
+        }
+
+        // Find the device to use as the kernel `root=` parameter. There can only be one.
+        let virtio_blk_root_devs = cfg
+            .disks
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.root)
+            .map(|(i, d)| (format_disk_letter("/dev/vd", i), d.read_only));
+
+        let virtio_scsi_root_devs = cfg
+            .scsis
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.root)
+            .map(|(i, s)| (format_disk_letter("/dev/sd", i), s.read_only));
+
+        let virtio_pmem_root_devs = cfg
+            .pmems
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.root)
+            .map(|(i, p)| (format!("/dev/pmem{}", i), p.ro));
+
+        let mut root_devs = virtio_blk_root_devs
+            .chain(virtio_scsi_root_devs)
+            .chain(virtio_pmem_root_devs);
+        if let Some((root_dev, read_only)) = root_devs.next() {
+            cfg.params.push(format!(
+                "root={} {}",
+                root_dev,
+                if read_only { "ro" } else { "rw" }
+            ));
+
+            // If the iterator is not exhausted, the user specified `root=true` on more than one
+            // device, which is an error.
+            if root_devs.next().is_some() {
+                return Err("only one root disk can be specified".to_string());
+            }
+        }
+
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            cfg.pmem_ext2 = cmd.pmem_ext2;
+        }
+
+        #[cfg(feature = "pvclock")]
+        {
+            cfg.pvclock = cmd.pvclock.unwrap_or_default();
+        }
 
         #[cfg(windows)]
         {
@@ -3150,14 +3237,19 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
             cfg.gpu_parameters = cmd.gpu.into_iter().map(|p| p.0).take(1).next();
             if !cmd.gpu_display.is_empty() {
+                log::warn!("'--gpu-display' is deprecated; please use `--gpu displays=[...]`");
                 cfg.gpu_parameters
                     .get_or_insert_with(Default::default)
                     .display_params
                     .extend(cmd.gpu_display.into_iter().map(|p| p.0));
+            }
 
-                #[cfg(feature = "android_display")]
-                {
-                    cfg.android_display_service = cmd.android_display_service;
+            #[cfg(feature = "android_display")]
+            {
+                if let Some(gpu_parameters) = &cfg.gpu_parameters {
+                    if !gpu_parameters.display_params.is_empty() {
+                        cfg.android_display_service = cmd.android_display_service;
+                    }
                 }
             }
 
@@ -3501,9 +3593,27 @@ impl TryFrom<RunCommand> for super::config::Config {
     }
 }
 
+// Produce a block device path as used by Linux block devices.
+//
+// Examples for "/dev/vdX":
+// /dev/vda, /dev/vdb, ..., /dev/vdz, /dev/vdaa, /dev/vdab, ...
+fn format_disk_letter(dev_prefix: &str, mut i: usize) -> String {
+    const ALPHABET_LEN: usize = 26; // a to z
+    let mut s = dev_prefix.to_string();
+    let insert_idx = dev_prefix.len();
+    loop {
+        s.insert(insert_idx, char::from(b'a' + (i % ALPHABET_LEN) as u8));
+        i /= ALPHABET_LEN;
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "config-file")]
     use super::*;
 
     #[test]
@@ -3542,5 +3652,21 @@ mod tests {
                 String::from("fourthparam"),
             ]
         );
+    }
+
+    #[test]
+    fn disk_letter() {
+        assert_eq!(format_disk_letter("/dev/sd", 0), "/dev/sda");
+        assert_eq!(format_disk_letter("/dev/sd", 1), "/dev/sdb");
+        assert_eq!(format_disk_letter("/dev/sd", 25), "/dev/sdz");
+        assert_eq!(format_disk_letter("/dev/sd", 26), "/dev/sdaa");
+        assert_eq!(format_disk_letter("/dev/sd", 27), "/dev/sdab");
+        assert_eq!(format_disk_letter("/dev/sd", 51), "/dev/sdaz");
+        assert_eq!(format_disk_letter("/dev/sd", 52), "/dev/sdba");
+        assert_eq!(format_disk_letter("/dev/sd", 53), "/dev/sdbb");
+        assert_eq!(format_disk_letter("/dev/sd", 78), "/dev/sdca");
+        assert_eq!(format_disk_letter("/dev/sd", 701), "/dev/sdzz");
+        assert_eq!(format_disk_letter("/dev/sd", 702), "/dev/sdaaa");
+        assert_eq!(format_disk_letter("/dev/sd", 703), "/dev/sdaab");
     }
 }

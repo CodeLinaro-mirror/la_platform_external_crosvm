@@ -14,7 +14,7 @@ rust_library {
     crate_name: "riscv64",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     features: [
         "gdb",
@@ -30,8 +30,6 @@ rust_library {
         "libgdbstub_arch",
         "libhypervisor",
         "libkernel_cmdline",
-        "libkvm",
-        "libkvm_sys",
         "liblibc",
         "libminijail_rust",
         "librand",
