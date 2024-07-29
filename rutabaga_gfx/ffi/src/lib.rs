@@ -27,7 +27,25 @@ use std::slice::from_raw_parts_mut;
 use libc::iovec;
 use libc::EINVAL;
 use libc::ESRCH;
-use rutabaga_gfx::*;
+use rutabaga_gfx::ResourceCreate3D;
+use rutabaga_gfx::ResourceCreateBlob;
+use rutabaga_gfx::Rutabaga;
+use rutabaga_gfx::RutabagaBuilder;
+use rutabaga_gfx::RutabagaChannel;
+use rutabaga_gfx::RutabagaComponentType;
+use rutabaga_gfx::RutabagaDebug;
+use rutabaga_gfx::RutabagaDebugHandler;
+use rutabaga_gfx::RutabagaDescriptor;
+use rutabaga_gfx::RutabagaFence;
+use rutabaga_gfx::RutabagaFenceHandler;
+use rutabaga_gfx::RutabagaFromRawDescriptor;
+use rutabaga_gfx::RutabagaHandle;
+use rutabaga_gfx::RutabagaIntoRawDescriptor;
+use rutabaga_gfx::RutabagaIovec;
+use rutabaga_gfx::RutabagaResult;
+use rutabaga_gfx::RutabagaWsi;
+use rutabaga_gfx::Transfer3D;
+use rutabaga_gfx::RUTABAGA_DEBUG_ERROR;
 
 #[cfg(not(unix))]
 #[repr(C)]
@@ -282,7 +300,7 @@ pub unsafe extern "C" fn rutabaga_init(builder: &rutabaga_builder, ptr: &mut *mu
 #[no_mangle]
 pub extern "C" fn rutabaga_finish(ptr: &mut *mut rutabaga) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        unsafe { Box::from_raw(*ptr) };
+        let _ = unsafe { Box::from_raw(*ptr) };
         *ptr = null_mut();
         NO_ERROR
     }))

@@ -229,47 +229,11 @@ impl VcpuAArch64 for GunyahVcpu {
         Ok(PSCI_0_2)
     }
 
-    #[cfg(feature = "gdb")]
     fn set_guest_debug(&self, _addrs: &[GuestAddress], _enable_singlestep: bool) -> Result<()> {
         Err(Error::new(ENOTSUP))
     }
 
-    #[cfg(feature = "gdb")]
-    fn set_gdb_registers(
-        &self,
-        _regs: &<gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::Registers,
-    ) -> Result<()> {
-        Err(Error::new(ENOTSUP))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn get_gdb_registers(
-        &self,
-        _regs: &mut <gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::Registers,
-    ) -> Result<()> {
-        Err(Error::new(ENOTSUP))
-    }
-
-    #[cfg(feature = "gdb")]
     fn get_max_hw_bps(&self) -> Result<usize> {
-        Err(Error::new(ENOTSUP))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn set_gdb_register(
-        &self,
-        _reg: <gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::RegId,
-        _data: &[u8],
-    ) -> Result<()> {
-        Err(Error::new(ENOTSUP))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn get_gdb_register(
-        &self,
-        _reg: <gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::RegId,
-        _data: &mut [u8],
-    ) -> Result<usize> {
         Err(Error::new(ENOTSUP))
     }
 }

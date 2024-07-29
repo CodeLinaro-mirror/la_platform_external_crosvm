@@ -200,7 +200,8 @@
       "no_presubmit": true
     },
     "power_monitor": {
-      "copy_out": true
+      "copy_out": true,
+      "patch": "power_monitor/patches/Android.bp.patch"
     },
     "protos": {
       "add_toplevel_block": "protos/cargo2android_protobuf.bp",

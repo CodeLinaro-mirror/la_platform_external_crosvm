@@ -12,13 +12,14 @@ registered_events = ["vm_control/registered_events"]
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+balloon_control = { path = "../common/balloon_control" }
 base = { path = "../base" }
 libc = "0.2.65"
 swap = { path = "../swap", default-features = false }
 vm_control = { path = "../vm_control", features = [ "balloon" ] }
 
 [build-dependencies]
-anyhow = "*"
+anyhow = "1"
 cbindgen = "0.24.3"
-cc = "*"
-tempfile = "*"
+cc = "1"
+tempfile = "3"

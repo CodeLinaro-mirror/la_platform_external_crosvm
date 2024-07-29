@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use base::error;
 use base::named_pipes::PipeConnection;
+use base::AsRawDescriptor;
 use base::Event;
 use base::EventToken;
 use base::FileSync;
@@ -18,6 +19,7 @@ use base::Result;
 use base::TimerTrait;
 use base::WaitContext;
 use hypervisor::ProtectionType;
+use winapi::um::ioapiset::CancelIoEx;
 
 use crate::bus::BusDevice;
 use crate::serial_device::SerialInput;
@@ -56,7 +58,7 @@ impl Serial {
             };
             self.system_params.kill_evt = Some(self_kill_evt);
 
-            match thread::Builder::new()
+            let thread_result = thread::Builder::new()
                 .name(format!("{} sync thread", self.debug_label()))
                 .spawn(move || {
                     let mut worker = SyncWorker {
@@ -65,7 +67,9 @@ impl Serial {
                     };
                     worker.run();
                     worker
-                }) {
+                });
+
+            match thread_result {
                 Err(e) => {
                     error!("failed to spawn sync thread: {}", e);
                 }
@@ -139,6 +143,12 @@ impl Drop for Serial {
             let _ = kill_evt.signal();
         }
 
+        // TODO: only do this if serial stdin is enabled?
+        // SAFETY: We pass a valid file descriptor to `CancelIoEx`.
+        unsafe {
+            CancelIoEx(std::io::stdin().as_raw_descriptor(), std::ptr::null_mut());
+        }
+
         if let Some(sync_thread) = self.system_params.sync_thread.take() {
             let _ = sync_thread.join();
         }
@@ -161,7 +171,7 @@ impl SyncWorker {
             Ok(timer) => timer,
         };
 
-        if let Err(e) = timer.reset(Duration::from_secs(1), Some(Duration::from_secs(1))) {
+        if let Err(e) = timer.reset_repeating(Duration::from_secs(1)) {
             error!("failed to set timer for SyncWorker: {}", e);
             return;
         }

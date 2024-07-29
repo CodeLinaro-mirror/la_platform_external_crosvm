@@ -256,7 +256,7 @@ impl AsRawDescriptor for AndroidSparse {
 
 // Performs reads up to the chunk boundary.
 impl FileReadWriteAtVolatile for AndroidSparse {
-    fn read_at_volatile(&mut self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
+    fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> io::Result<usize> {
         let found_chunk = self.chunks.range(..=offset).next_back();
         let (
             chunk_start,
@@ -301,7 +301,7 @@ impl FileReadWriteAtVolatile for AndroidSparse {
             }
         }
     }
-    fn write_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> io::Result<usize> {
+    fn write_at_volatile(&self, _slice: VolatileSlice, _offset: u64) -> io::Result<usize> {
         Err(io::Error::new(
             ErrorKind::PermissionDenied,
             "unsupported operation",
@@ -345,7 +345,7 @@ impl FileSetLen for AsyncAndroidSparse {
 }
 
 impl FileAllocate for AsyncAndroidSparse {
-    fn allocate(&mut self, _offset: u64, _length: u64) -> io::Result<()> {
+    fn allocate(&self, _offset: u64, _length: u64) -> io::Result<()> {
         Err(io::Error::new(
             ErrorKind::PermissionDenied,
             "unsupported operation",
@@ -355,14 +355,6 @@ impl FileAllocate for AsyncAndroidSparse {
 
 #[async_trait(?Send)]
 impl AsyncDisk for AsyncAndroidSparse {
-    fn into_inner(self: Box<Self>) -> Box<dyn DiskFile> {
-        Box::new(AndroidSparse {
-            file: self.inner.into_source(),
-            total_size: self.total_size,
-            chunks: self.chunks,
-        })
-    }
-
     async fn flush(&self) -> crate::Result<()> {
         // android sparse is read-only, nothing to flush.
         Ok(())
@@ -562,7 +554,7 @@ mod tests {
             chunk: Chunk::DontCare,
             expanded_size: 100,
         }];
-        let mut image = test_image(chunks);
+        let image = test_image(chunks);
         let mut input_memory = [55u8; 100];
         image
             .read_exact_at_volatile(VolatileSlice::new(&mut input_memory[..]), 0)
@@ -577,7 +569,7 @@ mod tests {
             chunk: Chunk::Fill([10, 20, 10, 20]),
             expanded_size: 8,
         }];
-        let mut image = test_image(chunks);
+        let image = test_image(chunks);
         let mut input_memory = [55u8; 8];
         image
             .read_exact_at_volatile(VolatileSlice::new(&mut input_memory[..]), 0)
@@ -592,7 +584,7 @@ mod tests {
             chunk: Chunk::Fill([10, 20, 30, 40]),
             expanded_size: 8,
         }];
-        let mut image = test_image(chunks);
+        let image = test_image(chunks);
         let mut input_memory = [55u8; 6];
         image
             .read_exact_at_volatile(VolatileSlice::new(&mut input_memory[..]), 1)
@@ -613,7 +605,7 @@ mod tests {
                 expanded_size: 100,
             },
         ];
-        let mut image = test_image(chunks);
+        let image = test_image(chunks);
         let mut input_memory = [55u8; 7];
         image
             .read_exact_at_volatile(VolatileSlice::new(&mut input_memory[..]), 39)
@@ -650,7 +642,7 @@ mod tests {
                 expanded_size: 4,
             },
         ];
-        let mut image = test_image(chunks);
+        let image = test_image(chunks);
         let mut input_memory = [55u8; 8];
         image
             .read_exact_at_volatile(VolatileSlice::new(&mut input_memory[..]), 0)
@@ -914,27 +906,6 @@ mod tests {
             let buf = read_exact_at(&*image, 0, 8).await;
             let expected = [10, 20, 10, 20, 30, 40, 30, 40];
             assert_eq!(&expected[..], &buf[..]);
-        })
-        .unwrap();
-    }
-
-    // Convert to sync and back again. There was once a bug where `into_inner` converted the
-    // AndroidSparse into a raw file.
-    //
-    // Skip on windows because `into_source` isn't supported.
-    #[cfg(not(windows))]
-    #[test]
-    fn async_roundtrip_read_dontcare() {
-        let ex = Executor::new().unwrap();
-        ex.run_until(async {
-            let chunks = vec![ChunkWithSize {
-                chunk: Chunk::DontCare,
-                expanded_size: 100,
-            }];
-            let image = test_async_image(chunks, &ex).unwrap();
-            let image = image.into_inner().to_async_disk(&ex).unwrap();
-            let buf = read_exact_at(&*image, 0, 100).await;
-            assert!(buf.iter().all(|x| *x == 0));
         })
         .unwrap();
     }

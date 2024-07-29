@@ -110,6 +110,10 @@ use devices::virtio::vhost::user::gpu::sys::windows::product::GpuBackendConfig a
 use devices::virtio::vhost::user::gpu::sys::windows::run_gpu_device_worker;
 #[cfg(feature = "audio")]
 use devices::virtio::vhost::user::snd::sys::windows::product::SndBackendConfig as SndBackendConfigProduct;
+#[cfg(feature = "audio")]
+use devices::virtio::vhost::user::snd::sys::windows::run_snd_device_worker;
+#[cfg(feature = "audio")]
+use devices::virtio::vhost::user::snd::sys::windows::SndSplitConfig;
 #[cfg(feature = "balloon")]
 use devices::virtio::BalloonFeatures;
 #[cfg(feature = "balloon")]
@@ -173,6 +177,7 @@ pub(crate) use panic_hook::set_panic_hook;
 use product::create_snd_mute_tube_pair;
 #[cfg(any(feature = "haxm", feature = "gvm", feature = "whpx"))]
 use product::create_snd_state_tube;
+#[cfg(feature = "pvclock")]
 use product::handle_pvclock_request;
 use product::merge_session_invariants;
 use product::run_ime_thread;
@@ -197,6 +202,7 @@ use vm_control::BalloonControlCommand;
 #[cfg(feature = "balloon")]
 use vm_control::BalloonTube;
 use vm_control::DeviceControlCommand;
+use vm_control::InitialAudioSessionState;
 use vm_control::IrqHandlerRequest;
 use vm_control::PvClockCommand;
 use vm_control::VcpuControl;
@@ -335,22 +341,6 @@ fn create_vhost_user_gpu_device(base_features: u64, vhost_user_tube: Tube) -> De
         Exit::VhostUserGpuDeviceNew,
         "failed to set up vhost-user gpu device",
     )?;
-
-    Ok(VirtioDeviceStub {
-        dev: Box::new(dev),
-        jail: None,
-    })
-}
-
-#[cfg(feature = "audio")]
-fn create_snd_device(
-    cfg: &Config,
-    parameters: SndParameters,
-    _product_args: SndBackendConfigProduct,
-) -> DeviceResult {
-    let features = virtio::base_features(cfg.protection_type);
-    let dev = VirtioSnd::new(features, parameters)
-        .exit_context(Exit::VirtioSoundDeviceNew, "failed to create snd device")?;
 
     Ok(VirtioDeviceStub {
         dev: Box::new(dev),
@@ -517,8 +507,9 @@ fn create_virtio_devices(
     vm_evt_wrtube: &SendTube,
     #[allow(clippy::ptr_arg)] control_tubes: &mut Vec<TaggedControlTube>,
     disk_device_tubes: &mut Vec<Tube>,
+    initial_audio_session_states: &mut Vec<InitialAudioSessionState>,
     balloon_device_tube: Option<Tube>,
-    pvclock_device_tube: Option<Tube>,
+    #[cfg(feature = "pvclock")] pvclock_device_tube: Option<Tube>,
     dynamic_mapping_device_tube: Option<Tube>,
     inflate_tube: Option<Tube>,
     init_balloon_size: u64,
@@ -553,39 +544,25 @@ fn create_virtio_devices(
     }
 
     #[cfg(feature = "audio")]
-    if product::virtio_sound_enabled() {
-        let snd_split_config = cfg
-            .snd_split_config
-            .as_mut()
-            .expect("snd_split_config must exist");
-        let snd_vmm_config = snd_split_config
-            .vmm_config
-            .as_mut()
-            .expect("snd_vmm_config must exist");
-        product::push_snd_control_tubes(control_tubes, snd_vmm_config);
-
-        match snd_split_config.backend_config.take() {
-            None => {
-                // No backend config present means the backend is running in another process.
-                devs.push(create_vhost_user_snd_device(
-                    virtio::base_features(cfg.protection_type),
-                    snd_vmm_config
-                        .main_vhost_user_tube
-                        .take()
-                        .expect("Snd VMM vhost-user tube should be set"),
-                )?);
-            }
-            Some(backend_config) => {
-                // Backend config present, so initialize Snd in this process.
-                devs.push(create_snd_device(
-                    cfg,
-                    backend_config.parameters,
-                    backend_config.product_config,
-                )?);
+    {
+        let snd_split_configs = std::mem::take(&mut cfg.snd_split_configs);
+        for mut snd_split_cfg in snd_split_configs.into_iter() {
+            devs.push(create_virtio_snd_device(
+                cfg,
+                &mut snd_split_cfg,
+                control_tubes,
+            )?);
+            if let Some(vmm_config) = snd_split_cfg.vmm_config {
+                let initial_audio_session_state = InitialAudioSessionState {
+                    audio_client_guid: vmm_config.audio_client_guid,
+                    card_index: vmm_config.card_index,
+                };
+                initial_audio_session_states.push(initial_audio_session_state);
             }
         }
     }
 
+    #[cfg(feature = "pvclock")]
     if let Some(tube) = pvclock_device_tube {
         product::push_pvclock_device(cfg, &mut devs, tsc_frequency, tube);
     }
@@ -774,6 +751,34 @@ fn create_virtio_gpu_device(
     .context("create vhost-user GPU device")
 }
 
+#[cfg(feature = "audio")]
+fn create_virtio_snd_device(
+    cfg: &mut Config,
+    snd_split_config: &mut SndSplitConfig,
+    #[allow(clippy::ptr_arg)] control_tubes: &mut Vec<TaggedControlTube>,
+) -> DeviceResult<VirtioDeviceStub> {
+    let snd_vmm_config = snd_split_config
+        .vmm_config
+        .as_mut()
+        .expect("snd_vmm_config must exist");
+    product::push_snd_control_tubes(control_tubes, snd_vmm_config);
+
+    // If the SND backend is passed, start up the vhost-user worker in the main process.
+    if let Some(backend_config) = snd_split_config.backend_config.take() {
+        std::thread::spawn(move || run_snd_device_worker(backend_config));
+    }
+
+    // The SND is always vhost-user, even if running in the main process.
+    create_vhost_user_snd_device(
+        virtio::base_features(cfg.protection_type),
+        snd_vmm_config
+            .main_vhost_user_tube
+            .take()
+            .expect("Snd VMM vhost-user tube should be set"),
+    )
+    .context("create vhost-user SND device")
+}
+
 fn create_devices(
     cfg: &mut Config,
     mem: &GuestMemory,
@@ -782,8 +787,9 @@ fn create_devices(
     vm_memory_control_tubes: &mut Vec<Tube>,
     control_tubes: &mut Vec<TaggedControlTube>,
     disk_device_tubes: &mut Vec<Tube>,
+    initial_audio_session_states: &mut Vec<InitialAudioSessionState>,
     balloon_device_tube: Option<Tube>,
-    pvclock_device_tube: Option<Tube>,
+    #[cfg(feature = "pvclock")] pvclock_device_tube: Option<Tube>,
     dynamic_mapping_device_tube: Option<Tube>,
     inflate_tube: Option<Tube>,
     init_balloon_size: u64,
@@ -796,7 +802,9 @@ fn create_devices(
         exit_evt_wrtube,
         control_tubes,
         disk_device_tubes,
+        initial_audio_session_states,
         balloon_device_tube,
+        #[cfg(feature = "pvclock")]
         pvclock_device_tube,
         dynamic_mapping_device_tube,
         inflate_tube,
@@ -865,13 +873,13 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     control_tubes: &mut BTreeMap<usize, TaggedControlTube>,
     guest_os: &mut RunnableLinuxVm<V, Vcpu>,
     sys_allocator_mutex: &Arc<Mutex<SystemAllocator>>,
-    virtio_snd_host_mute_tube: &mut Option<Tube>,
+    virtio_snd_host_mute_tubes: &mut [Tube],
     proto_main_loop_tube: Option<&ProtoTube>,
     anti_tamper_main_thread_tube: &Option<ProtoTube>,
     #[cfg(feature = "balloon")] mut balloon_tube: Option<&mut BalloonTube>,
     memory_size_mb: u64,
     vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
-    pvclock_host_tube: &Option<Tube>,
+    #[cfg(feature = "pvclock")] pvclock_host_tube: &Option<Tube>,
     run_mode_arc: &VcpuRunMode,
     region_state: &mut VmMemoryRegionState,
     vm_control_server: Option<&mut ControlServer>,
@@ -901,6 +909,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     vcpu_control_channels,
                     vcpu_boxes,
                     guest_os.irq_chip.as_ref(),
+                    #[cfg(feature = "pvclock")]
                     pvclock_host_tube,
                     msg,
                 );
@@ -979,7 +988,7 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     TaggedControlTube::Product(product_tube) => {
                         product::handle_tagged_control_tube_event(
                             product_tube,
-                            virtio_snd_host_mute_tube,
+                            virtio_snd_host_mute_tubes,
                             service_vm_state,
                             ipc_main_loop_tube,
                         )
@@ -1083,11 +1092,12 @@ fn handle_readable_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 ipc_main_loop_tube,
                 memory_size_mb,
                 proto_main_loop_tube,
+                #[cfg(feature = "pvclock")]
                 pvclock_host_tube,
                 run_mode_arc,
                 service_vm_state,
                 vcpu_boxes,
-                virtio_snd_host_mute_tube,
+                virtio_snd_host_mute_tubes,
                 execute_vm_request,
             );
             if let Some(exit_state) = handle_run_mode_change_for_vm_request(&run_mode_opt, guest_os)
@@ -1261,8 +1271,9 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     #[cfg(feature = "gpu")] gpu_control_tube: Option<Tube>,
     broker_shutdown_evt: Option<Event>,
     balloon_host_tube: Option<Tube>,
-    pvclock_host_tube: Option<Tube>,
+    #[cfg(feature = "pvclock")] pvclock_host_tube: Option<Tube>,
     disk_host_tubes: Vec<Tube>,
+    initial_audio_session_states: Vec<InitialAudioSessionState>,
     gralloc: RutabagaGralloc,
     #[cfg(feature = "stats")] stats: Option<Arc<Mutex<StatisticsCollector>>>,
     service_pipe_name: Option<String>,
@@ -1271,7 +1282,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     tsc_sync_mitigations: TscSyncMitigations,
     force_calibrated_tsc_leaf: bool,
     mut product_args: RunControlArgs,
-    mut virtio_snd_host_mute_tube: Option<Tube>,
+    mut virtio_snd_host_mute_tubes: Vec<Tube>,
     restore_path: Option<PathBuf>,
     control_server_path: Option<PathBuf>,
     force_s2idle: bool,
@@ -1281,6 +1292,11 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         start_service_ipc_listener(service_pipe_name)?;
 
     let mut service_vm_state = product::create_service_vm_state(memory_size_mb);
+
+    let service_audio_states = product::create_service_audio_states_and_send_to_service(
+        initial_audio_session_states,
+        &ipc_main_loop_tube,
+    )?;
 
     let sys_allocator_mutex = Arc::new(Mutex::new(sys_allocator));
 
@@ -1435,7 +1451,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     // Restore VM (if applicable).
     if let Some(path) = restore_path {
         vm_control::do_restore(
-            path,
+            &path,
             &guest_os.vm,
             |msg| {
                 kick_all_vcpus(
@@ -1443,6 +1459,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     &vcpu_control_channels,
                     vcpu_boxes.as_ref(),
                     guest_os.irq_chip.as_ref(),
+                    #[cfg(feature = "pvclock")]
                     &pvclock_host_tube,
                     msg,
                 )
@@ -1453,7 +1470,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                     &vcpu_control_channels,
                     vcpu_boxes.as_ref(),
                     guest_os.irq_chip.as_ref(),
-                    &pvclock_host_tube,
                     index,
                     msg,
                 )
@@ -1475,6 +1491,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             &vcpu_control_channels,
             vcpu_boxes.as_ref(),
             guest_os.irq_chip.as_ref(),
+            #[cfg(feature = "pvclock")]
             &pvclock_host_tube,
             // Other platforms (unix) have multiple modes they could start in (e.g. starting for
             // guest kernel debugging, etc). If/when we support those modes on Windows, we'll need
@@ -1512,13 +1529,14 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 &mut control_tubes,
                 &mut guest_os,
                 &sys_allocator_mutex,
-                &mut virtio_snd_host_mute_tube,
+                &mut virtio_snd_host_mute_tubes,
                 proto_main_loop_tube.as_ref(),
                 &anti_tamper_main_thread_tube,
                 #[cfg(feature = "balloon")]
                 balloon_tube.as_mut(),
                 memory_size_mb,
                 vcpu_boxes.as_ref(),
+                #[cfg(feature = "pvclock")]
                 &pvclock_host_tube,
                 run_mode_arc.as_ref(),
                 &mut region_state,
@@ -1677,18 +1695,30 @@ fn kick_all_vcpus(
     vcpu_control_channels: &[mpsc::Sender<VcpuControl>],
     vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
     irq_chip: &dyn IrqChipArch,
-    pvclock_host_tube: &Option<Tube>,
+    #[cfg(feature = "pvclock")] pvclock_host_tube: &Option<Tube>,
     msg: VcpuControl,
 ) {
     // On Windows, we handle run mode switching directly rather than delegating to the VCPU thread
     // like unix does.
     match &msg {
         VcpuControl::RunState(VmRunMode::Suspending) => {
-            suspend_all_vcpus(run_mode, vcpu_boxes, irq_chip, pvclock_host_tube);
+            suspend_all_vcpus(
+                run_mode,
+                vcpu_boxes,
+                irq_chip,
+                #[cfg(feature = "pvclock")]
+                pvclock_host_tube,
+            );
             return;
         }
         VcpuControl::RunState(VmRunMode::Running) => {
-            resume_all_vcpus(run_mode, vcpu_boxes, irq_chip, pvclock_host_tube);
+            resume_all_vcpus(
+                run_mode,
+                vcpu_boxes,
+                irq_chip,
+                #[cfg(feature = "pvclock")]
+                pvclock_host_tube,
+            );
             return;
         }
         _ => (),
@@ -1722,7 +1752,6 @@ fn kick_vcpu(
     vcpu_control_channels: &[mpsc::Sender<VcpuControl>],
     vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
     irq_chip: &dyn IrqChipArch,
-    pvclock_host_tube: &Option<Tube>,
     index: usize,
     msg: VcpuControl,
 ) {
@@ -1762,7 +1791,7 @@ pub(crate) fn suspend_all_vcpus(
     run_mode: &VcpuRunMode,
     vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
     irq_chip: &dyn IrqChipArch,
-    pvclock_host_tube: &Option<Tube>,
+    #[cfg(feature = "pvclock")] pvclock_host_tube: &Option<Tube>,
 ) {
     // VCPU threads MUST see the VmRunMode::Suspending flag first, otherwise
     // they may re-enter the VM.
@@ -1774,6 +1803,7 @@ pub(crate) fn suspend_all_vcpus(
     }
     irq_chip.kick_halted_vcpus();
 
+    #[cfg(feature = "pvclock")]
     handle_pvclock_request(pvclock_host_tube, PvClockCommand::Suspend)
         .unwrap_or_else(|e| error!("Error handling pvclock suspend: {:?}", e));
 }
@@ -1783,8 +1813,9 @@ pub(crate) fn resume_all_vcpus(
     run_mode: &VcpuRunMode,
     vcpu_boxes: &Mutex<Vec<Box<dyn VcpuArch>>>,
     irq_chip: &dyn IrqChipArch,
-    pvclock_host_tube: &Option<Tube>,
+    #[cfg(feature = "pvclock")] pvclock_host_tube: &Option<Tube>,
 ) {
+    #[cfg(feature = "pvclock")]
     handle_pvclock_request(pvclock_host_tube, PvClockCommand::Resume)
         .unwrap_or_else(|e| error!("Error handling pvclock resume: {:?}", e));
 
@@ -2466,6 +2497,7 @@ where
     };
 
     // PvClock gets a tube for handling suspend/resume requests from the main thread.
+    #[cfg(feature = "pvclock")]
     let (pvclock_host_tube, pvclock_device_tube) = if cfg.pvclock {
         let (host, device) =
             Tube::pair().exit_context(Exit::CreateTube, "failed to create tube")?;
@@ -2579,6 +2611,8 @@ where
 
     let (virtio_snd_host_mute_tube, virtio_snd_device_mute_tube) = create_snd_mute_tube_pair()?;
 
+    let mut initial_audio_session_states: Vec<InitialAudioSessionState> = Vec::new();
+
     let pci_devices = create_devices(
         &mut cfg,
         vm.get_memory(),
@@ -2587,7 +2621,9 @@ where
         &mut vm_memory_control_tubes,
         &mut control_tubes,
         &mut disk_device_tubes,
+        &mut initial_audio_session_states,
         balloon_device_tube,
+        #[cfg(feature = "pvclock")]
         pvclock_device_tube,
         dynamic_mapping_device_tube,
         /* inflate_tube= */ None,
@@ -2638,8 +2674,10 @@ where
         gpu_control_tube,
         cfg.broker_shutdown_event.take(),
         balloon_host_tube,
+        #[cfg(feature = "pvclock")]
         pvclock_host_tube,
         disk_host_tubes,
+        initial_audio_session_states,
         gralloc,
         #[cfg(feature = "stats")]
         stats,
@@ -2649,7 +2687,10 @@ where
         tsc_sync_mitigations,
         cfg.force_calibrated_tsc_leaf,
         product_args,
-        virtio_snd_host_mute_tube,
+        match virtio_snd_host_mute_tube {
+            Some(virtio_snd_host_mute_tube) => vec![virtio_snd_host_mute_tube],
+            None => vec![],
+        },
         cfg.restore_path,
         cfg.socket_path,
         cfg.force_s2idle,
@@ -2668,7 +2709,7 @@ mod tests {
 
         let dummy_kernel_path = test_dir.path().join("dummy_kernel.txt");
         OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .write(true)
             .open(&dummy_kernel_path)
             .expect("Could not open file!");

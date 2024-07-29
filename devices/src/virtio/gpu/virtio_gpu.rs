@@ -596,8 +596,12 @@ impl VirtioGpu {
 
     // Connects new displays to the device.
     fn add_displays(&mut self, displays: Vec<DisplayParameters>) -> GpuControlResult {
-        if self.scanouts.len() + displays.len() > VIRTIO_GPU_MAX_SCANOUTS {
-            return GpuControlResult::TooManyDisplays(VIRTIO_GPU_MAX_SCANOUTS);
+        let requested_num_scanouts = self.scanouts.len() + displays.len();
+        if requested_num_scanouts > VIRTIO_GPU_MAX_SCANOUTS {
+            return GpuControlResult::TooManyDisplays {
+                allowed: VIRTIO_GPU_MAX_SCANOUTS,
+                requested: requested_num_scanouts,
+            };
         }
 
         let mut available_scanout_ids = (0..VIRTIO_GPU_MAX_SCANOUTS)
@@ -855,12 +859,25 @@ impl VirtioGpu {
 
     /// Gets rutabaga's capset information associated with `index`.
     pub fn get_capset_info(&self, index: u32) -> VirtioGpuResult {
-        let (capset_id, version, size) = self.rutabaga.get_capset_info(index)?;
-        Ok(OkCapsetInfo {
-            capset_id,
-            version,
-            size,
-        })
+        if let Ok((capset_id, version, size)) = self.rutabaga.get_capset_info(index) {
+            Ok(OkCapsetInfo {
+                capset_id,
+                version,
+                size,
+            })
+        } else {
+            // Any capset_id > 63 is invalid according to the virtio-gpu spec, so we can
+            // intentionally poison the capset without stalling the guest kernel driver.
+            base::warn!(
+                "virtio-gpu get_capset_info(index={}) failed. intentionally poisoning response",
+                index
+            );
+            Ok(OkCapsetInfo {
+                capset_id: u32::max_value(),
+                version: 0,
+                size: 0,
+            })
+        }
     }
 
     /// Gets a capset from rutabaga.

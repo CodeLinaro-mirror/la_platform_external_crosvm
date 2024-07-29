@@ -20,6 +20,7 @@ use arch::RunnableLinuxVm;
 use arch::VmComponents;
 use arch::VmImage;
 use base::Event;
+use base::Tube;
 use base::SendTube;
 use devices::serial_device::SerialHardware;
 use devices::serial_device::SerialParameters;
@@ -70,6 +71,9 @@ mod fdt;
 const RISCV64_KERNEL_OFFSET: u64 = 0x20_0000;
 const RISCV64_INITRD_ALIGN: u64 = 8;
 const RISCV64_FDT_ALIGN: u64 = 0x40_0000;
+
+// Maximum Linux riscv kernel command line size (arch/riscv/include/uapi/asm/setup.h).
+const RISCV64_CMDLINE_MAX_SIZE: usize = 1024;
 
 // This indicates the start of DRAM inside the physical address space.
 const RISCV64_PHYS_MEM_START: u64 = 0x8000_0000;
@@ -292,7 +296,7 @@ impl arch::LinuxArch for Riscv64 {
         }
 
         // Event used by PMDevice to notify crosvm that guest OS is trying to suspend.
-        let suspend_evt = Event::new().map_err(Error::CreateEvent)?;
+        let (suspend_tube_send, suspend_tube_recv) = Tube::directional_pair().unwrap();
 
         // separate out image loading from other setup to get a specific error for
         // image loading
@@ -414,7 +418,7 @@ impl arch::LinuxArch for Riscv64 {
             hotplug_bus: BTreeMap::new(),
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
-            suspend_evt,
+            suspend_tube: (Arc::new(Mutex::new(suspend_tube_send)), suspend_tube_recv),
             bat_control: None,
             #[cfg(feature = "gdb")]
             gdb: components.gdb,
@@ -538,7 +542,7 @@ fn get_high_mmio_base_size(mem_size: u64, guest_phys_addr_bits: u8) -> (u64, u64
 }
 
 fn get_base_linux_cmdline() -> kernel_cmdline::Cmdline {
-    let mut cmdline = kernel_cmdline::Cmdline::new(base::pagesize());
+    let mut cmdline = kernel_cmdline::Cmdline::new(RISCV64_CMDLINE_MAX_SIZE);
     cmdline.insert_str("panic=-1").unwrap();
     cmdline
 }

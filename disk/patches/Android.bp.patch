@@ -1,8 +1,8 @@
 diff --git a/disk/Android.bp b/disk/Android.bp
-index ab4c44322..75dbbb9d5 100644
+index ef8395e82..088ac60b8 100644
 --- a/disk/Android.bp
 +++ b/disk/Android.bp
-@@ -26,19 +26,24 @@ rust_test {
+@@ -28,19 +28,24 @@ rust_test {
      edition: "2021",
      features: [
          "android-sparse",
@@ -27,7 +27,7 @@ index ab4c44322..75dbbb9d5 100644
          "libvm_memory",
          "libzerocopy",
      ],
-@@ -59,19 +64,24 @@ rust_library {
+@@ -61,18 +66,23 @@ rust_library {
      edition: "2021",
      features: [
          "android-sparse",
@@ -46,7 +46,6 @@ index ab4c44322..75dbbb9d5 100644
 +        "libprotos", // Added manually
          "libserde",
          "libsync_rust",
-         "libtempfile",
          "libthiserror",
 +        "libuuid", // Added manually
          "libvm_memory",

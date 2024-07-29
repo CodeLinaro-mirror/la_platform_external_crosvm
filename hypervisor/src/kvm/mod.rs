@@ -7,6 +7,9 @@ mod aarch64;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub use aarch64::*;
 
+mod cap;
+pub use cap::KvmCap;
+
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 
@@ -72,7 +75,6 @@ use crate::ClockState;
 use crate::Config;
 use crate::Datamatch;
 use crate::DeviceKind;
-use crate::HypervHypercall;
 use crate::Hypervisor;
 use crate::HypervisorCap;
 use crate::IoEventAddress;
@@ -142,8 +144,6 @@ pub fn dirty_log_bitmap_size(size: usize) -> usize {
 pub struct Kvm {
     kvm: SafeDescriptor,
 }
-
-pub type KvmCap = kvm::Cap;
 
 impl Kvm {
     pub fn new_with_path(device_path: &Path) -> Result<Kvm> {
@@ -673,6 +673,42 @@ impl Vm for KvmVm {
         })
     }
 
+    fn madvise_pageout_memory_region(
+        &mut self,
+        slot: MemSlot,
+        offset: usize,
+        size: usize,
+    ) -> Result<()> {
+        let mut regions = self.mem_regions.lock();
+        let mem = regions.get_mut(&slot).ok_or_else(|| Error::new(ENOENT))?;
+
+        mem.madvise(offset, size, libc::MADV_PAGEOUT)
+            .map_err(|err| match err {
+                MmapError::InvalidAddress => Error::new(EFAULT),
+                MmapError::NotPageAligned => Error::new(EINVAL),
+                MmapError::SystemCallFailed(e) => e,
+                _ => Error::new(EIO),
+            })
+    }
+
+    fn madvise_remove_memory_region(
+        &mut self,
+        slot: MemSlot,
+        offset: usize,
+        size: usize,
+    ) -> Result<()> {
+        let mut regions = self.mem_regions.lock();
+        let mem = regions.get_mut(&slot).ok_or_else(|| Error::new(ENOENT))?;
+
+        mem.madvise(offset, size, libc::MADV_REMOVE)
+            .map_err(|err| match err {
+                MmapError::InvalidAddress => Error::new(EFAULT),
+                MmapError::NotPageAligned => Error::new(EINVAL),
+                MmapError::SystemCallFailed(e) => e,
+                _ => Error::new(EIO),
+            })
+    }
+
     fn remove_memory_region(&mut self, slot: MemSlot) -> Result<Box<dyn MappedRegion>> {
         let mut regions = self.mem_regions.lock();
         if !regions.contains_key(&slot) {
@@ -904,7 +940,11 @@ impl Vcpu for KvmVcpu {
             // SAFETY:
             // The ioctl is safe because it does not read or write memory in this process.
             if unsafe { ioctl(self, KVM_KVMCLOCK_CTRL()) } != 0 {
-                return errno_result();
+                // Even if the host kernel supports the capability, it may not be configured by
+                // the guest - for example, when the guest kernel offlines a CPU.
+                if Error::last().errno() != libc::EINVAL {
+                    return errno_result();
+                }
             }
         }
 
@@ -943,24 +983,20 @@ impl Vcpu for KvmVcpu {
         // Safe because we know we mapped enough memory to hold the kvm_run struct because the
         // kernel told us how large it was.
         let run = unsafe { &mut *(self.run_mmap.as_ptr() as *mut kvm_run) };
+
+        // Check for architecture-specific VM exit reasons first in case the architecture wants to
+        // override the default handling.
+        if let Some(vcpu_exit) = self.handle_vm_exit_arch(run) {
+            return Ok(vcpu_exit);
+        }
+
         match run.exit_reason {
-            KVM_EXIT_IO => Ok(VcpuExit::Io),
             KVM_EXIT_MMIO => Ok(VcpuExit::Mmio),
-            KVM_EXIT_IOAPIC_EOI => {
-                // SAFETY:
-                // Safe because the exit_reason (which comes from the kernel) told us which
-                // union field to use.
-                let vector = unsafe { run.__bindgen_anon_1.eoi.vector };
-                Ok(VcpuExit::IoapicEoi { vector })
-            }
-            KVM_EXIT_HYPERV => Ok(VcpuExit::HypervHypercall),
-            KVM_EXIT_UNKNOWN => Ok(VcpuExit::Unknown),
             KVM_EXIT_EXCEPTION => Ok(VcpuExit::Exception),
             KVM_EXIT_HYPERCALL => Ok(VcpuExit::Hypercall),
             KVM_EXIT_DEBUG => Ok(VcpuExit::Debug),
-            KVM_EXIT_HLT => Ok(VcpuExit::Hlt),
             KVM_EXIT_IRQ_WINDOW_OPEN => Ok(VcpuExit::IrqWindowOpen),
-            KVM_EXIT_SHUTDOWN => Ok(VcpuExit::Shutdown),
+            KVM_EXIT_SHUTDOWN => Ok(VcpuExit::Shutdown(Ok(()))),
             KVM_EXIT_FAIL_ENTRY => {
                 // SAFETY:
                 // Safe because the exit_reason (which comes from the kernel) told us which
@@ -975,19 +1011,7 @@ impl Vcpu for KvmVcpu {
                 })
             }
             KVM_EXIT_INTR => Ok(VcpuExit::Intr),
-            KVM_EXIT_SET_TPR => Ok(VcpuExit::SetTpr),
-            KVM_EXIT_TPR_ACCESS => Ok(VcpuExit::TprAccess),
-            KVM_EXIT_S390_SIEIC => Ok(VcpuExit::S390Sieic),
-            KVM_EXIT_S390_RESET => Ok(VcpuExit::S390Reset),
-            KVM_EXIT_DCR => Ok(VcpuExit::Dcr),
-            KVM_EXIT_NMI => Ok(VcpuExit::Nmi),
             KVM_EXIT_INTERNAL_ERROR => Ok(VcpuExit::InternalError),
-            KVM_EXIT_OSI => Ok(VcpuExit::Osi),
-            KVM_EXIT_PAPR_HCALL => Ok(VcpuExit::PaprHcall),
-            KVM_EXIT_S390_UCONTROL => Ok(VcpuExit::S390Ucontrol),
-            KVM_EXIT_WATCHDOG => Ok(VcpuExit::Watchdog),
-            KVM_EXIT_S390_TSCH => Ok(VcpuExit::S390Tsch),
-            KVM_EXIT_EPR => Ok(VcpuExit::Epr),
             KVM_EXIT_SYSTEM_EVENT => {
                 // SAFETY:
                 // Safe because we know the exit reason told us this union
@@ -1010,54 +1034,6 @@ impl Vcpu for KvmVcpu {
                         Err(Error::new(EINVAL))
                     }
                 }
-            }
-            KVM_EXIT_X86_RDMSR => {
-                // SAFETY:
-                // Safe because the exit_reason (which comes from the kernel) told us which
-                // union field to use.
-                let msr = unsafe { &mut run.__bindgen_anon_1.msr };
-                let index = msr.index;
-                // By default fail the MSR read unless it was handled later.
-                msr.error = 1;
-                Ok(VcpuExit::RdMsr { index })
-            }
-            KVM_EXIT_X86_WRMSR => {
-                // SAFETY:
-                // Safe because the exit_reason (which comes from the kernel) told us which
-                // union field to use.
-                let msr = unsafe { &mut run.__bindgen_anon_1.msr };
-                // By default fail the MSR write.
-                msr.error = 1;
-                let index = msr.index;
-                let data = msr.data;
-                Ok(VcpuExit::WrMsr { index, data })
-            }
-            KVM_EXIT_X86_BUS_LOCK => Ok(VcpuExit::BusLock),
-            #[cfg(target_arch = "riscv64")]
-            KVM_EXIT_RISCV_SBI => {
-                // Safe because we trust the kernel to correctly fill in the union
-                let extension_id = unsafe { run.__bindgen_anon_1.riscv_sbi.extension_id };
-                let function_id = unsafe { run.__bindgen_anon_1.riscv_sbi.function_id };
-                let args = unsafe { run.__bindgen_anon_1.riscv_sbi.args };
-                Ok(VcpuExit::Sbi {
-                    extension_id,
-                    function_id,
-                    args,
-                })
-            }
-            #[cfg(target_arch = "riscv64")]
-            KVM_EXIT_RISCV_CSR => {
-                // Safe because we trust the kernel to correctly fill in the union
-                let csr_num = unsafe { run.__bindgen_anon_1.riscv_csr.csr_num };
-                let new_value = unsafe { run.__bindgen_anon_1.riscv_csr.new_value };
-                let write_mask = unsafe { run.__bindgen_anon_1.riscv_csr.write_mask };
-                let ret_value = unsafe { run.__bindgen_anon_1.riscv_csr.ret_value };
-                Ok(VcpuExit::RiscvCsr {
-                    csr_num,
-                    new_value,
-                    write_mask,
-                    ret_value,
-                })
             }
             r => panic!("unknown kvm exit reason: {}", r),
         }
@@ -1154,77 +1130,6 @@ impl Vcpu for KvmVcpu {
             }
             _ => Err(Error::new(EINVAL)),
         }
-    }
-
-    fn handle_hyperv_hypercall(
-        &self,
-        handle_fn: &mut dyn FnMut(HypervHypercall) -> u64,
-    ) -> Result<()> {
-        // SAFETY:
-        // Safe because we know we mapped enough memory to hold the kvm_run struct because the
-        // kernel told us how large it was.
-        let run = unsafe { &mut *(self.run_mmap.as_ptr() as *mut kvm_run) };
-        // Verify that the handler is called in the right context.
-        assert!(run.exit_reason == KVM_EXIT_HYPERV);
-        // SAFETY:
-        // Safe because the exit_reason (which comes from the kernel) told us which
-        // union field to use.
-        let hyperv = unsafe { &mut run.__bindgen_anon_1.hyperv };
-        match hyperv.type_ {
-            KVM_EXIT_HYPERV_SYNIC => {
-                // TODO(b/315998194): Add safety comment
-                #[allow(clippy::undocumented_unsafe_blocks)]
-                let synic = unsafe { &hyperv.u.synic };
-                handle_fn(HypervHypercall::HypervSynic {
-                    msr: synic.msr,
-                    control: synic.control,
-                    evt_page: synic.evt_page,
-                    msg_page: synic.msg_page,
-                });
-                Ok(())
-            }
-            KVM_EXIT_HYPERV_HCALL => {
-                // TODO(b/315998194): Add safety comment
-                #[allow(clippy::undocumented_unsafe_blocks)]
-                let hcall = unsafe { &mut hyperv.u.hcall };
-                hcall.result = handle_fn(HypervHypercall::HypervHcall {
-                    input: hcall.input,
-                    params: hcall.params,
-                });
-                Ok(())
-            }
-            _ => Err(Error::new(EINVAL)),
-        }
-    }
-
-    fn handle_rdmsr(&self, data: u64) -> Result<()> {
-        // SAFETY:
-        // Safe because we know we mapped enough memory to hold the kvm_run struct because the
-        // kernel told us how large it was.
-        let run = unsafe { &mut *(self.run_mmap.as_ptr() as *mut kvm_run) };
-        // Verify that the handler is called in the right context.
-        assert!(run.exit_reason == KVM_EXIT_X86_RDMSR);
-        // SAFETY:
-        // Safe because the exit_reason (which comes from the kernel) told us which
-        // union field to use.
-        let msr = unsafe { &mut run.__bindgen_anon_1.msr };
-        msr.data = data;
-        msr.error = 0;
-        Ok(())
-    }
-
-    fn handle_wrmsr(&self) {
-        // SAFETY:
-        // Safe because we know we mapped enough memory to hold the kvm_run struct because the
-        // kernel told us how large it was.
-        let run = unsafe { &mut *(self.run_mmap.as_ptr() as *mut kvm_run) };
-        // Verify that the handler is called in the right context.
-        assert!(run.exit_reason == KVM_EXIT_X86_WRMSR);
-        // SAFETY:
-        // Safe because the exit_reason (which comes from the kernel) told us which
-        // union field to use.
-        let msr = unsafe { &mut run.__bindgen_anon_1.msr };
-        msr.error = 0;
     }
 }
 
