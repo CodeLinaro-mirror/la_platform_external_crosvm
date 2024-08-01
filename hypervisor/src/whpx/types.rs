@@ -125,7 +125,7 @@ impl From<&Segment> for WHV_X64_SEGMENT_REGISTER {
         );
         WHV_X64_SEGMENT_REGISTER {
             Base: segment.base,
-            Limit: segment.limit,
+            Limit: segment.limit_bytes,
             Selector: segment.selector,
             __bindgen_anon_1: WHV_X64_SEGMENT_REGISTER__bindgen_ty_1 {
                 __bindgen_anon_1: WHV_X64_SEGMENT_REGISTER__bindgen_ty_1__bindgen_ty_1 {
@@ -143,7 +143,7 @@ impl From<&WHV_X64_SEGMENT_REGISTER> for Segment {
         let attributes = unsafe { whpx_segment.__bindgen_anon_1.__bindgen_anon_1 };
         Segment {
             base: whpx_segment.Base,
-            limit: whpx_segment.Limit,
+            limit_bytes: whpx_segment.Limit,
             selector: whpx_segment.Selector,
             type_: attributes.SegmentType() as u8,
             present: attributes.Present() as u8,

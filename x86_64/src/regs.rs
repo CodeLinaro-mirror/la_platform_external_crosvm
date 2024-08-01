@@ -251,6 +251,45 @@ pub fn configure_segments_and_sregs(mem: &GuestMemory, sregs: &mut Sregs) -> Res
     Ok(())
 }
 
+/// Configures the GDT, IDT, and segment registers for 32-bit protected mode with paging disabled.
+pub fn configure_segments_and_sregs_flat32(mem: &GuestMemory, sregs: &mut Sregs) -> Result<()> {
+    // reference: https://docs.kernel.org/arch/x86/boot.html?highlight=__BOOT_CS#id1
+    let gdt_table: [u64; BOOT_GDT_MAX] = [
+        gdt::gdt_entry(0, 0, 0),            // NULL
+        gdt::gdt_entry(0, 0, 0),            // NULL
+        gdt::gdt_entry(0xc09b, 0, 0xfffff), // CODE
+        gdt::gdt_entry(0xc093, 0, 0xfffff), // DATA
+        gdt::gdt_entry(0x808b, 0, 0xfffff), // TSS
+    ];
+
+    let code_seg = gdt::segment_from_gdt(gdt_table[2], 2);
+    let data_seg = gdt::segment_from_gdt(gdt_table[3], 3);
+    let tss_seg = gdt::segment_from_gdt(gdt_table[4], 4);
+
+    // Write segments
+    write_gdt_table(&gdt_table[..], mem)?;
+    sregs.gdt.base = BOOT_GDT_OFFSET;
+    sregs.gdt.limit = mem::size_of_val(&gdt_table) as u16 - 1;
+
+    write_idt_value(0, mem)?;
+    sregs.idt.base = BOOT_IDT_OFFSET;
+    sregs.idt.limit = mem::size_of::<u64>() as u16 - 1;
+
+    sregs.cs = code_seg;
+    sregs.ds = data_seg;
+    sregs.es = data_seg;
+    sregs.fs = data_seg;
+    sregs.gs = data_seg;
+    sregs.ss = data_seg;
+    sregs.tr = tss_seg;
+
+    /* 32-bit protected mode with paging disabled */
+    sregs.cr0 |= X86_CR0_PE;
+    sregs.cr0 &= !X86_CR0_PG;
+
+    Ok(())
+}
+
 /// Configures the system page tables and control registers for long mode with paging.
 pub fn setup_page_tables(mem: &GuestMemory, sregs: &mut Sregs) -> Result<()> {
     // Puts PML4 right after zero page but aligned to 4k.
@@ -308,7 +347,7 @@ mod tests {
         assert_eq!(0x0, read_u64(&gm, BOOT_IDT_OFFSET));
 
         assert_eq!(0, sregs.cs.base);
-        assert_eq!(0xfffff, sregs.ds.limit);
+        assert_eq!(0xffffffff, sregs.ds.limit_bytes);
         assert_eq!(0x10, sregs.cs.selector);
         assert_eq!(0x18, sregs.ds.selector);
         assert_eq!(0x18, sregs.es.selector);
@@ -317,7 +356,7 @@ mod tests {
         assert_eq!(1, sregs.gs.g);
         assert_eq!(0, sregs.ss.avl);
         assert_eq!(0, sregs.tr.base);
-        assert_eq!(0xfffff, sregs.tr.limit);
+        assert_eq!(0xffffffff, sregs.tr.limit_bytes);
         assert_eq!(0, sregs.tr.avl);
         assert_eq!(X86_CR0_PE, sregs.cr0 & X86_CR0_PE);
         assert_eq!(EFER_LME, sregs.efer);
