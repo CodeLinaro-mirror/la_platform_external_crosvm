@@ -42,6 +42,7 @@ pub const KUMQUAT_GPU_PROTOCOL_RESP_CAPSET: u32 = 0x3004;
 pub const KUMQUAT_GPU_PROTOCOL_RESP_CONTEXT_CREATE: u32 = 0x3005;
 pub const KUMQUAT_GPU_PROTOCOL_RESP_RESOURCE_CREATE: u32 = 0x3006;
 pub const KUMQUAT_GPU_PROTOCOL_RESP_CMD_SUBMIT_3D: u32 = 0x3007;
+pub const KUMQUAT_GPU_PROTOCOL_RESP_OK_SNAPSHOT: u32 = 0x3008;
 
 #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
 #[repr(C)]
@@ -216,8 +217,8 @@ pub enum KumquatGpuProtocol {
     CtxAttachResource(kumquat_gpu_protocol_ctx_resource),
     CtxDetachResource(kumquat_gpu_protocol_ctx_resource),
     ResourceCreate3d(kumquat_gpu_protocol_resource_create_3d),
-    TransferToHost3d(kumquat_gpu_protocol_transfer_host_3d),
-    TransferFromHost3d(kumquat_gpu_protocol_transfer_host_3d),
+    TransferToHost3d(kumquat_gpu_protocol_transfer_host_3d, RutabagaHandle),
+    TransferFromHost3d(kumquat_gpu_protocol_transfer_host_3d, RutabagaHandle),
     CmdSubmit3d(kumquat_gpu_protocol_cmd_submit, Vec<u8>, Vec<u64>),
     ResourceCreateBlob(kumquat_gpu_protocol_resource_create_blob),
     SnapshotSave,
@@ -228,6 +229,7 @@ pub enum KumquatGpuProtocol {
     RespContextCreate(u32),
     RespResourceCreate(kumquat_gpu_protocol_resp_resource_create, RutabagaHandle),
     RespCmdSubmit3d(u64, RutabagaHandle),
+    RespOkSnapshot,
 }
 
 pub enum KumquatGpuProtocolWrite<T: AsBytes + FromBytes> {
