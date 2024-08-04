@@ -108,7 +108,7 @@ const TYPE_TPM: u32 = MAX_VIRTIO_DEVICE_ID - 1;
 const TYPE_VHOST_USER: u32 = MAX_VIRTIO_DEVICE_ID - 2;
 const VIRTIO_DT_QCOM_BASE: u32 = 0xc000;
 const TYPE_QCOM_GLINK: u32 = VIRTIO_DT_QCOM_BASE + 10;
-
+const TYPE_QCOM_FRPC: u32 = VIRTIO_DT_QCOM_BASE + 0x0b;
 pub const VIRTIO_F_VERSION_1: u32 = 32;
 pub const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
 
@@ -147,6 +147,7 @@ pub fn type_to_str(type_: u32) -> Option<&'static str> {
         TYPE_TPM => "tpm",
         TYPE_VIDEO_DEC => "video-decoder",
         TYPE_VIDEO_ENC => "video-encoder",
+        TYPE_FRPC => "fastrpc",
         _ => return None,
     })
 }
