@@ -592,7 +592,7 @@ pub enum VmMemoryRequest {
 /// Struct for managing `VmMemoryRequest`s IOMMU related state.
 pub struct VmMemoryRequestIommuClient {
     tube: Arc<Mutex<Tube>>,
-    gpu_memory: BTreeSet<MemSlot>,
+    registered_memory: BTreeSet<VmMemoryRegionId>,
 }
 
 impl VmMemoryRequestIommuClient {
@@ -600,31 +600,31 @@ impl VmMemoryRequestIommuClient {
     pub fn new(tube: Arc<Mutex<Tube>>) -> Self {
         Self {
             tube,
-            gpu_memory: BTreeSet::new(),
+            registered_memory: BTreeSet::new(),
         }
     }
 }
 
+enum RegisteredMemory {
+    FixedMapping {
+        slot: MemSlot,
+        offset: usize,
+        size: usize,
+    },
+    DynamicMapping {
+        slot: MemSlot,
+    },
+}
+
+pub struct VmMappedMemoryRegion {
+    gfn: u64,
+    slot: MemSlot,
+}
+
+#[derive(Default)]
 pub struct VmMemoryRegionState {
-    // alloc -> (pfn, slot)
-    slot_map: HashMap<Alloc, (u64, MemSlot)>,
-    // id -> (slot, Option<offset, size>)
-    mapped_regions: BTreeMap<VmMemoryRegionId, (MemSlot, Option<(usize, usize)>)>,
-}
-
-impl VmMemoryRegionState {
-    pub fn new() -> VmMemoryRegionState {
-        Self {
-            slot_map: HashMap::new(),
-            mapped_regions: BTreeMap::new(),
-        }
-    }
-}
-
-impl Default for VmMemoryRegionState {
-    fn default() -> Self {
-        Self::new()
-    }
+    mapped_regions: HashMap<Alloc, VmMappedMemoryRegion>,
+    registered_memory: BTreeMap<VmMemoryRegionId, RegisteredMemory>,
 }
 
 fn try_map_to_prepared_region(
@@ -634,11 +634,15 @@ fn try_map_to_prepared_region(
     dest: &VmMemoryDestination,
     prot: &Protection,
 ) -> Option<VmMemoryResponse> {
-    let VmMemoryDestination::ExistingAllocation { allocation, offset } = dest else {
+    let VmMemoryDestination::ExistingAllocation {
+        allocation,
+        offset: dest_offset,
+    } = dest
+    else {
         return None;
     };
 
-    let (pfn, slot) = region_state.slot_map.get(allocation)?;
+    let VmMappedMemoryRegion { gfn, slot } = region_state.mapped_regions.get(allocation)?;
 
     let (descriptor, file_offset, size) = match source {
         VmMemorySource::Descriptor {
@@ -664,7 +668,7 @@ fn try_map_to_prepared_region(
     };
     if let Err(err) = vm.add_fd_mapping(
         *slot,
-        *offset as usize,
+        *dest_offset as usize,
         size,
         &descriptor,
         file_offset,
@@ -672,12 +676,18 @@ fn try_map_to_prepared_region(
     ) {
         return Some(VmMemoryResponse::Err(err));
     }
-    let pfn = pfn + (offset >> 12);
-    region_state.mapped_regions.insert(
-        VmMemoryRegionId(pfn),
-        (*slot, Some((*offset as usize, size))),
+
+    let gfn = gfn + (dest_offset >> 12);
+    let memory_region_id = VmMemoryRegionId(gfn);
+    region_state.registered_memory.insert(
+        memory_region_id,
+        RegisteredMemory::FixedMapping {
+            slot: *slot,
+            offset: *dest_offset as usize,
+            size,
+        },
     );
-    Some(VmMemoryResponse::RegisterMemory(VmMemoryRegionId(pfn)))
+    Some(VmMemoryResponse::RegisterMemory(memory_region_id))
 }
 
 impl VmMemoryRequest {
@@ -715,8 +725,8 @@ impl VmMemoryRequest {
                 }
 
                 match sys::prepare_shared_memory_region(vm, sys_allocator, alloc, cache) {
-                    Ok(info) => {
-                        region_state.slot_map.insert(alloc, info);
+                    Ok(region) => {
+                        region_state.mapped_regions.insert(alloc, region);
                         VmMemoryResponse::Ok
                     }
                     Err(e) => VmMemoryResponse::Err(e),
@@ -757,11 +767,12 @@ impl VmMemoryRequest {
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
 
+                let region_id = VmMemoryRegionId(guest_addr.0 >> 12);
                 if let (Some(descriptor), Some(iommu_client)) = (descriptor, iommu_client) {
                     let request =
                         VirtioIOMMURequest::VfioCommand(VirtioIOMMUVfioCommand::VfioDmabufMap {
-                            mem_slot: slot,
-                            gfn: guest_addr.0 >> 12,
+                            region_id,
+                            gpa: guest_addr.0,
                             size,
                             dma_buf: descriptor,
                         });
@@ -776,22 +787,23 @@ impl VmMemoryRequest {
                         }
                     };
 
-                    iommu_client.gpu_memory.insert(slot);
+                    iommu_client.registered_memory.insert(region_id);
                 }
 
-                let pfn = guest_addr.0 >> 12;
                 region_state
-                    .mapped_regions
-                    .insert(VmMemoryRegionId(pfn), (slot, None));
-                VmMemoryResponse::RegisterMemory(VmMemoryRegionId(pfn))
+                    .registered_memory
+                    .insert(region_id, RegisteredMemory::DynamicMapping { slot });
+                VmMemoryResponse::RegisterMemory(region_id)
             }
-            UnregisterMemory(id) => match region_state.mapped_regions.remove(&id) {
-                Some((slot, None)) => match vm.remove_memory_region(slot) {
+            UnregisterMemory(id) => match region_state.registered_memory.remove(&id) {
+                Some(RegisteredMemory::DynamicMapping { slot }) => match vm
+                    .remove_memory_region(slot)
+                {
                     Ok(_) => {
                         if let Some(iommu_client) = iommu_client {
-                            if iommu_client.gpu_memory.remove(&slot) {
+                            if iommu_client.registered_memory.remove(&id) {
                                 let request = VirtioIOMMURequest::VfioCommand(
-                                    VirtioIOMMUVfioCommand::VfioDmabufUnmap(slot),
+                                    VirtioIOMMUVfioCommand::VfioDmabufUnmap(id),
                                 );
 
                                 match virtio_iommu_request(&iommu_client.tube.lock(), &request) {
@@ -812,10 +824,12 @@ impl VmMemoryRequest {
                     }
                     Err(e) => VmMemoryResponse::Err(e),
                 },
-                Some((slot, Some((offset, size)))) => match vm.remove_mapping(slot, offset, size) {
-                    Ok(()) => VmMemoryResponse::Ok,
-                    Err(e) => VmMemoryResponse::Err(e),
-                },
+                Some(RegisteredMemory::FixedMapping { slot, offset, size }) => {
+                    match vm.remove_mapping(slot, offset, size) {
+                        Ok(()) => VmMemoryResponse::Ok,
+                        Err(e) => VmMemoryResponse::Err(e),
+                    }
+                }
                 None => VmMemoryResponse::Err(SysError::new(EINVAL)),
             },
             DynamicallyFreeMemoryRange {
@@ -903,7 +917,7 @@ impl VmMemoryRequest {
 
 #[derive(Serialize, Deserialize, Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
 /// Identifer for registered memory regions. Globally unique.
-// The current implementation uses pfn as the unique identifier.
+// The current implementation uses gfn as the unique identifier.
 pub struct VmMemoryRegionId(u64);
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -2229,9 +2243,9 @@ pub enum VmResponse {
     Err(SysError),
     /// Indicates the request encountered some error during execution.
     ErrString(String),
-    /// The request to register memory into guest address space was successfully done at page frame
-    /// number `pfn` and memory slot number `slot`.
-    RegisterMemory { pfn: u64, slot: u32 },
+    /// The request to register memory into guest address space was successfully done at guest page
+    /// frame number `gfn` and memory slot number `slot`.
+    RegisterMemory { gfn: u64, slot: u32 },
     /// Results of balloon control commands.
     #[cfg(feature = "balloon")]
     BalloonStats {
@@ -2268,10 +2282,10 @@ impl Display for VmResponse {
             Ok => write!(f, "ok"),
             Err(e) => write!(f, "error: {}", e),
             ErrString(e) => write!(f, "error: {}", e),
-            RegisterMemory { pfn, slot } => write!(
+            RegisterMemory { gfn, slot } => write!(
                 f,
-                "memory registered to page frame number {:#x} and memory slot {}",
-                pfn, slot
+                "memory registered to guest page frame number {:#x} and memory slot {}",
+                gfn, slot
             ),
             #[cfg(feature = "balloon")]
             VmResponse::BalloonStats {
@@ -2350,13 +2364,13 @@ pub enum VirtioIOMMUVfioCommand {
     },
     // Map a dma-buf into vfio iommu table
     VfioDmabufMap {
-        mem_slot: MemSlot,
-        gfn: u64,
+        region_id: VmMemoryRegionId,
+        gpa: u64,
         size: u64,
         dma_buf: SafeDescriptor,
     },
     // Unmap a dma-buf from vfio iommu table
-    VfioDmabufUnmap(MemSlot),
+    VfioDmabufUnmap(VmMemoryRegionId),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
