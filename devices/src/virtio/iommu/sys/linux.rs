@@ -15,12 +15,12 @@ use base::MemoryMappingBuilder;
 use base::TubeError;
 use cros_async::AsyncTube;
 use cros_async::Executor;
-use hypervisor::MemSlot;
 use sync::Mutex;
 use vm_control::VirtioIOMMURequest;
 use vm_control::VirtioIOMMUResponse;
 use vm_control::VirtioIOMMUVfioCommand;
 use vm_control::VirtioIOMMUVfioResult;
+use vm_control::VmMemoryRegionId;
 
 use self::vfio_wrapper::VfioWrapper;
 use crate::virtio::iommu::ipc_memory_mapper::IommuRequest;
@@ -30,8 +30,6 @@ use crate::virtio::iommu::Result;
 use crate::virtio::iommu::State;
 use crate::virtio::IommuError;
 use crate::VfioContainer;
-
-const VIRTIO_IOMMU_PAGE_SHIFT: u32 = 12;
 
 impl State {
     pub(in crate::virtio::iommu) fn handle_add_vfio_device(
@@ -73,11 +71,15 @@ impl State {
 
     pub(in crate::virtio::iommu) fn handle_map_dmabuf(
         &mut self,
-        mem_slot: MemSlot,
-        gfn: u64,
+        region_id: VmMemoryRegionId,
+        gpa: u64,
         size: u64,
         dma_buf: File,
     ) -> VirtioIOMMUVfioResult {
+        if gpa & self.page_mask != 0 {
+            error!("cannot map dmabuf to non-page-aligned guest physical address");
+            return VirtioIOMMUVfioResult::InvalidParam;
+        }
         let mmap = match MemoryMappingBuilder::new(size as usize)
             .from_file(&dma_buf)
             .build()
@@ -89,11 +91,11 @@ impl State {
             }
         };
         self.dmabuf_mem.insert(
-            gfn << VIRTIO_IOMMU_PAGE_SHIFT,
+            gpa,
             DmabufRegionEntry {
                 mmap,
-                mem_slot,
-                len: size,
+                region_id,
+                size,
             },
         );
 
@@ -102,12 +104,12 @@ impl State {
 
     pub(in crate::virtio::iommu) fn handle_unmap_dmabuf(
         &mut self,
-        mem_slot: MemSlot,
+        region_id: VmMemoryRegionId,
     ) -> VirtioIOMMUVfioResult {
         if let Some(range) = self
             .dmabuf_mem
             .iter()
-            .find(|(_, dmabuf_entry)| dmabuf_entry.mem_slot == mem_slot)
+            .find(|(_, dmabuf_entry)| dmabuf_entry.region_id == region_id)
             .map(|entry| *entry.0)
         {
             self.dmabuf_mem.remove(&range);
@@ -140,12 +142,12 @@ impl State {
             },
             VfioDeviceDel { endpoint_addr } => self.handle_del_vfio_device(endpoint_addr),
             VfioDmabufMap {
-                mem_slot,
-                gfn,
+                region_id,
+                gpa,
                 size,
                 dma_buf,
-            } => self.handle_map_dmabuf(mem_slot, gfn, size, File::from(dma_buf)),
-            VfioDmabufUnmap(mem_slot) => self.handle_unmap_dmabuf(mem_slot),
+            } => self.handle_map_dmabuf(region_id, gpa, size, File::from(dma_buf)),
+            VfioDmabufUnmap(region_id) => self.handle_unmap_dmabuf(region_id),
         };
         VirtioIOMMUResponse::VfioResponse(vfio_result)
     }
