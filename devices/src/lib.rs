@@ -52,6 +52,8 @@ use base::Tube;
 use base::TubeError;
 use cros_async::AsyncTube;
 use cros_async::Executor;
+use serde::Deserialize;
+use serde::Serialize;
 use vm_control::DeviceControlCommand;
 use vm_control::DevicesState;
 use vm_control::VmResponse;
@@ -119,6 +121,7 @@ pub use self::pci::StubPciParameters;
 pub use self::pflash::Pflash;
 pub use self::pflash::PflashParameters;
 pub use self::pl030::Pl030;
+pub use self::pmc_virt::VirtualPmc;
 pub use self::serial::Serial;
 pub use self::serial_device::Error as SerialError;
 pub use self::serial_device::SerialDevice;
@@ -155,7 +158,6 @@ cfg_if::cfg_if! {
         };
         pub use self::platform::VfioPlatformDevice;
         pub use self::ac_adapter::AcAdapter;
-        pub use self::pmc_virt::VirtualPmc;
         pub use self::proxy::ChildProcIntf;
         pub use self::proxy::Error as ProxyError;
         pub use self::proxy::ProxyDevice;
@@ -175,9 +177,6 @@ cfg_if::cfg_if! {
 }
 
 /// Request CoIOMMU to unpin a specific range.
-use serde::Deserialize;
-/// Request CoIOMMU to unpin a specific range.
-use serde::Serialize;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UnpinRequest {
     /// The ranges presents (start gfn, count).
