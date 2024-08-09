@@ -409,7 +409,7 @@ pub fn create_virtio_snd_device(
         Backend::Sys(virtio::snd::sys::StreamSourceBackend::AAUDIO) => "snd_aaudio_device",
         #[cfg(feature = "audio_cras")]
         Backend::Sys(virtio::snd::sys::StreamSourceBackend::CRAS) => "snd_cras_device",
-        #[cfg(not(feature = "audio_cras"))]
+        #[cfg(not(any(feature = "audio_cras", feature = "audio_aaudio")))]
         _ => unreachable!(),
     };
 
@@ -537,6 +537,35 @@ pub fn create_trackpad_device<T: IntoUnixStream>(
         .context("failed configuring virtio trackpad")?;
 
     let dev = virtio::input::new_trackpad(
+        idx,
+        socket,
+        width,
+        height,
+        name,
+        virtio::base_features(protection_type),
+    )
+    .context("failed to set up input device")?;
+
+    Ok(VirtioDeviceStub {
+        dev: Box::new(dev),
+        jail: simple_jail(jail_config, "input_device")?,
+    })
+}
+
+pub fn create_multitouch_trackpad_device<T: IntoUnixStream>(
+    protection_type: ProtectionType,
+    jail_config: &Option<JailConfig>,
+    trackpad_socket: T,
+    width: u32,
+    height: u32,
+    name: Option<&str>,
+    idx: u32,
+) -> DeviceResult {
+    let socket = trackpad_socket
+        .into_unix_stream()
+        .context("failed configuring virtio trackpad")?;
+
+    let dev = virtio::input::new_multitouch_trackpad(
         idx,
         socket,
         width,
@@ -1198,8 +1227,9 @@ pub fn create_pmem_ext2_device(
     pmem_device_tube: Tube,
 ) -> DeviceResult {
     let cfg = ext2::Config {
-        inodes_per_group: 4096,
-        blocks_per_group: 1024,
+        inodes_per_group: opts.inodes_per_group,
+        blocks_per_group: opts.blocks_per_group,
+        size: opts.size,
     };
     let arena = ext2::create_ext2_region(&cfg, Some(opts.path.as_path()))?;
     let arena_size = arena.size() as u64;

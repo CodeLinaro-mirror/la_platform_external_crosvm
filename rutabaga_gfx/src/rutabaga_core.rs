@@ -223,7 +223,12 @@ pub trait RutabagaContext {
     }
 
     /// Implementations must handle the context-specific command stream.
-    fn submit_cmd(&mut self, _commands: &mut [u8], _fence_ids: &[u64]) -> RutabagaResult<()>;
+    fn submit_cmd(
+        &mut self,
+        _commands: &mut [u8],
+        _fence_ids: &[u64],
+        shareable_fences: Vec<RutabagaHandle>,
+    ) -> RutabagaResult<()>;
 
     /// Implementations may use `resource` in this context's command stream.
     fn attach(&mut self, _resource: &mut RutabagaResource);
@@ -233,7 +238,13 @@ pub trait RutabagaContext {
 
     /// Implementations must create a fence on specified `ring_idx` in `fence`.  This
     /// allows for multiple synchronizations timelines per RutabagaContext.
-    fn context_create_fence(&mut self, _fence: RutabagaFence) -> RutabagaResult<()> {
+    ///
+    /// If RUTABAGA_FLAG_FENCE_HOST_SHAREABLE is set, a rutabaga handle must be returned on
+    /// success.
+    fn context_create_fence(
+        &mut self,
+        _fence: RutabagaFence,
+    ) -> RutabagaResult<Option<RutabagaHandle>> {
         Err(RutabagaError::Unsupported)
     }
 
@@ -338,6 +349,8 @@ fn calculate_component(component_mask: u8) -> RutabagaResult<RutabagaComponentTy
 /// thread-safe is more difficult.
 pub struct Rutabaga {
     resources: Map<u32, RutabagaResource>,
+    #[cfg(gfxstream_unstable)]
+    shareable_fences: Map<u64, RutabagaHandle>,
     contexts: Map<u32, Box<dyn RutabagaContext>>,
     // Declare components after resources and contexts such that it is dropped last.
     components: Map<RutabagaComponentType, Box<dyn RutabagaComponent>>,
@@ -529,7 +542,14 @@ impl Rutabaga {
                 .get_mut(&fence.ctx_id)
                 .ok_or(RutabagaError::InvalidContextId)?;
 
-            ctx.context_create_fence(fence)?;
+            #[allow(unused_variables)]
+            let handle_opt = ctx.context_create_fence(fence)?;
+
+            #[cfg(gfxstream_unstable)]
+            if fence.flags & RUTABAGA_FLAG_FENCE_HOST_SHAREABLE != 0 {
+                let handle = handle_opt.unwrap();
+                self.shareable_fences.insert(fence.fence_id, handle);
+            }
         } else {
             let component = self
                 .components
@@ -869,7 +889,12 @@ impl Rutabaga {
     }
 
     /// Exports the given fence for import into other processes.
-    pub fn export_fence(&self, fence_id: u64) -> RutabagaResult<RutabagaHandle> {
+    pub fn export_fence(&mut self, fence_id: u64) -> RutabagaResult<RutabagaHandle> {
+        #[cfg(gfxstream_unstable)]
+        if let Some(handle) = self.shareable_fences.get_mut(&fence_id) {
+            return handle.try_clone();
+        }
+
         let component = self
             .components
             .get(&self.default_component)
@@ -964,7 +989,33 @@ impl Rutabaga {
             .get_mut(&ctx_id)
             .ok_or(RutabagaError::InvalidContextId)?;
 
-        ctx.submit_cmd(commands, fence_ids)
+        #[allow(unused_mut)]
+        let mut shareable_fences: Vec<RutabagaHandle> = Vec::with_capacity(fence_ids.len());
+
+        #[cfg(gfxstream_unstable)]
+        for (i, fence_id) in fence_ids.iter().enumerate() {
+            let handle = self
+                .shareable_fences
+                .get_mut(&fence_id)
+                .ok_or(RutabagaError::InvalidRutabagaHandle)?;
+
+            let clone = handle.try_clone()?;
+            shareable_fences.insert(i, clone);
+        }
+
+        ctx.submit_cmd(commands, fence_ids, shareable_fences)
+    }
+
+    /// destroy fences that are still outstanding
+    #[cfg(gfxstream_unstable)]
+    pub fn destroy_fences(&mut self, fence_ids: &[u64]) -> RutabagaResult<()> {
+        for fence_id in fence_ids {
+            self.shareable_fences
+                .remove(&fence_id)
+                .ok_or(RutabagaError::InvalidRutabagaHandle)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1230,6 +1281,8 @@ impl RutabagaBuilder {
 
         Ok(Rutabaga {
             resources: Default::default(),
+            #[cfg(gfxstream_unstable)]
+            shareable_fences: Default::default(),
             contexts: Default::default(),
             components: rutabaga_components,
             default_component: self.default_component,

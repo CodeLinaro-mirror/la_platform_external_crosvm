@@ -91,6 +91,7 @@ fn bus_io_handler(bus: &Bus) -> impl FnMut(IoParams) -> Option<[u8; 8]> + '_ {
 
 /// Set the VCPU thread affinity and other per-thread scheduler properties.
 /// This function will be called from each VCPU thread at startup.
+#[allow(clippy::unnecessary_cast)]
 pub fn set_vcpu_thread_scheduling(
     vcpu_affinity: CpuSet,
     core_scheduling: bool,

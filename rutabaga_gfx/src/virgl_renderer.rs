@@ -88,7 +88,12 @@ fn import_resource(resource: &mut RutabagaResource) -> RutabagaResult<()> {
 }
 
 impl RutabagaContext for VirglRendererContext {
-    fn submit_cmd(&mut self, commands: &mut [u8], fence_ids: &[u64]) -> RutabagaResult<()> {
+    fn submit_cmd(
+        &mut self,
+        commands: &mut [u8],
+        fence_ids: &[u64],
+        _shareable_fences: Vec<RutabagaHandle>,
+    ) -> RutabagaResult<()> {
         #[cfg(not(virgl_renderer_unstable))]
         if !fence_ids.is_empty() {
             return Err(RutabagaError::Unsupported);
@@ -151,7 +156,10 @@ impl RutabagaContext for VirglRendererContext {
         RutabagaComponentType::VirglRenderer
     }
 
-    fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
+    fn context_create_fence(
+        &mut self,
+        fence: RutabagaFence,
+    ) -> RutabagaResult<Option<RutabagaHandle>> {
         // RutabagaFence::flags are not compatible with virglrenderer's fencing API and currently
         // virglrenderer context's assume all fences on a single timeline are MERGEABLE, and enforce
         // this assumption.
@@ -167,7 +175,8 @@ impl RutabagaContext for VirglRendererContext {
                 fence.fence_id,
             )
         };
-        ret_to_res(ret)
+        ret_to_res(ret)?;
+        Ok(None)
     }
 }
 

@@ -673,7 +673,6 @@ pub struct PassthroughFs {
     process_lock: Mutex<()>,
     // virtio-fs tag that the guest uses when mounting. This is only used for debugging
     // when tracing is enabled.
-    #[cfg_attr(not(feature = "trace_marker"), allow(dead_code))]
     tag: String,
 
     // File descriptors for various points in the file system tree.
@@ -2552,13 +2551,13 @@ impl FileSystem for PassthroughFs {
                 attr.st_uid
             } else {
                 // Cannot use -1 here because these are unsigned values.
-                ::std::u32::MAX
+                u32::MAX
             };
             let gid = if valid.contains(SetattrValid::GID) {
                 attr.st_gid
             } else {
                 // Cannot use -1 here because these are unsigned values.
-                ::std::u32::MAX
+                u32::MAX
             };
 
             // SAFETY: this is a constant value that is a nul-terminated string without interior

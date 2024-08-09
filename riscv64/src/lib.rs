@@ -55,7 +55,6 @@ use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
-#[cfg(any(target_os = "android", target_os = "linux"))]
 use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
@@ -195,9 +194,7 @@ impl arch::LinuxArch for Riscv64 {
         _dump_device_tree_blob: Option<PathBuf>,
         _debugcon_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
-        #[cfg(any(target_os = "android", target_os = "linux"))] _guest_suspended_cvar: Option<
-            Arc<(Mutex<bool>, Condvar)>,
-        >,
+        _guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         device_tree_overlays: Vec<DtbOverlay>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
@@ -306,9 +303,8 @@ impl arch::LinuxArch for Riscv64 {
                 return Err(Error::ImageTypeUnsupported);
             }
             VmImage::Kernel(ref mut kernel_image) => {
-                let kernel_size =
-                    arch::load_image(&mem, kernel_image, get_kernel_addr(), u64::max_value())
-                        .map_err(Error::KernelLoadFailure)?;
+                let kernel_size = arch::load_image(&mem, kernel_image, get_kernel_addr(), u64::MAX)
+                    .map_err(Error::KernelLoadFailure)?;
                 let kernel_end = get_kernel_addr().offset() + kernel_size as u64;
                 initrd = match components.initrd_image {
                     Some(initrd_file) => {

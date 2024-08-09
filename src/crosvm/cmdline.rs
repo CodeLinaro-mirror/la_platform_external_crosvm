@@ -7,6 +7,7 @@ cfg_if::cfg_if! {
         use base::RawDescriptor;
         use devices::virtio::vhost::user::device::parse_wayland_sock;
 
+        use crate::crosvm::sys::config::parse_pmem_ext2_option;
         use crate::crosvm::sys::config::VfioOption;
         use crate::crosvm::sys::config::SharedDir;
         use crate::crosvm::sys::config::PmemExt2Option;
@@ -229,7 +230,7 @@ pub struct CreateCompositeCommand {
     #[argh(positional, arg_name = "PATH")]
     /// image path
     pub path: String,
-    #[argh(positional, arg_name = "LABEL:PARTITION<:writable>")]
+    #[argh(positional, arg_name = "LABEL:PARTITION[:writable][:<GUID>]")]
     /// partitions
     pub partitions: Vec<String>,
 }
@@ -1491,6 +1492,7 @@ pub struct RunCommand {
     ///     single-touch[path=PATH,width=W,height=H,name=N]
     ///     switches[path=PATH]
     ///     trackpad[path=PATH,width=W,height=H,name=N]
+    ///     multi-touch-trackpad[path=PATH,width=W,height=H,name=N]
     /// See <https://crosvm.dev/book/devices/input.html> for more
     /// information.
     pub input: Vec<InputDeviceOption>,
@@ -1839,10 +1841,15 @@ pub struct RunCommand {
     pmem_device: Vec<DiskOption>,
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
-    #[argh(option, arg_name = "PATH")]
+    #[argh(
+        option,
+        arg_name = "PATH[,key=value[,key=value[,...]]]",
+        from_str_fn(parse_pmem_ext2_option)
+    )]
     #[serde(default)]
     #[merge(strategy = append)]
-    /// (EXPERIMENTAL): construct an ext2 file system on a pmem device from the given directory
+    /// (EXPERIMENTAL): construct an ext2 file system on a pmem device
+    /// from the given directory.
     pub pmem_ext2: Vec<PmemExt2Option>,
 
     #[cfg(feature = "process-invariants")]

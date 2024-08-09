@@ -704,7 +704,7 @@ impl PciConfiguration {
             .ok_or(Error::BarAddressInvalid(config.addr, config.size))?;
         match config.region_type {
             PciBarRegionType::Memory32BitRegion | PciBarRegionType::IoRegion => {
-                if end_addr > u64::from(u32::max_value()) {
+                if end_addr > u64::from(u32::MAX) {
                     return Err(Error::BarAddressInvalid(config.addr, config.size));
                 }
             }
@@ -712,10 +712,6 @@ impl PciConfiguration {
                 // The expansion ROM BAR cannot be used for part of a 64-bit BAR.
                 if config.bar_idx + 1 >= ROM_BAR_IDX {
                     return Err(Error::BarInvalid64(config.bar_idx));
-                }
-
-                if end_addr > u64::max_value() {
-                    return Err(Error::BarAddressInvalid(config.addr, config.size));
                 }
 
                 if self.bar_used[config.bar_idx + 1] {

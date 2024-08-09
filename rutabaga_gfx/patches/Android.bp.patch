@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index c69e8a386..39f7306a6 100644
+index c69e8a386..d64f158e6 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,7 +10,7 @@ index c69e8a386..39f7306a6 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -35,14 +34,73 @@ rust_library {
+@@ -35,14 +34,71 @@ rust_library {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
@@ -37,9 +37,8 @@ index c69e8a386..39f7306a6 100644
 +        },
 +    },
      static_libs: [
-+        "libdrm",
+-        "libgbm",
 +        "libepoxy",
-         "libgbm",
 +        "libgfxstream_backend",
          "libvirglrenderer",
      ],
@@ -86,7 +85,7 @@ index c69e8a386..39f7306a6 100644
  }
  
  rust_test {
-@@ -61,7 +119,6 @@ rust_test {
+@@ -61,7 +117,6 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
@@ -94,20 +93,18 @@ index c69e8a386..39f7306a6 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -73,12 +130,13 @@ rust_test {
+@@ -73,12 +128,9 @@ rust_test {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
 -    static_libs: [
-+    shared_libs: [
-+        "libepoxy",
-         "libgbm",
+-        "libgbm",
+-        "libvirglrenderer",
+-    ],
+     shared_libs: [
+-        "libdrm",
+         "libepoxy",
 +        "libgfxstream_backend",
-         "libvirglrenderer",
-     ],
--    shared_libs: [
-+    static_libs: [
-         "libdrm",
--        "libepoxy",
++        "libvirglrenderer",
      ],
  }
