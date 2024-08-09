@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use std::ptr::addr_of_mut;
 use std::slice;
 use std::sync::Arc;
-use std::u32;
 
 use base::error;
 use base::ioctl;
@@ -225,7 +224,7 @@ impl KvmVfioPviommu {
         if ret < 0 {
             Err(VfioError::KvmSetDeviceAttr(get_error()))
         } else {
-            // Safe as we verify the return value.
+            // SAFETY: Safe as we verify the return value.
             Ok(unsafe { File::from_raw_descriptor(ret) })
         }
     }
