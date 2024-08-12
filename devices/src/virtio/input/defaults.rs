@@ -51,7 +51,7 @@ pub fn new_multitouch_trackpad_config(
         virtio_input_device_ids::new(0, 0, 0, 0),
         name,
         name_with_index(b"virtio-multi-touch-trackpad-", idx),
-        virtio_input_bitmap::from_bits(&[INPUT_PROP_POINTER]),
+        virtio_input_bitmap::from_bits(&[INPUT_PROP_POINTER, INPUT_PROP_BUTTONPAD]),
         default_multitouchpad_events(),
         default_multitouchpad_absinfo(width, height, 10, 65536),
     )
@@ -177,6 +177,8 @@ fn default_multitouchscreen_absinfo(
     let mut absinfo: BTreeMap<u16, virtio_input_absinfo> = BTreeMap::new();
     absinfo.insert(ABS_MT_SLOT, virtio_input_absinfo::new(0, slot, 0, 0));
     absinfo.insert(ABS_MT_TRACKING_ID, virtio_input_absinfo::new(0, id, 0, 0));
+    absinfo.insert(ABS_X, virtio_input_absinfo::new(0, width, 0, 0));
+    absinfo.insert(ABS_Y, virtio_input_absinfo::new(0, height, 0, 0));
     absinfo.insert(ABS_MT_POSITION_X, virtio_input_absinfo::new(0, width, 0, 0));
     absinfo.insert(
         ABS_MT_POSITION_Y,
@@ -195,6 +197,8 @@ fn default_multitouchscreen_events() -> BTreeMap<u16, virtio_input_bitmap> {
             ABS_MT_TRACKING_ID,
             ABS_MT_POSITION_X,
             ABS_MT_POSITION_Y,
+            ABS_X,
+            ABS_Y,
         ]),
     );
     supported_events
@@ -229,7 +233,14 @@ fn default_multitouchpad_events() -> BTreeMap<u16, virtio_input_bitmap> {
     let mut supported_events: BTreeMap<u16, virtio_input_bitmap> = BTreeMap::new();
     supported_events.insert(
         EV_KEY,
-        virtio_input_bitmap::from_bits(&[BTN_TOUCH, BTN_TOOL_FINGER]),
+        virtio_input_bitmap::from_bits(&[
+            BTN_TOUCH,
+            BTN_TOOL_FINGER,
+            BTN_TOOL_DOUBLETAP,
+            BTN_TOOL_TRIPLETAP,
+            BTN_TOOL_QUADTAP,
+            BTN_LEFT,
+        ]),
     );
     supported_events.insert(
         EV_ABS,

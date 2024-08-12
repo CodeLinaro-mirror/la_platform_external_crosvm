@@ -25,6 +25,7 @@ use zerocopy::FromBytes;
 use crate::bytestream::Reader;
 use crate::bytestream::Writer;
 use crate::ipc::kumquat_gpu_protocol::*;
+use crate::rutabaga_os::AsRawDescriptor;
 use crate::rutabaga_os::FromRawDescriptor;
 use crate::rutabaga_os::IntoRawDescriptor;
 use crate::rutabaga_os::RawDescriptor;
@@ -65,24 +66,23 @@ impl RutabagaStream {
         let mut writer = Writer::new(&mut self.write_buffer);
         let mut num_descriptors = 0;
 
-        match encode {
-            KumquatGpuProtocolWrite::Cmd(cmd) => writer.write_obj(cmd)?,
+        let handle_opt: Option<RutabagaHandle> = match encode {
+            KumquatGpuProtocolWrite::Cmd(cmd) => {
+                writer.write_obj(cmd)?;
+                None
+            }
             KumquatGpuProtocolWrite::CmdWithHandle(cmd, handle) => {
                 writer.write_obj(cmd)?;
                 num_descriptors = 1;
-                self.descriptors[0] = handle.os_handle.into_raw_descriptor();
+                self.descriptors[0] = handle.os_handle.as_raw_descriptor();
+                Some(handle)
             }
             KumquatGpuProtocolWrite::CmdWithData(cmd, data) => {
                 writer.write_obj(cmd)?;
                 writer.write_all(&data)?;
+                None
             }
-            KumquatGpuProtocolWrite::CmdWithFile(cmd, data, file) => {
-                writer.write_obj(cmd)?;
-                writer.write_all(&data)?;
-                num_descriptors = 1;
-                self.descriptors[0] = file.into_raw_descriptor();
-            }
-        }
+        };
 
         let bytes_written = writer.bytes_written();
         let cmsg = ControlMessage::ScmRights(&mut self.descriptors[0..num_descriptors]);
@@ -169,7 +169,6 @@ impl RutabagaStream {
                 }
                 KUMQUAT_GPU_PROTOCOL_SUBMIT_3D => {
                     let cmd: kumquat_gpu_protocol_cmd_submit = reader.read_obj()?;
-                    let file_opt = files.pop_front();
                     if reader.available_bytes() < cmd.size.try_into()? {
                         // Large command buffers should handled via shared memory.
                         return Err(RutabagaError::InvalidCommandBuffer);
@@ -187,9 +186,9 @@ impl RutabagaStream {
                             }
                         }
                         reader.read_exact(&mut cmd_buf[..])?;
-                        KumquatGpuProtocol::CmdSubmit3d(cmd, cmd_buf, fence_ids, file_opt)
+                        KumquatGpuProtocol::CmdSubmit3d(cmd, cmd_buf, fence_ids)
                     } else {
-                        KumquatGpuProtocol::CmdSubmit3d(cmd, Vec::new(), Vec::new(), file_opt)
+                        KumquatGpuProtocol::CmdSubmit3d(cmd, Vec::new(), Vec::new())
                     }
                 }
                 KUMQUAT_GPU_PROTOCOL_RESOURCE_CREATE_BLOB => {
@@ -233,6 +232,19 @@ impl RutabagaStream {
                     };
 
                     KumquatGpuProtocol::RespResourceCreate(resp, handle)
+                }
+                KUMQUAT_GPU_PROTOCOL_RESP_CMD_SUBMIT_3D => {
+                    let file = files.pop_front().ok_or(RutabagaError::InvalidResourceId)?;
+                    let resp: kumquat_gpu_protocol_resp_cmd_submit_3d = reader.read_obj()?;
+                    let os_handle =
+                        unsafe { SafeDescriptor::from_raw_descriptor(file.into_raw_descriptor()) };
+
+                    let handle = RutabagaHandle {
+                        os_handle,
+                        handle_type: resp.handle_type,
+                    };
+
+                    KumquatGpuProtocol::RespCmdSubmit3d(resp.fence_id, handle)
                 }
                 _ => {
                     return Err(RutabagaError::Unsupported);

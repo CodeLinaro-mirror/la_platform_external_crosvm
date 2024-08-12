@@ -107,7 +107,6 @@ const AARCH64_PLATFORM_MMIO_SIZE: u64 = 0x800000;
 const AARCH64_FDT_OFFSET_IN_BIOS_MODE: u64 = 0x0;
 // Therefore, the BIOS is placed after the FDT in memory.
 const AARCH64_BIOS_OFFSET: u64 = AARCH64_FDT_MAX_SIZE;
-const AARCH64_BIOS_MAX_LEN: u64 = 1 << 20;
 
 const AARCH64_PROTECTED_VM_FW_MAX_SIZE: u64 = 0x400000;
 const AARCH64_PROTECTED_VM_FW_START: u64 =
@@ -172,10 +171,13 @@ fn get_bios_addr() -> GuestAddress {
 // Otherwise, returns None.
 fn get_swiotlb_addr(
     memory_size: u64,
+    swiotlb_size: u64,
     hypervisor: &(impl Hypervisor + ?Sized),
 ) -> Option<GuestAddress> {
     if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
-        Some(GuestAddress(AARCH64_PHYS_MEM_START + memory_size))
+        Some(GuestAddress(
+            AARCH64_PHYS_MEM_START + memory_size - swiotlb_size,
+        ))
     } else {
         None
     }
@@ -400,9 +402,18 @@ impl arch::LinuxArch for AArch64 {
         components: &VmComponents,
         hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error> {
+        // Static swiotlb is allocated from the end of RAM as a separate memory region, so, if
+        // enabled, make the RAM memory region smaller to leave room for it.
+        let mut main_memory_size = components.memory_size;
+        if let Some(size) = components.swiotlb {
+            if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+                main_memory_size -= size;
+            }
+        }
+
         let mut memory_regions = vec![(
             GuestAddress(AARCH64_PHYS_MEM_START),
-            components.memory_size,
+            main_memory_size,
             MemoryRegionOptions::new().align(get_block_size()),
         )];
 
@@ -416,7 +427,7 @@ impl arch::LinuxArch for AArch64 {
         }
 
         if let Some(size) = components.swiotlb {
-            if let Some(addr) = get_swiotlb_addr(components.memory_size, hypervisor) {
+            if let Some(addr) = get_swiotlb_addr(components.memory_size, size, hypervisor) {
                 memory_regions.push((
                     addr,
                     size,
@@ -465,9 +476,8 @@ impl arch::LinuxArch for AArch64 {
         let mut initrd = None;
         let payload = match components.vm_image {
             VmImage::Bios(ref mut bios) => {
-                let image_size =
-                    arch::load_image(&mem, bios, get_bios_addr(), AARCH64_BIOS_MAX_LEN)
-                        .map_err(Error::BiosLoadFailure)?;
+                let image_size = arch::load_image(&mem, bios, get_bios_addr(), u64::MAX)
+                    .map_err(Error::BiosLoadFailure)?;
                 PayloadType::Bios {
                     entry: get_bios_addr(),
                     image_size: image_size as u64,
@@ -803,7 +813,7 @@ impl arch::LinuxArch for AArch64 {
             psci_version,
             components.swiotlb.map(|size| {
                 (
-                    get_swiotlb_addr(components.memory_size, vm.get_hypervisor()),
+                    get_swiotlb_addr(components.memory_size, size, vm.get_hypervisor()),
                     size,
                 )
             }),
