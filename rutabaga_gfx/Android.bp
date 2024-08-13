@@ -65,7 +65,6 @@ rust_library {
 
 rust_library {
     name: "librutabaga_gfx_gfxstream",
-    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     vendor_available: true,
     crate_name: "rutabaga_gfx",
@@ -82,20 +81,26 @@ rust_library {
         "libzerocopy",
     ],
     proc_macros: ["libremain"],
-    cfgs: [
-        "gfxstream_unstable",
-    ],
-    features: [
-        "gfxstream",
-    ],
-    shared_libs: [
-        "libgfxstream_backend",
-    ],
     target: {
         host: {
-            features: ["vulkano"],
+            cfgs: [
+                "gfxstream_unstable",
+            ],
+            features: [
+                "gfxstream",
+                "vulkano",
+            ],
+            shared_libs: [
+                "libgfxstream_backend",
+            ],
+            compile_multilib: "64",
             rustlibs: [
                 "libvulkano",
+            ],
+        },
+        android: {
+            cfgs: [
+                "gfxstream_unstable",
             ],
         },
     },
