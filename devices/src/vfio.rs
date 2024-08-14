@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::File;
@@ -17,7 +16,6 @@ use std::path::PathBuf;
 use std::ptr::addr_of_mut;
 use std::slice;
 use std::sync::Arc;
-use std::u32;
 
 use base::error;
 use base::ioctl;
@@ -58,8 +56,6 @@ use crate::IommuDevType;
 #[sorted]
 #[derive(Error, Debug)]
 pub enum VfioError {
-    #[error("failed to borrow global vfio container")]
-    BorrowVfioContainer,
     #[error("failed to duplicate VfioContainer")]
     ContainerDupError,
     #[error("failed to set container's IOMMU driver type as {0:?}: {1}")]
@@ -222,18 +218,13 @@ impl KvmVfioPviommu {
 
         // SAFETY:
         // Safe as we are the owner of vfio_dev_attr, which is valid.
-        let ret = unsafe {
-            ioctl_with_ref(
-                kvm_vfio_file,
-                kvm_sys::KVM_SET_DEVICE_ATTR(),
-                &vfio_dev_attr,
-            )
-        };
+        let ret =
+            unsafe { ioctl_with_ref(kvm_vfio_file, kvm_sys::KVM_SET_DEVICE_ATTR, &vfio_dev_attr) };
 
         if ret < 0 {
             Err(VfioError::KvmSetDeviceAttr(get_error()))
         } else {
-            // Safe as we verify the return value.
+            // SAFETY: Safe as we verify the return value.
             Ok(unsafe { File::from_raw_descriptor(ret) })
         }
     }
@@ -286,13 +277,8 @@ impl KvmVfioPviommu {
 
         // SAFETY:
         // Safe as we are the owner of vfio_dev_attr, which is valid.
-        let ret = unsafe {
-            ioctl_with_ref(
-                kvm_vfio_file,
-                kvm_sys::KVM_SET_DEVICE_ATTR(),
-                &vfio_dev_attr,
-            )
-        };
+        let ret =
+            unsafe { ioctl_with_ref(kvm_vfio_file, kvm_sys::KVM_SET_DEVICE_ATTR, &vfio_dev_attr) };
 
         if ret < 0 {
             Err(VfioError::KvmSetDeviceAttr(get_error()))
@@ -351,7 +337,7 @@ impl VfioContainer {
     pub fn new_from_container(container: File) -> Result<Self> {
         // SAFETY:
         // Safe as file is vfio container descriptor and ioctl is defined by kernel.
-        let version = unsafe { ioctl(&container, VFIO_GET_API_VERSION()) };
+        let version = unsafe { ioctl(&container, VFIO_GET_API_VERSION) };
         if version as u8 != VFIO_API_VERSION {
             return Err(VfioError::VfioApiVersion);
         }
@@ -364,20 +350,20 @@ impl VfioContainer {
     }
 
     fn is_group_set(&self, group_id: u32) -> bool {
-        self.groups.get(&group_id).is_some()
+        self.groups.contains_key(&group_id)
     }
 
     fn check_extension(&self, val: IommuType) -> bool {
         // SAFETY:
         // Safe as file is vfio container and make sure val is valid.
-        let ret = unsafe { ioctl_with_val(self, VFIO_CHECK_EXTENSION(), val as c_ulong) };
+        let ret = unsafe { ioctl_with_val(self, VFIO_CHECK_EXTENSION, val as c_ulong) };
         ret != 0
     }
 
     fn set_iommu(&mut self, val: IommuType) -> i32 {
         // SAFETY:
         // Safe as file is vfio container and make sure val is valid.
-        unsafe { ioctl_with_val(self, VFIO_SET_IOMMU(), val as c_ulong) }
+        unsafe { ioctl_with_val(self, VFIO_SET_IOMMU, val as c_ulong) }
     }
 
     fn set_iommu_checked(&mut self, val: IommuType) -> Result<()> {
@@ -434,7 +420,7 @@ impl VfioContainer {
             dma_map.flags |= VFIO_DMA_MAP_FLAG_WRITE;
         }
 
-        let ret = ioctl_with_ref(self, VFIO_IOMMU_MAP_DMA(), &dma_map);
+        let ret = ioctl_with_ref(self, VFIO_IOMMU_MAP_DMA, &dma_map);
         if ret != 0 {
             return Err(VfioError::IommuDmaMap(get_error()));
         }
@@ -466,7 +452,7 @@ impl VfioContainer {
         // SAFETY:
         // Safe as file is vfio container, dma_unmap is constructed by us, and
         // we check the return value
-        let ret = unsafe { ioctl_with_mut_ref(self, VFIO_IOMMU_UNMAP_DMA(), &mut dma_unmap) };
+        let ret = unsafe { ioctl_with_mut_ref(self, VFIO_IOMMU_UNMAP_DMA, &mut dma_unmap) };
         if ret != 0 || dma_unmap.size != size {
             return Err(VfioError::IommuDmaUnmap(get_error()));
         }
@@ -497,7 +483,7 @@ impl VfioContainer {
         // SAFETY:
         // Safe as file is vfio container, iommu_info has valid values,
         // and we check the return value
-        let ret = unsafe { ioctl_with_mut_ref(self, VFIO_IOMMU_GET_INFO(), &mut iommu_info) };
+        let ret = unsafe { ioctl_with_mut_ref(self, VFIO_IOMMU_GET_INFO, &mut iommu_info) };
         if ret != 0 || (iommu_info.flags & VFIO_IOMMU_INFO_PGSIZES) == 0 {
             return Err(VfioError::IommuGetInfo(get_error()));
         }
@@ -529,7 +515,7 @@ impl VfioContainer {
         // SAFETY:
         // Safe as file is vfio container, iommu_info_argsz has valid values,
         // and we check the return value
-        let ret = unsafe { ioctl_with_mut_ref(self, VFIO_IOMMU_GET_INFO(), &mut iommu_info_argsz) };
+        let ret = unsafe { ioctl_with_mut_ref(self, VFIO_IOMMU_GET_INFO, &mut iommu_info_argsz) };
         if ret != 0 {
             return Err(VfioError::IommuGetInfo(get_error()));
         }
@@ -546,7 +532,7 @@ impl VfioContainer {
             // SAFETY:
             // Safe as file is vfio container, iommu_info has valid values,
             // and we check the return value
-            unsafe { ioctl_with_mut_ptr(self, VFIO_IOMMU_GET_INFO(), iommu_info.as_mut_ptr()) };
+            unsafe { ioctl_with_mut_ptr(self, VFIO_IOMMU_GET_INFO, iommu_info.as_mut_ptr()) };
         if ret != 0 {
             return Err(VfioError::IommuGetInfo(get_error()));
         }
@@ -748,7 +734,7 @@ impl VfioGroup {
         let mut ret =
             // SAFETY:
             // Safe as we are the owner of group_file and group_status which are valid value.
-            unsafe { ioctl_with_mut_ref(&group_file, VFIO_GROUP_GET_STATUS(), &mut group_status) };
+            unsafe { ioctl_with_mut_ref(&group_file, VFIO_GROUP_GET_STATUS, &mut group_status) };
         if ret < 0 {
             return Err(VfioError::GetGroupStatus(get_error()));
         }
@@ -764,7 +750,7 @@ impl VfioGroup {
         ret = unsafe {
             ioctl_with_ref(
                 &group_file,
-                VFIO_GROUP_SET_CONTAINER(),
+                VFIO_GROUP_SET_CONTAINER,
                 &container_raw_descriptor,
             )
         };
@@ -820,11 +806,7 @@ impl VfioGroup {
         // Safe as we are the owner of vfio_dev_descriptor and vfio_dev_attr which are valid value,
         // and we verify the return value.
         if 0 != unsafe {
-            ioctl_with_ref(
-                kvm_vfio_file,
-                kvm_sys::KVM_SET_DEVICE_ATTR(),
-                &vfio_dev_attr,
-            )
+            ioctl_with_ref(kvm_vfio_file, kvm_sys::KVM_SET_DEVICE_ATTR, &vfio_dev_attr)
         } {
             return Err(VfioError::KvmSetDeviceAttr(get_error()));
         }
@@ -838,7 +820,7 @@ impl VfioGroup {
 
         // SAFETY:
         // Safe as we are the owner of self and path_ptr which are valid value.
-        let ret = unsafe { ioctl_with_ptr(self, VFIO_GROUP_GET_DEVICE_FD(), path_ptr) };
+        let ret = unsafe { ioctl_with_ptr(self, VFIO_GROUP_GET_DEVICE_FD, path_ptr) };
         if ret < 0 {
             return Err(VfioError::GroupGetDeviceFD(get_error()));
         }
@@ -867,122 +849,91 @@ impl AsRawDescriptor for VfioGroup {
     }
 }
 
-/// A helper trait for managing VFIO setup
-pub trait VfioCommonTrait: Send + Sync {
+/// A helper struct for managing VFIO containers
+#[derive(Default)]
+pub struct VfioContainerManager {
+    /// One VFIO container shared by all VFIO devices that don't attach to any IOMMU device.
+    no_iommu_container: Option<Arc<Mutex<VfioContainer>>>,
+
+    /// For IOMMU enabled devices, all VFIO groups that share the same IOVA space are managed by
+    /// one VFIO container.
+    iommu_containers: Vec<Arc<Mutex<VfioContainer>>>,
+
+    /// One VFIO container shared by all VFIO devices that attach to the CoIOMMU device.
+    coiommu_container: Option<Arc<Mutex<VfioContainer>>>,
+
+    /// One VFIO container shared by all VFIO devices that attach to pKVM.
+    pkvm_iommu_container: Option<Arc<Mutex<VfioContainer>>>,
+}
+
+impl VfioContainerManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// The single place to create a VFIO container for a PCI endpoint.
     ///
     /// The policy to determine whether an individual or a shared VFIO container
     /// will be created for this device is governed by the physical PCI topology,
-    /// and the argument iommu_enabled.
+    /// and the argument iommu_type.
     ///
     ///  # Arguments
     ///
     ///  * `sysfspath` - the path to the PCI device, e.g. /sys/bus/pci/devices/0000:02:00.0
-    ///  * `iommu_enabled` - whether virtio IOMMU is enabled on this device
-    fn vfio_get_container<P: AsRef<Path>>(
-        iommu_dev: IommuDevType,
-        sysfspath: Option<P>,
-    ) -> Result<Arc<Mutex<VfioContainer>>>;
-}
-
-thread_local! {
-
-    // One VFIO container is shared by all VFIO devices that don't
-    // attach to the virtio IOMMU device
-    static NO_IOMMU_CONTAINER: RefCell<Option<Arc<Mutex<VfioContainer>>>> = RefCell::new(None);
-
-    // For IOMMU enabled devices, all VFIO groups that share the same IOVA space
-    // are managed by one VFIO container
-    static IOMMU_CONTAINERS: RefCell<Option<Vec<Arc<Mutex<VfioContainer>>>>> = RefCell::new(Some(Default::default()));
-
-    // One VFIO container is shared by all VFIO devices that
-    // attach to the CoIOMMU device
-    static COIOMMU_CONTAINER: RefCell<Option<Arc<Mutex<VfioContainer>>>> = RefCell::new(None);
-
-    // One VFIO container is shared by all VFIO devices that attach to pKVM
-    static PKVM_IOMMU_CONTAINER: RefCell<Option<Arc<Mutex<VfioContainer>>>> = RefCell::new(None);
-}
-
-pub struct VfioCommonSetup;
-
-impl VfioCommonTrait for VfioCommonSetup {
-    fn vfio_get_container<P: AsRef<Path>>(
-        iommu_dev: IommuDevType,
+    ///  * `iommu_type` - which type of IOMMU is enabled on this device
+    pub fn get_container<P: AsRef<Path>>(
+        &mut self,
+        iommu_type: IommuDevType,
         sysfspath: Option<P>,
     ) -> Result<Arc<Mutex<VfioContainer>>> {
-        match iommu_dev {
+        match iommu_type {
             IommuDevType::NoIommu => {
-                // One VFIO container is used for all IOMMU disabled groups
-                NO_IOMMU_CONTAINER.with(|v| {
-                    if v.borrow().is_some() {
-                        if let Some(ref container) = *v.borrow() {
-                            Ok(container.clone())
-                        } else {
-                            Err(VfioError::BorrowVfioContainer)
-                        }
-                    } else {
-                        let container = Arc::new(Mutex::new(VfioContainer::new()?));
-                        *v.borrow_mut() = Some(container.clone());
-                        Ok(container)
-                    }
-                })
+                // One VFIO container is used for all IOMMU disabled groups.
+                if let Some(container) = &self.no_iommu_container {
+                    Ok(container.clone())
+                } else {
+                    let container = Arc::new(Mutex::new(VfioContainer::new()?));
+                    self.no_iommu_container = Some(container.clone());
+                    Ok(container)
+                }
             }
             IommuDevType::VirtioIommu => {
                 let path = sysfspath.ok_or(VfioError::InvalidPath)?;
                 let group_id = VfioGroup::get_group_id(path)?;
 
-                // One VFIO container is used for all devices belong to one VFIO group
+                // One VFIO container is used for all devices that belong to one VFIO group.
                 // NOTE: vfio_wrapper relies on each container containing exactly one group.
-                IOMMU_CONTAINERS.with(|v| {
-                    if let Some(ref mut containers) = *v.borrow_mut() {
-                        let container = containers
-                            .iter()
-                            .find(|container| container.lock().is_group_set(group_id));
-
-                        match container {
-                            None => {
-                                let container = Arc::new(Mutex::new(VfioContainer::new()?));
-                                containers.push(container.clone());
-                                Ok(container)
-                            }
-                            Some(container) => Ok(container.clone()),
-                        }
-                    } else {
-                        Err(VfioError::BorrowVfioContainer)
-                    }
-                })
+                if let Some(container) = self
+                    .iommu_containers
+                    .iter()
+                    .find(|container| container.lock().is_group_set(group_id))
+                {
+                    Ok(container.clone())
+                } else {
+                    let container = Arc::new(Mutex::new(VfioContainer::new()?));
+                    self.iommu_containers.push(container.clone());
+                    Ok(container)
+                }
             }
             IommuDevType::CoIommu => {
                 // One VFIO container is used for devices attached to CoIommu
-                COIOMMU_CONTAINER.with(|v| {
-                    if v.borrow().is_some() {
-                        if let Some(ref container) = *v.borrow() {
-                            Ok(container.clone())
-                        } else {
-                            Err(VfioError::BorrowVfioContainer)
-                        }
-                    } else {
-                        let container = Arc::new(Mutex::new(VfioContainer::new()?));
-                        *v.borrow_mut() = Some(container.clone());
-                        Ok(container)
-                    }
-                })
+                if let Some(container) = &self.coiommu_container {
+                    Ok(container.clone())
+                } else {
+                    let container = Arc::new(Mutex::new(VfioContainer::new()?));
+                    self.coiommu_container = Some(container.clone());
+                    Ok(container)
+                }
             }
             IommuDevType::PkvmPviommu => {
                 // One VFIO container is used for devices attached to pKVM
-                PKVM_IOMMU_CONTAINER.with(|v| {
-                    if v.borrow().is_some() {
-                        if let Some(ref container) = *v.borrow() {
-                            Ok(container.clone())
-                        } else {
-                            Err(VfioError::BorrowVfioContainer)
-                        }
-                    } else {
-                        let container = Arc::new(Mutex::new(VfioContainer::new()?));
-                        *v.borrow_mut() = Some(container.clone());
-                        Ok(container)
-                    }
-                })
+                if let Some(container) = &self.pkvm_iommu_container {
+                    Ok(container.clone())
+                } else {
+                    let container = Arc::new(Mutex::new(VfioContainer::new()?));
+                    self.pkvm_iommu_container = Some(container.clone());
+                    Ok(container)
+                }
             }
         }
     }
@@ -1202,7 +1153,7 @@ impl VfioDevice {
         device_feature[0].flags = VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_ENTRY;
         // SAFETY:
         // Safe as we are the owner of self and power_management which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE(), &device_feature[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE, &device_feature[0]) };
         if ret < 0 {
             Err(VfioError::VfioPmLowPowerEnter(get_error()))
         } else {
@@ -1234,7 +1185,7 @@ impl VfioDevice {
         }
         // SAFETY:
         // Safe as we are the owner of self and power_management which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE(), &device_feature[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE, &device_feature[0]) };
         if ret < 0 {
             Err(VfioError::VfioPmLowPowerEnter(get_error()))
         } else {
@@ -1249,7 +1200,7 @@ impl VfioDevice {
         device_feature[0].flags = VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_EXIT;
         // SAFETY:
         // Safe as we are the owner of self and power_management which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE(), &device_feature[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE, &device_feature[0]) };
         if ret < 0 {
             Err(VfioError::VfioPmLowPowerExit(get_error()))
         } else {
@@ -1270,7 +1221,7 @@ impl VfioDevice {
         }
         // SAFETY:
         // Safe as we are the owner of self and dsm which are valid value
-        let ret = unsafe { ioctl_with_mut_ref(&self.dev, VFIO_DEVICE_ACPI_DSM(), &mut dsm[0]) };
+        let ret = unsafe { ioctl_with_mut_ref(&self.dev, VFIO_DEVICE_ACPI_DSM, &mut dsm[0]) };
         if ret < 0 {
             Err(VfioError::VfioAcpiDsm(get_error()))
         } else {
@@ -1304,7 +1255,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioAcpiNotificationEnable(get_error()))
         } else {
@@ -1323,7 +1274,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioAcpiNotificationDisable(get_error()))
         } else {
@@ -1350,7 +1301,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioAcpiNotificationTest(get_error()))
         } else {
@@ -1397,7 +1348,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioIrqEnable(get_error()))
         } else {
@@ -1434,7 +1385,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioIrqEnable(get_error()))
         } else {
@@ -1453,7 +1404,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioIrqDisable(get_error()))
         } else {
@@ -1472,7 +1423,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioIrqUnmask(get_error()))
         } else {
@@ -1491,7 +1442,7 @@ impl VfioDevice {
 
         // SAFETY:
         // Safe as we are the owner of self and irq_set which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS(), &irq_set[0]) };
+        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_SET_IRQS, &irq_set[0]) };
         if ret < 0 {
             Err(VfioError::VfioIrqMask(get_error()))
         } else {
@@ -1512,7 +1463,7 @@ impl VfioDevice {
         // SAFETY:
         // Safe as we are the owner of device_file and dev_info which are valid value,
         // and we verify the return value.
-        let ret = unsafe { ioctl_with_mut_ref(device_file, VFIO_DEVICE_GET_INFO(), &mut dev_info) };
+        let ret = unsafe { ioctl_with_mut_ref(device_file, VFIO_DEVICE_GET_INFO, &mut dev_info) };
         if ret < 0 {
             return Err(VfioError::VfioDeviceGetInfo(get_error()));
         }
@@ -1551,11 +1502,7 @@ impl VfioDevice {
             // Safe as we are the owner of dev and irq_info which are valid value,
             // and we verify the return value.
             let ret = unsafe {
-                ioctl_with_mut_ref(
-                    self.device_file(),
-                    VFIO_DEVICE_GET_IRQ_INFO(),
-                    &mut irq_info,
-                )
+                ioctl_with_mut_ref(self.device_file(), VFIO_DEVICE_GET_IRQ_INFO, &mut irq_info)
             };
             if ret < 0 || irq_info.count != 1 {
                 return Err(VfioError::VfioDeviceGetInfo(get_error()));
@@ -1587,7 +1534,7 @@ impl VfioDevice {
                 // SAFETY:
                 // Safe as we are the owner of dev and reg_info which are valid value,
                 // and we verify the return value.
-                unsafe { ioctl_with_mut_ref(dev, VFIO_DEVICE_GET_REGION_INFO(), &mut reg_info) };
+                unsafe { ioctl_with_mut_ref(dev, VFIO_DEVICE_GET_REGION_INFO, &mut reg_info) };
             if ret < 0 {
                 continue;
             }
@@ -1610,7 +1557,7 @@ impl VfioDevice {
                 let ret = unsafe {
                     ioctl_with_mut_ref(
                         dev,
-                        VFIO_DEVICE_GET_REGION_INFO(),
+                        VFIO_DEVICE_GET_REGION_INFO,
                         &mut (region_with_cap[0].region_info),
                     )
                 };

@@ -43,7 +43,8 @@
 //! However, it doesn't address the difference between CLOCK_BOOTTIME and CLOCK_MONOTONIC related
 //! to host's suspend/resume, as it is designed to maintain the CLOCK_REALTIME in sync mainly.
 
-use std::arch::x86_64::_rdtsc;
+#[cfg(target_arch = "aarch64")]
+use std::arch::asm;
 use std::collections::BTreeMap;
 use std::mem::replace;
 use std::mem::size_of;
@@ -109,6 +110,79 @@ const VIRTIO_PVCLOCK_S_OK: u8 = 0;
 const VIRTIO_PVCLOCK_S_IOERR: u8 = 1;
 
 const VIRTIO_PVCLOCK_CLOCKSOURCE_RATING: u32 = 450;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn read_clock_counter() -> u64 {
+    // SAFETY: rdtsc is unprivileged and have no side effects.
+    unsafe { std::arch::x86_64::_rdtsc() }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn read_clock_counter() -> u64 {
+    let mut x: u64;
+    // SAFETY: This instruction have no side effect apart from storing the current timestamp counter
+    //         into the specified register.
+    unsafe {
+        asm!("mrs {x}, cntvct_el0",
+            x = out(reg) x,
+        );
+    }
+    x
+}
+
+/// Calculate a (multiplier, shift) pair for scaled math of clocks.
+/// The values are passed on to `pvclock_scale_delta` in the guest kernel and satisfy the following
+/// (approximate) equality:
+/// `n * scaled_hz / base_hz ~= ((n << shift) * multiplier) >> 32`
+/// The logic here is roughly based on `kvm_get_time_scale` (but simplified as we can use u128).
+/// # Arguments
+/// * `scaled_hz` - Frequency to convert to. When dealing with clocksources, this is NSEC_PER_SEC.
+/// * `base_hz` - Frequency to convert from. When dealing with clocksources, this is the counter
+///   frequency.
+fn freq_scale_shift(scaled_hz: u64, base_hz: u64) -> (u32, i8) {
+    assert!(scaled_hz > 0 && base_hz > 0);
+    // We treat `multiplier` as a 0.32 fixed-point number by folding the >> 32 into its definition.
+    // With this definition, `multiplier` can be calculated as `(scaled_hz / base_hz) >> shift`
+    // with a corresponding `shift`.
+    //
+    // The value of `shift` should satisfy a few constraints:
+    // 1. `multiplier` needs to be < 1.0 due to the representable range of 0.32 fixed-point (maximum
+    //    (2^32-1)/2^32).
+    // 2. `shift` should be minimized because `pvclock_scale_delta` applies `shift` on the 64-bit
+    //    TSC value before extending to 128-bit and large positive shifts reduce the TSC rollover
+    //    time.
+    //
+    // Minimizing `shift` means maximizing `multiplier`. From the < 1.0 constraint, this is
+    // equivalent to having a multiplier within [0.5, 1.0). The logic below picks a multiplier
+    // satisfying that, while updating `shift` accordingly when we double or halve the multiplier.
+    let mut shift = 0;
+    // Convert to u128 so that overflow handling becomes much easier.
+    let mut scaled_hz = scaled_hz as u128;
+    let mut base_hz = base_hz as u128;
+    if scaled_hz >= base_hz {
+        while scaled_hz >= base_hz {
+            // `multiplier` >= 1.0; iteratively scale it down
+            // scaled_hz is at most 64 bits, so after this loop base_hz is at most 65 bits.
+            base_hz <<= 1;
+            shift += 1;
+        }
+    } else {
+        while base_hz > 2 * scaled_hz {
+            // `multiplier` < 0.5; iteratively scale it up
+            // base_hz is at most 64 bits. If the loop condition passes then scaled_hz is at most 63
+            // bits, otherwise at most 64 bits. Post-loop scaled_hz is at most 64 bits.
+            scaled_hz <<= 1;
+            shift -= 1;
+        }
+    }
+    // From above, we know that the values are at most 65 bits. This provides sufficient headroom
+    // for scaled_hz << 32 below.
+    assert!(base_hz < (1u128 << 65) && scaled_hz < (1u128 << 65));
+    let mult: u32 = ((scaled_hz << 32) / base_hz)
+        .try_into()
+        .expect("should not overflow");
+    (mult, shift)
+}
 
 // The config structure being exposed to the guest to tell them how much suspend time should be
 // injected to the guest's CLOCK_BOOTTIME.
@@ -199,27 +273,7 @@ impl PvclockSharedData {
     }
 
     pub fn set_tsc_frequency(&mut self, frequency: u64) -> Result<()> {
-        // TSC values are converted to timestamps using the following algorithm:
-        //   delta = _rdtsc() - tsc_suspended_delta
-        //   if tsc_frequency_shift > 0:
-        //     delta <<= tsc_frequency_shift
-        //   else:
-        //     delta >>= -tsc_frequency_shift
-        //   return (delta * tsc_frequency_multiplier) >> 32
-        //
-        // So, tsc_frequency_multiplier needs to be something like 1e9/tsc_frquency, in which case
-        // tsc_frequency_shift would be 32 (to counteract the final 32 right shift). But
-        // 1e9/tsc_frequency is <1 so we actually need to scale that value up and scale down
-        // the tsc_frequency_shift so we don't lose precision in the frequency. Our tsc_frequency
-        // isn't *that* precise, so we scale it up by 16 and scale down the tsc_frequency_shift by
-        // 16 (so it's also 16).
-        let shift = 16i8;
-        let multiplier: u32 = ((1_000_000_000u128 << shift) / frequency as u128)
-            .try_into()
-            .context(format!(
-                "tsc frequency multiplier overflow, frequency {}Hz is too small",
-                frequency
-            ))?;
+        let (multiplier, shift): (u32, i8) = freq_scale_shift(1_000_000_000, frequency);
 
         self.mem
             .write_obj_at_addr(multiplier, self.tsc_frequency_multiplier_addr)
@@ -310,6 +364,7 @@ impl PvClock {
         let last_state = replace(&mut self.worker_state, PvClockWorkerState::None);
         if let PvClockWorkerState::Idle(suspend_tube) = last_state {
             if queues.len() != QUEUE_SIZES.len() {
+                self.worker_state = PvClockWorkerState::Idle(suspend_tube);
                 return Err(anyhow!(
                     "expected {} queues, got {}",
                     QUEUE_SIZES.len(),
@@ -495,14 +550,11 @@ impl PvClockWorker {
         }
         self.suspend_time = Some(PvclockInstant {
             time: Utc::now(),
-            // SAFETY:
-            // Safe because _rdtsc takes no arguments, and we trust _rdtsc to not modify any other
-            // memory.
-            tsc_value: unsafe { _rdtsc() },
+            tsc_value: read_clock_counter(),
         });
     }
 
-    pub fn resume(&mut self) -> Result<()> {
+    pub fn resume(&mut self) -> Result<u64> {
         // First, increment the sequence lock by 1 before writing to the pvclock page.
         self.increment_pvclock_seqlock()?;
 
@@ -511,13 +563,13 @@ impl PvClockWorker {
         // writes to other fields.
         std::sync::atomic::fence(Ordering::SeqCst);
 
-        // Set the tsc suspended delta and guest_stopped_bit in pvclock struct. We only need to set
+        // Set the guest_stopped_bit and tsc suspended delta in pvclock struct. We only need to set
         // the bit, the guest will unset it once the guest has handled the stoppage.
         // We get the result here because we want to call increment_pvclock_seqlock regardless of
         // the result of these calls.
         let result = self
-            .set_suspended_time()
-            .and_then(|_| self.set_guest_stopped_bit());
+            .set_guest_stopped_bit()
+            .and_then(|_| self.set_suspended_time());
 
         // The guest makes sure there are memory barriers in between reads of the seqlock and other
         // fields, we should make sure there are memory barriers in between writes of seqlock and
@@ -545,18 +597,15 @@ impl PvClockWorker {
         }
     }
 
-    fn set_suspended_time(&mut self) -> Result<()> {
+    fn set_suspended_time(&mut self) -> Result<u64> {
         let (this_suspend_duration, this_suspend_tsc_delta) =
             if let Some(suspend_time) = self.suspend_time.take() {
                 (
                     Self::get_suspended_duration(&suspend_time),
-                    // SAFETY:
-                    // Safe because _rdtsc takes no arguments, and we trust _rdtsc to not modify
-                    // any other memory.
                     // NB: This calculation may wrap around, as TSC can be reset to zero when
                     // the device has resumed from the "deep" suspend state (it may not happen for
                     // s2idle cases). It also happens when the tsc value itself wraps.
-                    unsafe { _rdtsc() }.wrapping_sub(suspend_time.tsc_value),
+                    read_clock_counter().wrapping_sub(suspend_time.tsc_value),
                 )
             } else {
                 return Err(Error::new(libc::ENOTSUP))
@@ -586,7 +635,7 @@ impl PvClockWorker {
         self.total_injected_ns
             .fetch_add(this_suspend_duration.as_nanos() as u64, Ordering::SeqCst);
 
-        Ok(())
+        Ok(self.total_suspend_tsc_delta)
     }
 
     fn increment_pvclock_seqlock(&mut self) -> Result<()> {
@@ -822,13 +871,20 @@ fn run_main_worker(
                             PvClockCommandResponse::Ok
                         }
                         PvClockCommand::Resume => {
-                            if let Err(e) = worker.resume() {
-                                error!("Failed to resume pvclock: {:#}", e);
-                                PvClockCommandResponse::Err(pvclock_response_error_from_anyhow(e))
-                            } else {
-                                // signal to the driver that the total_suspend_ns has changed
-                                interrupt.signal_config_changed();
-                                PvClockCommandResponse::Ok
+                            match worker.resume() {
+                                Ok(total_suspended_ticks) => {
+                                    // signal to the driver that the total_suspend_ns has changed
+                                    interrupt.signal_config_changed();
+                                    PvClockCommandResponse::Resumed {
+                                        total_suspended_ticks,
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to resume pvclock: {:#}", e);
+                                    PvClockCommandResponse::Err(pvclock_response_error_from_anyhow(
+                                        e,
+                                    ))
+                                }
                             }
                         }
                     };
@@ -915,15 +971,25 @@ impl VirtioDevice for PvClock {
 
     fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
         let last_state = replace(&mut self.worker_state, PvClockWorkerState::None);
-        if let PvClockWorkerState::Main(main_worker_thread) = last_state {
-            let main_worker_ret = main_worker_thread.stop();
-            let mut queues = BTreeMap::new();
-            queues.insert(0, main_worker_ret.set_pvclock_page_queue);
-            self.worker_state = PvClockWorkerState::Idle(main_worker_ret.suspend_tube);
-            self.state.paused_main_worker = Some(main_worker_ret.worker.into());
-            Ok(Some(queues))
-        } else {
-            Ok(None)
+        match last_state {
+            PvClockWorkerState::Main(main_worker_thread) => {
+                let main_worker_ret = main_worker_thread.stop();
+                let mut queues = BTreeMap::new();
+                queues.insert(0, main_worker_ret.set_pvclock_page_queue);
+                self.worker_state = PvClockWorkerState::Idle(main_worker_ret.suspend_tube);
+                self.state.paused_main_worker = Some(main_worker_ret.worker.into());
+                Ok(Some(queues))
+            }
+            PvClockWorkerState::Stub(stub_worker_thread) => {
+                let stub_ret = stub_worker_thread.stop();
+                self.worker_state = PvClockWorkerState::Idle(stub_ret.suspend_tube);
+                Ok(None)
+            }
+            PvClockWorkerState::Idle(suspend_tube) => {
+                self.worker_state = PvClockWorkerState::Idle(suspend_tube);
+                Ok(None)
+            }
+            PvClockWorkerState::None => panic!("invalid state transition"),
         }
     }
 
@@ -945,6 +1011,10 @@ impl VirtioDevice for PvClock {
             );
             // Use unchecked as no worker is running at this point
             self.start_main_worker(interrupt, worker, queues)?;
+        } else {
+            // If the device wasn't activated, we should bring up the stub worker since that's
+            // what is supposed to be running for an un-activated device.
+            self.start_stub_worker();
         }
         Ok(())
     }
@@ -1080,5 +1150,74 @@ mod tests {
         );
 
         assert_wake_successful(&mut pvclock_device, &mem);
+    }
+
+    /// A simplified clone of `pvclock_scale_delta` from Linux kernel to emulate
+    /// what the kernel does when converting TSC to ktime.
+    fn pvclock_scale_tsc(mult: u32, shift: i8, tsc: u64) -> u64 {
+        let shifted = if shift < 0 {
+            tsc >> -shift
+        } else {
+            tsc << shift
+        };
+        let product = shifted as u128 * mult as u128;
+        (product >> 32).try_into().expect("should not overflow")
+    }
+
+    /// Helper function for checking the behavior of `freq_scale_shift`.
+    fn check_freq_scale(f: u64, input: u64) {
+        // We only test `scaled_hz` = 1GHz because that is the only value used in the code base.
+        let (mult, shift) = freq_scale_shift(1_000_000_000, f);
+
+        let scaled = pvclock_scale_tsc(mult, shift, input);
+
+        // Use relative error <= 1e-8 as the target. TSC can be huge so this isn't really a super
+        // accurate target, and our goal is to simply sanity check the math without adding too many
+        // requirements about rounding errors.
+        let expected: u64 = (input as u128 * 1_000_000_000u128 / f as u128) as u64;
+        let expected_lo: u64 = (input as u128 * 999_999_990u128 / f as u128) as u64;
+        let expected_hi: u64 = (input as u128 * 1_000_000_010u128 / f as u128) as u64;
+        assert!(
+            (expected_lo..=expected_hi).contains(&scaled),
+            "{scaled} should be close to {expected} (base_hz={f}, mult={mult}, shift={shift})"
+        );
+    }
+
+    #[test]
+    fn test_freq_scale_shift_accuracy() {
+        // Basic check for formula correctness: scaling `scaled_hz` to `base_hz` should yield
+        // `base_hz`.
+        for f in (1..=50).map(|n| n * 100_000_000) {
+            check_freq_scale(f, f);
+        }
+    }
+
+    #[test]
+    fn test_freq_scale_shift_overflow_high_freq() {
+        // For scale factors < 1.0, test that we can correctly convert the maximum TSC value without
+        // overflow. We must be able to handle values as large as it realistically can be, as the
+        // kernel clock breaks if the calculated ktime goes backwards (b/342168920).
+        for f in (11..=50).map(|n| n * 100_000_000) {
+            check_freq_scale(f, u64::MAX);
+        }
+    }
+
+    #[test]
+    fn test_freq_scale_shift_overflow_low_freq() {
+        fn prev_power_of_two(n: u64) -> u64 {
+            assert_ne!(n, 0);
+            let highest_bit_set = 63 - n.leading_zeros();
+            1 << highest_bit_set
+        }
+        // Same test as above, but for scale factors >= 1.0. The difference is that for scale
+        // factors >= 1.0 we first round up the factor, then apply a multiplier (< 1.0). We reflect
+        // this limitation in our tested maximum value.
+        for f in (1..=10).map(|n| n * 100_000_000) {
+            // Truncate the remainder since prev_power_of_two rounds down anyway.
+            let factor = 1_000_000_000 / f;
+            // This is like (exp2(floor(log2(factor)) + 1)).
+            let target = u64::MAX / (prev_power_of_two(factor) << 1);
+            check_freq_scale(f, target);
+        }
     }
 }

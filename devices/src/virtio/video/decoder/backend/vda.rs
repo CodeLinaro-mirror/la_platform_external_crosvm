@@ -286,6 +286,9 @@ impl DecoderSession for VdaDecoderSession {
 /// A VDA decoder backend that can be passed to `Decoder::new` in order to create a working decoder.
 pub struct LibvdaDecoder(libvda::decode::VdaInstance);
 
+/// SAFETY: safe because the Rcs in `VdaInstance` are always used from the same thread.
+unsafe impl Send for LibvdaDecoder {}
+
 impl LibvdaDecoder {
     /// Create a decoder backend instance that can be used to instantiate an decoder.
     pub fn new(backend_type: libvda::decode::VdaImplType) -> VideoResult<Self> {
@@ -314,7 +317,7 @@ impl DecoderBackend for LibvdaDecoder {
 
         // Raise the first |# of supported raw formats|-th bits because we can assume that any
         // combination of (a coded format, a raw format) is valid in Chrome.
-        let mask = !(u64::max_value() << caps.output_formats.len());
+        let mask = !(u64::MAX << caps.output_formats.len());
 
         let mut in_fmts = vec![];
         let mut profiles: BTreeMap<Format, Vec<Profile>> = Default::default();
@@ -386,7 +389,7 @@ impl DecoderBackend for LibvdaDecoder {
 
         // Raise the first |# of supported coded formats|-th bits because we can assume that any
         // combination of (a coded format, a raw format) is valid in Chrome.
-        let mask = !(u64::max_value() << caps.input_formats.len());
+        let mask = !(u64::MAX << caps.input_formats.len());
         let out_fmts = caps
             .output_formats
             .iter()

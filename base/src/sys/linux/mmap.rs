@@ -77,6 +77,29 @@ impl dyn MappedRegion {
             Err(Error::SystemCallFailed(ErrnoError::last()))
         }
     }
+
+    /// Calls madvise on a mapping of `size` bytes starting at `offset` from the start of
+    /// the region.  `offset`..`offset+size` must be contained within the `MappedRegion`.
+    pub fn madvise(&self, offset: usize, size: usize, advice: libc::c_int) -> Result<()> {
+        validate_includes_range(self.size(), offset, size)?;
+
+        // SAFETY:
+        // Safe because the MemoryMapping/MemoryMappingArena interface ensures our pointer and size
+        // are correct, and we've validated that `offset`..`offset+size` is in the range owned by
+        // this `MappedRegion`.
+        let ret = unsafe {
+            libc::madvise(
+                (self.as_ptr() as usize + offset) as *mut libc::c_void,
+                size,
+                advice,
+            )
+        };
+        if ret != -1 {
+            Ok(())
+        } else {
+            Err(Error::SystemCallFailed(ErrnoError::last()))
+        }
+    }
 }
 
 /// Wraps an anonymous shared memory mapping in the current process. Provides
@@ -311,7 +334,7 @@ impl MemoryMapping {
         // and set the (ANONYMOUS | NORESERVE) flag.
         let (fd, offset) = match fd {
             Some((fd, offset)) => {
-                if offset > libc::off64_t::max_value() as u64 {
+                if offset > libc::off64_t::MAX as u64 {
                     return Err(Error::InvalidOffset);
                 }
                 // Map private for read-only seal. See below for upstream relax of the restriction.
@@ -1018,11 +1041,11 @@ mod tests {
     #[test]
     fn slice_overflow_error() {
         let m = MemoryMappingBuilder::new(5).build().unwrap();
-        let res = m.get_slice(std::usize::MAX, 3).unwrap_err();
+        let res = m.get_slice(usize::MAX, 3).unwrap_err();
         assert_eq!(
             res,
             VolatileMemoryError::Overflow {
-                base: std::usize::MAX,
+                base: usize::MAX,
                 offset: 3,
             }
         );
@@ -1037,8 +1060,8 @@ mod tests {
     #[test]
     fn from_fd_offset_invalid() {
         let fd = tempfile().unwrap();
-        let res = MemoryMapping::from_fd_offset(&fd, 4096, (libc::off64_t::max_value() as u64) + 1)
-            .unwrap_err();
+        let res =
+            MemoryMapping::from_fd_offset(&fd, 4096, (libc::off64_t::MAX as u64) + 1).unwrap_err();
         match res {
             Error::InvalidOffset => {}
             e => panic!("unexpected error: {}", e),
@@ -1153,6 +1176,23 @@ mod tests {
         <dyn MappedRegion>::msync(&m, 0, size).unwrap();
         <dyn MappedRegion>::msync(&m, ps, size - ps).unwrap();
         let res = <dyn MappedRegion>::msync(&m, ps, size).unwrap_err();
+        match res {
+            Error::InvalidAddress => {}
+            e => panic!("unexpected error: {}", e),
+        }
+    }
+
+    #[test]
+    fn arena_madvise() {
+        let size = 0x40000;
+        let mut m = MemoryMappingArena::new(size).unwrap();
+        m.add_anon_protection(0, size, Protection::read_write())
+            .expect("failed to add writable protection for madvise MADV_REMOVE");
+        let ps = pagesize();
+        <dyn MappedRegion>::madvise(&m, 0, ps, libc::MADV_PAGEOUT).unwrap();
+        <dyn MappedRegion>::madvise(&m, 0, size, libc::MADV_PAGEOUT).unwrap();
+        <dyn MappedRegion>::madvise(&m, ps, size - ps, libc::MADV_REMOVE).unwrap();
+        let res = <dyn MappedRegion>::madvise(&m, ps, size, libc::MADV_PAGEOUT).unwrap_err();
         match res {
             Error::InvalidAddress => {}
             e => panic!("unexpected error: {}", e),

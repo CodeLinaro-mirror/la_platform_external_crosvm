@@ -16,6 +16,7 @@ use vm_memory::MemoryRegionPurpose;
 
 use super::GunyahVcpu;
 use super::GunyahVm;
+use crate::AArch64SysRegId;
 use crate::Hypervisor;
 use crate::PsciVersion;
 use crate::VcpuAArch64;
@@ -229,47 +230,23 @@ impl VcpuAArch64 for GunyahVcpu {
         Ok(PSCI_0_2)
     }
 
-    #[cfg(feature = "gdb")]
     fn set_guest_debug(&self, _addrs: &[GuestAddress], _enable_singlestep: bool) -> Result<()> {
         Err(Error::new(ENOTSUP))
     }
 
-    #[cfg(feature = "gdb")]
-    fn set_gdb_registers(
-        &self,
-        _regs: &<gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::Registers,
-    ) -> Result<()> {
-        Err(Error::new(ENOTSUP))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn get_gdb_registers(
-        &self,
-        _regs: &mut <gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::Registers,
-    ) -> Result<()> {
-        Err(Error::new(ENOTSUP))
-    }
-
-    #[cfg(feature = "gdb")]
     fn get_max_hw_bps(&self) -> Result<usize> {
         Err(Error::new(ENOTSUP))
     }
 
-    #[cfg(feature = "gdb")]
-    fn set_gdb_register(
-        &self,
-        _reg: <gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::RegId,
-        _data: &[u8],
-    ) -> Result<()> {
+    fn get_system_regs(&self) -> Result<BTreeMap<AArch64SysRegId, u64>> {
         Err(Error::new(ENOTSUP))
     }
 
-    #[cfg(feature = "gdb")]
-    fn get_gdb_register(
-        &self,
-        _reg: <gdbstub_arch::aarch64::AArch64 as gdbstub::arch::Arch>::RegId,
-        _data: &mut [u8],
-    ) -> Result<usize> {
-        Err(Error::new(ENOTSUP))
+    fn hypervisor_specific_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        unimplemented!()
+    }
+
+    fn hypervisor_specific_restore(&self, _data: serde_json::Value) -> anyhow::Result<()> {
+        unimplemented!()
     }
 }

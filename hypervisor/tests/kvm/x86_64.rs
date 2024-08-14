@@ -30,7 +30,6 @@ use hypervisor::Vm;
 use hypervisor::VmCap;
 use hypervisor::VmX86_64;
 use kvm_sys::*;
-use libc::EINVAL;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
@@ -58,7 +57,7 @@ fn get_msr_index_list() {
 #[test]
 fn entries_double_on_error() {
     let hypervisor = Kvm::new().unwrap();
-    let cpuid = get_cpuid_with_initial_capacity(&hypervisor, KVM_GET_SUPPORTED_CPUID(), 4).unwrap();
+    let cpuid = get_cpuid_with_initial_capacity(&hypervisor, KVM_GET_SUPPORTED_CPUID, 4).unwrap();
     assert!(cpuid.cpu_id_entries.len() > 4);
 }
 
@@ -409,20 +408,4 @@ fn set_msr_unsupported() {
         vcpu.set_msr(u32::MAX, u64::MAX),
         Err(base::Error::new(libc::EPERM))
     );
-}
-
-#[test]
-fn get_hyperv_cpuid() {
-    let kvm = Kvm::new().unwrap();
-    let gm = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
-    let vm = KvmVm::new(&kvm, gm, Default::default()).unwrap();
-    let vcpu = vm.create_vcpu(0).unwrap();
-    let cpuid = vcpu.get_hyperv_cpuid();
-    // Older kernels don't support so tolerate this kind of failure.
-    match cpuid {
-        Ok(_) => {}
-        Err(e) => {
-            assert_eq!(e.errno(), EINVAL);
-        }
-    }
 }

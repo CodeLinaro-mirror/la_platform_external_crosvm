@@ -49,7 +49,7 @@ fn setup_tap_device(tap_name: &[u8], ip_addr: Ipv4Addr, netmask: Ipv4Addr, mac_a
     let tap = Tap::new_with_name(tap_name, true, false).unwrap();
     // SAFETY:
     // ioctl is safe since we call it with a valid tap fd and check the return value.
-    let ret = unsafe { ioctl_with_val(&tap, net_sys::TUNSETPERSIST(), 1) };
+    let ret = unsafe { ioctl_with_val(&tap, net_sys::TUNSETPERSIST, 1) };
     if ret < 0 {
         panic!("Failed to persist tap interface");
     }
@@ -74,7 +74,7 @@ fn tap_hotplug_two_impl() {
     let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "2".to_owned()]);
     let mut vm = TestVm::new(config).unwrap();
 
-    //Setup test taps.
+    //Setup test taps. tap_name has to be distinct per test, or it may appear flaky (b/333090169).
     let tap1_name = "test_tap1";
     setup_tap_device(
         tap1_name.as_bytes(),
@@ -151,8 +151,8 @@ fn tap_hotplug_add_remove_add_impl() {
     let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
     let mut vm = TestVm::new(config).unwrap();
 
-    //Setup test tap
-    let tap_name = "test_tap";
+    //Setup test tap. tap_name has to be distinct per test, or it may appear flaky (b/333090169).
+    let tap_name = "test_tap3";
     setup_tap_device(
         tap_name.as_bytes(),
         "100.115.92.5".parse().unwrap(),
@@ -201,7 +201,6 @@ fn tap_hotplug_add_remove_add_impl() {
 
 /// Checks tap hotplug works with a device added, removed, then added again.
 #[test]
-#[ignore = "b/333090169 test is flaky"]
 fn tap_hotplug_add_remove_add() {
     call_test_with_sudo("tap_hotplug_add_remove_add_impl");
 }
@@ -217,11 +216,19 @@ fn tap_hotplug_add_remove_rapid_add_impl() {
     let config = Config::new().extra_args(vec!["--pci-hotplug-slots".to_owned(), "1".to_owned()]);
     let mut vm = TestVm::new(config).unwrap();
 
-    //Setup test tap
-    let tap_name = "test_tap";
+    //Setup test tap. tap_name has to be distinct per test, or it may appear flaky (b/333090169).
+    let tap_name_a = "test_tap4";
     setup_tap_device(
-        tap_name.as_bytes(),
-        "100.115.92.5".parse().unwrap(),
+        tap_name_a.as_bytes(),
+        "100.115.92.9".parse().unwrap(),
+        "255.255.255.252".parse().unwrap(),
+        "a0:b0:c0:d0:e0:f0".parse().unwrap(),
+    );
+
+    let tap_name_b = "test_tap5";
+    setup_tap_device(
+        tap_name_b.as_bytes(),
+        "100.115.92.1".parse().unwrap(),
         "255.255.255.252".parse().unwrap(),
         "a0:b0:c0:d0:e0:f0".parse().unwrap(),
     );
@@ -232,7 +239,7 @@ fn tap_hotplug_add_remove_rapid_add_impl() {
         wait_timeout
     ));
     // Hotplug tap.
-    vm.hotplug_tap(tap_name).unwrap();
+    vm.hotplug_tap(tap_name_a).unwrap();
     // Wait until virtio-net device appears in guest OS.
     assert!(poll_until_true(
         &mut vm,
@@ -242,7 +249,7 @@ fn tap_hotplug_add_remove_rapid_add_impl() {
 
     // Remove hotplugged tap device, then hotplug again without waiting for guest.
     vm.remove_pci_device(1).unwrap();
-    vm.hotplug_tap(tap_name).unwrap();
+    vm.hotplug_tap(tap_name_b).unwrap();
 
     // Wait for a while that the guest likely noticed the removal.
     thread::sleep(Duration::from_millis(500));
@@ -256,14 +263,17 @@ fn tap_hotplug_add_remove_rapid_add_impl() {
 
     drop(vm);
     Command::new("ip")
-        .args(["link", "delete", tap_name])
+        .args(["link", "delete", tap_name_a])
+        .status()
+        .unwrap();
+    Command::new("ip")
+        .args(["link", "delete", tap_name_b])
         .status()
         .unwrap();
 }
 
 /// Checks tap hotplug works with a device added, removed, then rapidly added again.
 #[test]
-#[ignore = "b/333090169 test is flaky"]
 fn tap_hotplug_add_remove_rapid_add() {
     call_test_with_sudo("tap_hotplug_add_remove_rapid_add_impl");
 }

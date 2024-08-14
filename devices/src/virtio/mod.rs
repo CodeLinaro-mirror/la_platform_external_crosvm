@@ -45,8 +45,6 @@ pub mod vsock;
 pub use self::balloon::Balloon;
 #[cfg(feature = "balloon")]
 pub use self::balloon::BalloonFeatures;
-#[cfg(feature = "balloon")]
-pub use self::balloon::BalloonMode;
 pub use self::block::BlockAsync;
 pub use self::console::Console;
 pub use self::descriptor_chain::DescriptorChain;
@@ -127,6 +125,7 @@ cfg_if::cfg_if! {
         pub use self::net::VHOST_NET_DEFAULT_PATH;
         pub use self::p9::P9;
         pub use self::pmem::Pmem;
+        pub use self::pmem::PmemConfig;
         #[cfg(feature = "audio")]
         pub use self::snd::new_sound;
         pub use self::wl::Wl;
@@ -145,6 +144,7 @@ use hypervisor::ProtectionType;
 use serde::Deserialize;
 use serde::Serialize;
 use virtio_sys::virtio_config::VIRTIO_F_ACCESS_PLATFORM;
+use virtio_sys::virtio_config::VIRTIO_F_SUSPEND;
 use virtio_sys::virtio_config::VIRTIO_F_VERSION_1;
 use virtio_sys::virtio_ids;
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
@@ -272,7 +272,8 @@ pub fn copy_config(dst: &mut [u8], dst_offset: u64, src: &[u8], src_offset: u64)
 
 /// Returns the set of reserved base features common to all virtio devices.
 pub fn base_features(protection_type: ProtectionType) -> u64 {
-    let mut features: u64 = 1 << VIRTIO_F_VERSION_1 | 1 << VIRTIO_RING_F_EVENT_IDX;
+    let mut features: u64 =
+        1 << VIRTIO_F_VERSION_1 | 1 << VIRTIO_RING_F_EVENT_IDX | 1 << VIRTIO_F_SUSPEND;
 
     if protection_type != ProtectionType::Unprotected {
         features |= 1 << VIRTIO_F_ACCESS_PLATFORM;

@@ -25,7 +25,6 @@ use crate::CpuId;
 use crate::CpuIdEntry;
 use crate::DebugRegs;
 use crate::Fpu;
-use crate::HypervHypercall;
 use crate::IoOperation;
 use crate::IoParams;
 use crate::Regs;
@@ -609,26 +608,6 @@ impl Vcpu for WhpxVcpu {
         }
     }
 
-    /// this is unhandled currently since we don't emulate hypercall instructions for whpx.
-    fn handle_hyperv_hypercall(&self, _func: &mut dyn FnMut(HypervHypercall) -> u64) -> Result<()> {
-        Ok(())
-    }
-
-    /// This function should be called after `Vcpu::run` returns `VcpuExit::RdMsr`,
-    /// and in the same thread as run.
-    ///
-    /// It will put `data` into the user buffer and return.
-    fn handle_rdmsr(&self, _data: u64) -> Result<()> {
-        // TODO(b/235691411): Implement.
-        Err(Error::new(libc::ENXIO))
-    }
-
-    /// This function should be called after `Vcpu::run` returns `VcpuExit::WrMsr`,
-    /// and in the same thread as run.
-    fn handle_wrmsr(&self) {
-        // TODO(b/235691411): Implement.
-    }
-
     #[allow(non_upper_case_globals)]
     fn run(&mut self) -> Result<VcpuExit> {
         // safe because we own this whpx virtual processor index, and assume the vm partition is
@@ -644,7 +623,6 @@ impl Vcpu for WhpxVcpu {
         })?;
 
         match self.last_exit_context.ExitReason {
-            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonNone => Ok(VcpuExit::Unknown),
             WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => Ok(VcpuExit::Mmio),
             WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => Ok(VcpuExit::Io),
             WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnrecoverableException => {
@@ -802,7 +780,7 @@ impl VcpuX86_64 for WhpxVcpu {
     }
 
     /// Injects interrupt vector `irq` into the VCPU.
-    fn interrupt(&self, irq: u32) -> Result<()> {
+    fn interrupt(&self, irq: u8) -> Result<()> {
         const REG_NAMES: [WHV_REGISTER_NAME; 1] =
             [WHV_REGISTER_NAME_WHvRegisterPendingInterruption];
         let mut pending_interrupt: WHV_X64_PENDING_INTERRUPTION_REGISTER__bindgen_ty_1 =
@@ -810,7 +788,7 @@ impl VcpuX86_64 for WhpxVcpu {
         pending_interrupt.set_InterruptionPending(1);
         pending_interrupt
             .set_InterruptionType(WHV_X64_PENDING_INTERRUPTION_TYPE_WHvX64PendingInterrupt as u32);
-        pending_interrupt.set_InterruptionVector(irq);
+        pending_interrupt.set_InterruptionVector(irq.into());
         let interrupt = WHV_REGISTER_VALUE {
             PendingInterruption: WHV_X64_PENDING_INTERRUPTION_REGISTER {
                 __bindgen_anon_1: pending_interrupt,
@@ -1183,17 +1161,24 @@ impl VcpuX86_64 for WhpxVcpu {
 
     /// Sets the value of a single model-specific register.
     fn set_msr(&self, msr_index: u32, value: u64) -> Result<()> {
-        let msr_name = get_msr_name(msr_index).ok_or(Error::new(libc::ENOENT))?;
-        let msr_value = WHV_REGISTER_VALUE { Reg64: value };
-        check_whpx!(unsafe {
-            WHvSetVirtualProcessorRegisters(
-                self.vm_partition.partition,
-                self.index,
-                &msr_name,
-                /* RegisterCount */ 1,
-                &msr_value,
-            )
-        })
+        match get_msr_name(msr_index) {
+            Some(msr_name) => {
+                let msr_value = WHV_REGISTER_VALUE { Reg64: value };
+                check_whpx!(unsafe {
+                    WHvSetVirtualProcessorRegisters(
+                        self.vm_partition.partition,
+                        self.index,
+                        &msr_name,
+                        /* RegisterCount */ 1,
+                        &msr_value,
+                    )
+                })
+            }
+            None => {
+                warn!("msr 0x{msr_index:X} write unsupported by WHPX, dropping");
+                Ok(())
+            }
+        }
     }
 
     /// Sets up the data returned by the CPUID instruction.
@@ -1250,12 +1235,6 @@ impl VcpuX86_64 for WhpxVcpu {
                 values.as_ptr() as *const WHV_REGISTER_VALUE,
             )
         })
-    }
-
-    /// Gets the system emulated hyper-v CPUID values.
-    /// For WHPX, this is not valid on the vcpu, and needs to be setup on the vm.
-    fn get_hyperv_cpuid(&self) -> Result<CpuId> {
-        Err(Error::new(ENXIO))
     }
 
     /// Sets up debug registers and configure vcpu for handling guest debug events.
@@ -1415,10 +1394,10 @@ mod tests {
         let vcpu = vm.create_vcpu(0).expect("failed to create vcpu");
 
         let mut fpu = vcpu.get_fpu().unwrap();
-        fpu.fpr[0][0] += 3;
+        fpu.fpr[0].significand += 3;
         vcpu.set_fpu(&fpu).unwrap();
         let fpu2 = vcpu.get_fpu().unwrap();
-        assert_eq!(fpu.fpr[0][0], fpu2.fpr[0][0]);
+        assert_eq!(fpu.fpr, fpu2.fpr);
     }
 
     #[test]

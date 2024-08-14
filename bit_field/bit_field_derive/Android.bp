@@ -15,10 +15,11 @@ package {
 rust_test_host {
     name: "bit_field_derive_test_bit_field_derive",
     defaults: ["crosvm_inner_defaults"],
+    host_cross_supported: false,
     crate_name: "bit_field_derive",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["bit_field_derive.rs"],
+    crate_root: "bit_field_derive.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -38,7 +39,7 @@ rust_proc_macro {
     crate_name: "bit_field_derive",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["bit_field_derive.rs"],
+    crate_root: "bit_field_derive.rs",
     edition: "2021",
     rustlibs: [
         "libproc_macro2",

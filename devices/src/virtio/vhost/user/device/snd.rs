@@ -18,7 +18,6 @@ use cros_async::Executor;
 use futures::channel::mpsc;
 use futures::FutureExt;
 use hypervisor::ProtectionType;
-use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use serde::Serialize;
 pub use sys::run_snd_device;
@@ -55,8 +54,6 @@ use crate::virtio::vhost::user::VhostUserDeviceBuilder;
 use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 
-static SND_EXECUTOR: OnceCell<Executor> = OnceCell::new();
-
 // Async workers:
 // 0 - ctrl
 // 1 - event
@@ -64,10 +61,9 @@ static SND_EXECUTOR: OnceCell<Executor> = OnceCell::new();
 // 3 - rx
 const PCM_RESPONSE_WORKER_IDX_OFFSET: usize = 2;
 struct SndBackend {
+    ex: Executor,
     cfg: virtio_snd_config,
     avail_features: u64,
-    acked_features: u64,
-    acked_protocol_features: VhostUserProtocolFeatures,
     workers: [Option<WorkerState<Rc<AsyncRwLock<Queue>>, Result<(), Error>>>; MAX_QUEUE_NUM],
     // tx and rx
     response_workers: [Option<WorkerState<Rc<AsyncRwLock<Queue>>, Result<(), Error>>>; 2],
@@ -77,37 +73,48 @@ struct SndBackend {
     rx_send: mpsc::UnboundedSender<PcmResponse>,
     tx_recv: Option<mpsc::UnboundedReceiver<PcmResponse>>,
     rx_recv: Option<mpsc::UnboundedReceiver<PcmResponse>>,
+    // Appended to logs for when there are mutliple audio devices.
+    card_index: usize,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SndBackendSnapshot {
     avail_features: u64,
-    acked_features: u64,
-    acked_protocol_features: u64,
     stream_infos: Option<Vec<StreamInfoSnapshot>>,
     snd_data: SndData,
 }
 
 impl SndBackend {
-    pub fn new(params: Parameters) -> anyhow::Result<Self> {
+    pub fn new(
+        ex: &Executor,
+        params: Parameters,
+        #[cfg(windows)] audio_client_guid: Option<String>,
+        card_index: usize,
+    ) -> anyhow::Result<Self> {
         let cfg = hardcoded_virtio_snd_config(&params);
         let avail_features = virtio::base_features(ProtectionType::Unprotected)
             | 1 << VHOST_USER_F_PROTOCOL_FEATURES;
 
         let snd_data = hardcoded_snd_data(&params);
         let mut keep_rds = Vec::new();
-        let builders = create_stream_info_builders(&params, &snd_data, &mut keep_rds)?;
+        let builders = create_stream_info_builders(&params, &snd_data, &mut keep_rds, card_index)?;
 
         if snd_data.pcm_info_len() != builders.len() {
             error!(
-                "snd: expected {} stream info builders, got {}",
+                "[Card {}] snd: expected {} stream info builders, got {}",
+                card_index,
                 snd_data.pcm_info_len(),
                 builders.len(),
             )
         }
 
-        let streams = builders
-            .into_iter()
+        let streams = builders.into_iter();
+
+        #[cfg(windows)]
+        let streams = streams
+            .map(|stream_builder| stream_builder.audio_client_guid(audio_client_guid.clone()));
+
+        let streams = streams
             .map(StreamInfoBuilder::build)
             .map(AsyncRwLock::new)
             .collect();
@@ -117,10 +124,9 @@ impl SndBackend {
         let (rx_send, rx_recv) = mpsc::unbounded();
 
         Ok(SndBackend {
+            ex: ex.clone(),
             cfg,
             avail_features,
-            acked_features: 0,
-            acked_protocol_features: VhostUserProtocolFeatures::empty(),
             workers: Default::default(),
             response_workers: Default::default(),
             snd_data: Rc::new(snd_data),
@@ -129,6 +135,7 @@ impl SndBackend {
             rx_send,
             tx_recv: Some(tx_recv),
             rx_recv: Some(rx_recv),
+            card_index,
         })
     }
 }
@@ -149,35 +156,8 @@ impl VhostUserDevice for SndBackend {
         self.avail_features
     }
 
-    fn ack_features(&mut self, value: u64) -> anyhow::Result<()> {
-        let unrequested_features = value & !self.avail_features;
-        if unrequested_features != 0 {
-            bail!("invalid features are given: {:#x}", unrequested_features);
-        }
-
-        self.acked_features |= value;
-
-        Ok(())
-    }
-
-    fn acked_features(&self) -> u64 {
-        self.acked_features
-    }
-
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
         VhostUserProtocolFeatures::CONFIG | VhostUserProtocolFeatures::MQ
-    }
-
-    fn ack_protocol_features(&mut self, features: u64) -> anyhow::Result<()> {
-        let features = VhostUserProtocolFeatures::from_bits(features)
-            .ok_or_else(|| anyhow!("invalid protocol features are given: {:#x}", features))?;
-        let supported = self.protocol_features();
-        self.acked_protocol_features = features & supported;
-        Ok(())
-    }
-
-    fn acked_protocol_features(&self) -> u64 {
-        self.acked_protocol_features.bits()
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -185,9 +165,8 @@ impl VhostUserDevice for SndBackend {
     }
 
     fn reset(&mut self) {
-        let ex = SND_EXECUTOR.get().expect("Executor not initialized");
         for worker in self.workers.iter_mut().filter_map(Option::take) {
-            let _ = ex.run_until(worker.queue_task.cancel());
+            let _ = self.ex.run_until(worker.queue_task.cancel());
         }
     }
 
@@ -199,20 +178,23 @@ impl VhostUserDevice for SndBackend {
         doorbell: Interrupt,
     ) -> anyhow::Result<()> {
         if self.workers[idx].is_some() {
-            warn!("Starting new queue handler without stopping old handler");
+            warn!(
+                "[Card {}] Starting new queue handler without stopping old handler",
+                self.card_index
+            );
             self.stop_queue(idx)?;
         }
 
-        // Safe because the executor is initialized in main() below.
-        let ex = SND_EXECUTOR.get().expect("Executor not initialized");
-
-        let kick_evt = queue
-            .event()
-            .try_clone()
-            .context("failed to clone queue event")?;
-        let mut kick_evt =
-            EventAsync::new(kick_evt, ex).context("failed to create EventAsync for kick_evt")?;
+        let kick_evt = queue.event().try_clone().context(format!(
+            "[Card {}] failed to clone queue event",
+            self.card_index
+        ))?;
+        let mut kick_evt = EventAsync::new(kick_evt, &self.ex).context(format!(
+            "[Card {}] failed to create EventAsync for kick_evt",
+            self.card_index
+        ))?;
         let queue = Rc::new(AsyncRwLock::new(queue));
+        let card_index = self.card_index;
         let queue_task = match idx {
             0 => {
                 // ctrl queue
@@ -221,9 +203,11 @@ impl VhostUserDevice for SndBackend {
                 let tx_send = self.tx_send.clone();
                 let rx_send = self.rx_send.clone();
                 let ctrl_queue = queue.clone();
-                Some(ex.spawn_local(async move {
+
+                let ex_clone = self.ex.clone();
+                Some(self.ex.spawn_local(async move {
                     handle_ctrl_queue(
-                        ex,
+                        &ex_clone,
                         &streams,
                         &snd_data,
                         ctrl_queue,
@@ -231,6 +215,7 @@ impl VhostUserDevice for SndBackend {
                         doorbell,
                         tx_send,
                         rx_send,
+                        card_index,
                         None,
                     )
                     .await
@@ -242,22 +227,25 @@ impl VhostUserDevice for SndBackend {
             // the Queue so we can return it back in stop_queue. As such, we create a do nothing
             // future to "run" this queue so that we track a WorkerState for it (which is how
             // we return the Queue back).
-            1 => Some(ex.spawn_local(async move { Ok(()) })),
+            1 => Some(self.ex.spawn_local(async move { Ok(()) })),
             2 | 3 => {
                 let (send, recv) = if idx == 2 {
                     (self.tx_send.clone(), self.tx_recv.take())
                 } else {
                     (self.rx_send.clone(), self.rx_recv.take())
                 };
-                let mut recv = recv.ok_or_else(|| anyhow!("queue restart is not supported"))?;
+                let mut recv = recv.ok_or_else(|| {
+                    anyhow!("[Card {}] queue restart is not supported", self.card_index)
+                })?;
                 let streams = Rc::clone(&self.streams);
                 let queue_pcm_queue = queue.clone();
-                let queue_task = ex.spawn_local(async move {
-                    handle_pcm_queue(&streams, send, queue_pcm_queue, &kick_evt, None).await
+                let queue_task = self.ex.spawn_local(async move {
+                    handle_pcm_queue(&streams, send, queue_pcm_queue, &kick_evt, card_index, None)
+                        .await
                 });
 
                 let queue_response_queue = queue.clone();
-                let response_queue_task = ex.spawn_local(async move {
+                let response_queue_task = self.ex.spawn_local(async move {
                     send_pcm_response_worker(queue_response_queue, doorbell, &mut recv, None).await
                 });
 
@@ -268,7 +256,11 @@ impl VhostUserDevice for SndBackend {
 
                 Some(queue_task)
             }
-            _ => bail!("attempted to start unknown queue: {}", idx),
+            _ => bail!(
+                "[Card {}] attempted to start unknown queue: {}",
+                self.card_index,
+                idx
+            ),
         };
 
         if let Some(queue_task) = queue_task {
@@ -278,14 +270,13 @@ impl VhostUserDevice for SndBackend {
     }
 
     fn stop_queue(&mut self, idx: usize) -> anyhow::Result<virtio::Queue> {
-        let ex = SND_EXECUTOR.get().expect("Executor not initialized");
         let worker_queue_rc = self
             .workers
             .get_mut(idx)
             .and_then(Option::take)
             .map(|worker| {
                 // Wait for queue_task to be aborted.
-                let _ = ex.run_until(worker.queue_task.cancel());
+                let _ = self.ex.run_until(worker.queue_task.cancel());
                 worker.queue
             });
 
@@ -296,14 +287,17 @@ impl VhostUserDevice for SndBackend {
                 .and_then(Option::take)
             {
                 // Wait for queue_task to be aborted.
-                let _ = ex.run_until(worker.queue_task.cancel());
+                let _ = self.ex.run_until(worker.queue_task.cancel());
             }
         }
 
         if let Some(queue_rc) = worker_queue_rc {
             match Rc::try_unwrap(queue_rc) {
                 Ok(queue_mutex) => Ok(queue_mutex.into_inner()),
-                Err(_) => panic!("failed to recover queue from worker"),
+                Err(_) => panic!(
+                    "[Card {}] failed to recover queue from worker",
+                    self.card_index
+                ),
             }
         } else {
             Err(anyhow::Error::new(DeviceError::WorkerNotFound))
@@ -319,7 +313,12 @@ impl VhostUserDevice for SndBackend {
                     stream_info
                         .lock()
                         .now_or_never()
-                        .expect("failed to lock audio state during snapshot")
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "[Card {}] failed to lock audio state during snapshot",
+                                self.card_index
+                            )
+                        })
                         .snapshot(),
                 );
             }
@@ -330,48 +329,44 @@ impl VhostUserDevice for SndBackend {
         let snd_data_ref: &SndData = self.snd_data.borrow();
         serde_json::to_vec(&SndBackendSnapshot {
             avail_features: self.avail_features,
-            acked_protocol_features: self.acked_protocol_features.bits(),
-            acked_features: self.acked_features,
             stream_infos: stream_info_snaps,
             snd_data: snd_data_ref.clone(),
         })
-        .context("Failed to serialize SndBackendSnapshot")
+        .context(format!(
+            "[Card {}] Failed to serialize SndBackendSnapshot",
+            self.card_index
+        ))
     }
 
     fn restore(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
-        let deser: SndBackendSnapshot = serde_json::from_slice(data.as_slice())
-            .context("Failed to deserialize SndBackendSnapshot")?;
+        let deser: SndBackendSnapshot =
+            serde_json::from_slice(data.as_slice()).context(format!(
+                "[Card {}] Failed to deserialize SndBackendSnapshot",
+                self.card_index
+            ))?;
         anyhow::ensure!(
             deser.avail_features == self.avail_features,
-            "avail features doesn't match on restore: expected: {}, got: {}",
+            "[Card {}] avail features doesn't match on restore: expected: {}, got: {}",
+            self.card_index,
             deser.avail_features,
             self.avail_features
-        );
-        anyhow::ensure!(
-            self.acked_protocol_features.bits() == deser.acked_protocol_features,
-            "Vhost user snd restored acked_protocol_features do not match. Live: {:?}, \
-            snapshot: {:?}",
-            self.acked_protocol_features,
-            deser.acked_protocol_features,
         );
         let snd_data = self.snd_data.borrow();
         anyhow::ensure!(
             &deser.snd_data == snd_data,
-            "snd data doesn't match on restore: expected: {:?}, got: {:?}",
+            "[Card {}] snd data doesn't match on restore: expected: {:?}, got: {:?}",
+            self.card_index,
             deser.snd_data,
             snd_data,
         );
-        self.acked_features = deser.acked_features;
 
-        // Wondering why we can pass ex to a move block *and* still use it
-        // afterwards? It's a &'static, which is the only kind of reference that
-        // can taken by a future run via spawn/spawn_local.
-        let ex = SND_EXECUTOR.get().expect("executor must be initialized");
+        let ex_clone = self.ex.clone();
         let streams_rc = self.streams.clone();
         let tx_send_clone = self.tx_send.clone();
         let rx_send_clone = self.rx_send.clone();
 
-        let restore_task = ex.spawn_local(async move {
+        let card_index = self.card_index;
+        let restore_task = self.ex.spawn_local(async move {
             if let Some(stream_infos) = &deser.stream_infos {
                 for (stream, stream_info) in streams_rc.lock().await.iter().zip(stream_infos.iter())
                 {
@@ -382,28 +377,28 @@ impl VhostUserDevice for SndBackend {
                         stream
                             .lock()
                             .await
-                            .prepare(ex, &tx_send_clone, &rx_send_clone)
+                            .prepare(&ex_clone, &tx_send_clone, &rx_send_clone)
                             .await
-                            .expect("failed to prepare PCM");
+                            .unwrap_or_else(|_| {
+                                panic!("[Card {}] failed to prepare PCM", card_index)
+                            });
                     }
                     if stream_info.state == VIRTIO_SND_R_PCM_START {
-                        stream
-                            .lock()
-                            .await
-                            .start()
-                            .await
-                            .expect("failed to start PCM");
+                        stream.lock().await.start().await.unwrap_or_else(|_| {
+                            panic!("[Card {}] failed to start PCM", card_index)
+                        });
                     }
                 }
             }
         });
-        ex.run_until(restore_task)
-            .expect("failed to restore streams");
+        self.ex
+            .run_until(restore_task)
+            .unwrap_or_else(|_| panic!("[Card {}] failed to restore streams", self.card_index));
         Ok(())
     }
 
-    fn stop_non_queue_workers(&mut self) -> anyhow::Result<()> {
+    fn enter_suspended_state(&mut self) -> anyhow::Result<bool> {
         // This device has no non-queue workers to stop.
-        Ok(())
+        Ok(true)
     }
 }

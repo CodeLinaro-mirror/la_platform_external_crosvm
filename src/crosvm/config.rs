@@ -9,6 +9,7 @@ use std::arch::x86_64::__cpuid_count;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
@@ -53,6 +54,7 @@ use hypervisor::ProtectionType;
 use jail::JailConfig;
 use resources::AddressRange;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
 use vm_control::BatteryType;
@@ -157,6 +159,42 @@ pub struct MemOptions {
     /// Amount of guest memory in MiB.
     #[serde(default)]
     pub size: Option<u64>,
+}
+
+fn deserialize_swap_interval<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error> {
+    let ms = Option::<u64>::deserialize(deserializer)?;
+    match ms {
+        None => Ok(None),
+        Some(ms) => Ok(Some(Duration::from_millis(ms))),
+    }
+}
+
+#[derive(
+    Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, serde_keyvalue::FromKeyValues,
+)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct PmemOption {
+    /// Path to the diks image.
+    pub path: PathBuf,
+    /// Whether the disk is read-only.
+    #[serde(default)]
+    pub ro: bool,
+    /// If set, add a kernel command line option making this the root device. Can only be set once.
+    #[serde(default)]
+    pub root: bool,
+    /// Experimental option to specify the size in bytes of an anonymous virtual memory area that
+    /// will be created to back this device.
+    #[serde(default)]
+    pub vma_size: Option<u64>,
+    /// Experimental option to specify interval for periodic swap out of memory mapping
+    #[serde(
+        default,
+        deserialize_with = "deserialize_swap_interval",
+        rename = "swap-interval-ms"
+    )]
+    pub swap_interval: Option<Duration>,
 }
 
 #[derive(Serialize, Deserialize, FromKeyValues)]
@@ -324,6 +362,12 @@ pub enum InputDeviceOption {
         path: PathBuf,
     },
     Trackpad {
+        path: PathBuf,
+        width: Option<u32>,
+        height: Option<u32>,
+        name: Option<String>,
+    },
+    MultiTouchTrackpad {
         path: PathBuf,
         width: Option<u32>,
         height: Option<u32>,
@@ -757,7 +801,9 @@ pub struct Config {
     #[cfg(feature = "plugin")]
     pub plugin_mounts: Vec<crate::crosvm::plugin::BindMount>,
     pub plugin_root: Option<PathBuf>,
-    pub pmem_devices: Vec<DiskOption>,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub pmem_ext2: Vec<crate::crosvm::sys::config::PmemExt2Option>,
+    pub pmems: Vec<PmemOption>,
     #[cfg(feature = "process-invariants")]
     pub process_invariants_data_handle: Option<u64>,
     #[cfg(feature = "process-invariants")]
@@ -770,6 +816,7 @@ pub struct Config {
     pub product_version: Option<String>,
     pub protection_type: ProtectionType,
     pub pstore: Option<Pstore>,
+    #[cfg(feature = "pvclock")]
     pub pvclock: bool,
     /// Must be `Some` iff `protection_type == ProtectionType::UnprotectedWithFirmware`.
     pub pvm_fw: Option<PathBuf>,
@@ -789,12 +836,10 @@ pub struct Config {
     #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
     #[cfg(all(windows, feature = "audio"))]
-    pub snd_split_config: Option<SndSplitConfig>,
+    pub snd_split_configs: Vec<SndSplitConfig>,
     pub socket_path: Option<PathBuf>,
     #[cfg(feature = "audio")]
     pub sound: Option<PathBuf>,
-    #[cfg(feature = "balloon")]
-    pub strict_balloon: bool,
     pub stub_pci_devices: Vec<StubPciParameters>,
     pub suspended: bool,
     pub swap_dir: Option<PathBuf>,
@@ -977,7 +1022,9 @@ impl Default for Config {
             #[cfg(feature = "plugin")]
             plugin_mounts: Vec::new(),
             plugin_root: None,
-            pmem_devices: Vec::new(),
+            #[cfg(any(target_os = "android", target_os = "linux"))]
+            pmem_ext2: Vec::new(),
+            pmems: Vec::new(),
             #[cfg(feature = "process-invariants")]
             process_invariants_data_handle: None,
             #[cfg(feature = "process-invariants")]
@@ -986,6 +1033,7 @@ impl Default for Config {
             product_name: None,
             protection_type: ProtectionType::Unprotected,
             pstore: None,
+            #[cfg(feature = "pvclock")]
             pvclock: false,
             pvm_fw: None,
             restore_path: None,
@@ -1002,12 +1050,10 @@ impl Default for Config {
             #[cfg(target_arch = "x86_64")]
             smbios: SmbiosOptions::default(),
             #[cfg(all(windows, feature = "audio"))]
-            snd_split_config: None,
+            snd_split_configs: Vec::new(),
             socket_path: None,
             #[cfg(feature = "audio")]
             sound: None,
-            #[cfg(feature = "balloon")]
-            strict_balloon: false,
             stub_pci_devices: Vec::new(),
             suspended: false,
             swap_dir: None,
@@ -1240,6 +1286,10 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         validate_file_backed_mapping(mapping)?;
     }
 
+    for pmem in cfg.pmems.iter() {
+        validate_pmem(pmem)?;
+    }
+
     // Validate platform specific things
     super::sys::config::validate_config(cfg)
 }
@@ -1256,6 +1306,24 @@ fn validate_file_backed_mapping(mapping: &mut FileBackedMappingParameters) -> Re
     } else if aligned_address != mapping.address || aligned_size != mapping.size {
         return Err(
             "--file-backed-mapping addr and size parameters must be page size aligned".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_pmem(pmem: &PmemOption) -> Result<(), String> {
+    if (pmem.swap_interval.is_some() && pmem.vma_size.is_none())
+        || (pmem.swap_interval.is_none() && pmem.vma_size.is_some())
+    {
+        return Err(
+            "--pmem vma-size and swap-interval parameters must be specified together".to_string(),
+        );
+    }
+
+    if pmem.ro && pmem.swap_interval.is_some() {
+        return Err(
+            "--pmem swap-interval parameter can only be set for writable pmem device".to_string(),
         );
     }
 
@@ -2287,5 +2355,63 @@ mod tests {
                 path: PathBuf::from("/dev/rotary-test")
             }
         );
+    }
+
+    #[test]
+    fn parse_pmem_options_missing_path() {
+        assert!(from_key_values::<PmemOption>("")
+            .unwrap_err()
+            .contains("missing field `path`"));
+    }
+
+    #[test]
+    fn parse_pmem_options_default_values() {
+        let pmem = from_key_values::<PmemOption>("/path/to/disk.img").unwrap();
+        assert_eq!(
+            pmem,
+            PmemOption {
+                path: "/path/to/disk.img".into(),
+                ro: false,
+                root: false,
+                vma_size: None,
+                swap_interval: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pmem_options_virtual_swap() {
+        let pmem =
+            from_key_values::<PmemOption>("virtual_path,vma-size=12345,swap-interval-ms=1000")
+                .unwrap();
+        assert_eq!(
+            pmem,
+            PmemOption {
+                path: "virtual_path".into(),
+                ro: false,
+                root: false,
+                vma_size: Some(12345),
+                swap_interval: Some(Duration::new(1, 0)),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_pmem_missing_virtual_swap_param() {
+        let pmem = from_key_values::<PmemOption>("virtual_path,swap-interval-ms=1000").unwrap();
+        assert!(validate_pmem(&pmem)
+            .unwrap_err()
+            .contains("vma-size and swap-interval parameters must be specified together"));
+    }
+
+    #[test]
+    fn validate_pmem_read_only_virtual_swap() {
+        let pmem = from_key_values::<PmemOption>(
+            "virtual_path,ro=true,vma-size=12345,swap-interval-ms=1000",
+        )
+        .unwrap();
+        assert!(validate_pmem(&pmem)
+            .unwrap_err()
+            .contains("swap-interval parameter can only be set for writable pmem device"));
     }
 }

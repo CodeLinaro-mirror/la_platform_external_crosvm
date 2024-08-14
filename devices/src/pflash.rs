@@ -264,7 +264,7 @@ mod tests {
     const BLOCK_SIZE: u32 = 4 * (1 << 10); // 4K
 
     fn empty_image() -> Box<dyn DiskFile> {
-        let mut f = Box::new(tempfile().unwrap());
+        let f = Box::new(tempfile().unwrap());
         f.write_all_at_volatile(VolatileSlice::new(&mut [0xff].repeat(IMAGE_SIZE)), 0)
             .unwrap();
         f
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn read() {
-        let mut f = empty_image();
+        let f = empty_image();
         let mut want = [0xde, 0xad, 0xbe, 0xef];
         let offset = 0x1000;
         f.write_all_at_volatile(VolatileSlice::new(&mut want), offset)
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn erase() {
-        let mut f = empty_image();
+        let f = empty_image();
         let mut data = [0xde, 0xad, 0xbe, 0xef];
         let offset = 0x1000;
         f.write_all_at_volatile(VolatileSlice::new(&mut data), offset)
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn status() {
-        let mut f = empty_image();
+        let f = empty_image();
         let mut data = [0xde, 0xad, 0xbe, 0xff];
         let offset = 0x0;
         f.write_all_at_volatile(VolatileSlice::new(&mut data), offset)

@@ -5,12 +5,12 @@
 set -e -u
 
 function usage() { echo "$0 [-r]" && exit 1; }
-
+CROSVM_DIR="$ANDROID_BUILD_TOP/external/crosvm"
 REUSE=""
 while getopts 'r' FLAG; do
   case ${FLAG} in
     r)
-      REUSE="--reuse-cargo-out"
+      REUSE="--reuse-cargo-out --cargo-out-dir $CROSVM_DIR"
       ;;
     ?)
       echo "unknown flag."
@@ -40,12 +40,12 @@ done
 #
 # TODO: Consider using android's prebuilt rust binaries. Currently doesn't work
 # because they try to incorrectly use system clang and llvm.
-RUST_TOOLCHAIN="1.73.0"
+RUST_TOOLCHAIN="1.77.2"
 rustup which --toolchain $RUST_TOOLCHAIN cargo || \
   rustup toolchain install $RUST_TOOLCHAIN
 CARGO_BIN="$(dirname $(rustup which --toolchain $RUST_TOOLCHAIN cargo))"
 
-cd $ANDROID_BUILD_TOP/external/crosvm
+cd "$CROSVM_DIR"
 
 if [ ! "$REUSE" ]; then
   rm -f cargo.out cargo.metadata

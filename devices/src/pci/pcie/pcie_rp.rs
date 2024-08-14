@@ -3,11 +3,11 @@
 // found in the LICENSE file.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc;
 
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use base::Event;
 use vm_control::GpeNotify;
 use vm_control::PmeNotify;
 
@@ -88,23 +88,33 @@ impl PciePortVariant for PcieRootPort {
 }
 
 impl HotPlugBus for PcieRootPort {
-    fn hot_plug(&mut self, addr: PciAddress) -> Result<Option<mpsc::Receiver<()>>> {
-        if self.pcie_port.is_cc_pending() {
-            bail!("Slot busy: plugging too early or guest does not support PCIe hotplug.");
+    fn hot_plug(&mut self, addr: PciAddress) -> Result<Option<Event>> {
+        if self.pcie_port.is_hpc_pending() {
+            bail!("Hot plug fail: previous slot event is pending.");
+        }
+        if !self.pcie_port.is_hotplug_ready() {
+            bail!("Hot unplug fail: slot is not enabled by the guest yet.");
         }
         self.downstream_devices
             .get(&addr)
             .context("No downstream devices.")?;
 
-        let (cc_sender, cc_recvr) = mpsc::channel();
-        self.pcie_port.set_cc_sender(cc_sender);
+        let hpc_sender = Event::new()?;
+        let hpc_recvr = hpc_sender.try_clone()?;
+        self.pcie_port.set_hpc_sender(hpc_sender);
         self.pcie_port
             .set_slot_status(PCIE_SLTSTA_PDS | PCIE_SLTSTA_ABP);
         self.pcie_port.trigger_hp_or_pme_interrupt();
-        Ok(Some(cc_recvr))
+        Ok(Some(hpc_recvr))
     }
 
-    fn hot_unplug(&mut self, addr: PciAddress) -> Result<Option<mpsc::Receiver<()>>> {
+    fn hot_unplug(&mut self, addr: PciAddress) -> Result<Option<Event>> {
+        if self.pcie_port.is_hpc_pending() {
+            bail!("Hot unplug fail: previous slot event is pending.");
+        }
+        if !self.pcie_port.is_hotplug_ready() {
+            bail!("Hot unplug fail: slot is not enabled by the guest yet.");
+        }
         self.downstream_devices
             .remove(&addr)
             .context("No downstream devices.")?;
@@ -120,17 +130,36 @@ impl HotPlugBus for PcieRootPort {
             self.removed_downstream.push(*guest_pci_addr);
         }
 
-        let (cc_sender, cc_recvr) = mpsc::channel();
-        if self.pcie_port.set_cc_sender(cc_sender).is_some() {
-            bail!("Slot busy: unplugging too early or guest does not support PCIe hotplug.");
+        let hpc_sender = Event::new()?;
+        let hpc_recvr = hpc_sender.try_clone()?;
+        let slot_control = self.pcie_port.get_slot_control();
+        match slot_control & PCIE_SLTCTL_PIC {
+            PCIE_SLTCTL_PIC_ON => {
+                self.pcie_port.set_hpc_sender(hpc_sender);
+                self.pcie_port.set_slot_status(PCIE_SLTSTA_ABP);
+                self.pcie_port.trigger_hp_or_pme_interrupt();
+            }
+            PCIE_SLTCTL_PIC_OFF => {
+                // Do not press attention button, as the slot is already off. Likely caused by
+                // previous hot plug failed.
+                self.pcie_port.mask_slot_status(!PCIE_SLTSTA_PDS);
+                hpc_sender.signal()?;
+            }
+            _ => {
+                // Power indicator in blinking state.
+                // Should not be possible, since the previous slot event is pending.
+                bail!("Hot unplug fail: Power indicator is blinking.");
+            }
         }
-        self.pcie_port.set_slot_status(PCIE_SLTSTA_ABP);
-        self.pcie_port.trigger_hp_or_pme_interrupt();
 
         if self.pcie_port.is_host() {
             self.pcie_port.hot_unplug()
         }
-        Ok(Some(cc_recvr))
+        Ok(Some(hpc_recvr))
+    }
+
+    fn get_ready_notification(&mut self) -> anyhow::Result<Event> {
+        Ok(self.pcie_port.get_ready_notification()?)
     }
 
     fn get_address(&self) -> Option<PciAddress> {

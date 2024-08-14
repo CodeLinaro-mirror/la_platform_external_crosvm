@@ -571,9 +571,9 @@ mod tests {
             simple_stats.add(v);
         }
 
-        bucket_check(histogram.buckets.get(0).unwrap(), &[0, 9, 5]);
-        bucket_check(histogram.buckets.get(1).unwrap(), &[20, 50]);
-        bucket_check(histogram.buckets.get(2).unwrap(), &[199, 120]);
+        bucket_check(&histogram.buckets[0], &[0, 9, 5]);
+        bucket_check(&histogram.buckets[1], &[20, 50]);
+        bucket_check(&histogram.buckets[2], &[199, 120]);
         assert_eq!(histogram.buckets.len(), 3);
         assert_eq!(histogram.simple_stat(), simple_stats);
         assert_eq!(histogram.values, None);
@@ -592,16 +592,19 @@ mod tests {
             simple_stats.add(v);
         }
 
-        bucket_check(histogram.buckets.get(1).unwrap(), &[4, 9, 5]);
-        bucket_check(histogram.buckets.get(2).unwrap(), &[20, 50]);
-        bucket_check(histogram.buckets.get(3).unwrap(), &[199, 120]);
+        bucket_check(&histogram.buckets[1], &[4, 9, 5]);
+        bucket_check(&histogram.buckets[2], &[20, 50]);
+        bucket_check(&histogram.buckets[3], &[199, 120]);
         assert_eq!(histogram.buckets.len(), 5);
         assert_eq!(histogram.simple_stat(), simple_stats);
         assert_eq!(histogram.values, None);
     }
 
+    #[cfg(feature = "experimental")]
     #[derive(Clone, Debug, PartialEq)]
     struct MyDetails(u64, u64);
+
+    #[cfg(feature = "experimental")]
     impl Details<u64> for MyDetails {
         fn value(&self) -> u64 {
             self.1 - self.0
@@ -637,9 +640,9 @@ mod tests {
             histogram.add(v.clone()).unwrap();
         }
 
-        bucket_check(histogram.buckets.get(0).unwrap(), &[4, 9, 5]);
-        bucket_check(histogram.buckets.get(1).unwrap(), &[20, 50]);
-        bucket_check(histogram.buckets.get(2).unwrap(), &[199, 120]);
+        bucket_check(histogram.buckets[0], &[4, 9, 5]);
+        bucket_check(histogram.buckets[1], &[20, 50]);
+        bucket_check(histogram.buckets[2], &[199, 120]);
         assert_eq!(histogram.buckets.len(), 3);
         assert_eq!(histogram.simple_stat(), simple_stats);
         assert_eq!(histogram.values, Some(values));
@@ -661,11 +664,11 @@ mod tests {
             histogram.add(v.clone()).unwrap();
         }
 
-        bucket_check(histogram.buckets.get(0).unwrap(), &[]);
-        bucket_check(histogram.buckets.get(4).unwrap(), &[]);
-        bucket_check(histogram.buckets.get(1).unwrap(), &[4, 9, 5]);
-        bucket_check(histogram.buckets.get(2).unwrap(), &[20, 50]);
-        bucket_check(histogram.buckets.get(3).unwrap(), &[199, 120]);
+        bucket_check(histogram.buckets[0], &[]);
+        bucket_check(histogram.buckets[4], &[]);
+        bucket_check(histogram.buckets[1], &[4, 9, 5]);
+        bucket_check(histogram.buckets[2], &[20, 50]);
+        bucket_check(histogram.buckets[3], &[199, 120]);
         assert_eq!(histogram.buckets.len(), 5);
         assert_eq!(histogram.simple_stat(), simple_stats);
         assert_eq!(histogram.values, Some(values));

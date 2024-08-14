@@ -8,6 +8,7 @@ pub(crate) mod gpu;
 use std::io::Result;
 use std::mem::size_of;
 use std::path::Path;
+use std::time::Duration;
 
 use base::error;
 use base::named_pipes::BlockingMode;
@@ -18,12 +19,12 @@ use base::Error;
 use base::Event;
 use base::PipeTube;
 use hypervisor::MemCacheType;
-use hypervisor::MemSlot;
 use hypervisor::Vm;
 use resources::Alloc;
 use resources::SystemAllocator;
 
 use crate::client::HandleRequestResult;
+use crate::VmMappedMemoryRegion;
 use crate::VmRequest;
 
 pub const SERVICE_MESSAGE_HEADER_SIZE: usize = size_of::<u32>();
@@ -65,6 +66,19 @@ pub fn handle_request<T: AsRef<Path> + std::fmt::Debug>(
             error!("failed to connect to socket at '{:?}': {}", socket_path, e);
             Err(())
         }
+    }
+}
+
+pub fn handle_request_with_timeout<T: AsRef<Path> + std::fmt::Debug>(
+    request: &VmRequest,
+    socket_path: T,
+    timeout: Option<Duration>,
+) -> HandleRequestResult {
+    if timeout.is_none() {
+        handle_request(request, socket_path)
+    } else {
+        error!("handle_request_with_timeout() not implemented for Windows");
+        Err(())
     }
 }
 
@@ -113,6 +127,15 @@ pub fn prepare_shared_memory_region(
     _allocator: &mut SystemAllocator,
     _alloc: Alloc,
     _cache: MemCacheType,
-) -> std::result::Result<(u64, MemSlot), Error> {
+) -> std::result::Result<VmMappedMemoryRegion, Error> {
     unimplemented!()
+}
+
+/// State of a specific audio device on boot.
+pub struct InitialAudioSessionState {
+    // Uniquely identify an audio device. In ALSA terminology, this is the card_index as opposed to
+    // a device index.
+    pub card_index: usize,
+    // GUID assigned to the device's IAudioClient
+    pub audio_client_guid: String,
 }

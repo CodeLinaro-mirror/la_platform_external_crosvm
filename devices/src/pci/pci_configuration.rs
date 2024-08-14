@@ -128,10 +128,24 @@ pub trait PciSubclass {
 #[derive(Copy, Clone)]
 pub enum PciMassStorageSubclass {
     Scsi = 0x00,
+    NonVolatileMemory = 0x08,
     Other = 0x80,
 }
 
 impl PciSubclass for PciMassStorageSubclass {
+    fn get_register_value(&self) -> u8 {
+        *self as u8
+    }
+}
+
+/// Subclasses of the NetworkController class.
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub enum PciNetworkControllerSubclass {
+    Other = 0x80,
+}
+
+impl PciSubclass for PciNetworkControllerSubclass {
     fn get_register_value(&self) -> u8 {
         *self as u8
     }
@@ -194,6 +208,46 @@ impl PciSubclass for PciBridgeSubclass {
     }
 }
 
+/// Subclasses of the SimpleCommunicationController class.
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub enum PciSimpleCommunicationControllerSubclass {
+    Other = 0x80,
+}
+
+impl PciSubclass for PciSimpleCommunicationControllerSubclass {
+    fn get_register_value(&self) -> u8 {
+        *self as u8
+    }
+}
+
+/// Subclasses of the BaseSystemPeripheral class.
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub enum PciBaseSystemPeripheralSubclass {
+    Iommu = 0x06,
+    Other = 0x80,
+}
+
+impl PciSubclass for PciBaseSystemPeripheralSubclass {
+    fn get_register_value(&self) -> u8 {
+        *self as u8
+    }
+}
+
+/// Subclasses of the InputDevice class.
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub enum PciInputDeviceSubclass {
+    Other = 0x80,
+}
+
+impl PciSubclass for PciInputDeviceSubclass {
+    fn get_register_value(&self) -> u8 {
+        *self as u8
+    }
+}
+
 /// Subclass of the SerialBus
 #[allow(dead_code)]
 #[derive(Copy, Clone)]
@@ -205,6 +259,19 @@ pub enum PciSerialBusSubClass {
 }
 
 impl PciSubclass for PciSerialBusSubClass {
+    fn get_register_value(&self) -> u8 {
+        *self as u8
+    }
+}
+
+/// Subclasses of the WirelessController class.
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub enum PciWirelessControllerSubclass {
+    Other = 0x80,
+}
+
+impl PciSubclass for PciWirelessControllerSubclass {
     fn get_register_value(&self) -> u8 {
         *self as u8
     }
@@ -637,7 +704,7 @@ impl PciConfiguration {
             .ok_or(Error::BarAddressInvalid(config.addr, config.size))?;
         match config.region_type {
             PciBarRegionType::Memory32BitRegion | PciBarRegionType::IoRegion => {
-                if end_addr > u64::from(u32::max_value()) {
+                if end_addr > u64::from(u32::MAX) {
                     return Err(Error::BarAddressInvalid(config.addr, config.size));
                 }
             }
@@ -645,10 +712,6 @@ impl PciConfiguration {
                 // The expansion ROM BAR cannot be used for part of a 64-bit BAR.
                 if config.bar_idx + 1 >= ROM_BAR_IDX {
                     return Err(Error::BarInvalid64(config.bar_idx));
-                }
-
-                if end_addr > u64::max_value() {
-                    return Err(Error::BarAddressInvalid(config.addr, config.size));
                 }
 
                 if self.bar_used[config.bar_idx + 1] {

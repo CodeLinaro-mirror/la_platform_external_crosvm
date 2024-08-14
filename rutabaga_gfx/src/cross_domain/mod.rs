@@ -31,11 +31,11 @@ use crate::cross_domain::sys::write_volatile;
 use crate::cross_domain::sys::Receiver;
 use crate::cross_domain::sys::Sender;
 use crate::cross_domain::sys::SystemStream;
-use crate::cross_domain::sys::WaitContext;
 use crate::rutabaga_core::RutabagaComponent;
 use crate::rutabaga_core::RutabagaContext;
 use crate::rutabaga_core::RutabagaResource;
 use crate::rutabaga_os::SafeDescriptor;
+use crate::rutabaga_os::WaitContext;
 use crate::rutabaga_utils::*;
 use crate::DrmFormat;
 use crate::ImageAllocationInfo;
@@ -47,22 +47,9 @@ use crate::RutabagaGrallocFlags;
 mod cross_domain_protocol;
 mod sys;
 
-#[allow(dead_code)]
-const WAIT_CONTEXT_MAX: usize = 16;
-
-pub struct CrossDomainEvent {
-    token: CrossDomainToken,
-    hung_up: bool,
-    readable: bool,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum CrossDomainToken {
-    ContextChannel,
-    WaylandReadPipe(u32),
-    Resample,
-    Kill,
-}
+const CROSS_DOMAIN_CONTEXT_CHANNEL_ID: u64 = 1;
+const CROSS_DOMAIN_RESAMPLE_ID: u64 = 2;
+const CROSS_DOMAIN_KILL_ID: u64 = 3;
 
 const CROSS_DOMAIN_DEFAULT_BUFFER_SIZE: usize = 4096;
 const CROSS_DOMAIN_MAX_SEND_RECV_SIZE: usize =
@@ -315,8 +302,8 @@ impl CrossDomainWorker {
         // The CrossDomainJob queue gurantees a new fence has been generated before polling is
         // resumed.
         if let Some(event) = events.first() {
-            match event.token {
-                CrossDomainToken::ContextChannel => {
+            match event.connection_id {
+                CROSS_DOMAIN_CONTEXT_CHANNEL_ID => {
                     let (len, files) = self.state.receive_msg(receive_buf)?;
                     if len != 0 || !files.is_empty() {
                         let mut cmd_receive: CrossDomainSendReceive = Default::default();
@@ -359,7 +346,7 @@ impl CrossDomainWorker {
                         self.fence_handler.call(fence);
                     }
                 }
-                CrossDomainToken::Resample => {
+                CROSS_DOMAIN_RESAMPLE_ID => {
                     // The resample event is triggered when the job queue is in the following state:
                     //
                     // [CrossDomain::AddReadPipe(..)] -> END
@@ -373,9 +360,13 @@ impl CrossDomainWorker {
                     channel_wait(thread_resample_evt)?;
                     self.state.add_job(CrossDomainJob::HandleFence(fence));
                 }
-                CrossDomainToken::WaylandReadPipe(pipe_id) => {
+                CROSS_DOMAIN_KILL_ID => {
+                    self.fence_handler.call(fence);
+                }
+                _ => {
                     let mut items = self.item_state.lock().unwrap();
                     let mut cmd_read: CrossDomainReadWrite = Default::default();
+                    let pipe_id: u32 = event.connection_id.try_into()?;
                     let bytes_read;
 
                     cmd_read.hdr.cmd = CROSS_DOMAIN_CMD_READ;
@@ -397,8 +388,7 @@ impl CrossDomainWorker {
 
                             // Zero bytes read indicates end-of-file on POSIX.
                             if event.hung_up && bytes_read == 0 {
-                                self.wait_ctx
-                                    .delete(CrossDomainToken::WaylandReadPipe(pipe_id), file)?;
+                                self.wait_ctx.delete(file)?;
                             }
                         }
                         _ => return Err(RutabagaError::InvalidCrossDomainItemType),
@@ -408,9 +398,6 @@ impl CrossDomainWorker {
                         items.table.remove(&pipe_id);
                     }
 
-                    self.fence_handler.call(fence);
-                }
-                CrossDomainToken::Kill => {
                     self.fence_handler.call(fence);
                 }
             }
@@ -425,9 +412,8 @@ impl CrossDomainWorker {
         thread_resample_evt: Receiver,
     ) -> RutabagaResult<()> {
         self.wait_ctx
-            .add(CrossDomainToken::Resample, &thread_resample_evt)?;
-        self.wait_ctx
-            .add(CrossDomainToken::Kill, &thread_kill_evt)?;
+            .add(CROSS_DOMAIN_RESAMPLE_ID, &thread_resample_evt)?;
+        self.wait_ctx.add(CROSS_DOMAIN_KILL_ID, &thread_kill_evt)?;
         let mut receive_buf: Vec<u8> = vec![0; CROSS_DOMAIN_MAX_SEND_RECV_SIZE];
 
         while let Some(job) = self.state.wait_for_job() {
@@ -449,9 +435,9 @@ impl CrossDomainWorker {
                         .ok_or(RutabagaError::InvalidCrossDomainItemId)?;
 
                     match item {
-                        CrossDomainItem::WaylandReadPipe(file) => self
-                            .wait_ctx
-                            .add(CrossDomainToken::WaylandReadPipe(read_pipe_id), file)?,
+                        CrossDomainItem::WaylandReadPipe(file) => {
+                            self.wait_ctx.add(read_pipe_id as u64, file)?
+                        }
                         _ => return Err(RutabagaError::InvalidCrossDomainItemType),
                     }
                 }
@@ -513,7 +499,7 @@ impl CrossDomainContext {
             let mut wait_ctx = WaitContext::new()?;
             match &connection {
                 Some(connection) => {
-                    wait_ctx.add(CrossDomainToken::ContextChannel, connection)?;
+                    wait_ctx.add(CROSS_DOMAIN_CONTEXT_CHANNEL_ID, connection)?;
                 }
                 None => return Err(RutabagaError::Unsupported),
             };
@@ -765,11 +751,12 @@ impl RutabagaContext for CrossDomainContext {
         }
     }
 
-    fn submit_cmd(&mut self, mut commands: &mut [u8], fence_ids: &[u64]) -> RutabagaResult<()> {
-        if !fence_ids.is_empty() {
-            return Err(RutabagaError::Unsupported);
-        }
-
+    fn submit_cmd(
+        &mut self,
+        mut commands: &mut [u8],
+        _fence_ids: &[u64],
+        _shareable_fences: Vec<RutabagaHandle>,
+    ) -> RutabagaResult<()> {
         while !commands.is_empty() {
             let hdr = CrossDomainHeader::read_from_prefix(commands.as_bytes())
                 .ok_or(RutabagaError::InvalidCommandBuffer)?;
@@ -876,7 +863,10 @@ impl RutabagaContext for CrossDomainContext {
             .remove(&resource.resource_id);
     }
 
-    fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
+    fn context_create_fence(
+        &mut self,
+        fence: RutabagaFence,
+    ) -> RutabagaResult<Option<RutabagaHandle>> {
         match fence.ring_idx as u32 {
             CROSS_DOMAIN_QUERY_RING => self.fence_handler.call(fence),
             CROSS_DOMAIN_CHANNEL_RING => {
@@ -887,7 +877,7 @@ impl RutabagaContext for CrossDomainContext {
             _ => return Err(RutabagaError::SpecViolation("unexpected ring type")),
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn component_type(&self) -> RutabagaComponentType {
@@ -904,7 +894,7 @@ impl RutabagaComponent for CrossDomain {
         let mut caps: CrossDomainCapabilities = Default::default();
         if let Some(ref channels) = self.channels {
             for channel in channels {
-                caps.supported_channels = 1 << channel.channel_type;
+                caps.supported_channels |= 1 << channel.channel_type;
             }
         }
 

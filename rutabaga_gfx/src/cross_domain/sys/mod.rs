@@ -5,7 +5,6 @@
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "android", target_os = "linux"))] {
         pub(crate) mod linux;
-        mod epoll_internal;
         use linux as platform;
     } else if #[cfg(any(target_os = "fuchsia",target_os = "windows", target_os = "macos",
                         target_os = "nto"))] {
@@ -25,4 +24,3 @@ pub use platform::write_volatile;
 pub use platform::Receiver;
 pub use platform::Sender;
 pub use platform::SystemStream;
-pub use platform::WaitContext;

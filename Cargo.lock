@@ -17,7 +17,6 @@ dependencies = [
  "kernel_cmdline",
  "kernel_loader",
  "libc",
- "memoffset 0.6.5",
  "minijail",
  "rand",
  "remain",
@@ -72,6 +71,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "android_log-sys"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ecc8056bf6ab9892dcd53216c83d1597487d7dacac16c8df6b877d127df9937"
+
+[[package]]
 name = "anti_tamper"
 version = "0.1.0"
 dependencies = [
@@ -117,6 +122,7 @@ dependencies = [
  "serde_keyvalue",
  "swap",
  "sync",
+ "tempfile",
  "thiserror",
  "uuid",
  "vm_control",
@@ -218,7 +224,6 @@ dependencies = [
  "cfg-if",
  "cros_async",
  "libcras",
- "minijail",
  "remain",
  "serde",
  "serde_json",
@@ -267,15 +272,15 @@ dependencies = [
 name = "base"
 version = "0.1.0"
 dependencies = [
+ "android_log-sys",
  "audio_streams",
  "base_event_token_derive",
  "cfg-if",
  "chrono",
  "env_logger",
+ "futures",
  "libc",
- "libtest-mimic",
  "log",
- "minijail",
  "once_cell",
  "protobuf",
  "protos",
@@ -300,6 +305,21 @@ dependencies = [
  "proc-macro2",
  "quote 1.0.33",
  "syn 2.0.37",
+]
+
+[[package]]
+name = "base_tokio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base",
+ "cfg-if",
+ "futures",
+ "libc",
+ "serde",
+ "sync",
+ "tokio",
+ "winapi",
 ]
 
 [[package]]
@@ -791,6 +811,7 @@ dependencies = [
  "disk",
  "document-features",
  "enumn",
+ "ext2",
  "futures",
  "gdbstub",
  "gdbstub_arch",
@@ -806,6 +827,7 @@ dependencies = [
  "log",
  "merge",
  "metrics",
+ "metrics_events",
  "minijail",
  "net_util",
  "once_cell",
@@ -876,6 +898,7 @@ name = "crosvm_control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "balloon_control",
  "base",
  "cbindgen",
  "cc",
@@ -996,13 +1019,13 @@ dependencies = [
  "futures",
  "gpu_display",
  "hypervisor",
+ "jail",
  "kvm_sys",
  "libc",
  "libcras",
  "libtest-mimic",
  "libvda",
  "linux_input_sys",
- "memoffset 0.6.5",
  "metrics",
  "minijail",
  "named-lock",
@@ -1076,9 +1099,9 @@ dependencies = [
 
 [[package]]
 name = "downcast-rs"
-version = "1.2.0"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ea835d29036a4087793836fa931b08837ad5e957da9e23886b29586fb9b6650"
+checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "e2e_tests"
@@ -1152,6 +1175,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b52c2ef4a78da0ba68fbe1fd920627411096d2ac478f7f4c9f3a54ba6705bade"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "ext2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argh",
+ "base",
+ "enumn",
+ "libc",
+ "tempfile",
+ "uuid",
+ "walkdir",
+ "zerocopy",
+ "zerocopy-derive",
 ]
 
 [[package]]
@@ -1459,12 +1498,9 @@ dependencies = [
  "downcast-rs",
  "enumn",
  "fnv",
- "gdbstub",
- "gdbstub_arch",
- "kvm",
+ "hypervisor_test_macro",
  "kvm_sys",
  "libc",
- "memoffset 0.6.5",
  "once_cell",
  "serde",
  "serde_json",
@@ -1475,6 +1511,17 @@ dependencies = [
  "win_util",
  "winapi",
  "windows",
+ "zerocopy",
+]
+
+[[package]]
+name = "hypervisor_test_macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote 1.0.33",
+ "rand",
+ "syn 2.0.37",
 ]
 
 [[package]]
@@ -1508,11 +1555,11 @@ dependencies = [
 
 [[package]]
 name = "intrusive-collections"
-version = "0.9.4"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfe531a7789d7120f3e17d4f3f2cd95f54418ba7354f60b7b622b6644a07888a"
+checksum = "b694dc9f70c3bda874626d2aed13b780f137aab435f4e9814121955cf706122e"
 dependencies = [
- "memoffset 0.5.6",
+ "memoffset 0.9.0",
 ]
 
 [[package]]
@@ -1563,6 +1610,8 @@ dependencies = [
  "base",
  "cfg-if",
  "libc",
+ "libtest-mimic",
+ "log",
  "minijail",
  "once_cell",
  "rayon",
@@ -1784,24 +1833,6 @@ name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
-
-[[package]]
-name = "memoffset"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "043175f069eda7b85febe4a74abbaeff828d9f8b448515d3151a14a3542811aa"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
-name = "memoffset"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
-dependencies = [
- "autocfg",
-]
 
 [[package]]
 name = "memoffset"
@@ -2489,8 +2520,6 @@ dependencies = [
  "gdbstub_arch",
  "hypervisor",
  "kernel_cmdline",
- "kvm",
- "kvm_sys",
  "libc",
  "minijail",
  "rand",
@@ -2549,6 +2578,15 @@ name = "ryu"
 version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3f6f92acf49d1b98f7a81226834412ada05458b7364277387724a237f062695"
+
+[[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "sandbox"
@@ -2861,7 +2899,19 @@ dependencies = [
  "num_cpus",
  "pin-project-lite",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "630bdcf245f78637c13ec01ffae6187cca34625e8c63150d424b59e55af2675e"
+dependencies = [
+ "proc-macro2",
+ "quote 1.0.33",
+ "syn 2.0.37",
 ]
 
 [[package]]
@@ -2983,9 +3033,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.3.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1674845326ee10d37ca60470760d4288a6f80f304007d92e5c53bab78c9cfd79"
+checksum = "a183cf7feeba97b4dd1c0d46788634f6221d87fa961b305bed08c851829efcc0"
 dependencies = [
  "getrandom",
  "serde",
@@ -3142,6 +3192,16 @@ dependencies = [
  "serde_json",
  "smallvec",
  "vk-parse",
+]
+
+[[package]]
+name = "walkdir"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+dependencies = [
+ "same-file",
+ "winapi-util",
 ]
 
 [[package]]
@@ -3450,7 +3510,6 @@ dependencies = [
  "kernel_cmdline",
  "kernel_loader",
  "libc",
- "memoffset 0.6.5",
  "minijail",
  "once_cell",
  "rand",
@@ -3473,9 +3532,9 @@ checksum = "0fcb9cbac069e033553e8bb871be2fbdffcab578eb25bd0f7c508cedc6dcd75a"
 
 [[package]]
 name = "zerocopy"
-version = "0.7.5"
+version = "0.7.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "870cdd4b8b867698aea998d95bcc06c1d75fe566267781ee6f5ae8c9c45a3930"
+checksum = "74d4d3961e53fa4c9a25a8637fc2bfaf2595b3d3ae34875568a5cf64787716be"
 dependencies = [
  "byteorder",
  "zerocopy-derive",
@@ -3483,9 +3542,9 @@ dependencies = [
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.7.5"
+version = "0.7.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9c6f95fa5657518b36c6784ba7cdd89e8bdf9a16e58266085248bfb950860c5"
+checksum = "9ce1b18ccd8e73a9321186f97e46f9f04b778851177567b1975109d26a08d2a6"
 dependencies = [
  "proc-macro2",
  "quote 1.0.33",

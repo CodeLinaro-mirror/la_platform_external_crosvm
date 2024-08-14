@@ -80,7 +80,6 @@ pub use wait_context::TriggeredEvent;
 pub use wait_context::WaitContext;
 pub use worker_thread::WorkerThread;
 pub use write_zeroes::PunchHole;
-pub use write_zeroes::PunchHoleMut;
 pub use write_zeroes::WriteZeroesAt;
 
 // TODO(b/233233301): reorganize platform specific exports under platform
@@ -181,7 +180,6 @@ pub use log::trace;
 pub use log::warn;
 pub use mmap::Protection;
 pub use platform::get_cpu_affinity;
-pub use platform::get_filesystem_type;
 pub use platform::getpid;
 pub use platform::open_file_or_duplicate;
 pub use platform::platform_timer_resolution::enable_high_res_timers;

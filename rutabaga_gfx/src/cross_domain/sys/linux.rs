@@ -15,8 +15,6 @@ use libc::O_WRONLY;
 use nix::cmsg_space;
 use nix::fcntl::fcntl;
 use nix::fcntl::FcntlArg;
-use nix::sys::epoll::EpollCreateFlags;
-use nix::sys::epoll::EpollFlags;
 use nix::sys::eventfd::EfdFlags;
 use nix::sys::eventfd::EventFd;
 use nix::sys::socket::connect;
@@ -44,12 +42,7 @@ use super::super::CrossDomainContext;
 use super::super::CrossDomainItem;
 use super::super::CrossDomainJob;
 use super::super::CrossDomainState;
-use super::epoll_internal::Epoll;
-use super::epoll_internal::EpollEvent;
 use crate::cross_domain::cross_domain_protocol::CrossDomainInit;
-use crate::cross_domain::CrossDomainEvent;
-use crate::cross_domain::CrossDomainToken;
-use crate::cross_domain::WAIT_CONTEXT_MAX;
 use crate::rutabaga_os::AsRawDescriptor;
 use crate::rutabaga_os::FromRawDescriptor;
 use crate::rutabaga_os::RawDescriptor;
@@ -283,67 +276,4 @@ pub fn channel() -> RutabagaResult<(Sender, Receiver)> {
     let sender = EventFd::from_flags(EfdFlags::empty())?;
     let receiver = sender.as_fd().try_clone_to_owned()?.into();
     Ok((sender, receiver))
-}
-
-pub struct WaitContext {
-    epoll_ctx: Epoll,
-    data: u64,
-    vec: Vec<(u64, CrossDomainToken)>,
-}
-
-impl WaitContext {
-    pub fn new() -> RutabagaResult<WaitContext> {
-        let epoll = Epoll::new(EpollCreateFlags::empty())?;
-        Ok(WaitContext {
-            epoll_ctx: epoll,
-            data: 0,
-            vec: Default::default(),
-        })
-    }
-
-    pub fn add<Waitable: AsFd>(
-        &mut self,
-        token: CrossDomainToken,
-        waitable: Waitable,
-    ) -> RutabagaResult<()> {
-        self.data += 1;
-        self.epoll_ctx
-            .add(waitable, EpollEvent::new(EpollFlags::EPOLLIN, self.data))?;
-        self.vec.push((self.data, token));
-        Ok(())
-    }
-
-    fn calculate_token(&self, data: u64) -> RutabagaResult<CrossDomainToken> {
-        if let Some(item) = self.vec.iter().find(|item| item.0 == data) {
-            return Ok(item.1);
-        }
-
-        Err(RutabagaError::SpecViolation("unable to find token"))
-    }
-
-    pub fn wait(&mut self) -> RutabagaResult<Vec<CrossDomainEvent>> {
-        let mut events = [EpollEvent::empty(); WAIT_CONTEXT_MAX];
-        let count = self.epoll_ctx.wait(&mut events, isize::MAX)?;
-        let events = events[0..count]
-            .iter()
-            .map(|e| CrossDomainEvent {
-                token: self.calculate_token(e.data()).unwrap(),
-                readable: e.events() & EpollFlags::EPOLLIN == EpollFlags::EPOLLIN,
-                hung_up: e.events() & EpollFlags::EPOLLHUP == EpollFlags::EPOLLHUP
-                    || e.events() & EpollFlags::EPOLLRDHUP != EpollFlags::EPOLLRDHUP,
-            })
-            .collect();
-
-        Ok(events)
-    }
-
-    pub fn delete<Waitable: AsFd>(
-        &mut self,
-        token: CrossDomainToken,
-        waitable: Waitable,
-    ) -> RutabagaResult<()> {
-        self.epoll_ctx.delete(waitable)?;
-        self.vec.retain(|item| item.1 != token);
-        Ok(())
-    }
 }

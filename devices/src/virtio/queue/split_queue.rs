@@ -126,6 +126,29 @@ impl SplitQueue {
         })
     }
 
+    pub fn vhost_user_reclaim(&mut self, vring_base: u16) {
+        self.next_avail = Wrapping(vring_base);
+        // The vhost-user spec says:
+        //
+        //     For the Used Ring, the device only needs the next descriptor index at which to put
+        //     new descriptors, which is the value in the vring structure in memory, so this value
+        //     is not covered by this message.
+        //
+        // So, we read the value from guest memory.
+        let used_index_addr = self.used_ring.unchecked_add(2);
+        self.next_used = self
+            .mem
+            .read_obj_from_addr_volatile(used_index_addr)
+            .unwrap();
+        // We assume the vhost-user backend sent interrupts for any descriptors it marked used
+        // before it stopped processing the queue, so `last_used == next_used`.
+        self.last_used = self.next_used;
+    }
+
+    pub fn next_avail_to_process(&self) -> u16 {
+        self.next_avail.0
+    }
+
     /// Return the actual size of the queue, as the driver may not set up a
     /// queue as big as the device allows.
     pub fn size(&self) -> u16 {
@@ -501,11 +524,11 @@ impl SplitQueue {
 #[cfg(test)]
 mod tests {
     use std::convert::TryInto;
+    use std::mem::offset_of;
 
     use data_model::Le16;
     use data_model::Le32;
     use data_model::Le64;
-    use memoffset::offset_of;
     use zerocopy::AsBytes;
     use zerocopy::FromBytes;
 
@@ -652,10 +675,10 @@ mod tests {
 
         // Assume driver submit another u16::MAX - 0x100 req to device,
         // Device has handled all of them, so increase self.next_used to u16::MAX
-        for _ in device_generate.0..u16::max_value() {
+        for _ in device_generate.0..u16::MAX {
             queue.add_used(fake_desc_chain(&mem), BUFFER_LEN);
         }
-        device_generate = Wrapping(u16::max_value());
+        device_generate = Wrapping(u16::MAX);
 
         // At this moment driver just handled 0x100 interrupts, so it
         // should inject interrupt.
@@ -737,10 +760,10 @@ mod tests {
 
         // Assume driver submit another u16::MAX - 0x101 req to device,
         // Device has handled all of them, so increase self.next_used to u16::MAX
-        for _ in device_generate.0..u16::max_value() {
+        for _ in device_generate.0..u16::MAX {
             queue.add_used(fake_desc_chain(&mem), BUFFER_LEN);
         }
-        device_generate = Wrapping(u16::max_value());
+        device_generate = Wrapping(u16::MAX);
 
         // At this moment driver hasn't finished last interrupt yet,
         // so interrupt isn't needed.

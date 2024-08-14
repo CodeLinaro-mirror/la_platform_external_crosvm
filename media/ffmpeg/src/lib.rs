@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#![cfg(any(target_os = "android", target_os = "linux"))]
+#![cfg(all(
+    any(target_os = "android", target_os = "linux"),
+    not(target_arch = "arm")
+))]
 
 pub mod avcodec;
 mod avutil;
@@ -18,6 +21,9 @@ mod ffi {
     #![allow(non_snake_case)]
     #![allow(dead_code)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+    /// SAFETY: `AVCodec` instances are all static and thus safe to share.
+    unsafe impl Sync for AVCodec {}
 }
 pub mod swscale;
 

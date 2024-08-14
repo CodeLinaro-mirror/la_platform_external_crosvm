@@ -19,7 +19,7 @@ rust_library {
     crate_name: "net_util",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     edition: "2021",
     rustlibs: [
         "libbase_rust",
@@ -43,7 +43,7 @@ rust_test {
     crate_name: "net_util",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -73,7 +73,7 @@ rust_test {
     crate_name: "unix_tap",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
-    srcs: ["tests/unix_tap.rs"],
+    crate_root: "tests/unix_tap.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {

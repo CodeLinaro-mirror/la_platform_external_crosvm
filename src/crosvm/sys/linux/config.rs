@@ -137,6 +137,11 @@ impl FromStr for SharedDir {
         //   (default: 0)
         // * gid=GID - gid of the device process in the user namespace created by minijail.
         //   (default: 0)
+        // * max_dynamic_perm=uint - number of maximum number of dynamic permissions paths (default:
+        //   0) This feature is arc_quota specific feature.
+        // * max_dynamic_xattr=uint - number of maximum number of dynamic xattr paths (default: 0).
+        //   This feature is arc_quota specific feature.
+        //
         // These two options (uid/gid) are useful when the crosvm process has no
         // CAP_SETGID/CAP_SETUID but an identity mapping of the current user/group
         // between the VM and the host is required.
@@ -218,6 +223,67 @@ impl FromStr for SharedDir {
         }
         Ok(shared_dir)
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PmemExt2Option {
+    pub path: PathBuf,
+    pub blocks_per_group: u32,
+    pub inodes_per_group: u32,
+    pub size: u32,
+}
+
+impl Default for PmemExt2Option {
+    fn default() -> Self {
+        let blocks_per_group = 4096;
+        let inodes_per_group = 1024;
+        let size = ext2::BLOCK_SIZE as u32 * blocks_per_group; // only one block group
+        Self {
+            path: Default::default(),
+            blocks_per_group,
+            inodes_per_group,
+            size,
+        }
+    }
+}
+
+pub fn parse_pmem_ext2_option(param: &str) -> Result<PmemExt2Option, String> {
+    let mut opt = PmemExt2Option::default();
+    let mut components = param.split(':');
+    opt.path = PathBuf::from(
+        components
+            .next()
+            .ok_or("missing source path for `pmem-ext2`")?,
+    );
+
+    for c in components {
+        let mut o = c.splitn(2, '=');
+        let kind = o.next().ok_or("`pmem-ext2` options must not be empty")?;
+        let value = o
+            .next()
+            .ok_or("`pmem-ext2` options must be of the form `kind=value`")?;
+        match kind {
+            "blocks_per_group" => {
+                opt.blocks_per_group = value
+                    .parse()
+                    .map_err(|e| format!("failed to parse blocks_per_groups '{value}': {:#}", e))?
+            }
+            "inodes_per_group" => {
+                opt.inodes_per_group = value
+                    .parse()
+                    .map_err(|e| format!("failed to parse inodes_per_groups '{value}': {:#}", e))?
+            }
+            "size" => {
+                opt.size = value
+                    .parse()
+                    .map_err(|e| format!("failed to parse memory size '{value}': {:#}", e))?
+            }
+            _ => return Err(format!("invalid `pmem-ext2` option: {}", kind)),
+        }
+    }
+
+    Ok(opt)
 }
 
 #[cfg(test)]
@@ -760,5 +826,46 @@ mod tests {
                 .fs_cfg
                 .use_dax
         );
+    }
+
+    #[test]
+    fn parse_pmem_ext2() {
+        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &["--pmem-ext2", "/path/to/dir", "/dev/null"],
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+        let opt = config.pmem_ext2.first().unwrap();
+
+        assert_eq!(opt.path, PathBuf::from("/path/to/dir"));
+    }
+
+    #[test]
+    fn parse_pmem_ext2_size() {
+        let blocks_per_group = 2048;
+        let inodes_per_group = 1024;
+        let size = 4096 * blocks_per_group;
+
+        let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
+            &[],
+            &[
+                "--pmem-ext2",
+                &format!("/path/to/dir:blocks_per_group={blocks_per_group}:inodes_per_group={inodes_per_group}:size={size}"),
+                "/dev/null",
+            ],
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+        let opt = config.pmem_ext2.first().unwrap();
+
+        assert_eq!(opt.path, PathBuf::from("/path/to/dir"));
+        assert_eq!(opt.blocks_per_group, blocks_per_group);
+        assert_eq!(opt.inodes_per_group, inodes_per_group);
+        assert_eq!(opt.size, size);
     }
 }

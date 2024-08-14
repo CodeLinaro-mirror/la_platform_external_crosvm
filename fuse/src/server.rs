@@ -1038,8 +1038,8 @@ impl<F: FileSystem + Sync> Server<F> {
                     minor: KERNEL_MINOR_VERSION,
                     max_readahead,
                     flags: enabled.bits() as u32,
-                    max_background: ::std::u16::MAX,
-                    congestion_threshold: (::std::u16::MAX / 4) * 3,
+                    max_background: u16::MAX,
+                    congestion_threshold: (u16::MAX / 4) * 3,
                     max_write,
                     time_gran: 1, // nanoseconds
                     max_pages,
@@ -1206,13 +1206,15 @@ impl<F: FileSystem + Sync> Server<F> {
                     let mut total_written = 0;
                     while let Some(dirent) = entries.next() {
                         let mut entry_inode = None;
-                        match self
+                        let dirent_result = self
                             .lookup_dirent_attribute(&in_header, &dirent)
                             .and_then(|e| {
                                 entry_inode = Some(e.inode);
                                 let remaining = (size as usize).saturating_sub(total_written);
                                 add_dirent(cursor, remaining, &dirent, Some(e))
-                            }) {
+                            });
+
+                        match dirent_result {
                             Ok(0) => {
                                 // No more space left in the buffer but we need to undo the lookup
                                 // that created the Entry or we will end up with mismatched lookup
@@ -1880,7 +1882,7 @@ fn add_dirent<W: Writer>(
 ) -> io::Result<usize> {
     // Strip the trailing '\0'.
     let name = d.name.to_bytes();
-    if name.len() > ::std::u32::MAX as usize {
+    if name.len() > u32::MAX as usize {
         return Err(io::Error::from_raw_os_error(libc::EOVERFLOW));
     }
 

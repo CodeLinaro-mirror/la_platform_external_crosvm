@@ -4,16 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
+use std::fmt::Debug;
 
-use anyhow::anyhow;
 use base::Error;
 use base::Result;
 use cros_fdt::Fdt;
 use downcast_rs::impl_downcast;
-#[cfg(feature = "gdb")]
-use gdbstub::arch::Arch;
-#[cfg(feature = "gdb")]
-use gdbstub_arch::aarch64::AArch64 as GdbArch;
 use libc::EINVAL;
 use serde::Deserialize;
 use serde::Serialize;
@@ -51,8 +47,109 @@ impl TryFrom<u32> for PsciVersion {
     }
 }
 
+// Aarch64 does not provide a concrete number as to how many registers exist.
+// The list of registers available exceeds 600 registers
+pub const AARCH64_MAX_REG_COUNT: usize = 1024;
+
 pub const PSCI_0_2: PsciVersion = PsciVersion { major: 0, minor: 2 };
 pub const PSCI_1_0: PsciVersion = PsciVersion { major: 1, minor: 0 };
+
+/// AArch64 system register as used in MSR/MRS instructions.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct AArch64SysRegId(u16);
+
+impl AArch64SysRegId {
+    /// Construct a system register ID from Op0, Op1, CRn, CRm, Op2.
+    ///
+    /// The meanings of the arguments are described in the ARMv8 Architecture Reference Manual
+    /// "System instruction class encoding overview" section.
+    pub fn new(op0: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> Result<Self> {
+        if op0 > 0b11 || op1 > 0b111 || crn > 0b1111 || crm > 0b1111 || op2 > 0b111 {
+            return Err(Error::new(EINVAL));
+        }
+
+        Ok(Self::new_unchecked(op0, op1, crn, crm, op2))
+    }
+
+    /// Construct a system register ID from Op0, Op1, CRn, CRm, Op2.
+    ///
+    /// Out-of-range values will be silently truncated.
+    pub const fn new_unchecked(op0: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> Self {
+        let op0 = (op0 as u16 & 0b11) << 14;
+        let op1 = (op1 as u16 & 0b111) << 11;
+        let crn = (crn as u16 & 0b1111) << 7;
+        let crm = (crm as u16 & 0b1111) << 3;
+        let op2 = op2 as u16 & 0b111;
+        Self(op0 | op1 | crn | crm | op2)
+    }
+
+    pub fn from_encoded(v: u16) -> Self {
+        Self(v)
+    }
+
+    #[inline]
+    pub const fn op0(&self) -> u8 {
+        ((self.0 >> 14) & 0b11) as u8
+    }
+
+    #[inline]
+    pub const fn op1(&self) -> u8 {
+        ((self.0 >> 11) & 0b111) as u8
+    }
+
+    #[inline]
+    pub const fn crn(&self) -> u8 {
+        ((self.0 >> 7) & 0b1111) as u8
+    }
+
+    #[inline]
+    pub const fn crm(&self) -> u8 {
+        ((self.0 >> 3) & 0b1111) as u8
+    }
+
+    #[inline]
+    pub const fn op2(&self) -> u8 {
+        (self.0 & 0b111) as u8
+    }
+
+    /// Returns the system register as encoded in bits 5-20 of MRS and MSR instructions.
+    pub const fn encoded(&self) -> u16 {
+        self.0
+    }
+}
+
+impl Debug for AArch64SysRegId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AArch64SysRegId")
+            .field("Op0", &self.op0())
+            .field("Op1", &self.op1())
+            .field("CRn", &self.crn())
+            .field("CRm", &self.crm())
+            .field("Op2", &self.op2())
+            .finish()
+    }
+}
+
+#[rustfmt::skip]
+#[allow(non_upper_case_globals)]
+impl AArch64SysRegId {
+    //                                                         Op0    Op1     CRn     CRm    Op2
+    pub const MPIDR_EL1: Self           = Self::new_unchecked(0b11, 0b000, 0b0000, 0b0000, 0b101);
+    pub const CCSIDR_EL1: Self          = Self::new_unchecked(0b11, 0b001, 0b0000, 0b0000, 0b000);
+    pub const CSSELR_EL1: Self          = Self::new_unchecked(0b11, 0b010, 0b0000, 0b0000, 0b000);
+    pub const FPCR: Self                = Self::new_unchecked(0b11, 0b011, 0b0100, 0b0100, 0b000);
+    pub const FPSR: Self                = Self::new_unchecked(0b11, 0b011, 0b0100, 0b0100, 0b001);
+    pub const SPSR_EL1: Self            = Self::new_unchecked(0b11, 0b000, 0b0100, 0b0000, 0b000);
+    pub const SPSR_irq: Self            = Self::new_unchecked(0b11, 0b100, 0b0100, 0b0011, 0b000);
+    pub const SPSR_abt: Self            = Self::new_unchecked(0b11, 0b100, 0b0100, 0b0011, 0b001);
+    pub const SPSR_und: Self            = Self::new_unchecked(0b11, 0b100, 0b0100, 0b0011, 0b010);
+    pub const SPSR_fiq: Self            = Self::new_unchecked(0b11, 0b100, 0b0100, 0b0011, 0b011);
+    pub const ELR_EL1: Self             = Self::new_unchecked(0b11, 0b000, 0b0100, 0b0000, 0b001);
+    pub const SP_EL1: Self              = Self::new_unchecked(0b11, 0b100, 0b0100, 0b0001, 0b000);
+    pub const CNTVCT_EL0: Self          = Self::new_unchecked(0b11, 0b011, 0b1110, 0b0000, 0b010);
+    pub const CNTV_CVAL_EL0: Self       = Self::new_unchecked(0b11, 0b011, 0b1110, 0b0011, 0b010);
+}
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum VcpuRegAArch64 {
@@ -60,6 +157,7 @@ pub enum VcpuRegAArch64 {
     Sp,
     Pc,
     Pstate,
+    System(AArch64SysRegId),
 }
 
 /// A wrapper for using a VM on aarch64 and getting/setting its state.
@@ -88,6 +186,12 @@ pub trait VmAArch64: Vm {
         fdt_address: GuestAddress,
         fdt_size: usize,
     ) -> Result<()>;
+
+    /// Set an offset that describes a number of counter cycles that are subtracted from both
+    /// virtual and physical counter views.
+    fn set_counter_offset(&self, _offset: u64) -> Result<()> {
+        Err(Error::new(libc::ENOSYS))
+    }
 }
 
 /// A wrapper around creating and using a VCPU on aarch64.
@@ -120,6 +224,15 @@ pub trait VcpuAArch64: Vcpu {
     /// Gets the value of a Neon vector register (V0-V31) on this VCPU.
     fn get_vector_reg(&self, reg_num: u8) -> Result<u128>;
 
+    /// Gets the set of system registers accessible by the hypervisor
+    fn get_system_regs(&self) -> Result<BTreeMap<AArch64SysRegId, u64>>;
+
+    /// Gets the hypervisor specific data for snapshot
+    fn hypervisor_specific_snapshot(&self) -> anyhow::Result<serde_json::Value>;
+
+    /// Restores the hypervisor specific data
+    fn hypervisor_specific_restore(&self, _data: serde_json::Value) -> anyhow::Result<()>;
+
     /// Gets the value of MPIDR_EL1 on this VCPU.
     fn get_mpidr(&self) -> Result<u64> {
         const RES1: u64 = 1 << 31;
@@ -134,47 +247,65 @@ pub trait VcpuAArch64: Vcpu {
     /// Gets the current PSCI version.
     fn get_psci_version(&self) -> Result<PsciVersion>;
 
-    #[cfg(feature = "gdb")]
     /// Sets up debug registers and configure vcpu for handling guest debug events.
     fn set_guest_debug(&self, addrs: &[GuestAddress], enable_singlestep: bool) -> Result<()>;
 
-    #[cfg(feature = "gdb")]
-    /// Sets the VCPU general registers used by GDB 'G' packets.
-    fn set_gdb_registers(&self, regs: &<GdbArch as Arch>::Registers) -> Result<()>;
-
-    #[cfg(feature = "gdb")]
-    /// Gets the VCPU general registers used by GDB 'g' packets.
-    fn get_gdb_registers(&self, regs: &mut <GdbArch as Arch>::Registers) -> Result<()>;
-
-    #[cfg(feature = "gdb")]
     /// Gets the max number of hardware breakpoints.
     fn get_max_hw_bps(&self) -> Result<usize>;
 
-    #[cfg(feature = "gdb")]
-    /// Sets the value of a single register on this VCPU.
-    fn set_gdb_register(&self, reg: <GdbArch as Arch>::RegId, data: &[u8]) -> Result<()>;
-
-    #[cfg(feature = "gdb")]
-    /// Gets the value of a single register on this VCPU.
-    fn get_gdb_register(&self, reg: <GdbArch as Arch>::RegId, data: &mut [u8]) -> Result<usize>;
-
-    /// Snapshot VCPU
     fn snapshot(&self) -> anyhow::Result<VcpuSnapshot> {
-        Err(anyhow!("not yet implemented"))
+        let mut snap = VcpuSnapshot {
+            vcpu_id: self.id(),
+            sp: self.get_one_reg(VcpuRegAArch64::Sp)?,
+            pc: self.get_one_reg(VcpuRegAArch64::Pc)?,
+            pstate: self.get_one_reg(VcpuRegAArch64::Pstate)?,
+            hypervisor_data: self.hypervisor_specific_snapshot()?,
+            sys: self.get_system_regs()?,
+            ..Default::default()
+        };
+
+        for (n, xn) in snap.x.iter_mut().enumerate() {
+            *xn = self.get_one_reg(VcpuRegAArch64::X(n as u8))?;
+        }
+
+        for (n, vn) in snap.v.iter_mut().enumerate() {
+            *vn = self.get_vector_reg(n as u8)?;
+        }
+
+        Ok(snap)
     }
 
     /// Restore VCPU
-    fn restore(&self, _snapshot: &VcpuSnapshot) -> anyhow::Result<()> {
-        Err(anyhow!("not yet implemented"))
+    fn restore(&self, snapshot: &VcpuSnapshot) -> anyhow::Result<()> {
+        self.set_one_reg(VcpuRegAArch64::Sp, snapshot.sp)?;
+        self.set_one_reg(VcpuRegAArch64::Pc, snapshot.pc)?;
+        self.set_one_reg(VcpuRegAArch64::Pstate, snapshot.pstate)?;
+
+        for (n, xn) in snapshot.x.iter().enumerate() {
+            self.set_one_reg(VcpuRegAArch64::X(n as u8), *xn)?;
+        }
+        for (n, vn) in snapshot.v.iter().enumerate() {
+            self.set_vector_reg(n as u8, *vn)?;
+        }
+        for (id, val) in &snapshot.sys {
+            self.set_one_reg(VcpuRegAArch64::System(*id), *val)?;
+        }
+        self.hypervisor_specific_restore(snapshot.hypervisor_data.clone())?;
+        Ok(())
     }
 }
 
 /// Aarch64 specific vCPU snapshot.
-///
-/// Not implemented yet.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VcpuSnapshot {
     pub vcpu_id: usize,
+    pub sp: u64,
+    pub pc: u64,
+    pub pstate: u64,
+    pub x: [u64; 31],
+    pub v: [u128; 32],
+    pub sys: BTreeMap<AArch64SysRegId, u64>,
+    pub hypervisor_data: serde_json::Value,
 }
 
 impl_downcast!(VcpuAArch64);
@@ -212,4 +343,90 @@ pub enum VcpuFeature {
     PmuV3,
     /// Starts the VCPU in a power-off state.
     PowerOff,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sysreg_new() {
+        let sysreg = AArch64SysRegId::new(1, 2, 3, 4, 5).unwrap();
+        assert_eq!(sysreg.op0(), 1);
+        assert_eq!(sysreg.op1(), 2);
+        assert_eq!(sysreg.crn(), 3);
+        assert_eq!(sysreg.crm(), 4);
+        assert_eq!(sysreg.op2(), 5);
+        assert_eq!(sysreg.encoded(), 0x51A5);
+    }
+
+    #[test]
+    fn sysreg_new_max() {
+        let sysreg = AArch64SysRegId::new(0b11, 0b111, 0b1111, 0b1111, 0b111).unwrap();
+        assert_eq!(sysreg.op0(), 3);
+        assert_eq!(sysreg.op1(), 7);
+        assert_eq!(sysreg.crn(), 15);
+        assert_eq!(sysreg.crm(), 15);
+        assert_eq!(sysreg.op2(), 7);
+        assert_eq!(sysreg.encoded(), 0xFFFF);
+    }
+
+    #[test]
+    fn sysreg_new_out_of_range() {
+        AArch64SysRegId::new(4, 0, 0, 0, 0).expect_err("invalid Op0");
+        AArch64SysRegId::new(0, 8, 0, 0, 0).expect_err("invalid Op1");
+        AArch64SysRegId::new(0, 0, 16, 0, 0).expect_err("invalid CRn");
+        AArch64SysRegId::new(0, 0, 0, 16, 0).expect_err("invalid CRm");
+        AArch64SysRegId::new(0, 0, 0, 0, 8).expect_err("invalid Op2");
+    }
+
+    #[test]
+    fn sysreg_encoding_mpidr_el1() {
+        assert_eq!(AArch64SysRegId::MPIDR_EL1.op0(), 3);
+        assert_eq!(AArch64SysRegId::MPIDR_EL1.op1(), 0);
+        assert_eq!(AArch64SysRegId::MPIDR_EL1.crn(), 0);
+        assert_eq!(AArch64SysRegId::MPIDR_EL1.crm(), 0);
+        assert_eq!(AArch64SysRegId::MPIDR_EL1.op2(), 5);
+        assert_eq!(AArch64SysRegId::MPIDR_EL1.encoded(), 0xC005);
+        assert_eq!(
+            AArch64SysRegId::MPIDR_EL1,
+            AArch64SysRegId::new(3, 0, 0, 0, 5).unwrap()
+        );
+    }
+
+    #[test]
+    fn sysreg_encoding_cntvct_el0() {
+        assert_eq!(AArch64SysRegId::CNTVCT_EL0.op0(), 3);
+        assert_eq!(AArch64SysRegId::CNTVCT_EL0.op1(), 3);
+        assert_eq!(AArch64SysRegId::CNTVCT_EL0.crn(), 14);
+        assert_eq!(AArch64SysRegId::CNTVCT_EL0.crm(), 0);
+        assert_eq!(AArch64SysRegId::CNTVCT_EL0.op2(), 2);
+        assert_eq!(AArch64SysRegId::CNTVCT_EL0.encoded(), 0xDF02);
+        assert_eq!(
+            AArch64SysRegId::CNTVCT_EL0,
+            AArch64SysRegId::new(3, 3, 14, 0, 2).unwrap()
+        );
+    }
+
+    #[test]
+    fn sysreg_encoding_cntv_cval_el0() {
+        assert_eq!(AArch64SysRegId::CNTV_CVAL_EL0.op0(), 3);
+        assert_eq!(AArch64SysRegId::CNTV_CVAL_EL0.op1(), 3);
+        assert_eq!(AArch64SysRegId::CNTV_CVAL_EL0.crn(), 14);
+        assert_eq!(AArch64SysRegId::CNTV_CVAL_EL0.crm(), 3);
+        assert_eq!(AArch64SysRegId::CNTV_CVAL_EL0.op2(), 2);
+        assert_eq!(AArch64SysRegId::CNTV_CVAL_EL0.encoded(), 0xDF1A);
+        assert_eq!(
+            AArch64SysRegId::CNTV_CVAL_EL0,
+            AArch64SysRegId::new(3, 3, 14, 3, 2).unwrap()
+        );
+    }
+
+    #[test]
+    fn sysreg_debug() {
+        assert_eq!(
+            format!("{:?}", AArch64SysRegId::MPIDR_EL1),
+            "AArch64SysRegId { Op0: 3, Op1: 0, CRn: 0, CRm: 0, Op2: 5 }"
+        );
+    }
 }

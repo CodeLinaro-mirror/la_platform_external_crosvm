@@ -10,6 +10,7 @@
 pub mod ioctl;
 #[macro_use]
 pub mod syslog;
+mod async_wait_for_single_object;
 mod console;
 mod descriptor;
 mod event;
@@ -17,7 +18,6 @@ mod events;
 pub mod file_traits;
 mod file_util;
 mod foreground_window;
-mod get_filesystem_type;
 mod iobuf;
 mod mmap;
 mod mmap_platform;
@@ -42,6 +42,7 @@ pub mod thread;
 
 mod write_zeroes;
 
+pub use async_wait_for_single_object::async_wait_for_single_object;
 pub use console::*;
 pub use descriptor::*;
 pub use event::*;
@@ -50,7 +51,6 @@ pub use file_util::get_allocated_ranges;
 pub use file_util::open_file_or_duplicate;
 pub use file_util::set_sparse_file;
 pub use foreground_window::give_foregrounding_permission;
-pub use get_filesystem_type::*;
 pub use iobuf::IoBuf;
 pub use ioctl::*;
 pub use mmap::*;
@@ -65,7 +65,6 @@ pub use system_info::getpid;
 pub use system_info::number_of_logical_cores;
 pub use system_info::pagesize;
 pub use terminal::*;
-pub use timer::*;
 use winapi::shared::minwindef::DWORD;
 pub(crate) use write_zeroes::file_write_zeroes_at;
 

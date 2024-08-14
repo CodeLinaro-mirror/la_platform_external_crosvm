@@ -31,6 +31,7 @@ use serde::Serialize;
 use vm_memory::GuestAddress;
 
 use crate::client::HandleRequestResult;
+use crate::VmMappedMemoryRegion;
 use crate::VmRequest;
 use crate::VmResponse;
 
@@ -84,7 +85,7 @@ pub fn handle_request_with_timeout<T: AsRef<Path> + std::fmt::Debug>(
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum VmMsyncRequest {
+pub enum VmMemoryMappingRequest {
     /// Flush the content of a memory mapping to its backing file.
     /// `slot` selects the arena (as returned by `Vm::add_mmap_arena`).
     /// `offset` is the offset of the mapping to sync within the arena.
@@ -94,15 +95,31 @@ pub enum VmMsyncRequest {
         offset: usize,
         size: usize,
     },
+
+    /// Gives a MADV_PAGEOUT advice to the memory region mapped at `slot`, with the address range
+    /// starting at `offset` from the start of the region, and with size `size`.
+    MadvisePageout {
+        slot: MemSlot,
+        offset: usize,
+        size: usize,
+    },
+
+    /// Gives a MADV_REMOVE advice to the memory region mapped at `slot`, with the address range
+    /// starting at `offset` from the start of the region, and with size `size`.
+    MadviseRemove {
+        slot: MemSlot,
+        offset: usize,
+        size: usize,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum VmMsyncResponse {
+pub enum VmMemoryMappingResponse {
     Ok,
     Err(SysError),
 }
 
-impl VmMsyncRequest {
+impl VmMemoryMappingRequest {
     /// Executes this request on the given Vm.
     ///
     /// # Arguments
@@ -111,13 +128,25 @@ impl VmMsyncRequest {
     /// This does not return a result, instead encapsulating the success or failure in a
     /// `VmMsyncResponse` with the intended purpose of sending the response back over the socket
     /// that received this `VmMsyncResponse`.
-    pub fn execute(&self, vm: &mut impl Vm) -> VmMsyncResponse {
-        use self::VmMsyncRequest::*;
+    pub fn execute(&self, vm: &mut impl Vm) -> VmMemoryMappingResponse {
+        use self::VmMemoryMappingRequest::*;
         match *self {
             MsyncArena { slot, offset, size } => match vm.msync_memory_region(slot, offset, size) {
-                Ok(()) => VmMsyncResponse::Ok,
-                Err(e) => VmMsyncResponse::Err(e),
+                Ok(()) => VmMemoryMappingResponse::Ok,
+                Err(e) => VmMemoryMappingResponse::Err(e),
             },
+            MadvisePageout { slot, offset, size } => {
+                match vm.madvise_pageout_memory_region(slot, offset, size) {
+                    Ok(()) => VmMemoryMappingResponse::Ok,
+                    Err(e) => VmMemoryMappingResponse::Err(e),
+                }
+            }
+            MadviseRemove { slot, offset, size } => {
+                match vm.madvise_remove_memory_region(slot, offset, size) {
+                    Ok(()) => VmMemoryMappingResponse::Ok,
+                    Err(e) => VmMemoryMappingResponse::Err(e),
+                }
+            }
         }
     }
 }
@@ -159,7 +188,7 @@ pub fn prepare_shared_memory_region(
     allocator: &mut SystemAllocator,
     alloc: Alloc,
     cache: MemCacheType,
-) -> Result<(u64, MemSlot), SysError> {
+) -> Result<VmMappedMemoryRegion, SysError> {
     if !matches!(alloc, Alloc::PciBar { .. }) {
         return Err(SysError::new(EINVAL));
     }
@@ -182,7 +211,10 @@ pub fn prepare_shared_memory_region(
                 false,
                 cache,
             ) {
-                Ok(slot) => Ok((range.start >> 12, slot)),
+                Ok(slot) => Ok(VmMappedMemoryRegion {
+                    gfn: range.start >> 12,
+                    slot,
+                }),
                 Err(e) => Err(e),
             }
         }
@@ -223,7 +255,9 @@ impl FsMappingRequest {
                     alloc,
                     MemCacheType::CacheCoherent,
                 ) {
-                    Ok((pfn, slot)) => VmResponse::RegisterMemory { pfn, slot },
+                    Ok(VmMappedMemoryRegion { gfn, slot }) => {
+                        VmResponse::RegisterMemory { gfn, slot }
+                    }
                     Err(e) => VmResponse::Err(e),
                 }
             }

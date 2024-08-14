@@ -40,6 +40,8 @@ use crate::virtio::Queue;
 use crate::virtio::VirtioDevice;
 use crate::virtio::VirtioPciShmCap;
 
+#[cfg(feature = "arc_quota")]
+mod arc_ioctl;
 mod caps;
 mod config;
 mod expiring_map;
@@ -239,7 +241,7 @@ impl VirtioDevice for Fs {
                 .send(&request)
                 .expect("failed to send allocation message");
             slot = match socket.recv() {
-                Ok(VmResponse::RegisterMemory { pfn: _, slot }) => slot,
+                Ok(VmResponse::RegisterMemory { gfn: _, slot }) => slot,
                 Ok(VmResponse::Err(e)) => panic!("failed to allocate shared memory region: {}", e),
                 r => panic!(
                     "unexpected response to allocate shared memory region: {:?}",

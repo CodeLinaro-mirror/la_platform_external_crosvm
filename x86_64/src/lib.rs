@@ -98,7 +98,6 @@ use devices::ProxyDevice;
 use devices::Serial;
 use devices::SerialHardware;
 use devices::SerialParameters;
-#[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::VirtualPmc;
 use devices::FW_CFG_BASE_PORT;
 use devices::FW_CFG_MAX_FILE_SLOTS;
@@ -137,7 +136,6 @@ use remain::sorted;
 use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
-#[cfg(any(target_os = "android", target_os = "linux"))]
 use sync::Condvar;
 use sync::Mutex;
 use thiserror::Error;
@@ -152,6 +150,7 @@ use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
 
 use crate::bootparam::boot_params;
+use crate::bootparam::XLF_CAN_BE_LOADED_ABOVE_4G;
 use crate::cpuid::EDX_HYBRID_CPU_SHIFT;
 
 #[sorted]
@@ -207,6 +206,8 @@ pub enum Error {
     CreateSerialDevices(arch::DeviceRegistrationError),
     #[error("failed to create socket: {0}")]
     CreateSocket(io::Error),
+    #[error("failed to create tube: {0}")]
+    CreateTube(base::TubeError),
     #[error("failed to create VCPU: {0}")]
     CreateVcpu(base::Error),
     #[error("failed to create Virtio MMIO bus: {0}")]
@@ -456,14 +457,12 @@ fn tss_addr_end() -> GuestAddress {
 
 fn configure_system(
     guest_mem: &GuestMemory,
-    kernel_addr: GuestAddress,
     cmdline_addr: GuestAddress,
     cmdline_size: usize,
     setup_data: Option<GuestAddress>,
     initrd: Option<(GuestAddress, usize)>,
     mut params: boot_params,
 ) -> Result<()> {
-    const EBDA_START: u64 = 0x0009_fc00;
     const KERNEL_BOOT_FLAG_MAGIC: u16 = 0xaa55;
     const KERNEL_HDR_MAGIC: u32 = 0x5372_6448;
     const KERNEL_LOADER_OTHER: u8 = 0xff;
@@ -481,23 +480,16 @@ fn configure_system(
     }
     if let Some((initrd_addr, initrd_size)) = initrd {
         params.hdr.ramdisk_image = initrd_addr.offset() as u32;
+        params.ext_ramdisk_image = (initrd_addr.offset() >> 32) as u32;
         params.hdr.ramdisk_size = initrd_size as u32;
+        params.ext_ramdisk_size = (initrd_size as u64 >> 32) as u32;
     }
-
-    add_e820_entry(
-        &mut params,
-        AddressRange {
-            start: START_OF_RAM_32BITS,
-            end: EBDA_START - 1,
-        },
-        E820Type::Ram,
-    )?;
 
     // GuestMemory::end_addr() returns the first address past the end, so subtract 1 to get the
     // inclusive end.
     let guest_mem_end = guest_mem.end_addr().offset() - 1;
     let ram_below_4g = AddressRange {
-        start: kernel_addr.offset(),
+        start: START_OF_RAM_32BITS,
         end: guest_mem_end.min(read_pci_mmio_before_32bit().start - 1),
     };
     let ram_above_4g = AddressRange {
@@ -720,9 +712,7 @@ impl arch::LinuxArch for X8664arch {
         pflash_jail: Option<Minijail>,
         fw_cfg_jail: Option<Minijail>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
-        #[cfg(any(target_os = "android", target_os = "linux"))] guest_suspended_cvar: Option<
-            Arc<(Mutex<bool>, Condvar)>,
-        >,
+        guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         device_tree_overlays: Vec<DtbOverlay>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
@@ -843,7 +833,9 @@ impl arch::LinuxArch for X8664arch {
         pid_debug_label_map.append(&mut virtio_mmio_pid);
 
         // Event used to notify crosvm that guest OS is trying to suspend.
-        let suspend_evt = Event::new().map_err(Error::CreateEvent)?;
+        let (suspend_tube_send, suspend_tube_recv) =
+            Tube::directional_pair().map_err(Error::CreateTube)?;
+        let suspend_tube_send = Arc::new(Mutex::new(suspend_tube_send));
 
         if components.fw_cfg_enable {
             Self::setup_fw_cfg_device(
@@ -921,7 +913,7 @@ impl arch::LinuxArch for X8664arch {
             &mem,
             &io_bus,
             system_allocator,
-            suspend_evt.try_clone().map_err(Error::CloneEvent)?,
+            suspend_tube_send.clone(),
             vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
             components.acpi_sdts,
             irq_chip.as_irq_chip_mut(),
@@ -934,7 +926,6 @@ impl arch::LinuxArch for X8664arch {
             swap_controller,
             #[cfg(any(target_os = "android", target_os = "linux"))]
             components.ac_adapter,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
             guest_suspended_cvar,
             &pci_irqs,
         )?;
@@ -1066,7 +1057,7 @@ impl arch::LinuxArch for X8664arch {
             io_bus,
             mmio_bus,
             pid_debug_label_map,
-            suspend_evt,
+            suspend_tube: (suspend_tube_send, suspend_tube_recv),
             resume_notify_devices,
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
@@ -1222,9 +1213,8 @@ impl<T: VcpuX86_64> arch::GdbOps<T> for X8664arch {
         // x87 FPU registers: ST0-ST7
         for (dst, src) in regs.st.iter_mut().zip(fpu.fpr.iter()) {
             // `fpr` contains the x87 floating point registers in FXSAVE format.
-            // Each element contains an 80-bit floating point value in the low 10 bytes.
-            // The upper 6 bytes are reserved and can be ignored.
-            dst.copy_from_slice(&src[0..10])
+            // Each element contains an 80-bit floating point value.
+            *dst = (*src).into();
         }
 
         // SSE registers: XMM0-XMM15
@@ -1282,7 +1272,7 @@ impl<T: VcpuX86_64> arch::GdbOps<T> for X8664arch {
 
         // x87 FPU registers: ST0-ST7
         for (dst, src) in fpu.fpr.iter_mut().zip(regs.st.iter()) {
-            dst[0..10].copy_from_slice(src);
+            *dst = (*src).into();
         }
 
         // SSE registers: XMM0-XMM15
@@ -1683,16 +1673,14 @@ impl X8664arch {
 
         let initrd = match initrd_file {
             Some(mut initrd_file) => {
-                let mut initrd_addr_max = u64::from(params.hdr.initrd_addr_max);
-                // Default initrd_addr_max for old kernels (see Documentation/x86/boot.txt).
-                if initrd_addr_max == 0 {
-                    initrd_addr_max = 0x37FFFFFF;
-                }
-
-                let mem_max = mem.end_addr().offset() - 1;
-                if initrd_addr_max > mem_max {
-                    initrd_addr_max = mem_max;
-                }
+                let initrd_addr_max = if params.hdr.xloadflags & XLF_CAN_BE_LOADED_ABOVE_4G != 0 {
+                    u64::MAX
+                } else if params.hdr.initrd_addr_max == 0 {
+                    // Default initrd_addr_max for old kernels (see Documentation/x86/boot.txt).
+                    0x37FFFFFF
+                } else {
+                    u64::from(params.hdr.initrd_addr_max)
+                };
 
                 let (initrd_start, initrd_size) = arch::load_image_high(
                     mem,
@@ -1709,7 +1697,6 @@ impl X8664arch {
 
         configure_system(
             mem,
-            GuestAddress(KERNEL_START_OFFSET),
             GuestAddress(CMDLINE_OFFSET),
             cmdline.to_bytes().len() + 1,
             setup_data,
@@ -1901,7 +1888,7 @@ impl X8664arch {
     ///
     /// * - `io_bus` the I/O bus to add the devices to
     /// * - `resources` the SystemAllocator to allocate IO and MMIO for acpi devices.
-    /// * - `suspend_evt` the event object which used to suspend the vm
+    /// * - `suspend_tube` the tube object which used to suspend/resume the VM.
     /// * - `sdts` ACPI system description tables
     /// * - `irq_chip` the IrqChip object for registering irq events
     /// * - `battery` indicate whether to create the battery
@@ -1913,7 +1900,7 @@ impl X8664arch {
         mem: &GuestMemory,
         io_bus: &Bus,
         resources: &mut SystemAllocator,
-        suspend_evt: Event,
+        suspend_tube: Arc<Mutex<SendTube>>,
         vm_evt_wrtube: SendTube,
         sdts: Vec<SDT>,
         irq_chip: &mut dyn IrqChip,
@@ -1924,9 +1911,7 @@ impl X8664arch {
         resume_notify_devices: &mut Vec<Arc<Mutex<dyn BusResumeDevice>>>,
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
         #[cfg(any(target_os = "android", target_os = "linux"))] ac_adapter: bool,
-        #[cfg(any(target_os = "android", target_os = "linux"))] guest_suspended_cvar: Option<
-            Arc<(Mutex<bool>, Condvar)>,
-        >,
+        guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         pci_irqs: &[(PciAddress, u32, PciInterruptPin)],
     ) -> Result<(acpi::AcpiDevResource, Option<BatControl>)> {
         // The AML data for the acpi devices
@@ -2016,7 +2001,6 @@ impl X8664arch {
         let acdc = None;
 
         //Virtual PMC
-        #[cfg(any(target_os = "android", target_os = "linux"))]
         if let Some(guest_suspended_cvar) = guest_suspended_cvar {
             let alloc = resources.get_anon_alloc();
             let mmio_base = resources
@@ -2042,7 +2026,7 @@ impl X8664arch {
 
         let mut pmresource = devices::ACPIPMResource::new(
             pm_sci_evt.try_clone().map_err(Error::CloneEvent)?,
-            suspend_evt,
+            suspend_tube,
             vm_evt_wrtube,
             acdc,
         );

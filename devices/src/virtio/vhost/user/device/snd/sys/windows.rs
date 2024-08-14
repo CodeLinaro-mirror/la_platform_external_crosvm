@@ -22,7 +22,6 @@ use crate::virtio::snd::sys::set_audio_thread_priority;
 use crate::virtio::vhost::user::device::handler::sys::windows::read_from_tube_transporter;
 use crate::virtio::vhost::user::device::handler::sys::windows::run_handler;
 use crate::virtio::vhost::user::device::snd::SndBackend;
-use crate::virtio::vhost::user::device::snd::SND_EXECUTOR;
 use crate::virtio::vhost::user::VhostUserDeviceBuilder;
 
 pub mod generic;
@@ -44,6 +43,10 @@ pub struct Options {
 pub struct SndVmmConfig {
     // Tube for setting up the vhost-user connection. May not exist if not using vhost-user.
     pub main_vhost_user_tube: Option<Tube>,
+    // GUID that will be passed into `IAudioClient::Initialize`.
+    pub audio_client_guid: String,
+    // Used to identify the device backend.
+    pub card_index: usize,
     // Product related configuration.
     pub product_config: product::SndVmmConfig,
 }
@@ -58,6 +61,10 @@ pub struct SndBackendConfig {
     pub exit_event: Event,
     // Sound device parameters.
     pub parameters: Parameters,
+    // This field is used to pass this GUID to `IAudioClient::Initialize`.
+    pub audio_client_guid: String,
+    // Used to append to logs in the vhost user device backends.
+    pub card_index: usize,
     // Product related configuration.
     pub product_config: product::SndBackendConfig,
 }
@@ -88,15 +95,6 @@ pub fn run_snd_device(opts: Options) -> anyhow::Result<()> {
         .recv()
         .context("failed to parse Snd backend config from bootstrap tube")?;
 
-    let vhost_user_tube = config
-        .device_vhost_user_tube
-        .expect("vhost-user Snd tube must be set");
-
-    let ex = Executor::new().context("Failed to create executor")?;
-    let _ = SND_EXECUTOR.set(ex.clone());
-
-    let snd_device = Box::new(SndBackend::new(config.parameters)?);
-
     // TODO(b/213170185): Uncomment once sandbox is upstreamed.
     // if sandbox::is_sandbox_target() {
     //     sandbox::TargetServices::get()
@@ -105,22 +103,47 @@ pub fn run_snd_device(opts: Options) -> anyhow::Result<()> {
     //         .lower_token();
     // }
 
+    run_snd_device_worker(config)
+}
+
+/// Run the SND device worker.
+pub fn run_snd_device_worker(config: SndBackendConfig) -> anyhow::Result<()> {
+    let card_index = config.card_index;
+    let vhost_user_tube = config
+        .device_vhost_user_tube
+        .unwrap_or_else(|| panic!("[Card {}] vhost-user Snd tube must be set", card_index));
+
+    let ex = Executor::new().context(format!("[Card {}] Failed to create executor", card_index))?;
+
+    let snd_device = Box::new(SndBackend::new(
+        &ex,
+        config.parameters,
+        Some(config.audio_client_guid),
+        config.card_index,
+    )?);
+
     // Set the audio thread priority here. This assumes our executor is running on a single thread.
     let _thread_priority_handle = set_audio_thread_priority();
     if let Err(e) = _thread_priority_handle {
-        warn!("Failed to set audio thread to real time: {}", e);
+        warn!(
+            "[Card {}] Failed to set audio thread to real time: {}",
+            card_index, e
+        );
     };
 
     let handler = snd_device.build(&ex)?;
 
-    info!("vhost-user snd device ready, starting run loop...");
+    info!(
+        "[Card {}] vhost-user snd device ready, starting run loop...",
+        card_index
+    );
     if let Err(e) = ex.run_until(run_handler(
         handler,
         vhost_user_tube,
         config.exit_event,
         &ex,
     )) {
-        bail!("error occurred: {}", e);
+        bail!("[Card {}] error occurred: {}", card_index, e);
     }
 
     Ok(())

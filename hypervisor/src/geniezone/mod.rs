@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::convert::TryFrom;
 use std::ffi::CString;
+use std::mem::offset_of;
 use std::os::raw::c_ulong;
 use std::os::unix::prelude::OsStrExt;
 use std::path::Path;
@@ -34,12 +35,6 @@ use base::RawDescriptor;
 use base::Result;
 use base::SafeDescriptor;
 use cros_fdt::Fdt;
-#[cfg(feature = "gdb")]
-use gdbstub::arch::Arch;
-#[cfg(feature = "gdb")]
-use gdbstub_arch::aarch64::reg::id::AArch64RegId;
-#[cfg(feature = "gdb")]
-use gdbstub_arch::aarch64::AArch64 as GdbArch;
 pub use geniezone_sys::*;
 use libc::open;
 use libc::EFAULT;
@@ -57,12 +52,12 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::MemoryRegionPurpose;
 
+use crate::AArch64SysRegId;
 use crate::BalloonEvent;
 use crate::ClockState;
 use crate::Config;
 use crate::Datamatch;
 use crate::DeviceKind;
-use crate::HypervHypercall;
 use crate::Hypervisor;
 use crate::HypervisorCap;
 use crate::IoEventAddress;
@@ -88,13 +83,8 @@ impl Geniezone {
     pub fn get_guest_phys_addr_bits(&self) -> u8 {
         // SAFETY:
         // Safe because we know self is a real geniezone fd
-        match unsafe {
-            ioctl_with_val(
-                self,
-                GZVM_CHECK_EXTENSION(),
-                GZVM_CAP_ARM_VM_IPA_SIZE.into(),
-            )
-        } {
+        match unsafe { ioctl_with_val(self, GZVM_CHECK_EXTENSION, GZVM_CAP_ARM_VM_IPA_SIZE.into()) }
+        {
             // Default physical address size is 40 bits if the extension is not supported.
             ret if ret <= 0 => 40,
             ipa => ipa as u8,
@@ -204,7 +194,7 @@ impl VmAArch64 for GeniezoneVm {
         // SAFETY:
         // Safe because we allocated the struct and we know the kernel will modify exactly the size
         // of the struct.
-        let ret = unsafe { ioctl_with_ref(self, GZVM_SET_DTB_CONFIG(), &dtb_config) };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_SET_DTB_CONFIG, &dtb_config) };
         if ret == 0 {
             Ok(())
         } else {
@@ -232,7 +222,7 @@ impl GeniezoneVcpu {
         // SAFETY:
         // Safe because we allocated the struct and we know the kernel will read exactly the size of
         // the struct.
-        let ret = unsafe { ioctl_with_ref(self, GZVM_SET_ONE_REG(), &onereg) };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_SET_ONE_REG, &onereg) };
         if ret == 0 {
             Ok(())
         } else {
@@ -261,7 +251,7 @@ impl GeniezoneVcpu {
         // SAFETY:
         // Safe because we allocated the struct and we know the kernel will read exactly the size of
         // the struct.
-        let ret = unsafe { ioctl_with_ref(self, GZVM_GET_ONE_REG(), &onereg) };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_GET_ONE_REG, &onereg) };
         if ret == 0 {
             Ok(())
         } else {
@@ -281,22 +271,12 @@ pub enum GeniezoneVcpuRegister {
     Pc,
     /// Processor State
     Pstate,
-    /// Stack Pointer (EL1)
-    SpEl1,
-    /// Exception Link Register (EL1)
-    ElrEl1,
-    /// Saved Program Status Register (EL1, abt, und, irq, fiq)
-    Spsr(u8),
     /// FP & SIMD Registers V0-V31
     V(u8),
-    /// Floating-point Status Register
-    Fpsr,
-    /// Floating-point Control Register
-    Fpcr,
     /// Geniezone Firmware Pseudo-Registers
     Firmware(u16),
-    /// Generic System Registers by (Op0, Op1, CRn, CRm, Op2)
-    System(u16),
+    /// System Registers
+    System(AArch64SysRegId),
     /// CCSIDR_EL1 Demultiplexed by CSSELR_EL1
     Ccsidr(u8),
 }
@@ -318,15 +298,17 @@ impl From<GeniezoneVcpuRegister> for u64 {
             gzvm_regs_reg(GZVM_REG_SIZE_U64, offset)
         }
 
+        fn spsr_reg(spsr_reg: u32) -> u64 {
+            let n = std::mem::size_of::<u64>() * (spsr_reg as usize);
+            gzvm_reg(offset_of!(gzvm_regs, spsr) + n)
+        }
+
         fn user_pt_reg(offset: usize) -> u64 {
-            gzvm_regs_reg(
-                GZVM_REG_SIZE_U64,
-                memoffset::offset_of!(gzvm_regs, regs) + offset,
-            )
+            gzvm_regs_reg(GZVM_REG_SIZE_U64, offset_of!(gzvm_regs, regs) + offset)
         }
 
         fn user_fpsimd_state_reg(size: u64, offset: usize) -> u64 {
-            gzvm_regs_reg(size, memoffset::offset_of!(gzvm_regs, fp_regs) + offset)
+            gzvm_regs_reg(size, offset_of!(gzvm_regs, fp_regs) + offset)
         }
 
         const fn reg_u64(kind: u64, fields: u64) -> u64 {
@@ -346,58 +328,44 @@ impl From<GeniezoneVcpuRegister> for u64 {
             GeniezoneVcpuRegister::X(n @ 0..=30) => {
                 let n = std::mem::size_of::<u64>() * (n as usize);
 
-                user_pt_reg(memoffset::offset_of!(user_pt_regs, regs) + n)
+                user_pt_reg(offset_of!(user_pt_regs, regs) + n)
             }
             GeniezoneVcpuRegister::X(n) => {
                 unreachable!("invalid GeniezoneVcpuRegister Xn index: {n}")
             }
-            GeniezoneVcpuRegister::Sp => user_pt_reg(memoffset::offset_of!(user_pt_regs, sp)),
-            GeniezoneVcpuRegister::Pc => user_pt_reg(memoffset::offset_of!(user_pt_regs, pc)),
-            GeniezoneVcpuRegister::Pstate => {
-                user_pt_reg(memoffset::offset_of!(user_pt_regs, pstate))
-            }
-            GeniezoneVcpuRegister::SpEl1 => gzvm_reg(memoffset::offset_of!(gzvm_regs, sp_el1)),
-            GeniezoneVcpuRegister::ElrEl1 => gzvm_reg(memoffset::offset_of!(gzvm_regs, elr_el1)),
-            GeniezoneVcpuRegister::Spsr(n @ 0..=4) => {
-                let n = std::mem::size_of::<u64>() * (n as usize);
-                gzvm_reg(memoffset::offset_of!(gzvm_regs, spsr) + n)
-            }
-            GeniezoneVcpuRegister::Spsr(n) => {
-                unreachable!("invalid GeniezoneVcpuRegister Spsr index: {n}")
-            }
+            GeniezoneVcpuRegister::Sp => user_pt_reg(offset_of!(user_pt_regs, sp)),
+            GeniezoneVcpuRegister::Pc => user_pt_reg(offset_of!(user_pt_regs, pc)),
+            GeniezoneVcpuRegister::Pstate => user_pt_reg(offset_of!(user_pt_regs, pstate)),
             GeniezoneVcpuRegister::V(n @ 0..=31) => {
                 let n = std::mem::size_of::<u128>() * (n as usize);
-                user_fpsimd_state_reg(
-                    GZVM_REG_SIZE_U128,
-                    memoffset::offset_of!(user_fpsimd_state, vregs) + n,
-                )
+                user_fpsimd_state_reg(GZVM_REG_SIZE_U128, offset_of!(user_fpsimd_state, vregs) + n)
             }
             GeniezoneVcpuRegister::V(n) => {
                 unreachable!("invalid GeniezoneVcpuRegister Vn index: {n}")
             }
-            GeniezoneVcpuRegister::Fpsr => user_fpsimd_state_reg(
-                GZVM_REG_SIZE_U32,
-                memoffset::offset_of!(user_fpsimd_state, fpsr),
-            ),
-            GeniezoneVcpuRegister::Fpcr => user_fpsimd_state_reg(
-                GZVM_REG_SIZE_U32,
-                memoffset::offset_of!(user_fpsimd_state, fpcr),
-            ),
+            GeniezoneVcpuRegister::System(AArch64SysRegId::FPSR) => {
+                user_fpsimd_state_reg(GZVM_REG_SIZE_U32, offset_of!(user_fpsimd_state, fpsr))
+            }
+            GeniezoneVcpuRegister::System(AArch64SysRegId::FPCR) => {
+                user_fpsimd_state_reg(GZVM_REG_SIZE_U32, offset_of!(user_fpsimd_state, fpcr))
+            }
+            GeniezoneVcpuRegister::System(AArch64SysRegId::SPSR_EL1) => spsr_reg(0),
+            GeniezoneVcpuRegister::System(AArch64SysRegId::SPSR_abt) => spsr_reg(1),
+            GeniezoneVcpuRegister::System(AArch64SysRegId::SPSR_und) => spsr_reg(2),
+            GeniezoneVcpuRegister::System(AArch64SysRegId::SPSR_irq) => spsr_reg(3),
+            GeniezoneVcpuRegister::System(AArch64SysRegId::SPSR_fiq) => spsr_reg(4),
+            GeniezoneVcpuRegister::System(AArch64SysRegId::SP_EL1) => {
+                gzvm_reg(offset_of!(gzvm_regs, sp_el1))
+            }
+            GeniezoneVcpuRegister::System(AArch64SysRegId::ELR_EL1) => {
+                gzvm_reg(offset_of!(gzvm_regs, elr_el1))
+            }
+            GeniezoneVcpuRegister::System(sysreg) => {
+                reg_u64(GZVM_REG_ARM64_SYSREG.into(), sysreg.encoded().into())
+            }
             GeniezoneVcpuRegister::Firmware(n) => reg_u64(GZVM_REG_ARM, n.into()),
-            GeniezoneVcpuRegister::System(n) => reg_u64(GZVM_REG_ARM64_SYSREG.into(), n.into()),
             GeniezoneVcpuRegister::Ccsidr(n) => demux_reg(GZVM_REG_SIZE_U32, 0, n.into()),
         }
-    }
-}
-
-#[cfg(feature = "gdb")]
-impl TryFrom<AArch64RegId> for GeniezoneVcpuRegister {
-    type Error = Error;
-
-    fn try_from(_reg: <GdbArch as Arch>::RegId) -> std::result::Result<Self, Self::Error> {
-        // TODO: Geniezone not support gdb currently
-        error!("Geniezone: not support gdb");
-        Err(Error::new(EINVAL))
     }
 }
 
@@ -409,6 +377,7 @@ impl From<VcpuRegAArch64> for GeniezoneVcpuRegister {
             VcpuRegAArch64::Sp => Self::Sp,
             VcpuRegAArch64::Pc => Self::Pc,
             VcpuRegAArch64::Pstate => Self::Pstate,
+            VcpuRegAArch64::System(sysreg) => Self::System(sysreg),
         }
     }
 }
@@ -457,45 +426,34 @@ impl VcpuAArch64 for GeniezoneVcpu {
         Ok(PSCI_0_2)
     }
 
-    #[cfg(feature = "gdb")]
     fn get_max_hw_bps(&self) -> Result<usize> {
         // TODO: Geniezone not support gdb currently
         error!("Geniezone: not support get_max_hw_bps");
         Err(Error::new(EINVAL))
     }
 
-    #[cfg(feature = "gdb")]
+    fn get_system_regs(&self) -> Result<BTreeMap<AArch64SysRegId, u64>> {
+        error!("Geniezone: not support get_system_regs");
+        Err(Error::new(EINVAL))
+    }
+
+    fn hypervisor_specific_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+        // TODO: Geniezone not support gdb currently
+        Err(anyhow::anyhow!(
+            "Geniezone: not support hypervisor_specific_snapshot"
+        ))
+    }
+
+    fn hypervisor_specific_restore(&self, _data: serde_json::Value) -> anyhow::Result<()> {
+        // TODO: Geniezone not support gdb currently
+        Err(anyhow::anyhow!(
+            "Geniezone: not support hypervisor_specific_restore"
+        ))
+    }
+
     fn set_guest_debug(&self, _addrs: &[GuestAddress], _enable_singlestep: bool) -> Result<()> {
         // TODO: Geniezone not support gdb currently
-        error!("Geniezone: not support set_gdb_registers");
-        Err(Error::new(EINVAL))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn set_gdb_registers(&self, _regs: &<GdbArch as Arch>::Registers) -> Result<()> {
-        // TODO: Geniezone not support gdb currently
-        error!("Geniezone: not support set_gdb_registers");
-        Err(Error::new(EINVAL))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn get_gdb_registers(&self, _regs: &mut <GdbArch as Arch>::Registers) -> Result<()> {
-        // TODO: Geniezone not support gdb currently
-        error!("Geniezone: not support get_gdb_registers");
-        Err(Error::new(EINVAL))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn set_gdb_register(&self, _reg: <GdbArch as Arch>::RegId, _data: &[u8]) -> Result<()> {
-        // TODO: Geniezone not support gdb currently
-        error!("Geniezone: not support set_gdb_register");
-        Err(Error::new(EINVAL))
-    }
-
-    #[cfg(feature = "gdb")]
-    fn get_gdb_register(&self, _reg: <GdbArch as Arch>::RegId, _data: &mut [u8]) -> Result<usize> {
-        // TODO: Geniezone not support gdb currently
-        error!("Geniezone: not support get_gdb_register");
+        error!("Geniezone: not support set_guest_debug");
         Err(Error::new(EINVAL))
     }
 }
@@ -523,7 +481,7 @@ unsafe fn set_user_memory_region(
         userspace_addr: userspace_addr as u64,
     };
 
-    let ret = ioctl_with_ref(descriptor, GZVM_SET_USER_MEMORY_REGION(), &region);
+    let ret = ioctl_with_ref(descriptor, GZVM_SET_USER_MEMORY_REGION, &region);
     if ret == 0 {
         Ok(())
     } else {
@@ -622,7 +580,7 @@ impl GeniezoneVm {
         // SAFETY:
         // Safe because we know gzvm is a real gzvm fd as this module is the only one that can make
         // gzvm objects.
-        let ret = unsafe { ioctl(geniezone, GZVM_CREATE_VM()) };
+        let ret = unsafe { ioctl(geniezone, GZVM_CREATE_VM) };
         if ret < 0 {
             return errno_result();
         }
@@ -669,7 +627,7 @@ impl GeniezoneVm {
         let fd =
             // SAFETY:
             // Safe because we know that our file is a VM fd and we verify the return result.
-            unsafe { ioctl_with_val(self, GZVM_CREATE_VCPU(), c_ulong::try_from(id).unwrap()) };
+            unsafe { ioctl_with_val(self, GZVM_CREATE_VCPU, c_ulong::try_from(id).unwrap()) };
 
         if fd < 0 {
             return errno_result();
@@ -699,7 +657,7 @@ impl GeniezoneVm {
     pub fn create_irq_chip(&self) -> Result<()> {
         // SAFETY:
         // Safe because we know that our file is a VM fd and we verify the return result.
-        let ret = unsafe { ioctl(self, GZVM_CREATE_IRQCHIP()) };
+        let ret = unsafe { ioctl(self, GZVM_CREATE_IRQCHIP) };
         if ret == 0 {
             Ok(())
         } else {
@@ -716,7 +674,7 @@ impl GeniezoneVm {
         // SAFETY:
         // Safe because we know that our file is a VM fd, we know the kernel will only read the
         // correct amount of memory from our pointer, and we verify the return result.
-        let ret = unsafe { ioctl_with_ref(self, GZVM_IRQ_LINE(), &irq_level) };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_IRQ_LINE, &irq_level) };
         if ret == 0 {
             Ok(())
         } else {
@@ -746,7 +704,7 @@ impl GeniezoneVm {
         // SAFETY:
         // Safe because we know that our file is a VM fd, we know the kernel will only read the
         // correct amount of memory from our pointer, and we verify the return result.
-        let ret = unsafe { ioctl_with_ref(self, GZVM_IRQFD(), &irqfd) };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_IRQFD, &irqfd) };
         if ret == 0 {
             Ok(())
         } else {
@@ -769,7 +727,7 @@ impl GeniezoneVm {
         // SAFETY:
         // Safe because we know that our file is a VM fd, we know the kernel will only read the
         // correct amount of memory from our pointer, and we verify the return result.
-        let ret = unsafe { ioctl_with_ref(self, GZVM_IRQFD(), &irqfd) };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_IRQFD, &irqfd) };
         if ret == 0 {
             Ok(())
         } else {
@@ -827,7 +785,7 @@ impl GeniezoneVm {
         // SAFETY:
         // Safe because we know that our file is a VM fd, we know the kernel will only read the
         // correct amount of memory from our pointer, and we verify the return result.
-        let ret = unsafe { ioctl_with_ref(self, GZVM_IOEVENTFD(), &ioeventfd) };
+        let ret = unsafe { ioctl_with_ref(self, GZVM_IOEVENTFD, &ioeventfd) };
         if ret == 0 {
             Ok(())
         } else {
@@ -842,7 +800,7 @@ impl GeniezoneVm {
         // Safe because we know that our file is a GZVM fd, and if the cap is invalid GZVM assumes
         // it's an unavailable extension and returns 0.
         unsafe {
-            ioctl_with_ref(self, GZVM_CHECK_EXTENSION(), &cap);
+            ioctl_with_ref(self, GZVM_CHECK_EXTENSION, &cap);
         }
         cap == 1
     }
@@ -866,7 +824,7 @@ impl GeniezoneVm {
         };
         // Safe because we allocated the struct and we know the kernel will read exactly the size of
         // the struct, and because we assume the caller has allocated the args appropriately.
-        let ret = ioctl_with_ref(self, GZVM_ENABLE_CAP(), &gzvm_cap);
+        let ret = ioctl_with_ref(self, GZVM_ENABLE_CAP, &gzvm_cap);
         if ret == 0 {
             Ok(gzvm_cap)
         } else {
@@ -878,7 +836,7 @@ impl GeniezoneVm {
         // SAFETY:
         // Safe because we allocated the struct and we know the kernel will modify exactly the size
         // of the struct and the return value is checked.
-        let ret = unsafe { base::ioctl_with_ref(self, GZVM_CREATE_DEVICE(), &dev) };
+        let ret = unsafe { base::ioctl_with_ref(self, GZVM_CREATE_DEVICE, &dev) };
         if ret == 0 {
             Ok(())
         } else {
@@ -996,6 +954,24 @@ impl Vm for GeniezoneVm {
             MmapError::SystemCallFailed(e) => e,
             _ => Error::new(EIO),
         })
+    }
+
+    fn madvise_pageout_memory_region(
+        &mut self,
+        _slot: MemSlot,
+        _offset: usize,
+        _size: usize,
+    ) -> Result<()> {
+        Err(Error::new(ENOTSUP))
+    }
+
+    fn madvise_remove_memory_region(
+        &mut self,
+        _slot: MemSlot,
+        _offset: usize,
+        _size: usize,
+    ) -> Result<()> {
+        Err(Error::new(ENOTSUP))
     }
 
     fn remove_memory_region(&mut self, slot: MemSlot) -> Result<Box<dyn MappedRegion>> {
@@ -1172,7 +1148,7 @@ impl Vcpu for GeniezoneVcpu {
     fn run(&mut self) -> Result<VcpuExit> {
         // SAFETY:
         // Safe because we know that our file is a VCPU fd and we verify the return result.
-        let ret = unsafe { ioctl_with_val(self, GZVM_RUN(), self.run_mmap.as_ptr() as u64) };
+        let ret = unsafe { ioctl_with_val(self, GZVM_RUN, self.run_mmap.as_ptr() as u64) };
         if ret != 0 {
             return errno_result();
         }
@@ -1217,7 +1193,7 @@ impl Vcpu for GeniezoneVcpu {
                 }
             }
             GZVM_EXIT_INTERNAL_ERROR => Ok(VcpuExit::InternalError),
-            GZVM_EXIT_SHUTDOWN => Ok(VcpuExit::Shutdown),
+            GZVM_EXIT_SHUTDOWN => Ok(VcpuExit::Shutdown(Ok(()))),
             GZVM_EXIT_UNKNOWN => panic!("unknown gzvm exit reason\n"),
             r => panic!("unknown gzvm exit reason: {}", r),
         }
@@ -1262,19 +1238,6 @@ impl Vcpu for GeniezoneVcpu {
     fn handle_io(&self, _handle_fn: &mut dyn FnMut(IoParams) -> Option<[u8; 8]>) -> Result<()> {
         Err(Error::new(EINVAL))
     }
-
-    fn handle_hyperv_hypercall(
-        &self,
-        _handle_fn: &mut dyn FnMut(HypervHypercall) -> u64,
-    ) -> Result<()> {
-        Err(Error::new(EINVAL))
-    }
-
-    fn handle_rdmsr(&self, _data: u64) -> Result<()> {
-        Err(Error::new(EINVAL))
-    }
-
-    fn handle_wrmsr(&self) {}
 }
 
 impl AsRawDescriptor for GeniezoneVcpu {

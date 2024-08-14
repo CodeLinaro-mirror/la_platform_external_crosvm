@@ -27,10 +27,7 @@ use libc::EINVAL;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub use self::acpi::DeviceVcfgRegister;
-pub use self::acpi::DsmMethod;
 pub use self::acpi::GpeScope;
-pub use self::acpi::PowerResourceMethod;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub use self::coiommu::CoIommuDev;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -47,20 +44,24 @@ pub use self::pci_configuration::PciBarConfiguration;
 pub use self::pci_configuration::PciBarIndex;
 pub use self::pci_configuration::PciBarPrefetchable;
 pub use self::pci_configuration::PciBarRegionType;
+pub use self::pci_configuration::PciBaseSystemPeripheralSubclass;
 pub use self::pci_configuration::PciCapability;
 pub use self::pci_configuration::PciCapabilityID;
 pub use self::pci_configuration::PciClassCode;
 pub use self::pci_configuration::PciConfiguration;
 pub use self::pci_configuration::PciDisplaySubclass;
 pub use self::pci_configuration::PciHeaderType;
+pub use self::pci_configuration::PciInputDeviceSubclass;
 pub use self::pci_configuration::PciMassStorageSubclass;
+pub use self::pci_configuration::PciMultimediaSubclass;
+pub use self::pci_configuration::PciNetworkControllerSubclass;
 pub use self::pci_configuration::PciProgrammingInterface;
 pub use self::pci_configuration::PciSerialBusSubClass;
+pub use self::pci_configuration::PciSimpleCommunicationControllerSubclass;
 pub use self::pci_configuration::PciSubclass;
-pub use self::pci_configuration::CAPABILITY_LIST_HEAD_OFFSET;
+pub use self::pci_configuration::PciWirelessControllerSubclass;
 pub use self::pci_device::BarRange;
 pub use self::pci_device::Error as PciDeviceError;
-pub use self::pci_device::IoEventError as PciIoEventError;
 pub use self::pci_device::PciBus;
 pub use self::pci_device::PciDevice;
 pub use self::pci_device::PreferredIrq;

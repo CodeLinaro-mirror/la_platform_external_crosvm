@@ -39,6 +39,7 @@ use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Display;
 use std::fs::File;
+use std::path::Path;
 use std::path::PathBuf;
 use std::result::Result as StdResult;
 use std::str::FromStr;
@@ -96,10 +97,12 @@ use swap::SwapStatus;
 use sync::Mutex;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub use sys::FsMappingRequest;
+#[cfg(windows)]
+pub use sys::InitialAudioSessionState;
 #[cfg(any(target_os = "android", target_os = "linux"))]
-pub use sys::VmMsyncRequest;
+pub use sys::VmMemoryMappingRequest;
 #[cfg(any(target_os = "android", target_os = "linux"))]
-pub use sys::VmMsyncResponse;
+pub use sys::VmMemoryMappingResponse;
 use thiserror::Error;
 pub use vm_control_product::GpuSendToMain;
 pub use vm_control_product::GpuSendToService;
@@ -107,7 +110,9 @@ pub use vm_control_product::ServiceSendToGpu;
 use vm_memory::GuestAddress;
 
 #[cfg(feature = "balloon")]
-pub use crate::balloon_tube::*;
+pub use crate::balloon_tube::BalloonControlCommand;
+#[cfg(feature = "balloon")]
+pub use crate::balloon_tube::BalloonTube;
 #[cfg(feature = "gdb")]
 pub use crate::gdb::VcpuDebug;
 #[cfg(feature = "gdb")]
@@ -184,8 +189,8 @@ pub trait PmeNotify: Send {
 pub trait PmResource {
     fn pwrbtn_evt(&mut self) {}
     fn slpbtn_evt(&mut self) {}
-    fn rtc_evt(&mut self) {}
-    fn gpe_evt(&mut self, _gpe: u32) {}
+    fn rtc_evt(&mut self, _clear_evt: Event) {}
+    fn gpe_evt(&mut self, _gpe: u32, _clear_evt: Option<Event>) {}
     fn pme_evt(&mut self, _requester_id: u16) {}
     fn register_gpe_notify_dev(&mut self, _gpe: u32, _notify_dev: Arc<Mutex<dyn GpeNotify>>) {}
     fn register_pme_notify_dev(&mut self, _bus: u8, _notify_dev: Arc<Mutex<dyn PmeNotify>>) {}
@@ -587,7 +592,7 @@ pub enum VmMemoryRequest {
 /// Struct for managing `VmMemoryRequest`s IOMMU related state.
 pub struct VmMemoryRequestIommuClient {
     tube: Arc<Mutex<Tube>>,
-    gpu_memory: BTreeSet<MemSlot>,
+    registered_memory: BTreeSet<VmMemoryRegionId>,
 }
 
 impl VmMemoryRequestIommuClient {
@@ -595,31 +600,31 @@ impl VmMemoryRequestIommuClient {
     pub fn new(tube: Arc<Mutex<Tube>>) -> Self {
         Self {
             tube,
-            gpu_memory: BTreeSet::new(),
+            registered_memory: BTreeSet::new(),
         }
     }
 }
 
+enum RegisteredMemory {
+    FixedMapping {
+        slot: MemSlot,
+        offset: usize,
+        size: usize,
+    },
+    DynamicMapping {
+        slot: MemSlot,
+    },
+}
+
+pub struct VmMappedMemoryRegion {
+    gfn: u64,
+    slot: MemSlot,
+}
+
+#[derive(Default)]
 pub struct VmMemoryRegionState {
-    // alloc -> (pfn, slot)
-    slot_map: HashMap<Alloc, (u64, MemSlot)>,
-    // id -> (slot, Option<offset, size>)
-    mapped_regions: BTreeMap<VmMemoryRegionId, (MemSlot, Option<(usize, usize)>)>,
-}
-
-impl VmMemoryRegionState {
-    pub fn new() -> VmMemoryRegionState {
-        Self {
-            slot_map: HashMap::new(),
-            mapped_regions: BTreeMap::new(),
-        }
-    }
-}
-
-impl Default for VmMemoryRegionState {
-    fn default() -> Self {
-        Self::new()
-    }
+    mapped_regions: HashMap<Alloc, VmMappedMemoryRegion>,
+    registered_memory: BTreeMap<VmMemoryRegionId, RegisteredMemory>,
 }
 
 fn try_map_to_prepared_region(
@@ -629,11 +634,15 @@ fn try_map_to_prepared_region(
     dest: &VmMemoryDestination,
     prot: &Protection,
 ) -> Option<VmMemoryResponse> {
-    let VmMemoryDestination::ExistingAllocation { allocation, offset } = dest else {
+    let VmMemoryDestination::ExistingAllocation {
+        allocation,
+        offset: dest_offset,
+    } = dest
+    else {
         return None;
     };
 
-    let (pfn, slot) = region_state.slot_map.get(allocation)?;
+    let VmMappedMemoryRegion { gfn, slot } = region_state.mapped_regions.get(allocation)?;
 
     let (descriptor, file_offset, size) = match source {
         VmMemorySource::Descriptor {
@@ -659,7 +668,7 @@ fn try_map_to_prepared_region(
     };
     if let Err(err) = vm.add_fd_mapping(
         *slot,
-        *offset as usize,
+        *dest_offset as usize,
         size,
         &descriptor,
         file_offset,
@@ -667,12 +676,18 @@ fn try_map_to_prepared_region(
     ) {
         return Some(VmMemoryResponse::Err(err));
     }
-    let pfn = pfn + (offset >> 12);
-    region_state.mapped_regions.insert(
-        VmMemoryRegionId(pfn),
-        (*slot, Some((*offset as usize, size))),
+
+    let gfn = gfn + (dest_offset >> 12);
+    let memory_region_id = VmMemoryRegionId(gfn);
+    region_state.registered_memory.insert(
+        memory_region_id,
+        RegisteredMemory::FixedMapping {
+            slot: *slot,
+            offset: *dest_offset as usize,
+            size,
+        },
     );
-    Some(VmMemoryResponse::RegisterMemory(VmMemoryRegionId(pfn)))
+    Some(VmMemoryResponse::RegisterMemory(memory_region_id))
 }
 
 impl VmMemoryRequest {
@@ -710,8 +725,8 @@ impl VmMemoryRequest {
                 }
 
                 match sys::prepare_shared_memory_region(vm, sys_allocator, alloc, cache) {
-                    Ok(info) => {
-                        region_state.slot_map.insert(alloc, info);
+                    Ok(region) => {
+                        region_state.mapped_regions.insert(alloc, region);
                         VmMemoryResponse::Ok
                     }
                     Err(e) => VmMemoryResponse::Err(e),
@@ -752,11 +767,12 @@ impl VmMemoryRequest {
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
 
+                let region_id = VmMemoryRegionId(guest_addr.0 >> 12);
                 if let (Some(descriptor), Some(iommu_client)) = (descriptor, iommu_client) {
                     let request =
                         VirtioIOMMURequest::VfioCommand(VirtioIOMMUVfioCommand::VfioDmabufMap {
-                            mem_slot: slot,
-                            gfn: guest_addr.0 >> 12,
+                            region_id,
+                            gpa: guest_addr.0,
                             size,
                             dma_buf: descriptor,
                         });
@@ -771,22 +787,23 @@ impl VmMemoryRequest {
                         }
                     };
 
-                    iommu_client.gpu_memory.insert(slot);
+                    iommu_client.registered_memory.insert(region_id);
                 }
 
-                let pfn = guest_addr.0 >> 12;
                 region_state
-                    .mapped_regions
-                    .insert(VmMemoryRegionId(pfn), (slot, None));
-                VmMemoryResponse::RegisterMemory(VmMemoryRegionId(pfn))
+                    .registered_memory
+                    .insert(region_id, RegisteredMemory::DynamicMapping { slot });
+                VmMemoryResponse::RegisterMemory(region_id)
             }
-            UnregisterMemory(id) => match region_state.mapped_regions.remove(&id) {
-                Some((slot, None)) => match vm.remove_memory_region(slot) {
+            UnregisterMemory(id) => match region_state.registered_memory.remove(&id) {
+                Some(RegisteredMemory::DynamicMapping { slot }) => match vm
+                    .remove_memory_region(slot)
+                {
                     Ok(_) => {
                         if let Some(iommu_client) = iommu_client {
-                            if iommu_client.gpu_memory.remove(&slot) {
+                            if iommu_client.registered_memory.remove(&id) {
                                 let request = VirtioIOMMURequest::VfioCommand(
-                                    VirtioIOMMUVfioCommand::VfioDmabufUnmap(slot),
+                                    VirtioIOMMUVfioCommand::VfioDmabufUnmap(id),
                                 );
 
                                 match virtio_iommu_request(&iommu_client.tube.lock(), &request) {
@@ -807,10 +824,12 @@ impl VmMemoryRequest {
                     }
                     Err(e) => VmMemoryResponse::Err(e),
                 },
-                Some((slot, Some((offset, size)))) => match vm.remove_mapping(slot, offset, size) {
-                    Ok(()) => VmMemoryResponse::Ok,
-                    Err(e) => VmMemoryResponse::Err(e),
-                },
+                Some(RegisteredMemory::FixedMapping { slot, offset, size }) => {
+                    match vm.remove_mapping(slot, offset, size) {
+                        Ok(()) => VmMemoryResponse::Ok,
+                        Err(e) => VmMemoryResponse::Err(e),
+                    }
+                }
                 None => VmMemoryResponse::Err(SysError::new(EINVAL)),
             },
             DynamicallyFreeMemoryRange {
@@ -898,7 +917,7 @@ impl VmMemoryRequest {
 
 #[derive(Serialize, Deserialize, Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
 /// Identifer for registered memory regions. Globally unique.
-// The current implementation uses pfn as the unique identifier.
+// The current implementation uses gfn as the unique identifier.
 pub struct VmMemoryRegionId(u64);
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1263,6 +1282,7 @@ pub enum PvClockCommand {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum PvClockCommandResponse {
     Ok,
+    Resumed { total_suspended_ticks: u64 },
     DeviceInactive,
     Err(SysError),
 }
@@ -1289,16 +1309,19 @@ pub enum VmRequest {
     Powerbtn,
     /// Trigger a sleep button event in the guest.
     Sleepbtn,
-    /// Trigger a RTC interrupt in the guest.
-    Rtc,
+    /// Trigger a RTC interrupt in the guest. When the irq associated with the RTC is
+    /// resampled, it will be re-asserted as long as `clear_evt` is not signaled.
+    Rtc { clear_evt: Event },
     /// Suspend the VM's VCPUs until resume.
     SuspendVcpus,
     /// Swap the memory content into files on a disk
     Swap(SwapCommand),
     /// Resume the VM's VCPUs that were previously suspended.
     ResumeVcpus,
-    /// Inject a general-purpose event.
-    Gpe(u32),
+    /// Inject a general-purpose event. If `clear_evt` is provided, when the irq associated
+    /// with the GPE is resampled, it will be re-asserted as long as `clear_evt` is not
+    /// signaled.
+    Gpe { gpe: u32, clear_evt: Option<Event> },
     /// Inject a PCI PME
     PciPme(u16),
     /// Make the VM's RT VCPU real-time.
@@ -1330,19 +1353,16 @@ pub enum VmRequest {
     /// Command to Snapshot devices
     Snapshot(SnapshotCommand),
     /// Register for event notification
-    #[cfg(feature = "registered_events")]
     RegisterListener {
         socket_addr: String,
         event: RegisteredEvent,
     },
     /// Unregister for notifications for event
-    #[cfg(feature = "registered_events")]
     UnregisterListener {
         socket_addr: String,
         event: RegisteredEvent,
     },
     /// Unregister for all event notification
-    #[cfg(feature = "registered_events")]
     Unregister { socket_addr: String },
     /// Suspend VM VCPUs and Devices until resume.
     SuspendVm,
@@ -1352,7 +1372,6 @@ pub enum VmRequest {
 
 /// NOTE: when making any changes to this enum please also update
 /// RegisteredEventFfi in crosvm_control/src/lib.rs
-#[cfg(feature = "registered_events")]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum RegisteredEvent {
     VirtioBalloonWsReport,
@@ -1360,18 +1379,16 @@ pub enum RegisteredEvent {
     VirtioBalloonOOMDeflation,
 }
 
-#[cfg(feature = "registered_events")]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RegisteredEventWithData {
     VirtioBalloonWsReport {
-        ws_buckets: Vec<WSBucket>,
+        ws_buckets: Vec<balloon_control::WSBucket>,
         balloon_actual: u64,
     },
     VirtioBalloonResize,
     VirtioBalloonOOMDeflation,
 }
 
-#[cfg(feature = "registered_events")]
 impl RegisteredEventWithData {
     pub fn into_event(&self) -> RegisteredEvent {
         match self {
@@ -1381,6 +1398,7 @@ impl RegisteredEventWithData {
         }
     }
 
+    #[cfg(feature = "registered_events")]
     pub fn into_proto(&self) -> registered_events::RegisteredEvent {
         match self {
             Self::VirtioBalloonWsReport {
@@ -1416,7 +1434,7 @@ impl RegisteredEventWithData {
         }
     }
 
-    pub fn from_ws(ws: &BalloonWS, balloon_actual: u64) -> Self {
+    pub fn from_ws(ws: &balloon_control::BalloonWS, balloon_actual: u64) -> Self {
         RegisteredEventWithData::VirtioBalloonWsReport {
             ws_buckets: ws.ws.clone(),
             balloon_actual,
@@ -1463,7 +1481,9 @@ fn map_descriptor(
 }
 
 // Get vCPU state. vCPUs are expected to all hold the same state.
-// In this function, there may be a time where vCPUs are not
+// In this function, there may be a time where vCPUs are not holding the same state
+// as they transition from one state to the other. This is expected, and the final result
+// should be all vCPUs holding the same state.
 fn get_vcpu_state(kick_vcpus: impl Fn(VcpuControl), vcpu_num: usize) -> anyhow::Result<VmRunMode> {
     let (send_chan, recv_chan) = mpsc::channel();
     kick_vcpus(VcpuControl::GetStates(send_chan));
@@ -1608,6 +1628,15 @@ impl VmRequest {
     /// This does not return a result, instead encapsulating the success or failure in a
     /// `VmResponse` with the intended purpose of sending the response back over the  socket that
     /// received this `VmRequest`.
+    ///
+    /// `suspended_pvclock_state`: If the hypervisor has its own pvclock (not the same as
+    /// virtio-pvclock) and the VM is suspended (not just the vCPUs, but the full VM), then
+    /// `suspended_pvclock_state` will be used to store the ClockState saved just after the vCPUs
+    /// were suspended. It is important that we save the value right after the vCPUs are suspended
+    /// and restore it right before the vCPUs are resumed (instead of, more naturally, during the
+    /// snapshot/restore steps) because the pvclock continues to tick even when the vCPUs are
+    /// suspended.
+    #[allow(unused_variables)]
     pub fn execute(
         &self,
         vm: &impl Vm,
@@ -1624,8 +1653,9 @@ impl VmRequest {
         vcpu_size: usize,
         irq_handler_control: &Tube,
         snapshot_irqchip: impl Fn() -> anyhow::Result<serde_json::Value>,
+        suspended_pvclock_state: &mut Option<hypervisor::ClockState>,
     ) -> VmResponse {
-        match *self {
+        match self {
             VmRequest::Exit => {
                 *run_mode = Some(VmRunMode::Exiting);
                 VmResponse::Ok
@@ -1648,10 +1678,19 @@ impl VmRequest {
                     VmResponse::Err(SysError::new(ENOTSUP))
                 }
             }
-            VmRequest::Rtc => {
-                if let Some(pm) = pm {
-                    pm.lock().rtc_evt();
-                    VmResponse::Ok
+            VmRequest::Rtc { clear_evt } => {
+                if let Some(pm) = pm.as_ref() {
+                    match clear_evt.try_clone() {
+                        Ok(clear_evt) => {
+                            pm.lock().rtc_evt(clear_evt);
+                            *run_mode = Some(VmRunMode::Running);
+                            VmResponse::Ok
+                        }
+                        Err(err) => {
+                            error!("Error cloning clear_evt: {:?}", err);
+                            VmResponse::Err(SysError::new(EIO))
+                        }
+                    }
                 } else {
                     error!("{:#?} not supported", *self);
                     VmResponse::Err(SysError::new(ENOTSUP))
@@ -1761,7 +1800,7 @@ impl VmRequest {
             }) => {
                 #[cfg(feature = "swap")]
                 if let Some(swap_controller) = swap_controller {
-                    return match swap_controller.disable(slow_file_cleanup) {
+                    return match swap_controller.disable(*slow_file_cleanup) {
                         Ok(()) => VmResponse::Ok,
                         Err(e) => {
                             error!("swap disable failed: {}", e);
@@ -1797,6 +1836,18 @@ impl VmRequest {
                 if current_mode != VmRunMode::Suspending {
                     error!("vCPUs failed to all suspend.");
                     return VmResponse::Err(SysError::new(EIO));
+                }
+                // Snapshot the pvclock ASAP after stopping vCPUs.
+                if vm.check_capability(VmCap::PvClock) {
+                    if suspended_pvclock_state.is_none() {
+                        *suspended_pvclock_state = Some(match vm.get_pvclock() {
+                            Ok(x) => x,
+                            Err(e) => {
+                                error!("suspend_pvclock failed: {e:?}");
+                                return VmResponse::Err(SysError::new(EIO));
+                            }
+                        });
+                    }
                 }
                 if let Err(e) = device_control_tube
                     .send(&DeviceControlCommand::SleepDevices)
@@ -1848,13 +1899,31 @@ impl VmRequest {
                         return VmResponse::Err(SysError::new(EIO));
                     }
                 }
+                // Resume the pvclock as late as possible before starting vCPUs.
+                if vm.check_capability(VmCap::PvClock) {
+                    // If None, then we aren't suspended, which is a valid case.
+                    if let Some(x) = suspended_pvclock_state {
+                        if let Err(e) = vm.set_pvclock(x) {
+                            error!("resume_pvclock failed: {e:?}");
+                            return VmResponse::Err(SysError::new(EIO));
+                        }
+                    }
+                }
                 kick_vcpus(VcpuControl::RunState(VmRunMode::Running));
                 VmResponse::Ok
             }
-            VmRequest::Gpe(gpe) => {
+            VmRequest::Gpe { gpe, clear_evt } => {
                 if let Some(pm) = pm.as_ref() {
-                    pm.lock().gpe_evt(gpe);
-                    VmResponse::Ok
+                    match clear_evt.as_ref().map(|e| e.try_clone()).transpose() {
+                        Ok(clear_evt) => {
+                            pm.lock().gpe_evt(*gpe, clear_evt);
+                            VmResponse::Ok
+                        }
+                        Err(err) => {
+                            error!("Error cloning clear_evt: {:?}", err);
+                            VmResponse::Err(SysError::new(EIO))
+                        }
+                    }
                 } else {
                     error!("{:#?} not supported", *self);
                     VmResponse::Err(SysError::new(ENOTSUP))
@@ -1862,7 +1931,7 @@ impl VmRequest {
             }
             VmRequest::PciPme(requester_id) => {
                 if let Some(pm) = pm.as_ref() {
-                    pm.lock().pme_evt(requester_id);
+                    pm.lock().pme_evt(*requester_id);
                     VmResponse::Ok
                 } else {
                     error!("{:#?} not supported", *self);
@@ -1878,7 +1947,7 @@ impl VmRequest {
             VmRequest::DiskCommand {
                 disk_index,
                 ref command,
-            } => match &disk_host_tubes.get(disk_index) {
+            } => match &disk_host_tubes.get(*disk_index) {
                 Some(tube) => handle_disk_command(command, tube),
                 None => VmResponse::Err(SysError::new(ENODEV)),
             },
@@ -1927,7 +1996,7 @@ impl VmRequest {
             VmRequest::BatCommand(type_, ref cmd) => {
                 match bat_control {
                     Some(battery) => {
-                        if battery.type_ != type_ {
+                        if battery.type_ != *type_ {
                             error!("ignored battery command due to battery type: expected {:?}, got {:?}", battery.type_, type_);
                             return VmResponse::Err(SysError::new(EINVAL));
                         }
@@ -1962,14 +2031,14 @@ impl VmRequest {
                 info!("Starting crosvm snapshot");
                 match do_snapshot(
                     snapshot_path.to_path_buf(),
-                    vm,
                     kick_vcpus,
                     irq_handler_control,
                     device_control_tube,
                     vcpu_size,
                     snapshot_irqchip,
-                    compress_memory,
-                    encrypt,
+                    *compress_memory,
+                    *encrypt,
+                    suspended_pvclock_state,
                 ) {
                     Ok(()) => {
                         info!("Finished crosvm snapshot successfully");
@@ -1981,17 +2050,14 @@ impl VmRequest {
                     }
                 }
             }
-            #[cfg(feature = "registered_events")]
             VmRequest::RegisterListener {
                 socket_addr: _,
                 event: _,
             } => VmResponse::Ok,
-            #[cfg(feature = "registered_events")]
             VmRequest::UnregisterListener {
                 socket_addr: _,
                 event: _,
             } => VmResponse::Ok,
-            #[cfg(feature = "registered_events")]
             VmRequest::Unregister { socket_addr: _ } => VmResponse::Ok,
         }
     }
@@ -2000,7 +2066,6 @@ impl VmRequest {
 /// Snapshot the VM to file at `snapshot_path`
 fn do_snapshot(
     snapshot_path: PathBuf,
-    vm: &impl Vm,
     kick_vcpus: impl Fn(VcpuControl),
     irq_handler_control: &Tube,
     device_control_tube: &Tube,
@@ -2008,6 +2073,7 @@ fn do_snapshot(
     snapshot_irqchip: impl Fn() -> anyhow::Result<serde_json::Value>,
     compress_memory: bool,
     encrypt: bool,
+    suspended_pvclock_state: &mut Option<hypervisor::ClockState>,
 ) -> anyhow::Result<()> {
     let _vcpu_guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
     let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
@@ -2058,12 +2124,7 @@ fn do_snapshot(
     let snapshot_writer = SnapshotWriter::new(snapshot_path, encrypt)?;
 
     // Snapshot hypervisor's paravirtualized clock.
-    let pvclock_snapshot = if vm.check_capability(VmCap::PvClock) {
-        serde_json::to_value(vm.get_pvclock()?)?
-    } else {
-        serde_json::Value::Null
-    };
-    snapshot_writer.write_fragment("pvclock", &pvclock_snapshot)?;
+    snapshot_writer.write_fragment("pvclock", &serde_json::to_value(suspended_pvclock_state)?)?;
 
     // Snapshot Vcpus
     info!("VCPUs snapshotting...");
@@ -2112,8 +2173,7 @@ fn do_snapshot(
 /// Same as `VmRequest::execute` with a `VmRequest::Restore`. Exposed as a separate function
 /// because not all the `VmRequest::execute` arguments are available in the "cold restore" flow.
 pub fn do_restore(
-    restore_path: PathBuf,
-    vm: &impl Vm,
+    restore_path: &Path,
     kick_vcpus: impl Fn(VcpuControl),
     kick_vcpu: impl Fn(VcpuControl, usize),
     irq_handler_control: &Tube,
@@ -2121,6 +2181,7 @@ pub fn do_restore(
     vcpu_size: usize,
     mut restore_irqchip: impl FnMut(serde_json::Value) -> anyhow::Result<()>,
     require_encrypted: bool,
+    suspended_pvclock_state: &mut Option<hypervisor::ClockState>,
 ) -> anyhow::Result<()> {
     let _guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size);
     let _devices_guard = DeviceSleepGuard::new(device_control_tube)?;
@@ -2128,12 +2189,7 @@ pub fn do_restore(
     let snapshot_reader = SnapshotReader::new(restore_path, require_encrypted)?;
 
     // Restore hypervisor's paravirtualized clock.
-    let pvclock_snapshot: serde_json::Value = snapshot_reader.read_fragment("pvclock")?;
-    if vm.check_capability(VmCap::PvClock) {
-        vm.set_pvclock(&serde_json::from_value(pvclock_snapshot)?)?;
-    } else {
-        anyhow::ensure!(pvclock_snapshot == serde_json::Value::Null);
-    };
+    *suspended_pvclock_state = snapshot_reader.read_fragment("pvclock")?;
 
     // Restore IrqChip
     let irq_snapshot: serde_json::Value = snapshot_reader.read_fragment("irqchip")?;
@@ -2211,18 +2267,21 @@ pub enum VmResponse {
     Err(SysError),
     /// Indicates the request encountered some error during execution.
     ErrString(String),
-    /// The request to register memory into guest address space was successfully done at page frame
-    /// number `pfn` and memory slot number `slot`.
-    RegisterMemory { pfn: u64, slot: u32 },
+    /// The request to register memory into guest address space was successfully done at guest page
+    /// frame number `gfn` and memory slot number `slot`.
+    RegisterMemory { gfn: u64, slot: u32 },
     /// Results of balloon control commands.
     #[cfg(feature = "balloon")]
     BalloonStats {
-        stats: BalloonStats,
+        stats: balloon_control::BalloonStats,
         balloon_actual: u64,
     },
     /// Results of balloon WS-R command
     #[cfg(feature = "balloon")]
-    BalloonWS { ws: BalloonWS, balloon_actual: u64 },
+    BalloonWS {
+        ws: balloon_control::BalloonWS,
+        balloon_actual: u64,
+    },
     /// Results of PCI hot plug
     #[cfg(feature = "pci-hotplug")]
     PciHotPlugResponse { bus: u8 },
@@ -2247,10 +2306,10 @@ impl Display for VmResponse {
             Ok => write!(f, "ok"),
             Err(e) => write!(f, "error: {}", e),
             ErrString(e) => write!(f, "error: {}", e),
-            RegisterMemory { pfn, slot } => write!(
+            RegisterMemory { gfn, slot } => write!(
                 f,
-                "memory registered to page frame number {:#x} and memory slot {}",
-                pfn, slot
+                "memory registered to guest page frame number {:#x} and memory slot {}",
+                gfn, slot
             ),
             #[cfg(feature = "balloon")]
             VmResponse::BalloonStats {
@@ -2329,13 +2388,13 @@ pub enum VirtioIOMMUVfioCommand {
     },
     // Map a dma-buf into vfio iommu table
     VfioDmabufMap {
-        mem_slot: MemSlot,
-        gfn: u64,
+        region_id: VmMemoryRegionId,
+        gpa: u64,
         size: u64,
         dma_buf: SafeDescriptor,
     },
     // Unmap a dma-buf from vfio iommu table
-    VfioDmabufUnmap(MemSlot),
+    VfioDmabufUnmap(VmMemoryRegionId),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
