@@ -2195,6 +2195,11 @@ pub struct RunCommand {
     ///         Error when FS_IOC_SETPATHXATTR ioctl is called
     ///         in the device if current dyamic permission path is
     ///         lager or equal to this value.
+    ///     security_ctx=BOOL - Enables FUSE_SECURITY_CONTEXT
+    ///        feature(default: true). This should be set to false
+    ///        in case the when the host not allowing write to
+    ///        /proc/<pid>/attr/fscreate, or guest directory does
+    ///        care about the security context.
     ///     Options uid and gid are useful when the crosvm process
     ///     has no CAP_SETGID/CAP_SETUID but an identity mapping of
     ///     the current user/group between the VM and the host is
@@ -2451,6 +2456,13 @@ pub struct RunCommand {
     #[merge(strategy = append)]
     /// path to a socket for vhost-user block
     pub vhost_user_blk: Vec<VhostUserOption>,
+
+    #[argh(option)]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// number of milliseconds to retry if the socket path is missing or has no listener. Defaults
+    /// to no retries.
+    pub vhost_user_connect_timeout_ms: Option<u64>,
 
     #[argh(option, arg_name = "SOCKET_PATH")]
     #[serde(skip)] // Deprecated - use `vhost-user` instead.
@@ -3534,6 +3546,8 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.vhost_user = cmd.vhost_user;
+
+        cfg.vhost_user_connect_timeout_ms = cmd.vhost_user_connect_timeout_ms;
 
         // Convert an option from `VhostUserOption` to `VhostUserFrontendOption` with the given
         // device type.
