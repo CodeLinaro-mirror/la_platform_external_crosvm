@@ -685,11 +685,11 @@ fn test_mmio_exit_cross_page() {
                             (0x1000, 8) => {
                                 // Ensure this instruction is the first read
                                 // in the sequence.
-                                Some([0x88, 0x03, 0x67, 0x8a, 0x01, 0xf4, 0, 0])
+                                Ok(Some([0x88, 0x03, 0x67, 0x8a, 0x01, 0xf4, 0, 0]))
                             }
                             // Second MMIO read is a regular read from an
                             // unmapped memory (pointed to by initial EAX).
-                            (0x3010, 1) => Some([0x66, 0, 0, 0, 0, 0, 0, 0]),
+                            (0x3010, 1) => Ok(Some([0x66, 0, 0, 0, 0, 0, 0, 0])),
                             _ => {
                                 panic!("invalid address({:#x})/size({})", address, size)
                             }
@@ -699,7 +699,7 @@ fn test_mmio_exit_cross_page() {
                         assert_eq!(address, 0x3000);
                         assert_eq!(data[0], 0x33);
                         assert_eq!(size, 1);
-                        None
+                        Ok(None)
                     }
                 }
             })
@@ -793,7 +793,7 @@ fn test_mmio_exit_readonly_memory() {
                     assert_eq!(size, 1);
                     assert_eq!(address, 0x5000);
                     assert_eq!(data[0], 0x67);
-                    None
+                    Ok(None)
                 }
             })
             .expect("failed to set the data");
@@ -3317,7 +3317,7 @@ fn test_slat_on_region_removal_is_mmio() {
                     );
                     // We won't vmenter again, so there's no need to actually satisfy the MMIO by
                     // returning data; however, some hypervisors (WHPX) require it.
-                    Some([0u8; 8])
+                    Ok(Some([0u8; 8]))
                 })
                 .unwrap();
                 true
@@ -3607,6 +3607,121 @@ fn test_ready_for_interrupt_for_intercepted_instructions() {
             }
         }
     );
+}
+
+#[test]
+fn test_hardware_breakpoint_with_isr() {
+    global_asm_data!(
+        setup_debug_handler_code,
+        ".code64",
+        // Set up the stack
+        "mov sp, 0x900",
+        "mov rax, 0x1019", // Address of the instruction to trigger the breakpoint
+        "mov dr0, rax",
+        "mov rax, 0x00000001", // Enable the first breakpoint (local, exact) for execution
+        "mov dr7, rax",
+        "nop", // This should trigger the debug exception
+        "nop",
+        "hlt"
+    );
+
+    global_asm_data!(
+        debug_isr_code,
+        ".code64",
+        "mov rbx, 0xf00dbabe", // Set a value to indicate the ISR was called
+        "mov rax, 0",
+        "mov dr7, rax", // Disable debugging again
+        "mov rax, dr6",
+        "iretq" // Return from interrupt
+    );
+
+    global_asm_data!(
+        null_isr_code,
+        ".code64",
+        "mov rbx, 0xbaadf00d", // This ISR should never get called
+        "hlt"
+    );
+
+    let debug_isr_offset = 0x800;
+    let null_isr_offset = 0x700;
+    let debug_idt_entry = IdtEntry::new(debug_isr_offset);
+    let null_idt_entry = IdtEntry::new(null_isr_offset);
+
+    let idt = (0..256)
+        .flat_map(|i| {
+            let entry = if i == 0x01 {
+                debug_idt_entry
+            } else {
+                null_idt_entry
+            };
+            entry.as_bytes().to_owned()
+        })
+        .collect::<Vec<_>>();
+
+    let idt_base = 0x12000;
+
+    let setup = TestSetup {
+        assembly: setup_debug_handler_code::data().to_vec(),
+        load_addr: GuestAddress(0x1000),
+        mem_size: 0x20000,
+        initial_regs: Regs {
+            rip: 0x1000,
+            rflags: 2 | FLAGS_IF_BIT,
+            ..Default::default()
+        },
+        extra_vm_setup: Some(Box::new(
+            move |vcpu: &mut dyn VcpuX86_64, vm: &mut dyn Vm| {
+                enter_long_mode(vcpu, vm);
+
+                let guest_mem = vm.get_memory();
+
+                // Write IDT to guest memory
+                guest_mem
+                    .write_at_addr(idt.as_bytes(), GuestAddress(idt_base))
+                    .expect("Failed to write IDT entry");
+
+                guest_mem
+                    .write_at_addr(
+                        debug_isr_code::data().to_vec().as_bytes(),
+                        GuestAddress(debug_isr_offset),
+                    )
+                    .expect("Failed to write debug ISR entry");
+
+                guest_mem
+                    .write_at_addr(
+                        null_isr_code::data().to_vec().as_bytes(),
+                        GuestAddress(null_isr_offset),
+                    )
+                    .expect("Failed to write null ISR entry");
+
+                // Set the IDT
+                let mut sregs = vcpu.get_sregs().expect("Failed to get sregs");
+                sregs.idt.base = idt_base;
+                sregs.idt.limit = (core::mem::size_of::<IdtEntry>() * 256 - 1) as u16;
+                vcpu.set_sregs(&sregs).expect("Failed to set sregs");
+            },
+        )),
+        ..Default::default()
+    };
+
+    let regs_matcher = |_: HypervisorType, regs: &Regs, _: &Sregs| {
+        assert_eq!(regs.rax & 1, 1, "Breakpoint #0 not hit");
+        assert_eq!(
+            regs.rip,
+            0x1000 + (setup_debug_handler_code::data().len() as u64),
+            "rIP not at the right HLT"
+        );
+        assert_eq!(regs.rbx, 0xf00dbabe, "Debug ISR was not called");
+    };
+
+    let exit_matcher = |_, exit: &VcpuExit, _: &mut dyn VcpuX86_64, _: &mut dyn Vm| match exit {
+        VcpuExit::Hlt => {
+            true // Break VM runloop
+        }
+        r => panic!("unexpected exit reason: {:?}", r),
+    };
+
+    run_tests!(setup, regs_matcher, exit_matcher);
 }
 
 #[test]
