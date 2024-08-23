@@ -106,8 +106,9 @@
       "//vendor:__subpackages__"
     ],
     "libfuse_rust": [
-        "//packages/modules/Virtualization/authfs",
+        "//packages/modules/Virtualization/guest/authfs",
         "//packages/modules/Virtualization/guest/zipfuse"
+        "//packages/modules/Virtualization/tests/authfs",
     ],
     "libhypervisor": [
       // For QCOM's crosvm fork.
