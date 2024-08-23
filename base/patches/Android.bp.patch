@@ -96,7 +96,7 @@ index 734ab7c1..20f48f53 100644
 +    },
 +    shared_libs: ["libcap"], // specified in src/linux/capabilities.rs
      visibility: [
-         "//packages/modules/Virtualization/virtualizationmanager",
+         "//packages/modules/Virtualization/android/virtmgr",
          "//vendor:__subpackages__",
      ],
  }

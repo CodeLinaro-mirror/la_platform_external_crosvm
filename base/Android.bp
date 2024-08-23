@@ -250,7 +250,7 @@ rust_library {
     },
     shared_libs: ["libcap"], // specified in src/linux/capabilities.rs
     visibility: [
-        "//packages/modules/Virtualization/virtualizationmanager",
+        "//packages/modules/Virtualization/android/virtmgr",
         "//vendor:__subpackages__",
     ],
 }

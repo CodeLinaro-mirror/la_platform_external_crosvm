@@ -52,7 +52,7 @@ rust_library {
     ],
     proc_macros: ["libremain"],
     aliases: ["crypto_generic:crypto"],
-    visibility: ["//packages/modules/Virtualization/virtualizationmanager"],
+    visibility: ["//packages/modules/Virtualization/android/virtmgr"],
 }
 
 rust_test {
