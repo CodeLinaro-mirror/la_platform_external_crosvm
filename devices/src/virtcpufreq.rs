@@ -9,6 +9,9 @@ use base::Error;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
+use anyhow::Context;
+use serde::Deserialize;
+use serde::Serialize;
 use sync::Mutex;
 
 use crate::pci::CrosvmDeviceId;
@@ -27,6 +30,7 @@ const SCHED_FLAG_UTIL_CLAMP_MIN: u64 = 0x20;
 
 const SCHED_FLAG_KEEP_ALL: u64 = SCHED_FLAG_KEEP_POLICY | SCHED_FLAG_KEEP_PARAMS;
 
+#[derive(Serialize, Deserialize)]
 pub struct VirtCpufreq {
     cpu_fmax: u32,
     cpu_capacity: u32,
@@ -143,4 +147,24 @@ impl BusDevice for VirtCpufreq {
     }
 }
 
-impl Suspendable for VirtCpufreq {}
+impl Suspendable for VirtCpufreq {
+    // Device only active through MMIO writes. Vcpus are frozen before the device tries to sleep,
+    // so the device will not be active at time of calling function.
+    fn sleep(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn wake(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
+        serde_json::to_value(&self).with_context(|| format!("failed to serialize"))
+    }
+
+    fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+        let deser: Self = serde_json::from_value(data).with_context(|| format!("failed to deserialize"))?;
+        *self = deser;
+        Ok(())
+    }
+}
