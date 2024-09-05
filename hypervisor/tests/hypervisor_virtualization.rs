@@ -48,6 +48,42 @@ pub enum HypervisorType {
     Gvm,
 }
 
+#[repr(C, packed)]
+#[derive(AsBytes)]
+/// Define IDTR value
+struct Idtr {
+    // The lower 2 bytes are limit.
+    limit: u16,
+    // The higher 4 bytes are base address.
+    base_address: u32,
+}
+
+#[repr(C, packed)]
+#[derive(AsBytes, Debug, Copy, Clone)]
+struct IdtEntry {
+    address_low: u16,
+    selector: u16,
+    ist: u8,
+    flags: u8,
+    address_mid: u16,
+    address_high: u32,
+    reserved: u32,
+}
+
+impl IdtEntry {
+    pub fn new(handler_addr: u64) -> Self {
+        IdtEntry {
+            address_low: (handler_addr & 0xFFFF) as u16,
+            selector: 0x10, // Our long mode CS is the third entry (0x0, 0x8, 0x10).
+            ist: 0,
+            flags: 0x8E, // Present, interrupt gate, DPL 0
+            address_mid: ((handler_addr >> 16) & 0xFFFF) as u16,
+            address_high: (handler_addr >> 32) as u32,
+            reserved: 0,
+        }
+    }
+}
+
 impl std::fmt::Display for HypervisorType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -262,26 +298,66 @@ global_asm_data!(
 const GDT_OFFSET: u64 = 0x1500;
 const IDT_OFFSET: u64 = 0x1528;
 
-pub fn configure_long_mode_memory(vm: &mut dyn Vm) -> Segment {
-    // Condensed version of the function in x86_64\src\gdt.rs
-    pub fn segment_from_gdt(entry: u64, table_index: u8) -> Segment {
-        Segment {
-            base: (((entry) & 0xFF00000000000000) >> 32)
-                | (((entry) & 0x000000FF00000000) >> 16)
-                | (((entry) & 0x00000000FFFF0000) >> 16),
-            limit: ((((entry) & 0x000F000000000000) >> 32) | ((entry) & 0x000000000000FFFF)) as u32,
-            selector: (table_index * 8) as u16,
-            type_: ((entry & 0x00000F0000000000) >> 40) as u8,
-            present: ((entry & 0x0000800000000000) >> 47) as u8,
-            dpl: ((entry & 0x0000600000000000) >> 45) as u8,
-            db: ((entry & 0x0040000000000000) >> 54) as u8,
-            s: ((entry & 0x0000100000000000) >> 44) as u8,
-            l: ((entry & 0x0020000000000000) >> 53) as u8,
-            g: ((entry & 0x0080000000000000) >> 55) as u8,
-            avl: ((entry & 0x0010000000000000) >> 52) as u8,
-        }
+// Condensed version of the function in x86_64\src\gdt.rs
+pub fn segment_from_gdt(entry: u64, table_index: u8) -> Segment {
+    let g = ((entry & 0x0080000000000000) >> 55) as u8;
+    let limit = ((((entry) & 0x000F000000000000) >> 32) | ((entry) & 0x000000000000FFFF)) as u32;
+    let limit_bytes = if g == 0 { limit } else { (limit * 4096) + 4095 };
+    Segment {
+        base: (((entry) & 0xFF00000000000000) >> 32)
+            | (((entry) & 0x000000FF00000000) >> 16)
+            | (((entry) & 0x00000000FFFF0000) >> 16),
+        limit_bytes,
+        selector: (table_index * 8) as u16,
+        type_: ((entry & 0x00000F0000000000) >> 40) as u8,
+        present: ((entry & 0x0000800000000000) >> 47) as u8,
+        dpl: ((entry & 0x0000600000000000) >> 45) as u8,
+        db: ((entry & 0x0040000000000000) >> 54) as u8,
+        s: ((entry & 0x0000100000000000) >> 44) as u8,
+        l: ((entry & 0x0020000000000000) >> 53) as u8,
+        g,
+        avl: ((entry & 0x0010000000000000) >> 52) as u8,
     }
+}
 
+pub fn null_descriptor() -> [u8; 8] {
+    [0u8; 8]
+}
+
+const DESC_ACCESS_PRESENT: u8 = 1 << 7;
+const DESC_ACCESS_NOT_SYS: u8 = 1 << 4;
+const DESC_ACCESS_EXEC: u8 = 1 << 3;
+const DESC_ACCESS_RW: u8 = 1 << 1;
+const DESC_ACCESS_ACCESSED: u8 = 1 << 0;
+
+const DESC_FLAG_GRAN_4K: u8 = 1 << 7;
+const DESC_FLAG_DEFAULT_OP_SIZE_32: u8 = 1 << 6;
+const DESC_FLAG_LONG_MODE: u8 = 1 << 5;
+
+pub fn segment_descriptor(base: u32, limit: u32, access: u8, flags: u8) -> [u8; 8] {
+    assert!(limit < (1 << 20)); // limit value must fit in 20 bits
+    assert!(flags & 0x0F == 0x00); // flags must be in the high 4 bits only
+
+    [
+        limit as u8,                 // limit [7:0]
+        (limit >> 8) as u8,          // limit [15:8]
+        base as u8,                  // base [7:0]
+        (base >> 8) as u8,           // base [15:8]
+        (base >> 16) as u8,          // base [23:16]
+        access,                      // type + s + dpl + p
+        (limit >> 16) as u8 | flags, // limit [19:16] + flags
+        (base >> 24) as u8,          // base [31:24]
+    ]
+}
+
+pub fn write_gdt(guest_mem: &GuestMemory, gdt: &[u8]) {
+    let gdt_addr = GuestAddress(GDT_OFFSET);
+    guest_mem
+        .write_at_addr(gdt, gdt_addr)
+        .expect("Failed to write GDT entry to guest memory");
+}
+
+pub fn configure_long_mode_memory(vm: &mut dyn Vm) -> Segment {
     let guest_mem = vm.get_memory();
 
     assert!(
@@ -289,50 +365,25 @@ pub fn configure_long_mode_memory(vm: &mut dyn Vm) -> Segment {
         "Long-mode setup requires 0x1500-0xc000 to be mapped in the guest."
     );
 
-    const PRESENT: u8 = 1 << 7;
-    const NOT_SYS: u8 = 1 << 4;
-    const EXEC: u8 = 1 << 3;
-    const RW: u8 = 1 << 1;
-    const ACCESSED: u8 = 1 << 0;
-
-    const GRAN_4K: u8 = 1 << 7;
-    const LONG_MODE: u8 = 1 << 5;
-
     // Setup GDT
-    let gdt: Vec<u8> = vec![
-        // Null descriptor
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        // Null descriptor
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        // Code segment descriptor
-        0xFF, // Limit & Base (low, bits 0-15)
-        0xFF,
-        0x00,
-        0x00,
-        0x00,                                     // Base (mid, bits 16-23)
-        PRESENT | NOT_SYS | EXEC | RW | ACCESSED, // Access byte
-        GRAN_4K | LONG_MODE | 0x0F,               // Flags & Limit (high)
-        0x00,                                     // Base (high)
-    ];
+    let mut gdt = Vec::new();
+    // 0x00
+    gdt.extend_from_slice(&null_descriptor());
+    // 0x08
+    gdt.extend_from_slice(&null_descriptor());
+    // 0x10: code segment descriptor
+    gdt.extend_from_slice(&segment_descriptor(
+        0x0,
+        0xFFFFF,
+        DESC_ACCESS_PRESENT
+            | DESC_ACCESS_NOT_SYS
+            | DESC_ACCESS_EXEC
+            | DESC_ACCESS_RW
+            | DESC_ACCESS_ACCESSED,
+        DESC_FLAG_GRAN_4K | DESC_FLAG_LONG_MODE,
+    ));
 
-    let gdt_addr = GuestAddress(GDT_OFFSET);
-    guest_mem
-        .write_at_addr(&gdt, gdt_addr)
-        .expect("Failed to write GDT entry to guest memory");
+    write_gdt(guest_mem, &gdt);
 
     // Convert the GDT entries to a vector of u64
     let gdt_entries: Vec<u64> = gdt
@@ -394,7 +445,8 @@ pub fn enter_long_mode(vcpu: &mut dyn VcpuX86_64, vm: &mut dyn Vm) {
     sregs.gdt.limit = 0xFFFF;
 
     sregs.idt.base = IDT_OFFSET;
-    sregs.idt.limit = 0xFFFF;
+    // The IDT limit should be 16 bytes * 256 entries - 1.
+    sregs.idt.limit = 0xFFF;
 
     sregs.cs = code_seg;
 
@@ -403,6 +455,78 @@ pub fn enter_long_mode(vcpu: &mut dyn VcpuX86_64, vm: &mut dyn Vm) {
     sregs.efer |= 0x100 | 0x400; // LME & LMA (Must be auto-enabled with CR0_PG)
     sregs.cr3 = pml4_addr.offset();
     sregs.cr4 |= 0x80 | 0x20; // PGE & PAE
+
+    vcpu.set_sregs(&sregs).expect("failed to set sregs");
+}
+
+pub fn configure_flat_protected_mode_memory(vm: &mut dyn Vm) -> Segment {
+    let guest_mem = vm.get_memory();
+
+    assert!(
+        guest_mem.range_overlap(GuestAddress(0x1500), GuestAddress(0xc000)),
+        "Protected-mode setup requires 0x1500-0xc000 to be mapped in the guest."
+    );
+
+    // Setup GDT
+    let mut gdt = Vec::new();
+
+    // 0x00
+    gdt.extend_from_slice(&null_descriptor());
+    // 0x08
+    gdt.extend_from_slice(&null_descriptor());
+    // 0x10: code segment descriptor
+    gdt.extend_from_slice(&segment_descriptor(
+        0x0,
+        0xFFFFF,
+        DESC_ACCESS_PRESENT
+            | DESC_ACCESS_NOT_SYS
+            | DESC_ACCESS_EXEC
+            | DESC_ACCESS_RW
+            | DESC_ACCESS_ACCESSED,
+        DESC_FLAG_GRAN_4K | DESC_FLAG_DEFAULT_OP_SIZE_32,
+    ));
+
+    write_gdt(guest_mem, &gdt);
+
+    // Convert the GDT entries to a vector of u64
+    let gdt_entries: Vec<u64> = gdt
+        .chunks(8)
+        .map(|chunk| {
+            let mut array = [0u8; 8];
+            array.copy_from_slice(chunk);
+            u64::from_le_bytes(array)
+        })
+        .collect();
+
+    let code_seg = segment_from_gdt(gdt_entries[2], 2);
+
+    // Setup IDT
+    let idt_addr = GuestAddress(IDT_OFFSET);
+    let idt_entry: u64 = 0; // Empty IDT
+    let idt_entry_bytes = idt_entry.to_le_bytes();
+    guest_mem
+        .write_at_addr(&idt_entry_bytes, idt_addr)
+        .expect("failed to write IDT entry to guest memory");
+
+    code_seg
+}
+
+pub fn enter_protected_mode(vcpu: &mut dyn VcpuX86_64, vm: &mut dyn Vm) {
+    let code_seg = configure_flat_protected_mode_memory(vm);
+
+    let mut sregs = vcpu.get_sregs().expect("failed to get sregs");
+
+    sregs.cs = code_seg;
+
+    sregs.gdt.base = GDT_OFFSET;
+    sregs.gdt.limit = 0xFFFF;
+
+    sregs.idt.base = IDT_OFFSET;
+    sregs.idt.limit = 0xFFF;
+
+    // 32-bit protected mode, paging disabled
+    sregs.cr0 |= 0x1; // PE
+    sregs.cr0 &= !0x80000000; // ~PG
 
     vcpu.set_sregs(&sregs).expect("failed to set sregs");
 }
@@ -1679,16 +1803,6 @@ fn test_set_cr_guest() {
         },
         |_, exit, _, _: &mut dyn Vm| matches!(exit, VcpuExit::Hlt)
     );
-}
-
-#[repr(C, packed)]
-#[derive(AsBytes)]
-// Define IDTR value
-struct Idtr {
-    // The lower 2 bytes are limit.
-    limit: u16,
-    // The higher 4 bytes are base address.
-    base_address: u32,
 }
 
 mod test_minimal_interrupt_injection_code {
@@ -3492,5 +3606,260 @@ fn test_ready_for_interrupt_for_intercepted_instructions() {
                 r => panic!("unexpected exit reason: {:?}", r),
             }
         }
+    );
+}
+
+#[test]
+fn test_debug_register_persistence() {
+    global_asm_data!(
+        test_debug_registers_code,
+        ".code64",
+        "mov dr0, rax",
+        "inc rax",
+        "mov dr1, rax",
+        "inc rax",
+        "mov dr2, rax",
+        "inc rax",
+        "mov dr3, rax",
+        // Perform HLT to cause VMEXIT
+        "hlt",
+        "mov r8, dr0",
+        "mov r9, dr1",
+        "mov r10, dr2",
+        "mov r11, dr3",
+        "hlt"
+    );
+
+    let initial_dr_value: u64 = 0x12345678;
+
+    let setup = TestSetup {
+        assembly: test_debug_registers_code::data().to_vec(),
+        mem_size: 0x11000,
+        load_addr: GuestAddress(0x1000),
+        initial_regs: Regs {
+            rax: initial_dr_value,
+            rip: 0x1000,
+            rflags: 2,
+            ..Default::default()
+        },
+        extra_vm_setup: Some(Box::new(|vcpu: &mut dyn VcpuX86_64, vm: &mut dyn Vm| {
+            enter_long_mode(vcpu, vm);
+        })),
+        ..Default::default()
+    };
+
+    let mut hlt_count = 0;
+
+    run_tests!(
+        setup,
+        |_, regs, _| {
+            assert_eq!(regs.r8, initial_dr_value, "DR0 value mismatch after VMEXIT");
+            assert_eq!(
+                regs.r9,
+                initial_dr_value + 1,
+                "DR1 value mismatch after VMEXIT"
+            );
+            assert_eq!(
+                regs.r10,
+                initial_dr_value + 2,
+                "DR2 value mismatch after VMEXIT"
+            );
+            assert_eq!(
+                regs.r11,
+                initial_dr_value + 3,
+                "DR3 value mismatch after VMEXIT"
+            );
+        },
+        |_, exit, _, _: &mut dyn Vm| match exit {
+            VcpuExit::Hlt => {
+                hlt_count += 1;
+                hlt_count > 1 // Halt execution after the second HLT
+            }
+            r => panic!("unexpected exit reason: {:?}", r),
+        }
+    );
+}
+
+#[test]
+fn test_minimal_exception_injection() {
+    // This test tries to write an invalid MSR, causing a General Protection exception to be
+    // injected by the hypervisor (since MSR writes cause a VMEXIT). We run it in long mode since
+    // real mode exception handling isn't always well supported (failed on Intel HAXM).
+    mod assembly {
+        use super::*;
+
+        // An ISR that handles any generic interrupt.
+        global_asm_data!(
+            pub isr_generic,
+            ".code64",
+            // Set EBX to 888 to observe this is where we halted.
+            "mov ebx, 888",
+            "hlt"
+        );
+
+        // An ISR that handles the General Protection fault specifically.
+        global_asm_data!(
+            pub isr_gp,
+            ".code64",
+            // Set EBX to 999 to observe this is where we halted.
+            "mov ebx, 999",
+            "hlt"
+        );
+
+        // Our VM entry (in long mode).
+        global_asm_data!(
+            pub init,
+            ".code64",
+            // Set up the stack, which will be used when CPU transfers the control to the ISR. If
+            // not set up, can cause faults (stack should be aligned).
+            "mov esp, 0x900",
+            // We will verify EBX, set it here first.
+            "mov ebx, 777",
+            // Should trigger GP fault when we try to write to MSR 0.
+            "wrmsr",
+            // We should never get here since we halt in the fault handlers.
+            "hlt",
+        );
+    }
+
+    let mem_size: u64 = 0x20000;
+
+    let setup = TestSetup {
+        initial_regs: Regs {
+            // WRMSR will try to write to ECX, we set it to zero to point to an old read-only MSR
+            // (IA32_P5_MC_ADDR).
+            rcx: 0,
+            // Intentionally not setting IF flag since exceptions don't check it.
+            rflags: 2,
+            ..Default::default()
+        },
+        mem_size,
+        extra_vm_setup: Some(Box::new(|vcpu: &mut dyn VcpuX86_64, vm: &mut dyn Vm| {
+            enter_long_mode(vcpu, vm);
+
+            let start_addr: u64 = 0x1000;
+            let guest_mem = vm.get_memory();
+
+            let isr_assembly = assembly::isr_generic::data().to_vec();
+            let isr_assembly_len =
+                u64::try_from(isr_assembly.len()).expect("ISR size should be within u64");
+
+            let isr_gp_assembly = assembly::isr_gp::data().to_vec();
+            let isr_gp_assembly_len =
+                u64::try_from(isr_gp_assembly.len()).expect("GP ISR size should be within u64");
+
+            let mut cur_addr = start_addr;
+
+            guest_mem
+                .write_at_addr(&isr_assembly, GuestAddress(cur_addr))
+                .expect("Failed to write ISR to guest memory");
+            cur_addr += isr_assembly_len;
+
+            guest_mem
+                .write_at_addr(&isr_gp_assembly, GuestAddress(cur_addr))
+                .expect("Failed to write ISR to guest memory");
+            cur_addr += isr_gp_assembly_len;
+
+            let mut regs = vcpu.get_regs().expect("Failed to get regs");
+            regs.rip = cur_addr;
+            vcpu.set_regs(&regs).expect("Failed to set regs");
+
+            let init_assembly = assembly::init::data().to_vec();
+            guest_mem
+                .write_at_addr(&init_assembly, GuestAddress(cur_addr))
+                .expect("Failed to write init assembly to guest memory");
+
+            let idt_entry_generic = IdtEntry::new(start_addr);
+            let idt_entry_gp = IdtEntry::new(start_addr + isr_assembly_len);
+
+            // Construct an IDT with an entry for each possible vector.
+            let idt = (0..256)
+                .flat_map(|i| {
+                    // GP handler is vector 13.
+                    let isr_address = if i == 0x0D {
+                        idt_entry_gp
+                    } else {
+                        idt_entry_generic
+                    };
+
+                    isr_address.as_bytes().to_owned()
+                })
+                .collect::<Vec<_>>();
+
+            // Write the IDT to memory.
+            let idt_base = 0x12000;
+            guest_mem
+                .write_at_addr(&idt, GuestAddress(idt_base))
+                .expect("Failed to write IDT to guest memory");
+
+            // Set the IDT in our registers.
+            let mut sregs = vcpu.get_sregs().expect("Failed to get sregs");
+            sregs.idt.base = idt_base;
+            sregs.idt.limit = (core::mem::size_of::<IdtEntry>() * 256 - 1) as u16;
+            vcpu.set_sregs(&sregs).expect("Failed to set sregs");
+        })),
+        ..Default::default()
+    };
+
+    run_tests!(
+        setup,
+        |_, regs, _| {
+            // If EBX is 999 the GP handler ran.
+            assert_eq!(regs.rbx, 999);
+        },
+        |_, exit, _, _: &mut dyn Vm| matches!(exit, VcpuExit::Hlt)
+    );
+}
+
+#[test]
+fn test_pmode_segment_limit() {
+    // This test configures 32-bit protected mode and verifies that segment limits are converted
+    // correctly. The test setup configures a segment with the 20-bit limit field set to 0xFFFFF and
+    // the 4096-byte granularity bit set, which should result in a 4 GB limit (0xFFFFFFFF).
+    mod assembly {
+        use super::*;
+
+        global_asm_data!(
+            pub init,
+            ".code32",
+            // Load the CS segment limit into EAX.
+            "mov cx, cs",
+            "lsl eax, cx",
+            "hlt",
+        );
+    }
+
+    let mem_size: u64 = 0x20000;
+
+    let setup = TestSetup {
+        initial_regs: Regs {
+            ..Default::default()
+        },
+        mem_size,
+        extra_vm_setup: Some(Box::new(|vcpu: &mut dyn VcpuX86_64, vm: &mut dyn Vm| {
+            enter_protected_mode(vcpu, vm);
+
+            let guest_mem = vm.get_memory();
+
+            let mut regs = vcpu.get_regs().expect("Failed to get regs");
+            regs.rax = 12345;
+            regs.rip = 0x1000;
+            vcpu.set_regs(&regs).expect("Failed to set regs");
+
+            let init_assembly = assembly::init::data().to_vec();
+            guest_mem
+                .write_at_addr(&init_assembly, GuestAddress(0x1000))
+                .expect("Failed to write init assembly to guest memory");
+        })),
+        ..Default::default()
+    };
+
+    run_tests!(
+        setup,
+        |_, regs, _| {
+            // The output of the LSL instruction should be 4GB - 1.
+            assert_eq!(regs.rax, 0xFFFFFFFF);
+        },
+        |_, exit, _, _: &mut dyn Vm| matches!(exit, VcpuExit::Hlt)
     );
 }

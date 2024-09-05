@@ -27,6 +27,7 @@ rust_library {
         "gdbstub_arch",
     ],
     rustlibs: [
+        "libanyhow",
         "libarch",
         "libbase_rust",
         "libcros_fdt",

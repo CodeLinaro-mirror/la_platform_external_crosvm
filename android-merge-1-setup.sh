@@ -60,3 +60,4 @@ fi
 
 git merge --log aosp/upstream-main
 $ANDROID_BUILD_TOP/external/crosvm/tools/install-deps
+$ANDROID_BUILD_TOP/external/crosvm/android-fork-stats.sh
