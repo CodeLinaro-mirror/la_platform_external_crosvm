@@ -4,10 +4,11 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap as Map;
+use std::time::Duration;
 
+use rutabaga_gfx::kumquat_support::RutabagaWaitContext;
 use rutabaga_gfx::RutabagaError;
 use rutabaga_gfx::RutabagaResult;
-use rutabaga_gfx::RutabagaWaitContext;
 
 use crate::kumquat_gpu::KumquatGpu;
 use crate::kumquat_gpu::KumquatGpuConnection;
@@ -19,9 +20,9 @@ pub struct Kumquat {
 }
 
 impl Kumquat {
-    pub fn new(capset_names: String) -> RutabagaResult<Kumquat> {
+    pub fn new(capset_names: String, renderer_features: String) -> RutabagaResult<Kumquat> {
         Ok(Kumquat {
-            kumquat_gpu: KumquatGpu::new(capset_names)?,
+            kumquat_gpu: KumquatGpu::new(capset_names, renderer_features)?,
             wait_ctx: RutabagaWaitContext::new()?,
             connections: Default::default(),
         })
@@ -42,7 +43,10 @@ impl Kumquat {
             return Ok(());
         }
 
-        let events = self.wait_ctx.wait()?;
+        // TODO(b/356504311): This is necessary in case client B connects to the socket when the
+        // thread is waiting on a client A command (which never happens without client B). The
+        // correct solution would be to add the listner to the WaitContext in the future.
+        let events = self.wait_ctx.wait(Some(Duration::from_millis(100)))?;
         for event in events {
             let mut hung_up = false;
             match self.connections.entry(event.connection_id) {
