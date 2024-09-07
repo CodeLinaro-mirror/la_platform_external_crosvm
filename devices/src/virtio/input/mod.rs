@@ -85,6 +85,9 @@ pub enum InputError {
     // Detected error on guest side
     #[error("detected error on guest side: {0}")]
     GuestError(String),
+    // Invalid UTF-8 string
+    #[error("invalid UTF-8 string: {0}")]
+    InvalidString(std::string::FromUtf8Error),
     // Error while reading from virtqueue
     #[error("failed to read from virtqueue: {0}")]
     ReadQueue(std::io::Error),
@@ -172,6 +175,10 @@ impl virtio_input_config {
         }
     }
 
+    fn set_payload_str(&mut self, s: &str) {
+        self.set_payload_slice(s.as_bytes());
+    }
+
     fn set_payload_bitmap(&mut self, bitmap: &virtio_input_bitmap) {
         self.size = bitmap.min_size();
         self.payload.copy_from_slice(&bitmap.bitmap);
@@ -238,8 +245,8 @@ pub struct VirtioInputConfig {
     select: u8,
     subsel: u8,
     device_ids: virtio_input_device_ids,
-    name: Vec<u8>,
-    serial_name: Vec<u8>,
+    name: String,
+    serial_name: String,
     properties: virtio_input_bitmap,
     supported_events: BTreeMap<u16, virtio_input_bitmap>,
     axis_info: BTreeMap<u16, virtio_input_absinfo>,
@@ -248,8 +255,8 @@ pub struct VirtioInputConfig {
 impl VirtioInputConfig {
     fn new(
         device_ids: virtio_input_device_ids,
-        name: Vec<u8>,
-        serial_name: Vec<u8>,
+        name: String,
+        serial_name: String,
         properties: virtio_input_bitmap,
         supported_events: BTreeMap<u16, virtio_input_bitmap>,
         axis_info: BTreeMap<u16, virtio_input_absinfo>,
@@ -283,10 +290,10 @@ impl VirtioInputConfig {
         cfg.subsel = self.subsel;
         match self.select {
             VIRTIO_INPUT_CFG_ID_NAME => {
-                cfg.set_payload_slice(&self.name);
+                cfg.set_payload_str(&self.name);
             }
             VIRTIO_INPUT_CFG_ID_SERIAL => {
-                cfg.set_payload_slice(&self.serial_name);
+                cfg.set_payload_str(&self.serial_name);
             }
             VIRTIO_INPUT_CFG_PROP_BITS => {
                 cfg.set_payload_bitmap(&self.properties);
@@ -347,6 +354,7 @@ struct Worker<T: EventSource> {
     event_source: T,
     event_queue: Queue,
     status_queue: Queue,
+    name: String,
 }
 
 impl<T: EventSource> Worker<T> {
@@ -512,6 +520,14 @@ impl<T: EventSource> Worker<T> {
                     }
                 }
             }
+
+            for event in wait_events.iter().filter(|e| e.is_hungup) {
+                if let Token::InputEventsAvailable = event.token {
+                    warn!("input event source for '{}' disconnected", self.name);
+                    let _ = wait_ctx.delete(&self.event_source);
+                }
+            }
+
             if eventq_needs_interrupt {
                 self.event_queue.trigger_interrupt(&self.interrupt);
             }
@@ -586,6 +602,7 @@ where
         let event_queue = queues.remove(&0).unwrap();
         let status_queue = queues.remove(&1).unwrap();
 
+        let name = self.config.name.clone();
         let source = self
             .source
             .take()
@@ -596,6 +613,7 @@ where
                 event_source: source,
                 event_queue,
                 status_queue,
+                name,
             };
             worker.run(kill_evt);
             worker
