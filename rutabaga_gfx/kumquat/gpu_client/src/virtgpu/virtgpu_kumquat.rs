@@ -7,11 +7,22 @@ use std::collections::BTreeMap as Map;
 use std::convert::TryInto;
 use std::fs::File;
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
+use std::os::fd::OwnedFd;
+use std::path::PathBuf;
 use std::slice::from_raw_parts_mut;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
+use nix::sys::eventfd::EfdFlags;
+use nix::sys::eventfd::EventFd;
 use nix::unistd::read;
-use rutabaga_gfx::kumquat_gpu_protocol::*;
+use rutabaga_gfx::kumquat_support::kumquat_gpu_protocol::*;
+use rutabaga_gfx::kumquat_support::RutabagaMemoryMapping;
+use rutabaga_gfx::kumquat_support::RutabagaReader;
+use rutabaga_gfx::kumquat_support::RutabagaSharedMemory;
+use rutabaga_gfx::kumquat_support::RutabagaStream;
+use rutabaga_gfx::kumquat_support::RutabagaTube;
+use rutabaga_gfx::kumquat_support::RutabagaWriter;
 use rutabaga_gfx::RutabagaDescriptor;
 use rutabaga_gfx::RutabagaError;
 use rutabaga_gfx::RutabagaFromRawDescriptor;
@@ -21,14 +32,10 @@ use rutabaga_gfx::RutabagaHandle;
 use rutabaga_gfx::RutabagaIntoRawDescriptor;
 use rutabaga_gfx::RutabagaMappedRegion;
 use rutabaga_gfx::RutabagaMapping;
-use rutabaga_gfx::RutabagaMemoryMapping;
 use rutabaga_gfx::RutabagaRawDescriptor;
-use rutabaga_gfx::RutabagaReader;
 use rutabaga_gfx::RutabagaResult;
-use rutabaga_gfx::RutabagaSharedMemory;
-use rutabaga_gfx::RutabagaStream;
-use rutabaga_gfx::RutabagaWriter;
 use rutabaga_gfx::VulkanInfo;
+use rutabaga_gfx::RUTABAGA_FENCE_HANDLE_TYPE_EVENT_FD;
 use rutabaga_gfx::RUTABAGA_FLAG_FENCE;
 use rutabaga_gfx::RUTABAGA_FLAG_FENCE_HOST_SHAREABLE;
 use rutabaga_gfx::RUTABAGA_FLAG_INFO_RING_IDX;
@@ -39,6 +46,42 @@ use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD;
 use crate::virtgpu::defines::*;
 
 const VK_ICD_FILENAMES: &str = "VK_ICD_FILENAMES";
+
+// The Tesla V-100 driver seems to enter a power management mode and stops being available to the
+// Vulkan loader if more than a certain number of VK instances are created in the same process.
+//
+// This behavior is reproducible via:
+//
+// GfxstreamEnd2EndTests --gtest_filter="*MultiThreadedVkMapMemory*"
+//
+// Workaround this by having a singleton gralloc per-process.
+fn gralloc() -> &'static Mutex<RutabagaGralloc> {
+    static GRALLOC: OnceLock<Mutex<RutabagaGralloc>> = OnceLock::new();
+    GRALLOC.get_or_init(|| {
+        // The idea is to make sure the gfxstream ICD isn't loaded when gralloc starts
+        // up. The Nvidia ICD should be loaded.
+        //
+        // This is mostly useful for developers.  For AOSP hermetic gfxstream end2end
+        // testing, VK_ICD_FILENAMES shouldn't be defined.  For deqp-vk, this is
+        // useful, but not safe for multi-threaded tests.  For now, since this is only
+        // used for end2end tests, we should be good.
+        let vk_icd_name_opt = match std::env::var(VK_ICD_FILENAMES) {
+            Ok(vk_icd_name) => {
+                std::env::remove_var(VK_ICD_FILENAMES);
+                Some(vk_icd_name)
+            }
+            Err(_) => None,
+        };
+
+        let gralloc = Mutex::new(RutabagaGralloc::new(RutabagaGrallocBackendFlags::new()).unwrap());
+
+        if let Some(vk_icd_name) = vk_icd_name_opt {
+            std::env::set_var(VK_ICD_FILENAMES, vk_icd_name);
+        }
+
+        gralloc
+    })
+}
 
 pub struct VirtGpuResource {
     resource_id: u32,
@@ -76,12 +119,12 @@ pub struct VirtGpuKumquat {
     stream: RutabagaStream,
     capsets: Map<u32, Vec<u8>>,
     resources: Map<u32, VirtGpuResource>,
-    gralloc_opt: Option<RutabagaGralloc>,
 }
 
 impl VirtGpuKumquat {
-    pub fn new() -> RutabagaResult<VirtGpuKumquat> {
-        let connection = UnixStream::connect("/tmp/rutabaga-0")?;
+    pub fn new(gpu_socket: &str) -> RutabagaResult<VirtGpuKumquat> {
+        let path = PathBuf::from(gpu_socket);
+        let connection = RutabagaTube::new(path)?;
         let mut stream = RutabagaStream::new(connection);
 
         let get_num_capsets = kumquat_gpu_protocol_ctrl_hdr {
@@ -138,7 +181,6 @@ impl VirtGpuKumquat {
             stream,
             capsets,
             resources: Default::default(),
-            gralloc_opt: None,
         })
     }
 
@@ -336,29 +378,15 @@ impl VirtGpuKumquat {
             let clone = resource.handle.try_clone()?;
 
             if clone.handle_type == RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD {
-                if self.gralloc_opt.is_none() {
-                    // The idea is to make sure the gfxstream ICD isn't loaded when gralloc starts
-                    // up. The Nvidia ICD should be loaded.
-                    let vk_driver = std::env::var(VK_ICD_FILENAMES).unwrap();
-                    std::env::remove_var(VK_ICD_FILENAMES);
-                    self.gralloc_opt =
-                        Some(RutabagaGralloc::new(RutabagaGrallocBackendFlags::new())?);
-                    std::env::set_var(VK_ICD_FILENAMES, vk_driver);
-                }
+                let region = gralloc().lock().unwrap().import_and_map(
+                    clone,
+                    resource.vulkan_info,
+                    resource.size as u64,
+                )?;
 
-                if let Some(ref mut gralloc) = self.gralloc_opt {
-                    let region = gralloc.import_and_map(
-                        clone,
-                        resource.vulkan_info,
-                        resource.size as u64,
-                    )?;
-
-                    let rutabaga_mapping = region.as_rutabaga_mapping();
-                    resource.gpu_mapping = Some(region);
-                    Ok(rutabaga_mapping)
-                } else {
-                    return Err(RutabagaError::SpecViolation("no gralloc"));
-                }
+                let rutabaga_mapping = region.as_rutabaga_mapping();
+                resource.gpu_mapping = Some(region);
+                Ok(rutabaga_mapping)
             } else {
                 let mapping = RutabagaMemoryMapping::from_safe_descriptor(
                     clone.os_handle,
@@ -390,6 +418,20 @@ impl VirtGpuKumquat {
             .get_mut(&transfer.bo_handle)
             .ok_or(RutabagaError::InvalidResourceId)?;
 
+        // TODO(b/356504311): We should really move EventFd creation into rutabaga_os..
+        let owned: OwnedFd = EventFd::from_flags(EfdFlags::empty())?.into();
+        let eventfd: File = owned.into();
+
+        // SAFETY: Safe because the eventfd is valid and owned by us.
+        let emulated_fence = RutabagaHandle {
+            os_handle: unsafe {
+                RutabagaDescriptor::from_raw_descriptor(eventfd.into_raw_descriptor())
+            },
+            handle_type: RUTABAGA_FENCE_HANDLE_TYPE_EVENT_FD,
+        };
+
+        resource.attached_fences.push(emulated_fence.try_clone()?);
+
         let transfer_to_host = kumquat_gpu_protocol_transfer_host_3d {
             hdr: kumquat_gpu_protocol_ctrl_hdr {
                 type_: KUMQUAT_GPU_PROTOCOL_TRANSFER_TO_HOST_3D,
@@ -412,8 +454,10 @@ impl VirtGpuKumquat {
             padding: 0,
         };
 
-        self.stream
-            .write(KumquatGpuProtocolWrite::Cmd(transfer_to_host))?;
+        self.stream.write(KumquatGpuProtocolWrite::CmdWithHandle(
+            transfer_to_host,
+            emulated_fence,
+        ))?;
         Ok(())
     }
 
@@ -423,6 +467,19 @@ impl VirtGpuKumquat {
             .get_mut(&transfer.bo_handle)
             .ok_or(RutabagaError::InvalidResourceId)?;
 
+        // TODO(b/356504311): We should really move EventFd creation into rutabaga_os..
+        let owned: OwnedFd = EventFd::from_flags(EfdFlags::empty())?.into();
+        let eventfd: File = owned.into();
+
+        // SAFETY: Safe because the eventfd is valid and owned by us.
+        let emulated_fence = RutabagaHandle {
+            os_handle: unsafe {
+                RutabagaDescriptor::from_raw_descriptor(eventfd.into_raw_descriptor())
+            },
+            handle_type: RUTABAGA_FENCE_HANDLE_TYPE_EVENT_FD,
+        };
+
+        resource.attached_fences.push(emulated_fence.try_clone()?);
         let transfer_from_host = kumquat_gpu_protocol_transfer_host_3d {
             hdr: kumquat_gpu_protocol_ctrl_hdr {
                 type_: KUMQUAT_GPU_PROTOCOL_TRANSFER_FROM_HOST_3D,
@@ -445,8 +502,11 @@ impl VirtGpuKumquat {
             padding: 0,
         };
 
-        self.stream
-            .write(KumquatGpuProtocolWrite::Cmd(transfer_from_host))?;
+        self.stream.write(KumquatGpuProtocolWrite::CmdWithHandle(
+            transfer_from_host,
+            emulated_fence,
+        ))?;
+
         Ok(())
     }
 
@@ -653,7 +713,12 @@ impl VirtGpuKumquat {
 
         self.stream
             .write(KumquatGpuProtocolWrite::Cmd(snapshot_save))?;
-        Ok(())
+
+        let mut protocols = self.stream.read()?;
+        match protocols.remove(0) {
+            KumquatGpuProtocol::RespOkSnapshot => Ok(()),
+            _ => Err(RutabagaError::Unsupported),
+        }
     }
 
     pub fn restore(&mut self) -> RutabagaResult<()> {
@@ -664,7 +729,12 @@ impl VirtGpuKumquat {
 
         self.stream
             .write(KumquatGpuProtocolWrite::Cmd(snapshot_restore))?;
-        Ok(())
+
+        let mut protocols = self.stream.read()?;
+        match protocols.remove(0) {
+            KumquatGpuProtocol::RespOkSnapshot => Ok(()),
+            _ => Err(RutabagaError::Unsupported),
+        }
     }
 }
 
@@ -689,7 +759,7 @@ impl Drop for VirtGpuKumquat {
             self.resources.clear();
             let context_destroy = kumquat_gpu_protocol_ctrl_hdr {
                 type_: KUMQUAT_GPU_PROTOCOL_CTX_DESTROY,
-                ..Default::default()
+                payload: self.context_id,
             };
 
             let _ = self
