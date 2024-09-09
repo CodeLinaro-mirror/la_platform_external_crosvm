@@ -14,6 +14,16 @@ cc_library_headers {
     export_include_dirs: ["src/include"],
 }
 
+// The following shared library is used by gfxstream guest libraries (for
+// example, libgfxstream_vulkan.so) for end2end testing (b:354706346) via
+// Kumquat:
+//
+// https://crosvm.dev/book/appendix/rutabaga_gfx.html#kumquat-media-server
+//
+// Since traditionally guest-side libraries link against it,
+// libvirtgpu_kumquat_ffi and it's main dependency (librutabaga_gfx_gfxstream)
+// support a wider degree of ABIs than crosvm itself does.  This simplifies the
+// guest gfxstream build.
 rust_ffi_shared {
     name: "libvirtgpu_kumquat_ffi",
     crate_name: "virtgpu_kumquat_ffi",
@@ -30,9 +40,6 @@ rust_ffi_shared {
     ],
     target: {
         host: {
-            compile_multilib: "64",
-        },
-        android: {
             compile_multilib: "64",
         },
     },

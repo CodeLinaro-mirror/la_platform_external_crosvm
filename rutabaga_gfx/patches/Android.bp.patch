@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index c69e8a386..d64f158e6 100644
+index c69e8a386..4964f3118 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,14 +10,18 @@ index c69e8a386..d64f158e6 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -35,14 +34,71 @@ rust_library {
+@@ -35,16 +34,78 @@ rust_library {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
+-    static_libs: [
+-        "libgbm",
+-        "libvirglrenderer",
 +    cfgs: [
 +        "gfxstream_unstable",
-+    ],
-+    shared_libs: [
+     ],
+     shared_libs: [
+-        "libdrm",
 +        "libc++",
 +        "libbase",
 +    ],
@@ -36,17 +40,15 @@ index c69e8a386..d64f158e6 100644
 +            ],
 +        },
 +    },
-     static_libs: [
--        "libgbm",
-+        "libepoxy",
++    static_libs: [
+         "libepoxy",
 +        "libgfxstream_backend",
-         "libvirglrenderer",
++        "libvirglrenderer",
      ],
-+}
-+
+ }
+ 
 +rust_library {
 +    name: "librutabaga_gfx_gfxstream",
-+    defaults: ["crosvm_inner_defaults"],
 +    host_supported: true,
 +    vendor_available: true,
 +    crate_name: "rutabaga_gfx",
@@ -63,29 +65,35 @@ index c69e8a386..d64f158e6 100644
 +        "libzerocopy",
 +    ],
 +    proc_macros: ["libremain"],
-+    cfgs: [
-+        "gfxstream_unstable",
-+    ],
-+    features: [
-+        "gfxstream",
-+    ],
-     shared_libs: [
--        "libdrm",
--        "libepoxy",
-+        "libgfxstream_backend",
-     ],
 +    target: {
 +        host: {
-+            features: ["vulkano"],
++            cfgs: [
++                "gfxstream_unstable",
++            ],
++            features: [
++                "gfxstream",
++                "vulkano",
++            ],
++            shared_libs: [
++                "libgfxstream_backend",
++            ],
++            compile_multilib: "64",
 +            rustlibs: [
 +                "libvulkano",
 +            ],
 +        },
++        android: {
++            cfgs: [
++                "gfxstream_unstable",
++            ],
++        },
 +    },
- }
- 
++}
++
  rust_test {
-@@ -61,7 +117,6 @@ rust_test {
+     name: "rutabaga_gfx_test_src_lib",
+     defaults: ["crosvm_inner_defaults"],
+@@ -61,7 +122,6 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
@@ -93,7 +101,7 @@ index c69e8a386..d64f158e6 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -73,12 +128,9 @@ rust_test {
+@@ -73,12 +133,9 @@ rust_test {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
