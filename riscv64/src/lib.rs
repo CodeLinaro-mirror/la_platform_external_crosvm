@@ -15,6 +15,7 @@ use std::sync::Arc;
 use arch::get_serial_cmdline;
 use arch::CpuSet;
 use arch::DtbOverlay;
+use arch::FdtPosition;
 use arch::GetSerialCmdlineError;
 use arch::RunnableLinuxVm;
 use arch::VmComponents;
@@ -196,6 +197,7 @@ impl arch::LinuxArch for Riscv64 {
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
         _guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         device_tree_overlays: Vec<DtbOverlay>,
+        fdt_position: Option<FdtPosition>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmRiscv64,
@@ -366,6 +368,10 @@ impl arch::LinuxArch for Riscv64 {
             })
             .collect();
 
+        assert!(
+            matches!(fdt_position, None | Some(FdtPosition::AfterPayload)),
+            "fdt_position={fdt_position:?} not supported"
+        );
         let fdt_offset = (kernel_initrd_end + (RISCV64_FDT_ALIGN - 1)) & !(RISCV64_FDT_ALIGN - 1);
 
         let timebase_freq: u32 = vcpus[0]
@@ -420,7 +426,7 @@ impl arch::LinuxArch for Riscv64 {
             gdb: components.gdb,
             pm: None,
             devices_thread: None,
-            vm_request_tube: None,
+            vm_request_tubes: Vec::new(),
         })
     }
 
@@ -460,6 +466,10 @@ impl arch::LinuxArch for Riscv64 {
     }
 
     fn get_host_cpu_frequencies_khz() -> Result<BTreeMap<usize, Vec<u32>>> {
+        Ok(BTreeMap::new())
+    }
+
+    fn get_host_cpu_max_freq_khz() -> Result<BTreeMap<usize, u32>> {
         Ok(BTreeMap::new())
     }
 

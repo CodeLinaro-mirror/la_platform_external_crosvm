@@ -12,7 +12,6 @@ use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
 use std::os::fd::OwnedFd;
 use std::os::raw::c_void;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -20,7 +19,11 @@ use log::error;
 use nix::sys::eventfd::EfdFlags;
 use nix::sys::eventfd::EventFd;
 use rutabaga_gfx::calculate_capset_mask;
-use rutabaga_gfx::kumquat_gpu_protocol::*;
+use rutabaga_gfx::kumquat_support::kumquat_gpu_protocol::*;
+use rutabaga_gfx::kumquat_support::RutabagaMemoryMapping;
+use rutabaga_gfx::kumquat_support::RutabagaSharedMemory;
+use rutabaga_gfx::kumquat_support::RutabagaStream;
+use rutabaga_gfx::kumquat_support::RutabagaTube;
 use rutabaga_gfx::ResourceCreate3D;
 use rutabaga_gfx::ResourceCreateBlob;
 use rutabaga_gfx::Rutabaga;
@@ -34,10 +37,7 @@ use rutabaga_gfx::RutabagaFromRawDescriptor;
 use rutabaga_gfx::RutabagaHandle;
 use rutabaga_gfx::RutabagaIntoRawDescriptor;
 use rutabaga_gfx::RutabagaIovec;
-use rutabaga_gfx::RutabagaMemoryMapping;
 use rutabaga_gfx::RutabagaResult;
-use rutabaga_gfx::RutabagaSharedMemory;
-use rutabaga_gfx::RutabagaStream;
 use rutabaga_gfx::RutabagaWsi;
 use rutabaga_gfx::Transfer3D;
 use rutabaga_gfx::VulkanInfo;
@@ -47,6 +47,8 @@ use rutabaga_gfx::RUTABAGA_FLAG_FENCE_HOST_SHAREABLE;
 use rutabaga_gfx::RUTABAGA_MAP_ACCESS_RW;
 use rutabaga_gfx::RUTABAGA_MAP_CACHE_CACHED;
 use rutabaga_gfx::RUTABAGA_MEM_HANDLE_TYPE_SHM;
+
+const SNAPSHOT_DIR: &str = "/tmp/";
 
 pub struct KumquatGpuConnection {
     stream: RutabagaStream,
@@ -91,7 +93,7 @@ pub struct KumquatGpu {
 }
 
 impl KumquatGpu {
-    pub fn new(capset_names: String) -> RutabagaResult<KumquatGpu> {
+    pub fn new(capset_names: String, renderer_features: String) -> RutabagaResult<KumquatGpu> {
         let capset_mask = calculate_capset_mask(capset_names.as_str().split(":"));
         let fence_state = Arc::new(Mutex::new(FenceData {
             pending_fences: Default::default(),
@@ -99,10 +101,17 @@ impl KumquatGpu {
 
         let fence_handler = create_fence_handler(fence_state.clone());
 
+        let renderer_features_opt = if renderer_features.is_empty() {
+            None
+        } else {
+            Some(renderer_features)
+        };
+
         let rutabaga = RutabagaBuilder::new(RutabagaComponentType::CrossDomain, capset_mask)
             .set_use_external_blob(true)
             .set_use_egl(true)
             .set_wsi(RutabagaWsi::Surfaceless)
+            .set_renderer_features(renderer_features_opt)
             .build(fence_handler, None)?;
 
         Ok(KumquatGpu {
@@ -121,7 +130,7 @@ impl KumquatGpu {
 }
 
 impl KumquatGpuConnection {
-    pub fn new(connection: UnixStream) -> KumquatGpuConnection {
+    pub fn new(connection: RutabagaTube) -> KumquatGpuConnection {
         KumquatGpuConnection {
             stream: RutabagaStream::new(connection),
         }
@@ -267,6 +276,10 @@ impl KumquatGpuConnection {
                         },
                     );
 
+                    kumquat_gpu
+                        .rutabaga
+                        .context_attach_resource(cmd.ctx_id, resource_id)?;
+
                     let resp = kumquat_gpu_protocol_resp_resource_create {
                         hdr: kumquat_gpu_protocol_ctrl_hdr {
                             type_: KUMQUAT_GPU_PROTOCOL_RESP_RESOURCE_CREATE,
@@ -284,7 +297,7 @@ impl KumquatGpuConnection {
                         },
                     ))?;
                 }
-                KumquatGpuProtocol::TransferToHost3d(cmd) => {
+                KumquatGpuProtocol::TransferToHost3d(cmd, emulated_fence) => {
                     let resource_id = cmd.resource_id;
 
                     let transfer = Transfer3D {
@@ -303,8 +316,17 @@ impl KumquatGpuConnection {
                     kumquat_gpu
                         .rutabaga
                         .transfer_write(cmd.ctx_id, resource_id, transfer)?;
+
+                    // SAFETY: Safe because the emulated fence and owned by us.
+                    let mut file = unsafe {
+                        File::from_raw_descriptor(emulated_fence.os_handle.into_raw_descriptor())
+                    };
+
+                    // TODO(b/356504311): An improvement would be `impl From<RutabagaHandle> for
+                    // RutabagaEvent` + `RutabagaEvent::signal`
+                    file.write(&mut 1u64.to_ne_bytes())?;
                 }
-                KumquatGpuProtocol::TransferFromHost3d(cmd) => {
+                KumquatGpuProtocol::TransferFromHost3d(cmd, emulated_fence) => {
                     let resource_id = cmd.resource_id;
 
                     let transfer = Transfer3D {
@@ -323,6 +345,15 @@ impl KumquatGpuConnection {
                     kumquat_gpu
                         .rutabaga
                         .transfer_read(cmd.ctx_id, resource_id, transfer, None)?;
+
+                    // SAFETY: Safe because the emulated fence and owned by us.
+                    let mut file = unsafe {
+                        File::from_raw_descriptor(emulated_fence.os_handle.into_raw_descriptor())
+                    };
+
+                    // TODO(b/356504311): An improvement would be `impl From<RutabagaHandle> for
+                    // RutabagaEvent` + `RutabagaEvent::signal`
+                    file.write(&mut 1u64.to_ne_bytes())?;
                 }
                 KumquatGpuProtocol::CmdSubmit3d(cmd, mut cmd_buf, fence_ids) => {
                     kumquat_gpu.rutabaga.submit_command(
@@ -443,12 +474,26 @@ impl KumquatGpuConnection {
                     kumquat_gpu.snapshot_buffer.set_position(0);
                     kumquat_gpu
                         .rutabaga
-                        .snapshot(&mut kumquat_gpu.snapshot_buffer, "")?;
+                        .snapshot(&mut kumquat_gpu.snapshot_buffer, SNAPSHOT_DIR)?;
+
+                    let resp = kumquat_gpu_protocol_ctrl_hdr {
+                        type_: KUMQUAT_GPU_PROTOCOL_RESP_OK_SNAPSHOT,
+                        payload: 0,
+                    };
+
+                    self.stream.write(KumquatGpuProtocolWrite::Cmd(resp))?;
                 }
                 KumquatGpuProtocol::SnapshotRestore => {
                     kumquat_gpu
                         .rutabaga
-                        .restore(&mut kumquat_gpu.snapshot_buffer, "")?;
+                        .restore(&mut kumquat_gpu.snapshot_buffer, SNAPSHOT_DIR)?;
+
+                    let resp = kumquat_gpu_protocol_ctrl_hdr {
+                        type_: KUMQUAT_GPU_PROTOCOL_RESP_OK_SNAPSHOT,
+                        payload: 0,
+                    };
+
+                    self.stream.write(KumquatGpuProtocolWrite::Cmd(resp))?;
                 }
                 KumquatGpuProtocol::OkNoData => {
                     hung_up = true;

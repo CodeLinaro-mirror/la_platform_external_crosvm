@@ -38,7 +38,6 @@ pub struct kvm_vfio_iommu_config {
     pub sid_idx: u32,
     pub vsid: u32,
 }
-pub const KVM_PVIOMMU_SET_CONFIG: i32 = 1;
 
 #[repr(C)]
 #[derive(Default)]

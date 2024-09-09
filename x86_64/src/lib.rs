@@ -55,6 +55,7 @@ use arch::get_serial_cmdline;
 use arch::serial::SerialDeviceInfo;
 use arch::CpuSet;
 use arch::DtbOverlay;
+use arch::FdtPosition;
 use arch::GetSerialCmdlineError;
 use arch::RunnableLinuxVm;
 use arch::VmComponents;
@@ -339,9 +340,11 @@ const GB: u64 = 1 << 30;
 
 pub const BOOT_STACK_POINTER: u64 = 0x8000;
 const START_OF_RAM_32BITS: u64 = 0;
+const FIRST_ADDR_PAST_20BITS: u64 = 1 << 20;
 const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 // Linux (with 4-level paging) has a physical memory limit of 46 bits (64 TiB).
 const HIGH_MMIO_MAX_END: u64 = (1u64 << 46) - 1;
+pub const KERNEL_32BIT_ENTRY_OFFSET: u64 = 0x0;
 pub const KERNEL_64BIT_ENTRY_OFFSET: u64 = 0x200;
 pub const ZERO_PAGE_OFFSET: u64 = 0x7000;
 // Set BIOS max size to 16M: this is used only when `unrestricted guest` is disabled
@@ -485,17 +488,26 @@ fn configure_system(
         params.ext_ramdisk_size = (initrd_size as u64 >> 32) as u32;
     }
 
+    // Some guest kernels expect a typical PC memory layout where the region between 640 KB and 1 MB
+    // is reserved for device memory/ROMs and get confused if there is a RAM region spanning this
+    // area, so we provide the traditional 640 KB low memory and 1 MB+ high memory regions.
+    let ram_below_1m_end = 640 * 1024;
+    let ram_below_1m = AddressRange {
+        start: START_OF_RAM_32BITS,
+        end: ram_below_1m_end - 1,
+    };
     // GuestMemory::end_addr() returns the first address past the end, so subtract 1 to get the
     // inclusive end.
     let guest_mem_end = guest_mem.end_addr().offset() - 1;
     let ram_below_4g = AddressRange {
-        start: START_OF_RAM_32BITS,
+        start: FIRST_ADDR_PAST_20BITS,
         end: guest_mem_end.min(read_pci_mmio_before_32bit().start - 1),
     };
     let ram_above_4g = AddressRange {
         start: FIRST_ADDR_PAST_32BITS,
         end: guest_mem_end,
     };
+    add_e820_entry(&mut params, ram_below_1m, E820Type::Ram)?;
     add_e820_entry(&mut params, ram_below_4g, E820Type::Ram)?;
     if !ram_above_4g.is_empty() {
         add_e820_entry(&mut params, ram_above_4g, E820Type::Ram)?
@@ -714,6 +726,7 @@ impl arch::LinuxArch for X8664arch {
         #[cfg(feature = "swap")] swap_controller: &mut Option<swap::SwapController>,
         guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         device_tree_overlays: Vec<DtbOverlay>,
+        _fdt_position: Option<FdtPosition>,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -855,7 +868,7 @@ impl arch::LinuxArch for X8664arch {
                 vm_evt_wrtube.try_clone().map_err(Error::CloneTube)?,
             )?;
         }
-        let vm_request_tube = if !components.no_rtc {
+        let mut vm_request_tube = if !components.no_rtc {
             let (host_tube, device_tube) = Tube::pair()
                 .context("create tube")
                 .map_err(Error::SetupCmos)?;
@@ -1011,7 +1024,8 @@ impl arch::LinuxArch for X8664arch {
                 // The default values for `Regs` and `Sregs` already set up the reset vector.
             }
             VmImage::Kernel(ref mut kernel_image) => {
-                let (params, kernel_end, kernel_entry) = Self::load_kernel(&mem, kernel_image)?;
+                let (params, kernel_end, kernel_entry, cpu_mode) =
+                    Self::load_kernel(&mem, kernel_image)?;
 
                 Self::setup_system_memory(
                     &mem,
@@ -1030,20 +1044,37 @@ impl arch::LinuxArch for X8664arch {
                 vcpu_init[0].regs.rsp = BOOT_STACK_POINTER;
                 vcpu_init[0].regs.rsi = ZERO_PAGE_OFFSET;
 
-                regs::set_long_mode_msrs(&mut msrs);
-                regs::set_mtrr_msrs(&mut msrs, &vm, pci_start);
+                match cpu_mode {
+                    CpuMode::LongMode => {
+                        regs::set_long_mode_msrs(&mut msrs);
 
-                // Set up long mode and enable paging.
-                regs::configure_segments_and_sregs(&mem, &mut vcpu_init[0].sregs)
-                    .map_err(Error::ConfigureSegments)?;
-                regs::setup_page_tables(&mem, &mut vcpu_init[0].sregs)
-                    .map_err(Error::SetupPageTables)?;
+                        // Set up long mode and enable paging.
+                        regs::configure_segments_and_sregs(&mem, &mut vcpu_init[0].sregs)
+                            .map_err(Error::ConfigureSegments)?;
+                        regs::setup_page_tables(&mem, &mut vcpu_init[0].sregs)
+                            .map_err(Error::SetupPageTables)?;
+                    }
+                    CpuMode::FlatProtectedMode => {
+                        regs::set_default_msrs(&mut msrs);
+
+                        // Set up 32-bit protected mode with paging disabled.
+                        regs::configure_segments_and_sregs_flat32(&mem, &mut vcpu_init[0].sregs)
+                            .map_err(Error::ConfigureSegments)?;
+                    }
+                }
+
+                regs::set_mtrr_msrs(&mut msrs, &vm, pci_start);
             }
         }
 
         // Initialize MSRs for all VCPUs.
         for vcpu in vcpu_init.iter_mut() {
             vcpu.msrs = msrs.clone();
+        }
+
+        let mut vm_request_tubes = Vec::new();
+        if let Some(req_tube) = vm_request_tube.take() {
+            vm_request_tubes.push(req_tube);
         }
 
         Ok(RunnableLinuxVm {
@@ -1070,7 +1101,7 @@ impl arch::LinuxArch for X8664arch {
             platform_devices: Vec::new(),
             hotplug_bus: BTreeMap::new(),
             devices_thread: None,
-            vm_request_tube,
+            vm_request_tubes,
         })
     }
 
@@ -1149,6 +1180,10 @@ impl arch::LinuxArch for X8664arch {
     }
 
     fn get_host_cpu_frequencies_khz() -> Result<BTreeMap<usize, Vec<u32>>> {
+        Ok(BTreeMap::new())
+    }
+
+    fn get_host_cpu_max_freq_khz() -> Result<BTreeMap<usize, u32>> {
         Ok(BTreeMap::new())
     }
 
@@ -1527,6 +1562,14 @@ impl Aml for PciRootOSC {
     }
 }
 
+pub enum CpuMode {
+    /// 32-bit protected mode with paging disabled.
+    FlatProtectedMode,
+
+    /// 64-bit long mode.
+    LongMode,
+}
+
 impl X8664arch {
     /// Loads the bios from an open file.
     ///
@@ -1604,11 +1647,11 @@ impl X8664arch {
     /// # Returns
     ///
     /// On success, returns the Linux x86_64 boot protocol parameters, the first address past the
-    /// end of the kernel, and the entry point (initial `RIP` value).
+    /// end of the kernel, the entry point (initial `RIP` value), and the initial CPU mode.
     fn load_kernel(
         mem: &GuestMemory,
         kernel_image: &mut File,
-    ) -> Result<(boot_params, u64, GuestAddress)> {
+    ) -> Result<(boot_params, u64, GuestAddress, CpuMode)> {
         let kernel_start = GuestAddress(KERNEL_START_OFFSET);
         match kernel_loader::load_elf64(mem, kernel_start, kernel_image, 0) {
             Ok(loaded_kernel) => {
@@ -1618,17 +1661,15 @@ impl X8664arch {
                     boot_params,
                     loaded_kernel.address_range.end,
                     loaded_kernel.entry,
+                    CpuMode::LongMode,
                 ))
             }
             Err(kernel_loader::Error::InvalidMagicNumber) => {
                 // The image failed to parse as ELF, so try to load it as a bzImage.
-                let (boot_params, bzimage_end) =
+                let (boot_params, bzimage_end, bzimage_entry, cpu_mode) =
                     bzimage::load_bzimage(mem, kernel_start, kernel_image)
                         .map_err(Error::LoadBzImage)?;
-                let bzimage_entry = mem
-                    .checked_offset(kernel_start, KERNEL_64BIT_ENTRY_OFFSET)
-                    .ok_or(Error::KernelOffsetPastEnd)?;
-                Ok((boot_params, bzimage_end, bzimage_entry))
+                Ok((boot_params, bzimage_end, bzimage_entry, cpu_mode))
             }
             Err(e) => Err(Error::LoadKernel(e)),
         }

@@ -205,6 +205,7 @@ use crate::crosvm::ratelimit::Ratelimit;
 use crate::crosvm::sys::cmdline::DevicesCommand;
 use crate::crosvm::sys::config::SharedDir;
 use crate::crosvm::sys::config::SharedDirKind;
+use crate::crosvm::sys::platform::vcpu::VcpuPidTid;
 
 const KVM_PATH: &str = "/dev/kvm";
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -769,7 +770,11 @@ fn create_virtio_devices(
     }
 
     for opt in &cfg.vhost_user {
-        devs.push(create_vhost_user_frontend(cfg.protection_type, opt)?);
+        devs.push(create_vhost_user_frontend(
+            cfg.protection_type,
+            opt,
+            cfg.vhost_user_connect_timeout_ms,
+        )?);
     }
 
     Ok(devs)
@@ -1239,49 +1244,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     let mut cpu_frequencies = BTreeMap::new();
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-    let mut virt_cpufreq_socket = None;
-
-    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-    if cfg.virt_cpufreq {
-        let host_cpu_frequencies = Arch::get_host_cpu_frequencies_khz()?;
-
-        for cpu_id in 0..cfg.vcpu_count.unwrap_or(1) {
-            let vcpu_affinity = match cfg.vcpu_affinity.clone() {
-                Some(VcpuAffinity::Global(v)) => v,
-                Some(VcpuAffinity::PerVcpu(mut m)) => m.remove(&cpu_id).unwrap_or_default(),
-                None => {
-                    panic!("There must be some vcpu_affinity setting with VirtCpufreq enabled!")
-                }
-            };
-
-            // Check that the physical CPUs that the vCPU is affined to all share the same
-            // frequency domain.
-            if let Some(freq_domain) = host_cpu_frequencies.get(&vcpu_affinity[0]) {
-                for cpu in vcpu_affinity.iter() {
-                    if let Some(frequencies) = host_cpu_frequencies.get(cpu) {
-                        if frequencies != freq_domain {
-                            panic!("Affined CPUs do not share a frequency domain!");
-                        }
-                    }
-                }
-                cpu_frequencies.insert(cpu_id, freq_domain.clone());
-            } else {
-                panic!("No frequency domain for cpu:{}", cpu_id);
-            }
-        }
-
-        virt_cpufreq_socket = if let Some(path) = &cfg.virt_cpufreq_socket {
-            let file = base::open_file_or_duplicate(path, OpenOptions::new().write(true))
-                .with_context(|| {
-                    format!("failed to open virt_cpufreq_socket {}", path.display())
-                })?;
-            let fd: std::os::fd::OwnedFd = file.into();
-            let socket: std::os::unix::net::UnixStream = fd.into();
-            Some(socket)
-        } else {
-            None
-        };
-    }
+    let mut normalized_cpu_capacities = BTreeMap::new();
 
     // if --enable-fw-cfg or --fw-cfg was given, we want to enable fw_cfg
     let fw_cfg_enable = cfg.enable_fw_cfg || !cfg.fw_cfg_parameters.is_empty();
@@ -1293,6 +1256,62 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
     } else {
         (cfg.cpu_clusters.clone(), cfg.cpu_capacity.clone())
     };
+
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    if cfg.virt_cpufreq {
+        if !cfg.cpu_frequencies_khz.is_empty() {
+            cpu_frequencies = cfg.cpu_frequencies_khz.clone();
+        } else {
+            let host_cpu_frequencies = Arch::get_host_cpu_frequencies_khz()?;
+
+            for cpu_id in 0..cfg.vcpu_count.unwrap_or(1) {
+                let vcpu_affinity = match cfg.vcpu_affinity.clone() {
+                    Some(VcpuAffinity::Global(v)) => v,
+                    Some(VcpuAffinity::PerVcpu(mut m)) => m.remove(&cpu_id).unwrap_or_default(),
+                    None => {
+                        panic!("There must be some vcpu_affinity setting with VirtCpufreq enabled!")
+                    }
+                };
+
+                // Check that the physical CPUs that the vCPU is affined to all share the same
+                // frequency domain.
+                if let Some(freq_domain) = host_cpu_frequencies.get(&vcpu_affinity[0]) {
+                    for cpu in vcpu_affinity.iter() {
+                        if let Some(frequencies) = host_cpu_frequencies.get(cpu) {
+                            if frequencies != freq_domain {
+                                panic!("Affined CPUs do not share a frequency domain!");
+                            }
+                        }
+                    }
+                    cpu_frequencies.insert(cpu_id, freq_domain.clone());
+                } else {
+                    panic!("No frequency domain for cpu:{}", cpu_id);
+                }
+            }
+        }
+        let mut max_freqs = Vec::new();
+
+        for (_cpu, frequencies) in cpu_frequencies.iter() {
+            max_freqs.push(*frequencies.iter().max().ok_or(Error::new(libc::EINVAL))?)
+        }
+
+        let host_max_freqs = Arch::get_host_cpu_max_freq_khz()?;
+        let largest_host_max_freq = host_max_freqs
+            .values()
+            .max()
+            .ok_or(Error::new(libc::EINVAL))?;
+
+        for (cpu_id, max_freq) in max_freqs.iter().enumerate() {
+            let normalized_cpu_capacity = (u64::from(*cpu_capacity.get(&cpu_id).unwrap())
+                * u64::from(*max_freq))
+            .checked_div(u64::from(*largest_host_max_freq))
+            .ok_or(Error::new(libc::EINVAL))?;
+            normalized_cpu_capacities.insert(
+                cpu_id,
+                u32::try_from(normalized_cpu_capacity).map_err(|_| Error::new(libc::EINVAL))?,
+            );
+        }
+    }
 
     Ok(VmComponents {
         #[cfg(target_arch = "x86_64")]
@@ -1311,11 +1330,11 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         vcpu_affinity: cfg.vcpu_affinity.clone(),
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         cpu_frequencies,
-        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-        virt_cpufreq_socket,
         fw_cfg_parameters: cfg.fw_cfg_parameters.clone(),
         cpu_clusters,
         cpu_capacity,
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        normalized_cpu_capacities,
         no_smt: cfg.no_smt,
         hugepages: cfg.hugepages,
         hv_cfg: hypervisor::Config {
@@ -2174,10 +2193,11 @@ where
         &mut swap_controller,
         guest_suspended_cvar.clone(),
         dt_overlays,
+        cfg.fdt_position,
     )
     .context("the architecture failed to build the vm")?;
 
-    if let Some(tube) = linux.vm_request_tube.take() {
+    for tube in linux.vm_request_tubes.drain(..) {
         control_tubes.push(TaggedControlTube::Vm(tube));
     }
 
@@ -2931,6 +2951,7 @@ struct ControlLoopState<'a, V: VmArch, Vcpu: VcpuArch> {
     pvclock_host_tube: Option<Arc<Tube>>,
     vfio_container_manager: &'a mut VfioContainerManager,
     suspended_pvclock_state: &'a mut Option<hypervisor::ClockState>,
+    vcpus_pid_tid: &'a BTreeMap<usize, (u32, u32)>,
 }
 
 fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
@@ -3055,6 +3076,9 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 VmResponse::Err(base::Error::new(libc::ENOTSUP))
             }
         }
+        VmRequest::VcpuPidTid => VmResponse::VcpuPidTidResponse {
+            pid_tid_map: state.vcpus_pid_tid.clone(),
+        },
         _ => {
             let response = request.execute(
                 &state.linux.vm,
@@ -3551,6 +3575,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     // Architecture-specific code must supply a vcpu_init element for each VCPU.
     assert_eq!(vcpus.len(), linux.vcpu_init.len());
 
+    let (vcpu_pid_tid_sender, vcpu_pid_tid_receiver) = mpsc::channel();
     for ((cpu_id, vcpu), vcpu_init) in vcpus.into_iter().enumerate().zip(linux.vcpu_init.drain(..))
     {
         let (to_vcpu_channel, from_main_channel) = mpsc::channel();
@@ -3622,8 +3647,28 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             bus_lock_ratelimit_ctrl,
             run_mode,
             cfg.boost_uclamp,
+            vcpu_pid_tid_sender.clone(),
         )?;
         vcpu_handles.push((handle, to_vcpu_channel));
+    }
+
+    let mut vcpus_pid_tid = BTreeMap::new();
+    for _ in 0..vcpu_handles.len() {
+        let vcpu_pid_tid: VcpuPidTid = vcpu_pid_tid_receiver
+            .recv()
+            .context("failed receiving vcpu pid/tid")?;
+        if vcpus_pid_tid
+            .insert(
+                vcpu_pid_tid.vcpu_id,
+                (vcpu_pid_tid.process_id, vcpu_pid_tid.thread_id),
+            )
+            .is_some()
+        {
+            return Err(anyhow!(
+                "Vcpu {} returned more than 1 PID and TID",
+                vcpu_pid_tid.vcpu_id
+            ));
+        }
     }
 
     #[cfg(feature = "gdb")]
@@ -3943,6 +3988,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             pvclock_host_tube: pvclock_host_tube.clone(),
                             vfio_container_manager: &mut vfio_container_manager,
                             suspended_pvclock_state: &mut suspended_pvclock_state,
+                            vcpus_pid_tid: &vcpus_pid_tid,
                         };
                         let (exit_requested, mut ids_to_remove, add_tubes) =
                             process_vm_control_event(&mut state, id, socket)?;

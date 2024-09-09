@@ -144,6 +144,12 @@ pub enum FrontendReq {
     /// Query the backend for its device status as defined in the VIRTIO
     /// specification.
     GET_STATUS = 40,
+    /// Front-end and back-end negotiate a channel over which to transfer the back-end’s internal
+    /// state during migration.
+    SET_DEVICE_STATE_FD = 42,
+    /// After transferring the back-end’s internal state during migration, check whether the
+    /// back-end was able to successfully fully process the state.
+    CHECK_DEVICE_STATE = 43,
 
     // Non-standard message types.
     /// Stop all queue handlers and save each queue state.
@@ -441,13 +447,15 @@ bitflags! {
         const STATUS = 0x0001_0000;
         /// Support Xen mmap.
         const XEN_MMAP = 0x0002_0000;
+        /// Support VHOST_USER_SET_DEVICE_STATE_FD and VHOST_USER_CHECK_DEVICE_STATE messages.
+        const DEVICE_STATE = 0x0008_0000;
         /// Support shared memory regions. (Non-standard.)
         const SHARED_MEMORY_REGIONS = 0x8000_0000;
     }
 }
 
 /// A generic message to encapsulate a 64-bit value.
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Default, Clone, Copy, AsBytes, FromZeroes, FromBytes)]
 pub struct VhostUserU64 {
     /// The encapsulated 64-bit common value.
@@ -623,7 +631,7 @@ impl VhostUserMsgValidator for VhostUserSingleMemoryRegion {
 }
 
 /// Vring state descriptor.
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Default, Clone, Copy, AsBytes, FromZeroes, FromBytes)]
 pub struct VhostUserVringState {
     /// Vring index.
@@ -735,7 +743,7 @@ bitflags! {
 }
 
 /// Message to read/write device configuration space.
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Default, Clone, Copy, AsBytes, FromZeroes, FromBytes)]
 pub struct VhostUserConfig {
     /// Offset of virtio device's configuration space.
@@ -818,9 +826,26 @@ impl VhostUserMsgValidator for VhostUserInflight {
     }
 }
 
+/// VHOST_USER_SET_DEVICE_STATE_FD request payload.
+#[repr(C)]
+#[derive(Default, Clone, Copy, AsBytes, FromZeroes, FromBytes)]
+pub struct DeviceStateTransferParameters {
+    /// Direction in which the state is transferred
+    pub transfer_direction: u32,
+    /// State in which the VM guest and devices are.
+    pub migration_phase: u32,
+}
+
+impl VhostUserMsgValidator for DeviceStateTransferParameters {
+    fn is_valid(&self) -> bool {
+        // Validated elsewhere.
+        true
+    }
+}
+
 /*
  * TODO: support dirty log, live migration and IOTLB operations.
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct VhostUserVringArea {
     pub index: u32,
     pub flags: u32,
@@ -828,13 +853,13 @@ pub struct VhostUserVringArea {
     pub offset: u64,
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct VhostUserLog {
     pub size: u64,
     pub offset: u64,
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct VhostUserIotlb {
     pub iova: u64,
     pub size: u64,
@@ -1057,7 +1082,7 @@ impl VhostUserShmemUnmapMsg {
 }
 
 /// Inflight I/O descriptor state for split virtqueues
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct DescStateSplit {
     /// Indicate whether this descriptor (only head) is inflight or not.
@@ -1078,7 +1103,7 @@ impl DescStateSplit {
 }
 
 /// Inflight I/O queue region for split virtqueues
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct QueueRegionSplit {
     /// Features flags of this region
     pub features: u64,
@@ -1109,7 +1134,7 @@ impl QueueRegionSplit {
 }
 
 /// Inflight I/O descriptor state for packed virtqueues
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct DescStatePacked {
     /// Indicate whether this descriptor (only head) is inflight or not.
@@ -1142,7 +1167,7 @@ impl DescStatePacked {
 }
 
 /// Inflight I/O queue region for packed virtqueues
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct QueueRegionPacked {
     /// Features flags of this region
     pub features: u64,
@@ -1188,7 +1213,7 @@ impl QueueRegionPacked {
 }
 
 /// Virtio shared memory descriptor.
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Default, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 pub struct VhostSharedMemoryRegion {
     /// The shared memory region's shmid.
@@ -1208,6 +1233,17 @@ impl VhostSharedMemoryRegion {
             length,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum VhostUserTransferDirection {
+    Save,
+    Load,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum VhostUserMigrationPhase {
+    Stopped,
 }
 
 #[cfg(test)]

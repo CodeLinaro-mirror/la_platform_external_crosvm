@@ -23,6 +23,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use arch::CpuSet;
+use arch::FdtPosition;
 use arch::Pstore;
 #[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
@@ -79,6 +80,11 @@ use crate::crosvm::config::from_key_values;
 use crate::crosvm::config::parse_bus_id_addr;
 use crate::crosvm::config::parse_cpu_affinity;
 use crate::crosvm::config::parse_cpu_capacity;
+#[cfg(all(
+    any(target_arch = "arm", target_arch = "aarch64"),
+    any(target_os = "android", target_os = "linux")
+))]
+use crate::crosvm::config::parse_cpu_frequencies;
 use crate::crosvm::config::parse_dynamic_power_coefficient;
 #[cfg(target_arch = "x86_64")]
 use crate::crosvm::config::parse_memory_region;
@@ -1133,6 +1139,20 @@ pub struct RunCommand {
     /// group the given CPUs into a cluster (default: no clusters)
     pub cpu_cluster: Vec<CpuSet>,
 
+    #[cfg(all(
+        any(target_arch = "arm", target_arch = "aarch64"),
+        any(target_os = "android", target_os = "linux")
+    ))]
+    #[argh(
+        option,
+        arg_name = "CPU=FREQS[,CPU=FREQS[,...]]",
+        from_str_fn(parse_cpu_frequencies)
+    )]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// set the list of frequencies in KHz for the given CPU (default: no frequencies)
+    pub cpu_frequencies_khz: Option<BTreeMap<usize, Vec<u32>>>, // CPU index -> frequencies
+
     #[argh(option, short = 'c')]
     #[merge(strategy = overwrite_option)]
     /// cpu parameters.
@@ -1273,6 +1293,18 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// gather and display statistics on Vm Exits and Bus Reads/Writes.
     pub exit_stats: Option<bool>,
+
+    #[argh(option)]
+    #[serde(skip)]
+    #[merge(strategy = overwrite)]
+    /// where the FDT is placed in memory.
+    ///
+    /// On x86_64, no effect.
+    ///
+    /// On aarch64, defaults to `end` for kernel payloads and to `start` for BIOS payloads.
+    ///
+    /// On riscv64, defaults to `after-payload`.
+    pub fdt_position: Option<FdtPosition>,
 
     #[argh(
         option,
@@ -2163,6 +2195,11 @@ pub struct RunCommand {
     ///         Error when FS_IOC_SETPATHXATTR ioctl is called
     ///         in the device if current dyamic permission path is
     ///         lager or equal to this value.
+    ///     security_ctx=BOOL - Enables FUSE_SECURITY_CONTEXT
+    ///        feature(default: true). This should be set to false
+    ///        in case the when the host not allowing write to
+    ///        /proc/<pid>/attr/fscreate, or guest directory does
+    ///        care about the security context.
     ///     Options uid and gid are useful when the crosvm process
     ///     has no CAP_SETGID/CAP_SETUID but an identity mapping of
     ///     the current user/group between the VM and the host is
@@ -2420,6 +2457,13 @@ pub struct RunCommand {
     /// path to a socket for vhost-user block
     pub vhost_user_blk: Vec<VhostUserOption>,
 
+    #[argh(option)]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// number of milliseconds to retry if the socket path is missing or has no listener. Defaults
+    /// to no retries.
+    pub vhost_user_connect_timeout_ms: Option<u64>,
+
     #[argh(option, arg_name = "SOCKET_PATH")]
     #[serde(skip)] // Deprecated - use `vhost-user` instead.
     #[merge(strategy = append)]
@@ -2517,16 +2561,6 @@ pub struct RunCommand {
     #[merge(strategy = overwrite_option)]
     /// enable a virtual cpu freq device
     pub virt_cpufreq: Option<bool>,
-
-    #[cfg(all(
-        any(target_arch = "arm", target_arch = "aarch64"),
-        any(target_os = "android", target_os = "linux")
-    ))]
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)]
-    #[merge(strategy = overwrite_option)]
-    /// (EXPERIMENTAL) use UDS for a virtual cpu freq device
-    pub virt_cpufreq_socket: Option<PathBuf>,
 
     #[cfg(feature = "audio")]
     #[argh(
@@ -2724,7 +2758,9 @@ impl TryFrom<RunCommand> for super::config::Config {
         ))]
         {
             cfg.virt_cpufreq = cmd.virt_cpufreq.unwrap_or_default();
-            cfg.virt_cpufreq_socket = cmd.virt_cpufreq_socket;
+            if let Some(frequencies) = cmd.cpu_frequencies_khz {
+                cfg.cpu_frequencies_khz = frequencies;
+            }
         }
 
         cfg.vcpu_cgroup_path = cmd.vcpu_cgroup_path;
@@ -3511,6 +3547,8 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.vhost_user = cmd.vhost_user;
 
+        cfg.vhost_user_connect_timeout_ms = cmd.vhost_user_connect_timeout_ms;
+
         // Convert an option from `VhostUserOption` to `VhostUserFrontendOption` with the given
         // device type.
         fn vu(
@@ -3558,6 +3596,8 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.stub_pci_devices = cmd.stub_pci_device;
+
+        cfg.fdt_position = cmd.fdt_position;
 
         cfg.file_backed_mappings = cmd.file_backed_mapping;
 
