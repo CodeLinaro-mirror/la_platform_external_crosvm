@@ -177,7 +177,10 @@ impl Vcpu for HaxmVcpu {
     /// Once called, it will determine whether a mmio read or mmio write was the reason for the mmio
     /// exit, call `handle_fn` with the respective IoOperation to perform the mmio read or
     /// write, and set the return data in the vcpu so that the vcpu can resume running.
-    fn handle_mmio(&self, handle_fn: &mut dyn FnMut(IoParams) -> Option<[u8; 8]>) -> Result<()> {
+    fn handle_mmio(
+        &self,
+        handle_fn: &mut dyn FnMut(IoParams) -> Result<Option<[u8; 8]>>,
+    ) -> Result<()> {
         // SAFETY:
         // Safe because we know we mapped enough memory to hold the hax_tunnel struct because the
         // kernel told us how large it was.
@@ -198,7 +201,12 @@ impl Vcpu for HaxmVcpu {
                     address,
                     size,
                     operation: IoOperation::Read,
-                }) {
+                })
+                // We have to unwrap/panic here because HAXM doesn't have a
+                // facility to inject a GP fault here. Once HAXM can do that, we
+                // should inject a GP fault & bubble the error.
+                .unwrap()
+                {
                     let data = u64::from_ne_bytes(data);
                     // SAFETY:
                     // Safe because we know this is an mmio read, so we need to put data into the
@@ -219,7 +227,9 @@ impl Vcpu for HaxmVcpu {
                     operation: IoOperation::Write {
                         data: data.to_ne_bytes(),
                     },
-                });
+                })
+                // Similarly to the read direction, we MUST panic here.
+                .unwrap();
                 Ok(())
             }
             _ => Err(Error::new(EINVAL)),
@@ -768,15 +778,9 @@ impl From<&segment_desc_t> for Segment {
         // TODO(b/315998194): Add safety comment
         #[allow(clippy::undocumented_unsafe_blocks)]
         unsafe {
-            let g = item.__bindgen_anon_1.__bindgen_anon_1.granularity() as u8;
-            let limit_bytes = if g == 0 {
-                item.limit
-            } else {
-                (item.limit * 4096) + 4095
-            };
             Segment {
                 base: item.base,
-                limit_bytes,
+                limit_bytes: item.limit,
                 selector: item.selector,
                 type_: item.__bindgen_anon_1.__bindgen_anon_1.type_() as u8,
                 present: item.__bindgen_anon_1.__bindgen_anon_1.present() as u8,
@@ -784,7 +788,7 @@ impl From<&segment_desc_t> for Segment {
                 db: item.__bindgen_anon_1.__bindgen_anon_1.operand_size() as u8,
                 s: item.__bindgen_anon_1.__bindgen_anon_1.desc() as u8,
                 l: item.__bindgen_anon_1.__bindgen_anon_1.long_mode() as u8,
-                g,
+                g: item.__bindgen_anon_1.__bindgen_anon_1.granularity() as u8,
                 avl: item.__bindgen_anon_1.__bindgen_anon_1.available() as u8,
             }
         }
@@ -793,14 +797,9 @@ impl From<&segment_desc_t> for Segment {
 
 impl From<&Segment> for segment_desc_t {
     fn from(item: &Segment) -> Self {
-        let limit = if item.g == 0 {
-            item.limit_bytes
-        } else {
-            item.limit_bytes / 4096
-        };
         let mut segment = segment_desc_t {
             base: item.base,
-            limit,
+            limit: item.limit_bytes,
             selector: item.selector,
             ..Default::default()
         };
