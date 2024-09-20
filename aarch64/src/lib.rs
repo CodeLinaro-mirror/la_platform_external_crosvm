@@ -394,6 +394,18 @@ fn get_vcpu_mpidr_aff<Vcpu: VcpuAArch64>(vcpus: &[Vcpu], index: usize) -> Option
     Some(vcpus.get(index)?.get_mpidr().ok()? & MPIDR_AFF_MASK)
 }
 
+fn main_memory_size(components: &VmComponents, hypervisor: &(impl Hypervisor + ?Sized)) -> u64 {
+    // Static swiotlb is allocated from the end of RAM as a separate memory region, so, if
+    // enabled, make the RAM memory region smaller to leave room for it.
+    let mut main_memory_size = components.memory_size;
+    if let Some(size) = components.swiotlb {
+        if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+            main_memory_size -= size;
+        }
+    }
+    main_memory_size
+}
+
 impl arch::LinuxArch for AArch64 {
     type Error = Error;
 
@@ -403,14 +415,7 @@ impl arch::LinuxArch for AArch64 {
         components: &VmComponents,
         hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error> {
-        // Static swiotlb is allocated from the end of RAM as a separate memory region, so, if
-        // enabled, make the RAM memory region smaller to leave room for it.
-        let mut main_memory_size = components.memory_size;
-        if let Some(size) = components.swiotlb {
-            if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
-                main_memory_size -= size;
-            }
-        }
+        let main_memory_size = main_memory_size(components, hypervisor);
 
         let mut memory_regions = vec![(
             GuestAddress(AARCH64_PHYS_MEM_START),
@@ -472,6 +477,8 @@ impl arch::LinuxArch for AArch64 {
         let has_bios = matches!(components.vm_image, VmImage::Bios(_));
         let mem = vm.get_memory().clone();
 
+        let main_memory_size = main_memory_size(&components, vm.get_hypervisor());
+
         // separate out image loading from other setup to get a specific error for
         // image loading
         let mut initrd = None;
@@ -494,7 +501,7 @@ impl arch::LinuxArch for AArch64 {
                         let initrd_addr =
                             (kernel_end + (AARCH64_INITRD_ALIGN - 1)) & !(AARCH64_INITRD_ALIGN - 1);
                         let initrd_max_size =
-                            components.memory_size - (initrd_addr - AARCH64_PHYS_MEM_START);
+                            main_memory_size - (initrd_addr - AARCH64_PHYS_MEM_START);
                         let initrd_addr = GuestAddress(initrd_addr);
                         let initrd_size =
                             arch::load_image(&mem, &mut initrd_file, initrd_addr, initrd_max_size)
@@ -507,7 +514,7 @@ impl arch::LinuxArch for AArch64 {
             }
         };
 
-        let memory_end = GuestAddress(AARCH64_PHYS_MEM_START + components.memory_size);
+        let memory_end = GuestAddress(AARCH64_PHYS_MEM_START + main_memory_size);
         let fdt_offset = fdt_address(memory_end, has_bios);
 
         let mut use_pmu = vm
