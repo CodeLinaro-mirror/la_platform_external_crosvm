@@ -25,9 +25,18 @@ if ! [ -x "$(command -v bpfmt)" ]; then
 fi
 
 # If there is need to verify installation of some packages, add them here in pkges.
-pkges='meson protobuf-compiler'
+pkges='
+libdrm-dev
+libcap-dev
+libepoxy-dev
+libwayland-dev
+meson
+pkg-config
+protobuf-compiler
+wayland-protocols
+'
 for pkg in $pkges; do
-  result="$(dpkg-query -W --showformat='${db:Status-Status}' "$pkg" 2>&1)"
+  set +e; result="$(dpkg-query -W --showformat='${db:Status-Status}' "$pkg" 2>&1)"; set -e
   if [ ! $? = 0 ] || [ ! "$result" = installed ]; then
     echo $pkg' not found. Please install.' >&2
     exit 1
