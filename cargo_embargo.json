@@ -92,7 +92,6 @@
       "//vendor:__subpackages__"
     ],
     "libbase_rust": [
-      "//packages/modules/Virtualization/android/virtmgr",
       // For QCOM's crosvm fork.
       "//vendor:__subpackages__"
     ],
