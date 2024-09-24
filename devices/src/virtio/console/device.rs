@@ -108,7 +108,7 @@ impl ConsoleDevice {
     }
 
     fn ensure_worker_stopped(&mut self) {
-        if let Some(mut worker) = self.worker.take() {
+        if let Some(worker) = self.worker.take() {
             let ports = worker.stop();
             for (worker_port, port) in ports.into_iter().zip(self.ports.iter_mut()) {
                 worker_port.into_console_port(port);
@@ -116,13 +116,8 @@ impl ConsoleDevice {
         }
     }
 
-    pub fn start_queue(
-        &mut self,
-        idx: usize,
-        queue: Queue,
-        interrupt: Interrupt,
-    ) -> anyhow::Result<()> {
-        let worker = self.ensure_worker_started(interrupt);
+    pub fn start_queue(&mut self, idx: usize, queue: Queue) -> anyhow::Result<()> {
+        let worker = self.ensure_worker_started(queue.interrupt().clone());
         worker.start_queue(idx, queue)
     }
 

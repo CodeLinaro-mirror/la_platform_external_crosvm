@@ -39,14 +39,12 @@ use crate::virtio::fs::Config;
 use crate::virtio::vhost::user::device::handler::Error as DeviceError;
 use crate::virtio::vhost::user::device::handler::VhostUserDevice;
 use crate::virtio::vhost::user::device::handler::WorkerState;
-use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 
 const MAX_QUEUE_NUM: usize = 2; /* worker queue and high priority queue */
 
 async fn handle_fs_queue(
     queue: Rc<RefCell<virtio::Queue>>,
-    doorbell: Interrupt,
     kick_evt: EventAsync,
     server: Arc<fuse::Server<PassthroughFs>>,
     tube: Arc<Mutex<Tube>>,
@@ -59,7 +57,7 @@ async fn handle_fs_queue(
             error!("Failed to read kick event for fs queue: {}", e);
             break;
         }
-        if let Err(e) = process_fs_queue(&doorbell, &mut queue.borrow_mut(), &server, &tube, slot) {
+        if let Err(e) = process_fs_queue(&mut queue.borrow_mut(), &server, &tube, slot) {
             error!("Process FS queue failed: {}", e);
             break;
         }
@@ -144,7 +142,6 @@ impl VhostUserDevice for FsBackend {
         idx: usize,
         queue: virtio::Queue,
         _mem: GuestMemory,
-        doorbell: Interrupt,
     ) -> anyhow::Result<()> {
         if self.workers[idx].is_some() {
             warn!("Starting new queue handler without stopping old handler");
@@ -162,7 +159,6 @@ impl VhostUserDevice for FsBackend {
         let queue = Rc::new(RefCell::new(queue));
         let queue_task = self.ex.spawn_local(handle_fs_queue(
             queue.clone(),
-            doorbell,
             kick_evt,
             self.server.clone(),
             Arc::new(Mutex::new(fs_device_tube)),
@@ -207,8 +203,13 @@ impl VhostUserDevice for FsBackend {
 /// FS Device
 pub struct Options {
     #[argh(option, arg_name = "PATH")]
-    /// path to a vhost-user socket
-    socket: String,
+    /// the UDS path to a vhost-user socket.
+    /// If this flag is set, --fd cannot be specified.
+    socket: Option<String>,
+    #[argh(option, arg_name = "FD")]
+    /// file descriptor of a connected vhost-user socket.
+    /// If this flag is set, --socket cannot be specified.
+    fd: Option<i32>,
     #[argh(option, arg_name = "TAG")]
     /// the virtio-fs tag
     tag: String,
