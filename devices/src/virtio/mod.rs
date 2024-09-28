@@ -98,6 +98,7 @@ pub use self::vhost_user_frontend::VhostUserFrontend;
 #[cfg(any(feature = "video-decoder", feature = "video-encoder"))]
 pub use self::video::VideoDevice;
 pub use self::virtio_device::SharedMemoryMapper;
+pub use self::virtio_device::SharedMemoryPrepareType;
 pub use self::virtio_device::SharedMemoryRegion;
 pub use self::virtio_device::VirtioDevice;
 pub use self::virtio_device::VirtioTransportType;
@@ -125,6 +126,7 @@ cfg_if::cfg_if! {
         pub use self::p9::P9;
         pub use self::pmem::Pmem;
         pub use self::pmem::PmemConfig;
+        pub use self::pmem::MemSlotConfig;
         #[cfg(feature = "audio")]
         pub use self::snd::new_sound;
         pub use self::wl::Wl;

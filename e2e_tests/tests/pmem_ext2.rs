@@ -8,7 +8,6 @@
 
 use std::os::unix::fs::symlink;
 
-use anyhow::bail;
 use fixture::vm::Config;
 use fixture::vm::TestVm;
 
@@ -95,31 +94,6 @@ fn pmem_ext2() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn set_num_files_limit(num_files: u64) -> anyhow::Result<()> {
-    let mut buf = std::mem::MaybeUninit::<libc::rlimit64>::zeroed();
-    // SAFETY: Safe because this will only modify `buf` and we check the return value.
-    let res =
-        unsafe { libc::prlimit64(0, libc::RLIMIT_NOFILE, std::ptr::null(), buf.as_mut_ptr()) };
-    if res != 0 {
-        bail!("failed to call prlimit64");
-    }
-
-    // SAFETY: Safe because the kernel guarantees that the struct is fully initialized.
-    let mut limit = unsafe { buf.assume_init() };
-    if limit.rlim_max < num_files {
-        bail!("rlim_max < num_files: {} < {}", limit.rlim_max, num_files);
-    }
-
-    limit.rlim_cur = num_files;
-    // SAFETY: Safe because limit is properly initialized.
-    let res = unsafe { libc::setrlimit64(libc::RLIMIT_NOFILE, &limit) };
-    if res != 0 {
-        bail!("failed to call setrlimit64");
-    }
-
-    Ok(())
-}
-
 /// Check a case with 1000 files in a directory.
 #[test]
 fn pmem_ext2_manyfiles() -> anyhow::Result<()> {
@@ -127,10 +101,6 @@ fn pmem_ext2_manyfiles() -> anyhow::Result<()> {
     // ├── 0.txt
     // ...
     // └── 999.txt
-
-    // TODO(crrev.com/c/5644847): Remove `set_num_files_limi` once we add a logic to fork a separate
-    // process for ext2 creation with larger files limit.
-    set_num_files_limit(2048)?;
 
     let temp_dir = tempfile::tempdir()?;
     for i in 0..1000 {
@@ -154,4 +124,89 @@ fn pmem_ext2_manyfiles() -> anyhow::Result<()> {
     assert_eq!(ls_result.stdout.trim(), "1002");
 
     Ok(())
+}
+
+/// Starts pmem-ext2 device with the given uid/gid setting and share a file created by the current
+/// user with the guest. Returns (uid, gid) in the guest.
+fn start_with_ugid_map(
+    uid: u32,
+    uid_map: &str,
+    gid: u32,
+    gid_map: &str,
+) -> anyhow::Result<(u32, u32)> {
+    let temp_dir = tempfile::tempdir()?;
+    let a = temp_dir.path().join("a.txt");
+    std::fs::write(a, "A")?;
+
+    let dir_path = temp_dir.path().to_str().unwrap().to_string();
+    let config = Config::new().extra_args(vec![
+        "--pmem-ext2".to_string(),
+        format!("{dir_path}:uidmap={uid_map}:gidmap={gid_map}:uid={uid}:gid={gid}"),
+    ]);
+
+    let mut vm = TestVm::new(config)?;
+    vm.exec_in_guest("mount -t ext2 /dev/pmem0 /mnt/")?;
+
+    let result = vm
+        .exec_in_guest_async("stat --printf '%u %g' /mnt/a.txt")?
+        .with_timeout(std::time::Duration::from_secs(1))
+        .wait_ok(&mut vm)?;
+    let out = result.stdout.trim();
+    println!("guest ugid: {out}");
+    let ids = out
+        .split(" ")
+        .map(|s| s.parse::<u32>())
+        .collect::<Result<Vec<u32>, _>>()
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    Ok((ids[0], ids[1])) // (uid, gid)
+}
+
+fn geteugid() -> (u32, u32) {
+    // SAFETY: geteuid never fails.
+    let euid = unsafe { libc::geteuid() };
+    // SAFETY: getegid never fails.
+    let egid = unsafe { libc::getegid() };
+    (euid, egid)
+}
+
+/// Maps to the same id in the guest.
+#[test]
+fn pmem_ext2_ugid_map_identical() {
+    let (host_uid, host_gid) = geteugid();
+
+    let uid_map = format!("{host_uid} {host_uid} 1");
+    let gid_map = format!("{host_gid} {host_gid} 1");
+    let (guest_uid, guest_gid) =
+        start_with_ugid_map(host_uid, &uid_map, host_gid, &gid_map).unwrap();
+    assert_eq!(host_uid, guest_uid);
+    assert_eq!(host_gid, guest_gid);
+}
+
+/// Maps to the root in the guest.
+#[test]
+fn pmem_ext2_ugid_map_to_root() {
+    let (host_uid, host_gid) = geteugid();
+
+    let uid_map = format!("0 {host_uid} 1");
+    let gid_map = format!("0 {host_gid} 1");
+    let (guest_uid, guest_gid) = start_with_ugid_map(0, &uid_map, 0, &gid_map).unwrap();
+    assert_eq!(guest_uid, 0);
+    assert_eq!(guest_gid, 0);
+}
+
+/// Maps to fake ids in the guest.
+#[test]
+fn pmem_ext2_ugid_map_fake_ids() {
+    let (host_uid, host_gid) = geteugid();
+
+    let fake_uid = 1234;
+    let fake_gid = 5678;
+
+    let uid_map = format!("{fake_uid} {host_uid} 1");
+    let gid_map = format!("{fake_gid} {host_gid} 1");
+    let (guest_uid, guest_gid) =
+        start_with_ugid_map(fake_uid, &uid_map, fake_gid, &gid_map).unwrap();
+    assert_eq!(guest_uid, fake_uid);
+    assert_eq!(guest_gid, fake_gid);
 }
