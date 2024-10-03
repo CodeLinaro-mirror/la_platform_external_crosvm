@@ -382,7 +382,7 @@ fn vhost_user_connection_from_socket_fd(fd: u32) -> Result<UnixStream> {
         anyhow::bail!("path {} is not socket", path.display());
     }
 
-    let safe_fd = safe_descriptor_from_fd(fd as i32)?;
+    let safe_fd = safe_descriptor_from_cmdline_fd(&(fd as i32))?;
 
     let stream: UnixStream = UnixStream::from(safe_fd);
     Ok(stream)
@@ -1287,12 +1287,16 @@ pub fn create_pmem_ext2_device(
     index: usize,
     pmem_device_tube: Tube,
 ) -> DeviceResult {
-    let cfg = ext2::Config {
+    let builder = ext2::Builder {
         inodes_per_group: opts.inodes_per_group,
         blocks_per_group: opts.blocks_per_group,
         size: opts.size,
     };
-    let arena = ext2::create_ext2_region(&cfg, Some(opts.path.as_path()))?;
+    let arena = builder
+        .allocate_memory()?
+        .build_mmap_info(Some(opts.path.as_path()))?
+        .do_mmap()?;
+
     let mapping_size = arena.size() as u64;
 
     let mapping_address = GuestAddress(
