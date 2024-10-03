@@ -2826,6 +2826,7 @@ pub fn trigger_vm_suspend_and_wait_for_entry(
 }
 
 #[cfg(feature = "pvclock")]
+#[derive(Debug)]
 /// The action requested by the pvclock device to perform on the main thread.
 enum PvClockAction {
     #[cfg(target_arch = "aarch64")]
@@ -2954,6 +2955,17 @@ struct ControlLoopState<'a, V: VmArch, Vcpu: VcpuArch> {
     vcpus_pid_tid: &'a BTreeMap<usize, (u32, u32)>,
 }
 
+struct VmRequestResult {
+    response: Option<VmResponse>,
+    exit: bool,
+}
+
+impl VmRequestResult {
+    fn new(response: Option<VmResponse>, exit: bool) -> Self {
+        VmRequestResult { response, exit }
+    }
+}
+
 fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     state: &mut ControlLoopState<V, Vcpu>,
     id: usize,
@@ -2964,16 +2976,16 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         allow(unused_variables, clippy::ptr_arg)
     )]
     add_tubes: &mut Vec<TaggedControlTube>,
-) -> Result<(Option<VmResponse>, bool, Option<VmRunMode>)> {
-    let mut suspend_requested = false;
-    let mut run_mode_opt = None;
-
+) -> Result<VmRequestResult> {
     #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
     let mut add_irq_control_tubes = Vec::new();
     #[cfg(any(target_arch = "x86_64", feature = "pci-hotplug"))]
     let mut add_vm_memory_control_tubes = Vec::new();
 
     let response = match request {
+        VmRequest::Exit => {
+            return Ok(VmRequestResult::new(Some(VmResponse::Ok), true));
+        }
         VmRequest::HotPlugVfioCommand { device, add } => {
             #[cfg(target_arch = "x86_64")]
             {
@@ -3060,16 +3072,16 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         VmRequest::BalloonCommand(cmd) => {
             if let Some(tube) = state.balloon_tube.as_mut() {
                 let Some((r, key)) = tube.send_cmd(cmd, Some(id)) else {
-                    return Ok((None, false, None));
+                    return Ok(VmRequestResult::new(None, false));
                 };
                 if key != id {
                     let Some(TaggedControlTube::Vm(tube)) = state.control_tubes.get(&key) else {
-                        return Ok((None, false, None));
+                        return Ok(VmRequestResult::new(None, false));
                     };
                     if let Err(e) = tube.send(&r) {
                         error!("failed to send VmResponse: {}", e);
                     }
-                    return Ok((None, false, None));
+                    return Ok(VmRequestResult::new(None, false));
                 }
                 r
             } else {
@@ -3080,9 +3092,39 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             pid_tid_map: state.vcpus_pid_tid.clone(),
         },
         _ => {
+            if !state.cfg.force_s2idle {
+                #[cfg(feature = "pvclock")]
+                if let Some(ref pvclock_host_tube) = state.pvclock_host_tube {
+                    // Update clock offset when pvclock is used.
+                    if let VmRequest::ResumeVcpus = request {
+                        let cmd = PvClockCommand::Resume;
+                        match send_pvclock_cmd(pvclock_host_tube, cmd.clone()) {
+                            Ok(action) => {
+                                info!("{:?} command successfully processed", cmd);
+                                if let Some(action) = action {
+                                    match action {
+                                        #[cfg(target_arch = "aarch64")]
+                                        PvClockAction::SetCounterOffset(offset) => {
+                                            state.linux.vm.set_counter_offset(offset)?;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => error!("{:?} command failed: {:#}", cmd, e),
+                        };
+                    }
+                }
+            }
+            let kick_all_vcpus = |msg| {
+                if let VcpuControl::RunState(VmRunMode::Running) = msg {
+                    for dev in &state.linux.resume_notify_devices {
+                        dev.lock().resume_imminent();
+                    }
+                }
+                vcpu::kick_all_vcpus(state.vcpu_handles, state.linux.irq_chip.as_irq_chip(), msg);
+            };
             let response = request.execute(
                 &state.linux.vm,
-                &mut run_mode_opt,
                 state.disk_host_tubes,
                 &mut state.linux.pm,
                 #[cfg(feature = "gpu")]
@@ -3094,13 +3136,7 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                 #[cfg(not(feature = "usb"))]
                 None,
                 &mut state.linux.bat_control,
-                |msg| {
-                    vcpu::kick_all_vcpus(
-                        state.vcpu_handles,
-                        state.linux.irq_chip.as_irq_chip(),
-                        msg,
-                    )
-                },
+                kick_all_vcpus,
                 state.cfg.force_s2idle,
                 #[cfg(feature = "swap")]
                 state.swap_controller.as_ref(),
@@ -3112,8 +3148,6 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             );
             if state.cfg.force_s2idle {
                 if let VmRequest::SuspendVcpus = request {
-                    suspend_requested = true;
-
                     // Spawn s2idle wait thread.
                     let send_tube = tube.try_clone_send_tube().unwrap();
                     let suspend_tube = state.linux.suspend_tube.0.clone();
@@ -3133,30 +3167,22 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             )
                         })
                         .context("failed to spawn s2idle_wait thread")?;
+
+                    // For s2idle, omit the response since it will be sent by
+                    // s2idle_wait thread when suspension actually happens.
+                    return Ok(VmRequestResult::new(None, false));
                 }
             } else {
-                // if not doing s2idle, the guest clock should
-                // behave as the host does, so let the guest
-                // know about the suspend / resume via
-                // virtio-pvclock.
                 #[cfg(feature = "pvclock")]
                 if let Some(ref pvclock_host_tube) = state.pvclock_host_tube {
-                    let cmd = match request {
-                        VmRequest::SuspendVcpus => Some(PvClockCommand::Suspend),
-                        VmRequest::ResumeVcpus => Some(PvClockCommand::Resume),
-                        _ => None,
-                    };
-                    if let Some(cmd) = cmd {
+                    // Record the time after VCPUs are suspended to track suspension duration.
+                    if let VmRequest::SuspendVcpus = request {
+                        let cmd = PvClockCommand::Suspend;
                         match send_pvclock_cmd(pvclock_host_tube, cmd.clone()) {
                             Ok(action) => {
                                 info!("{:?} command successfully processed", cmd);
                                 if let Some(action) = action {
-                                    match action {
-                                        #[cfg(target_arch = "aarch64")]
-                                        PvClockAction::SetCounterOffset(offset) => {
-                                            state.linux.vm.set_counter_offset(offset)?;
-                                        }
-                                    }
+                                    error!("Unexpected action {:?} requested for suspend", action);
                                 }
                             }
                             Err(e) => error!("{:?} command failed: {:#}", cmd, e),
@@ -3187,7 +3213,7 @@ fn process_vm_request<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         }
     }
 
-    Ok((Some(response), suspend_requested, run_mode_opt))
+    Ok(VmRequestResult::new(Some(response), false))
 }
 
 fn process_vm_control_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
@@ -3200,44 +3226,16 @@ fn process_vm_control_event<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     match socket {
         TaggedControlTube::Vm(tube) => match tube.recv::<VmRequest>() {
             Ok(request) => {
-                let (response, suspend_requested, run_mode_opt) =
-                    process_vm_request(state, id, tube, request, &mut add_tubes)?;
+                let res = process_vm_request(state, id, tube, request, &mut add_tubes)?;
 
-                if let Some(response) = response {
-                    // If suspend requested skip that step since it will be
-                    // performed by s2idle_wait thread when suspension actually
-                    // happens.
-                    if !suspend_requested {
-                        if let Err(e) = tube.send(&response) {
-                            error!("failed to send VmResponse: {}", e);
-                        }
+                if let Some(response) = res.response {
+                    if let Err(e) = tube.send(&response) {
+                        error!("failed to send VmResponse: {}", e);
                     }
                 }
 
-                if let Some(run_mode) = run_mode_opt {
-                    info!("control socket changed run mode to {}", run_mode);
-                    match run_mode {
-                        VmRunMode::Exiting => {
-                            return Ok((true, Vec::new(), Vec::new()));
-                        }
-                        other => {
-                            if other == VmRunMode::Running {
-                                for dev in &state.linux.resume_notify_devices {
-                                    dev.lock().resume_imminent();
-                                }
-                            }
-                            // If suspend requested skip that step since it
-                            // will be performed by s2idle_wait thread when
-                            // needed.
-                            if !suspend_requested {
-                                vcpu::kick_all_vcpus(
-                                    state.vcpu_handles,
-                                    state.linux.irq_chip.as_irq_chip(),
-                                    VcpuControl::RunState(other),
-                                );
-                            }
-                        }
-                    }
+                if res.exit {
+                    return Ok((true, Vec::new(), Vec::new()));
                 }
             }
             Err(e) => {
