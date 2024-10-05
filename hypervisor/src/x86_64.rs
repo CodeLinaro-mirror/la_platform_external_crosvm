@@ -186,9 +186,9 @@ pub trait VcpuX86_64: Vcpu {
     ///
     /// It sets TSC_OFFSET (VMCS / CB field) by setting the TSC MSR to the current
     /// host TSC value plus the desired offset. We rely on the fact that hypervisors
-    /// determine the value of TSC_OFFSET by computing TSC_OFFSET = new_tsc_value
-    /// - _rdtsc() = _rdtsc() + offset - _rdtsc() ~= offset. Note that the ~= is
-    /// important: this is an approximate operation, because the two _rdtsc() calls
+    /// determine the value of TSC_OFFSET by computing TSC_OFFSET = `new_tsc_value - _rdtsc()` =
+    /// `_rdtsc() + offset - _rdtsc()` ~= `offset`. Note that the ~= is important: this is an
+    /// approximate operation, because the two _rdtsc() calls
     /// are separated by at least a few ticks.
     ///
     /// Note: TSC_OFFSET, host TSC, guest TSC, and TSC MSR are all different
@@ -808,7 +808,7 @@ impl Default for Regs {
 
 /// State of a memory segment.
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Segment {
     pub base: u64,
     /// Limit of the segment - always in bytes, regardless of granularity (`g`) field.

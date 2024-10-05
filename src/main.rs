@@ -37,9 +37,11 @@ use devices::virtio::vhost::user::device::run_snd_device;
 #[cfg(feature = "composite-disk")]
 use disk::create_composite_disk;
 #[cfg(feature = "composite-disk")]
-use disk::create_disk_file;
-#[cfg(feature = "composite-disk")]
 use disk::create_zero_filler;
+#[cfg(feature = "composite-disk")]
+use disk::open_disk_file;
+#[cfg(any(feature = "composite-disk", feature = "qcow"))]
+use disk::DiskFileParams;
 #[cfg(feature = "composite-disk")]
 use disk::ImagePartitionType;
 #[cfg(feature = "composite-disk")]
@@ -392,7 +394,6 @@ fn parse_composite_partition_arg(
 
 #[cfg(feature = "composite-disk")]
 fn create_composite(cmd: cmdline::CreateCompositeCommand) -> std::result::Result<(), ()> {
-    use std::fs::File;
     use std::path::PathBuf;
 
     let composite_image_path = &cmd.path;
@@ -449,17 +450,17 @@ fn create_composite(cmd: cmdline::CreateCompositeCommand) -> std::result::Result
         .map(|partition_arg| {
             let (label, path, writable, part_guid) = parse_composite_partition_arg(&partition_arg)?;
 
-            let partition_file =
-                File::open(&path).map_err(|e| error!("Failed to open partition image: {}", e))?;
-
             // Sparseness for composite disks is not user provided on Linux
             // (e.g. via an option), and it has no runtime effect.
-            let size = create_disk_file(
-                partition_file,
-                /* is_sparse_file= */ true,
-                disk::MAX_NESTING_DEPTH,
-                Path::new(&path),
-            )
+            let size = open_disk_file(DiskFileParams {
+                path: PathBuf::from(&path),
+                is_read_only: !writable,
+                is_sparse_file: true,
+                is_overlapped: false,
+                is_direct: false,
+                lock: true,
+                depth: 0,
+            })
             .map_err(|e| error!("Failed to create DiskFile instance: {}", e))?
             .get_len()
             .map_err(|e| error!("Failed to get length of partition image: {}", e))?;
@@ -496,6 +497,8 @@ fn create_composite(cmd: cmdline::CreateCompositeCommand) -> std::result::Result
 
 #[cfg(feature = "qcow")]
 fn create_qcow2(cmd: cmdline::CreateQcow2Command) -> std::result::Result<(), ()> {
+    use std::path::PathBuf;
+
     if !(cmd.size.is_some() ^ cmd.backing_file.is_some()) {
         println!(
             "Create a new QCOW2 image at `PATH` of either the specified `SIZE` in bytes or
@@ -514,17 +517,23 @@ fn create_qcow2(cmd: cmdline::CreateQcow2Command) -> std::result::Result<(), ()>
             error!("Failed opening qcow file at '{}': {}", cmd.file_path, e);
         })?;
 
+    let params = DiskFileParams {
+        path: PathBuf::from(&cmd.file_path),
+        is_read_only: false,
+        is_sparse_file: false,
+        is_overlapped: false,
+        is_direct: false,
+        lock: true,
+        depth: 0,
+    };
     match (cmd.size, cmd.backing_file) {
-        (Some(size), None) => QcowFile::new(file, size).map_err(|e| {
+        (Some(size), None) => QcowFile::new(file, params, size).map_err(|e| {
             error!("Failed to create qcow file at '{}': {}", cmd.file_path, e);
         })?,
-        (None, Some(backing_file)) => {
-            QcowFile::new_from_backing(file, &backing_file, disk::MAX_NESTING_DEPTH).map_err(
-                |e| {
-                    error!("Failed to create qcow file at '{}': {}", cmd.file_path, e);
-                },
-            )?
-        }
+        (None, Some(backing_file)) => QcowFile::new_from_backing(file, params, &backing_file)
+            .map_err(|e| {
+                error!("Failed to create qcow file at '{}': {}", cmd.file_path, e);
+            })?,
         _ => unreachable!(),
     };
     Ok(())
