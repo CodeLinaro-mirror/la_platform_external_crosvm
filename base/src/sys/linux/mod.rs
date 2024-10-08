@@ -552,8 +552,8 @@ pub fn open_file_or_duplicate<P: AsRef<Path>>(path: P, options: &OpenOptions) ->
     })
 }
 
-/// Get the max number of open files allowed by the environment.
-pub fn max_open_files() -> Result<u64> {
+/// Get the soft and hard limits of max number of open files allowed by the environment.
+pub fn max_open_files() -> Result<libc::rlimit64> {
     let mut buf = mem::MaybeUninit::<libc::rlimit64>::zeroed();
 
     // SAFETY:
@@ -563,7 +563,44 @@ pub fn max_open_files() -> Result<u64> {
         // SAFETY:
         // Safe because the kernel guarantees that the struct is fully initialized.
         let limit = unsafe { buf.assume_init() };
-        Ok(limit.rlim_max)
+        Ok(limit)
+    } else {
+        errno_result()
+    }
+}
+
+/// Executes the given callback with extended soft limit of max number of open files. After the
+/// callback executed, restore the limit.
+pub fn call_with_extended_max_files<T, E>(
+    callback: impl FnOnce() -> std::result::Result<T, E>,
+) -> Result<std::result::Result<T, E>> {
+    let cur_limit = max_open_files()?;
+    let new_limit = libc::rlimit64 {
+        rlim_cur: cur_limit.rlim_max,
+        ..cur_limit
+    };
+    let needs_extension = cur_limit.rlim_cur < new_limit.rlim_cur;
+    if needs_extension {
+        set_max_open_files(new_limit)?;
+    }
+
+    let r = callback();
+
+    // Restore the soft limit.
+    if needs_extension {
+        set_max_open_files(cur_limit)?;
+    }
+
+    Ok(r)
+}
+
+/// Set the soft and hard limits of max number of open files to the given value.
+fn set_max_open_files(limit: libc::rlimit64) -> Result<()> {
+    // SAFETY: RLIMIT_NOFILE is known only to read a buffer of size rlimit64, and we have always
+    // rlimit64 allocated.
+    let res = unsafe { libc::setrlimit64(libc::RLIMIT_NOFILE, &limit) };
+    if res == 0 {
+        Ok(())
     } else {
         errno_result()
     }

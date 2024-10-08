@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::bail;
 use anyhow::Context;
 use base::linux::max_open_files;
+use base::AsRawDescriptor;
 use base::RawDescriptor;
 use cros_async::Executor;
 use jail::create_base_minijail;
@@ -42,7 +43,9 @@ fn jail_and_fork(
     gid_map: Option<String>,
     disable_sandbox: bool,
 ) -> anyhow::Result<i32> {
-    let limit = max_open_files().context("failed to get max open files")?;
+    let limit = max_open_files()
+        .context("failed to get max open files")?
+        .rlim_max;
     // Create new minijail sandbox
     let jail = if disable_sandbox {
         create_base_minijail(dir_path.as_path(), limit)?
@@ -114,7 +117,8 @@ pub fn start_device(opts: Options) -> anyhow::Result<()> {
 
     let (listener, stream) = match (opts.socket, opts.fd) {
         (Some(socket), None) => {
-            let listener = VhostUserListener::new_socket(&socket, Some(&mut keep_rds))?;
+            let listener = VhostUserListener::new(&socket)?;
+            keep_rds.push(listener.as_raw_descriptor());
             (Some(listener), None)
         }
         (None, Some(fd)) => {
