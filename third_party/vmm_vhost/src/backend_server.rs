@@ -4,22 +4,20 @@
 use std::fs::File;
 use std::mem;
 
-use base::error;
 use base::AsRawDescriptor;
 use base::RawDescriptor;
+use base::SafeDescriptor;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::Ref;
 
 use crate::into_single_file;
 use crate::message::*;
-use crate::to_system_stream;
 use crate::BackendReq;
 use crate::Connection;
 use crate::Error;
 use crate::FrontendReq;
 use crate::Result;
-use crate::SystemStream;
 
 /// Trait for vhost-user backends.
 ///
@@ -77,8 +75,6 @@ pub trait Backend {
     ) -> Result<Option<File>>;
     fn check_device_state(&mut self) -> Result<()>;
     fn get_shared_memory_regions(&mut self) -> Result<Vec<VhostSharedMemoryRegion>>;
-    fn snapshot(&mut self) -> Result<Vec<u8>>;
-    fn restore(&mut self, data_bytes: &[u8]) -> Result<()>;
 }
 
 impl<T> Backend for T
@@ -215,14 +211,6 @@ where
     fn get_shared_memory_regions(&mut self) -> Result<Vec<VhostSharedMemoryRegion>> {
         self.as_mut().get_shared_memory_regions()
     }
-
-    fn snapshot(&mut self) -> Result<Vec<u8>> {
-        self.as_mut().snapshot()
-    }
-
-    fn restore(&mut self, data_bytes: &[u8]) -> Result<()> {
-        self.as_mut().restore(data_bytes)
-    }
 }
 
 /// Handles requests from a vhost-user connection by dispatching them to [[Backend]] methods.
@@ -239,13 +227,6 @@ pub struct BackendServer<S: Backend> {
 
     /// Sending ack for messages without payload.
     reply_ack_enabled: bool,
-}
-
-impl<S: Backend> BackendServer<S> {
-    /// Create a backend server from a connected socket.
-    pub fn from_stream(socket: SystemStream, backend: S) -> Self {
-        Self::new(Connection::from(socket), backend)
-    }
 }
 
 impl<S: Backend> AsRef<S> for BackendServer<S> {
@@ -669,21 +650,6 @@ impl<S: Backend> BackendServer<S> {
                 }
                 self.send_reply_with_payload(&hdr, &msg, buf.as_slice())?;
             }
-            Ok(FrontendReq::SNAPSHOT) => {
-                let (success_msg, payload) = match self.backend.snapshot() {
-                    Ok(snapshot_payload) => (VhostUserSuccess::new(true), snapshot_payload),
-                    Err(e) => {
-                        error!("Failed to snapshot: {}", e);
-                        (VhostUserSuccess::new(false), Vec::new())
-                    }
-                };
-                self.send_reply_with_payload(&hdr, &success_msg, payload.as_slice())?;
-            }
-            Ok(FrontendReq::RESTORE) => {
-                let res = self.backend.restore(buf.as_slice());
-                let msg = VhostUserSuccess::new(res.is_ok());
-                self.send_reply_message(&hdr, &msg)?;
-            }
             _ => {
                 return Err(Error::InvalidMessage);
             }
@@ -837,11 +803,9 @@ impl<S: Backend> BackendServer<S> {
 
     fn set_backend_req_fd(&mut self, files: Vec<File>) -> Result<()> {
         let file = into_single_file(files).ok_or(Error::InvalidMessage)?;
-        let fd = file.into();
-        // SAFETY: Safe because the protocol promises the file represents the appropriate file type
-        // for the platform.
-        let stream = unsafe { to_system_stream(fd) }?;
-        self.backend.set_backend_req_fd(Connection::from(stream));
+        let fd: SafeDescriptor = file.into();
+        let connection = Connection::try_from(fd).map_err(|_| Error::InvalidMessage)?;
+        self.backend.set_backend_req_fd(connection);
         Ok(())
     }
 
@@ -946,14 +910,12 @@ mod tests {
     use super::*;
     use crate::test_backend::TestBackend;
     use crate::Connection;
-    use crate::SystemStream;
 
     #[test]
     fn test_backend_server_new() {
-        let (p1, _p2) = SystemStream::pair().unwrap();
-        let connection = Connection::from(p1);
+        let (p1, _p2) = Connection::pair().unwrap();
         let backend = TestBackend::new();
-        let handler = BackendServer::new(connection, backend);
+        let handler = BackendServer::new(p1, backend);
 
         assert!(handler.as_raw_descriptor() != INVALID_DESCRIPTOR);
     }
