@@ -71,6 +71,27 @@ pub trait SharedMemoryMapper: Send {
 /// and all the events, memory, and queues for device operation will be moved into the device.
 /// Optionally, a virtio device can implement device reset in which it returns said resources and
 /// resets its internal.
+///
+/// Virtio device state machine
+/// ```none
+///                           restore (inactive)
+///       ----------------------------------------------------
+///       |                                                  |
+///       |                                                  V
+///       |                       ------------         --------------
+/// ------------- restore(active) |  asleep  |         |   asleep   |   // States in this row
+/// |asleep(new)|---------------> | (active) |         | (inactive) |   // can be snapshotted
+/// -------------                 ------------         --------------
+///    ^       |                     ^    |              ^      |
+///    |       |                     |    |              |      |
+///  sleep    wake                sleep  wake         sleep   wake
+///    |       |                     |    |              |      |
+///    |       V                     |    V              |      V
+///  ------------     activate     ----------  reset   ------------
+///  |    new   | ---------------> | active | ------>  | inactive |
+///  ------------                  ---------- <------  ------------
+///                                           activate
+/// ```
 pub trait VirtioDevice: Send {
     /// Returns a label suitable for debug output.
     fn debug_label(&self) -> String {
@@ -377,7 +398,11 @@ macro_rules! suspendable_virtio_tests {
                 device
                     .virtio_wake(Some((mem.clone(), interrupt.clone(), sleep_result)))
                     .expect("failed to wake");
+
+                // Create a new device to restore the previously taken snapshot
                 let (_ctx2, mut device) = $dev();
+                // Sleep the device before restore
+                assert!(device.virtio_sleep().expect("failed to sleep").is_none());
                 device
                     .virtio_restore(snap.clone())
                     .expect("failed to restore");
