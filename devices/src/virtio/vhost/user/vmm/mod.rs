@@ -25,6 +25,7 @@ mod scmi;
 mod glink_cma;
 mod i2c;
 mod frpc;
+mod ssr;
 
 pub use self::block::*;
 pub use self::console::*;
@@ -43,6 +44,7 @@ pub use self::scmi::*;
 pub use self::glink_cma::*;
 pub use self::i2c::*;
 pub use self::frpc::*;
+pub use self::ssr::*;
 
 use remain::sorted;
 use thiserror::Error as ThisError;
