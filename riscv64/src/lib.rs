@@ -198,6 +198,7 @@ impl arch::LinuxArch for Riscv64 {
         _guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         device_tree_overlays: Vec<DtbOverlay>,
         fdt_position: Option<FdtPosition>,
+        _no_pmu: bool,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmRiscv64,
@@ -424,8 +425,6 @@ impl arch::LinuxArch for Riscv64 {
             delay_rt: components.delay_rt,
             suspend_tube: (Arc::new(Mutex::new(suspend_tube_send)), suspend_tube_recv),
             bat_control: None,
-            #[cfg(feature = "gdb")]
-            gdb: components.gdb,
             pm: None,
             devices_thread: None,
             vm_request_tubes: Vec::new(),

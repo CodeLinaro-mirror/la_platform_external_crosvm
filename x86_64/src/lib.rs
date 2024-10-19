@@ -819,6 +819,7 @@ impl arch::LinuxArch for X8664arch {
         guest_suspended_cvar: Option<Arc<(Mutex<bool>, Condvar)>>,
         device_tree_overlays: Vec<DtbOverlay>,
         _fdt_position: Option<FdtPosition>,
+        _no_pmu: bool,
     ) -> std::result::Result<RunnableLinuxVm<V, Vcpu>, Self::Error>
     where
         V: VmX86_64,
@@ -1231,8 +1232,6 @@ impl arch::LinuxArch for X8664arch {
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
             bat_control,
-            #[cfg(feature = "gdb")]
-            gdb: components.gdb,
             pm: Some(acpi_dev_resource.pm),
             root_config: pci,
             #[cfg(any(target_os = "android", target_os = "linux"))]
