@@ -139,6 +139,10 @@ balloon = ["devices/balloon", "vm_control/balloon"]
 ## concatenate large file system images into a single disk image.
 composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
 
+## Enables virtiofs uid-gid mapping from the host side through command line when user-namespace
+## isn't available for non-root users. This format is supported only for vhost-user-fs.
+fs_runtime_ugid_map = ["devices/fs_runtime_ugid_map"]
+
 ## Enables support for JSON configuration files that can be specified using `--cfg`. See
 ## [Configuration Files](https://crosvm.dev/book/running_crosvm/options.html#configuration-files)
 ## for more information.
@@ -356,6 +360,7 @@ all-default = [
     "crash-report",
     "default",
     "ffmpeg",
+    "fs_runtime_ugid_map",
     "gdb",
     "geniezone",
     "gfxstream",
@@ -437,21 +442,22 @@ all-msvc64 = [ "all-mingw64" ]
 
 ## All features that are compiled and tested for android builds
 all-android = [
-        "android-sparse",
-        "audio",
-        "audio_aaudio",
-        "balloon",
-        "config-file",
-        "gdb",
-        "gdbstub",
-        "gdbstub_arch",
-        "geniezone",
-        "gunyah",
-        "libaaudio_stub",
-        "net",
-        "qcow",
-        "usb",
-        "composite-disk",
+    "android-sparse",
+    "audio",
+    "audio_aaudio",
+    "balloon",
+    "composite-disk",
+    "config-file",
+    "fs_runtime_ugid_map",
+    "gdb",
+    "gdbstub",
+    "gdbstub_arch",
+    "geniezone",
+    "gunyah",
+    "libaaudio_stub",
+    "net",
+    "qcow",
+    "usb",
 ]
 
 [dependencies]
