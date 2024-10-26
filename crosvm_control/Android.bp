@@ -56,4 +56,5 @@ rust_ffi_static {
     // doesn't actually exist.
     //
     // static_libs: ["libcrosvm_control_test"],
+    visibility: ["//packages/modules/Virtualization/android/virtmgr"],
 }
