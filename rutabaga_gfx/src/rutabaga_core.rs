@@ -15,7 +15,7 @@ use crate::cross_domain::CrossDomain;
 use crate::gfxstream::Gfxstream;
 use crate::rutabaga_2d::Rutabaga2D;
 use crate::rutabaga_os::MemoryMapping;
-use crate::rutabaga_os::SafeDescriptor;
+use crate::rutabaga_os::OwnedDescriptor;
 use crate::rutabaga_snapshot::RutabagaResourceSnapshot;
 use crate::rutabaga_snapshot::RutabagaSnapshot;
 use crate::rutabaga_utils::*;
@@ -85,7 +85,7 @@ pub trait RutabagaComponent {
 
     /// Used only by VirglRenderer to return a poll_descriptor that is signaled when a poll() is
     /// necessary.
-    fn poll_descriptor(&self) -> Option<SafeDescriptor> {
+    fn poll_descriptor(&self) -> Option<OwnedDescriptor> {
         None
     }
 
@@ -200,6 +200,11 @@ pub trait RutabagaComponent {
         Err(RutabagaError::Unsupported)
     }
 
+    /// Implementations should stop workers.
+    fn suspend(&self) -> RutabagaResult<()> {
+        Ok(())
+    }
+
     /// Implementations must snapshot to the specified directory
     fn snapshot(&self, _directory: &str) -> RutabagaResult<()> {
         Err(RutabagaError::Unsupported)
@@ -208,6 +213,11 @@ pub trait RutabagaComponent {
     /// Implementations must restore from the specified directory
     fn restore(&self, _directory: &str) -> RutabagaResult<()> {
         Err(RutabagaError::Unsupported)
+    }
+
+    /// Implementations should resume workers.
+    fn resume(&self) -> RutabagaResult<()> {
+        Ok(())
     }
 
     /// Implementations must perform a blocking wait-sync on the resource identified by resource_id
@@ -365,6 +375,15 @@ pub struct Rutabaga {
 }
 
 impl Rutabaga {
+    pub fn suspend(&self) -> RutabagaResult<()> {
+        let component = self
+            .components
+            .get(&self.default_component)
+            .ok_or(RutabagaError::InvalidComponent)?;
+
+        component.suspend()
+    }
+
     /// Take a snapshot of Rutabaga's current state. The snapshot is serialized into an opaque byte
     /// stream and written to `w`.
     pub fn snapshot(&self, w: &mut impl Write, directory: &str) -> RutabagaResult<()> {
@@ -474,6 +493,15 @@ impl Rutabaga {
         }
     }
 
+    pub fn resume(&self) -> RutabagaResult<()> {
+        let component = self
+            .components
+            .get(&self.default_component)
+            .ok_or(RutabagaError::InvalidComponent)?;
+
+        component.resume()
+    }
+
     fn capset_id_to_component_type(&self, capset_id: u32) -> RutabagaResult<RutabagaComponentType> {
         let component = self
             .capset_info
@@ -576,7 +604,7 @@ impl Rutabaga {
 
     /// Returns a pollable descriptor for the default rutabaga component. In practice, it is only
     /// not None if the default component is virglrenderer.
-    pub fn poll_descriptor(&self) -> Option<SafeDescriptor> {
+    pub fn poll_descriptor(&self) -> Option<OwnedDescriptor> {
         let component = self.components.get(&self.default_component).or(None)?;
         component.poll_descriptor()
     }
@@ -1179,7 +1207,7 @@ impl RutabagaBuilder {
     pub fn build(
         mut self,
         fence_handler: RutabagaFenceHandler,
-        #[allow(unused_variables)] rutabaga_server_descriptor: Option<SafeDescriptor>,
+        #[allow(unused_variables)] rutabaga_server_descriptor: Option<OwnedDescriptor>,
     ) -> RutabagaResult<Rutabaga> {
         let mut rutabaga_components: Map<RutabagaComponentType, Box<dyn RutabagaComponent>> =
             Default::default();
