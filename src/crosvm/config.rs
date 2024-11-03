@@ -822,11 +822,13 @@ pub struct Config {
     pub mmio_address_ranges: Vec<AddressRange>,
     #[cfg(target_arch = "aarch64")]
     pub mte: bool,
+    pub name: Option<String>,
     #[cfg(feature = "net")]
     pub net: Vec<NetParameters>,
     #[cfg(windows)]
     pub net_vhost_user_tube: Option<Tube>,
     pub no_i8042: bool,
+    pub no_pmu: bool,
     pub no_rtc: bool,
     pub no_smt: bool,
     pub params: Vec<String>,
@@ -1049,11 +1051,13 @@ impl Default for Config {
             mmio_address_ranges: Vec::new(),
             #[cfg(target_arch = "aarch64")]
             mte: false,
+            name: None,
             #[cfg(feature = "net")]
             net: Vec::new(),
             #[cfg(windows)]
             net_vhost_user_tube: None,
             no_i8042: false,
+            no_pmu: false,
             no_rtc: false,
             no_smt: false,
             params: Vec::new(),
