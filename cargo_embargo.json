@@ -96,6 +96,9 @@
       // For QCOM's crosvm fork.
       "//vendor:__subpackages__"
     ],
+    "libcrosvm_control_static": [
+      "//packages/modules/Virtualization/android/virtmgr"
+    ],
     "libdevices": [
       // For QCOM's crosvm fork.
       "//vendor:__subpackages__"
@@ -117,9 +120,6 @@
     "libsync_rust": [
       // For QCOM's crosvm fork.
       "//vendor:__subpackages__"
-    ],
-    "libvm_control": [
-      "//packages/modules/Virtualization/android/virtmgr"
     ],
     "libvm_memory": [
       // For QCOM's crosvm fork.
