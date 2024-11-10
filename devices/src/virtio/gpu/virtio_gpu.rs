@@ -109,6 +109,7 @@ struct VirtioGpuResourceSnapshot {
     size: u64,
 
     backing_iovecs: Option<Vec<(GuestAddress, usize)>>,
+    shmem_offset: Option<u64>,
 }
 
 impl VirtioGpuResource {
@@ -129,17 +130,17 @@ impl VirtioGpuResource {
     }
 
     fn snapshot(&self) -> VirtioGpuResourceSnapshot {
-        // Only the 2D backend is support and it doesn't use these fields.
-        assert!(self.shmem_offset.is_none());
+        // Only the 2D backend is fully supported and it doesn't use these fields. 3D is WIP.
         assert!(self.scanout_data.is_none());
         assert!(self.display_import.is_none());
-        assert_eq!(self.rutabaga_external_mapping, false);
+
         VirtioGpuResourceSnapshot {
             resource_id: self.resource_id,
             width: self.width,
             height: self.height,
             size: self.size,
             backing_iovecs: self.backing_iovecs.clone(),
+            shmem_offset: self.shmem_offset,
         }
     }
 
@@ -457,6 +458,7 @@ pub struct VirtioGpu {
     external_blob: bool,
     fixed_blob_mapping: bool,
     udmabuf_driver: Option<UdmabufDriver>,
+    deferred_snapshot_load: Option<VirtioGpuSnapshot>,
 }
 
 // Only the 2D mode is supported. Notes on `VirtioGpu` fields:
@@ -564,6 +566,7 @@ impl VirtioGpu {
             external_blob,
             fixed_blob_mapping,
             udmabuf_driver,
+            deferred_snapshot_load: None,
         })
     }
 
@@ -1288,6 +1291,12 @@ impl VirtioGpu {
         Ok(OkNoData)
     }
 
+    pub fn suspend(&self) -> anyhow::Result<()> {
+        self.rutabaga
+            .suspend()
+            .context("failed to suspend rutabaga")
+    }
+
     pub fn snapshot(&self) -> anyhow::Result<VirtioGpuSnapshot> {
         Ok(VirtioGpuSnapshot {
             scanouts: self
@@ -1312,45 +1321,60 @@ impl VirtioGpu {
         })
     }
 
-    pub fn restore(
-        &mut self,
-        snapshot: VirtioGpuSnapshot,
-        mem: &GuestMemory,
-    ) -> anyhow::Result<()> {
-        assert!(self.scanouts.keys().eq(snapshot.scanouts.keys()));
-        for (i, s) in snapshot.scanouts.into_iter() {
-            self.scanouts.get_mut(&i).unwrap().restore(
-                s,
-                // Only the cursor scanout can have a parent.
-                None,
-                &self.display,
-            )?;
-        }
-        self.scanouts_updated
-            .store(snapshot.scanouts_updated, Ordering::SeqCst);
+    pub fn restore(&mut self, snapshot: VirtioGpuSnapshot) -> anyhow::Result<()> {
+        self.deferred_snapshot_load = Some(snapshot);
+        Ok(())
+    }
 
-        let cursor_parent_surface_id = snapshot
-            .cursor_scanout
-            .parent_scanout_id
-            .and_then(|i| self.scanouts.get(&i).unwrap().surface_id);
-        self.cursor_scanout.restore(
-            snapshot.cursor_scanout,
-            cursor_parent_surface_id,
-            &self.display,
-        )?;
+    pub fn resume(&mut self, mem: &GuestMemory) -> anyhow::Result<()> {
+        if let Some(snapshot) = self.deferred_snapshot_load.take() {
+            assert!(self.scanouts.keys().eq(snapshot.scanouts.keys()));
+            for (i, s) in snapshot.scanouts.into_iter() {
+                self.scanouts
+                    .get_mut(&i)
+                    .unwrap()
+                    .restore(
+                        s,
+                        // Only the cursor scanout can have a parent.
+                        None,
+                        &self.display,
+                    )
+                    .context("failed to restore scanouts")?;
+            }
+            self.scanouts_updated
+                .store(snapshot.scanouts_updated, Ordering::SeqCst);
 
-        self.rutabaga
-            .restore(&mut &snapshot.rutabaga[..], "")
-            .context("failed to restore rutabaga")?;
+            let cursor_parent_surface_id = snapshot
+                .cursor_scanout
+                .parent_scanout_id
+                .and_then(|i| self.scanouts.get(&i).unwrap().surface_id);
+            self.cursor_scanout
+                .restore(
+                    snapshot.cursor_scanout,
+                    cursor_parent_surface_id,
+                    &self.display,
+                )
+                .context("failed to restore cursor scanout")?;
 
-        for (id, s) in snapshot.resources.into_iter() {
-            let backing_iovecs = s.backing_iovecs.clone();
-            self.resources.insert(id, VirtioGpuResource::restore(s));
-            if let Some(backing_iovecs) = backing_iovecs {
-                self.attach_backing(id, mem, backing_iovecs)?;
+            self.rutabaga
+                .restore(&mut &snapshot.rutabaga[..], "")
+                .context("failed to restore rutabaga")?;
+
+            for (id, s) in snapshot.resources.into_iter() {
+                let backing_iovecs = s.backing_iovecs.clone();
+                let shmem_offset = s.shmem_offset;
+                self.resources.insert(id, VirtioGpuResource::restore(s));
+                if let Some(backing_iovecs) = backing_iovecs {
+                    self.attach_backing(id, mem, backing_iovecs)
+                        .context("failed to restore resource backing")?;
+                }
+                if let Some(shmem_offset) = shmem_offset {
+                    self.resource_map_blob(id, shmem_offset)
+                        .context("failed to restore resource mapping")?;
+                }
             }
         }
 
-        Ok(())
+        self.rutabaga.resume().context("failed to resume rutabaga")
     }
 }
