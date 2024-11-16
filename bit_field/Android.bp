@@ -26,7 +26,7 @@ rust_test {
         unit_test: true,
     },
     edition: "2021",
-    rustlibs: ["libbit_field"],
+    rustlibs: ["libbit_field_crosvm"],
     proc_macros: ["libbit_field_derive"],
 }
 
@@ -44,12 +44,12 @@ rust_test {
         unit_test: true,
     },
     edition: "2021",
-    rustlibs: ["libbit_field"],
+    rustlibs: ["libbit_field_crosvm"],
     proc_macros: ["libbit_field_derive"],
 }
 
 rust_library {
-    name: "libbit_field",
+    name: "libbit_field_crosvm",
     defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "bit_field",

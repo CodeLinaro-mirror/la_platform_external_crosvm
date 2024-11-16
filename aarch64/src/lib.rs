@@ -19,6 +19,7 @@ use arch::DtbOverlay;
 use arch::FdtPosition;
 use arch::GetSerialCmdlineError;
 use arch::RunnableLinuxVm;
+use arch::SveConfig;
 use arch::VcpuAffinity;
 use arch::VmComponents;
 use arch::VmImage;
@@ -378,13 +379,23 @@ fn main_memory_size(components: &VmComponents, hypervisor: &(impl Hypervisor + ?
     main_memory_size
 }
 
+pub struct ArchMemoryLayout {}
+
 impl arch::LinuxArch for AArch64 {
     type Error = Error;
+    type ArchMemoryLayout = ArchMemoryLayout;
+
+    fn arch_memory_layout(
+        _components: &VmComponents,
+    ) -> std::result::Result<Self::ArchMemoryLayout, Self::Error> {
+        Ok(ArchMemoryLayout {})
+    }
 
     /// Returns a Vec of the valid memory addresses.
     /// These should be used to configure the GuestMemory structure for the platform.
     fn guest_memory_layout(
         components: &VmComponents,
+        _arch_memory_layout: &Self::ArchMemoryLayout,
         hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error> {
         let main_memory_size = main_memory_size(components, hypervisor);
@@ -417,7 +428,10 @@ impl arch::LinuxArch for AArch64 {
         Ok(memory_regions)
     }
 
-    fn get_system_allocator_config<V: Vm>(vm: &V) -> SystemAllocatorConfig {
+    fn get_system_allocator_config<V: Vm>(
+        vm: &V,
+        _arch_memory_layout: &Self::ArchMemoryLayout,
+    ) -> SystemAllocatorConfig {
         Self::get_resource_allocator_config(
             vm.get_memory().end_addr(),
             vm.get_guest_phys_addr_bits(),
@@ -426,6 +440,7 @@ impl arch::LinuxArch for AArch64 {
 
     fn build_vm<V, Vcpu>(
         mut components: VmComponents,
+        _arch_memory_layout: &Self::ArchMemoryLayout,
         _vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
@@ -562,8 +577,9 @@ impl arch::LinuxArch for AArch64 {
 
         // Initialize Vcpus after all Vcpu objects have been created.
         for (vcpu_id, vcpu) in vcpus.iter().enumerate() {
-            vcpu.init(&Self::vcpu_features(vcpu_id, use_pmu, components.boot_cpu))
-                .map_err(Error::VcpuInit)?;
+            let features =
+                &Self::vcpu_features(vcpu_id, use_pmu, components.boot_cpu, components.sve_config);
+            vcpu.init(features).map_err(Error::VcpuInit)?;
         }
 
         irq_chip.finalize().map_err(Error::FinalizeIrqChip)?;
@@ -1292,7 +1308,12 @@ impl AArch64 {
     ///
     /// * `vcpu_id` - The VM's index for `vcpu`.
     /// * `use_pmu` - Should `vcpu` be configured to use the Performance Monitor Unit.
-    fn vcpu_features(vcpu_id: usize, use_pmu: bool, boot_cpu: usize) -> Vec<VcpuFeature> {
+    fn vcpu_features(
+        vcpu_id: usize,
+        use_pmu: bool,
+        boot_cpu: usize,
+        sve: SveConfig,
+    ) -> Vec<VcpuFeature> {
         let mut features = vec![VcpuFeature::PsciV0_2];
         if use_pmu {
             features.push(VcpuFeature::PmuV3);
@@ -1300,6 +1321,9 @@ impl AArch64 {
         // Non-boot cpus are powered off initially
         if vcpu_id != boot_cpu {
             features.push(VcpuFeature::PowerOff);
+        }
+        if sve.enable {
+            features.push(VcpuFeature::Sve);
         }
 
         features
