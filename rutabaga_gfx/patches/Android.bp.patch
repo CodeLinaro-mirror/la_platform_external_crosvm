@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index c69e8a386..4964f3118 100644
+index ab64209dd..1795150d6 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,7 +10,7 @@ index c69e8a386..4964f3118 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -35,16 +34,78 @@ rust_library {
+@@ -37,16 +36,80 @@ rust_library {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
@@ -61,6 +61,8 @@ index c69e8a386..4964f3118 100644
 +        "liblibc",
 +        "liblog_rust",
 +        "libnix",
++        "libserde",
++        "libserde_json",
 +        "libthiserror",
 +        "libzerocopy",
 +    ],
@@ -93,7 +95,7 @@ index c69e8a386..4964f3118 100644
  rust_test {
      name: "rutabaga_gfx_test_src_lib",
      defaults: ["crosvm_inner_defaults"],
-@@ -61,7 +122,6 @@ rust_test {
+@@ -63,7 +126,6 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
@@ -101,7 +103,7 @@ index c69e8a386..4964f3118 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -73,12 +133,9 @@ rust_test {
+@@ -77,12 +139,9 @@ rust_test {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
