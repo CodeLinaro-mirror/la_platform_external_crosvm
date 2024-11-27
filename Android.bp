@@ -329,7 +329,6 @@ rust_defaults {
         },
     },
     apex_available: [
-	"//apex_available:platform",
         "com.android.virt",
     ],
     defaults_visibility: [
@@ -338,7 +337,6 @@ rust_defaults {
         "//packages/modules/Virtualization/tests/authfs",
         // For QCOM's crosvm fork.
         "//vendor:__subpackages__",
-        "//external/libchromeos-rs",
     ],
 }
 
