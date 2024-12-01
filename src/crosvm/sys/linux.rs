@@ -724,6 +724,19 @@ fn create_virtio_devices(
         }
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(feature = "media")]
+    {
+        for v4l2_device in &cfg.v4l2_proxy {
+            devs.push(create_v4l2_device(cfg.protection_type, v4l2_device)?);
+        }
+    }
+
+    #[cfg(feature = "media")]
+    if cfg.simple_media_device {
+        devs.push(create_simple_media_device(cfg.protection_type)?);
+    }
+
     #[cfg(feature = "video-decoder")]
     {
         for (tube, backend) in video_dec_cfg {
@@ -1485,10 +1498,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         #[cfg(target_arch = "x86_64")]
         force_s2idle: cfg.force_s2idle,
         pvm_fw: pvm_fw_image,
-        #[cfg(target_arch = "x86_64")]
-        pcie_ecam: cfg.pcie_ecam,
-        #[cfg(target_arch = "x86_64")]
-        pci_low_start: cfg.pci_low_start,
+        pci_config: cfg.pci_config,
         dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
         boot_cpu: cfg.boot_cpu,
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -1678,6 +1688,9 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
     }
 
     // Check that the VM was actually created in protected mode as expected.
+    // This check is only needed on aarch64. On x86_64, protected VM creation will fail
+    // if protected mode is not supported.
+    #[cfg(not(target_arch = "x86_64"))]
     if cfg.protection_type.isolates_memory() && !vm.check_capability(VmCap::Protected) {
         bail!("Failed to create protected VM");
     }

@@ -10,7 +10,7 @@ index ab64209dd..1795150d6 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -37,16 +36,80 @@ rust_library {
+@@ -37,16 +36,82 @@ rust_library {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
@@ -70,6 +70,7 @@ index ab64209dd..1795150d6 100644
 +    target: {
 +        host: {
 +            cfgs: [
++                "fence_passing_option1",
 +                "gfxstream_unstable",
 +            ],
 +            features: [
@@ -86,6 +87,7 @@ index ab64209dd..1795150d6 100644
 +        },
 +        android: {
 +            cfgs: [
++                "fence_passing_option1",
 +                "gfxstream_unstable",
 +            ],
 +        },

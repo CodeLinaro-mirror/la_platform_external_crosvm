@@ -19,7 +19,6 @@ mod rutabaga_2d;
 mod rutabaga_core;
 mod rutabaga_gralloc;
 mod rutabaga_os;
-mod rutabaga_snapshot;
 mod rutabaga_utils;
 mod virgl_renderer;
 
@@ -54,6 +53,7 @@ pub mod kumquat_support {
     pub use crate::rutabaga_os::Tube as RutabagaTube;
     pub use crate::rutabaga_os::TubeType as RutabagaTubeType;
     pub use crate::rutabaga_os::WaitContext as RutabagaWaitContext;
+    pub use crate::rutabaga_os::WaitTimeout as RutabagaWaitTimeout;
     pub use crate::rutabaga_os::WritePipe as RutabagaWritePipe;
     pub use crate::rutabaga_os::DEFAULT_RAW_DESCRIPTOR as RUTABAGA_DEFAULT_RAW_DESCRIPTOR;
 }
