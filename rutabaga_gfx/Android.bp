@@ -88,6 +88,7 @@ rust_library {
     target: {
         host: {
             cfgs: [
+                "fence_passing_option1",
                 "gfxstream_unstable",
             ],
             features: [
@@ -104,6 +105,7 @@ rust_library {
         },
         android: {
             cfgs: [
+                "fence_passing_option1",
                 "gfxstream_unstable",
             ],
         },

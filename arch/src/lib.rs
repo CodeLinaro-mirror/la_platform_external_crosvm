@@ -68,8 +68,6 @@ use jail::FakeMinijailStub as Minijail;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use minijail::Minijail;
 use remain::sorted;
-#[cfg(target_arch = "x86_64")]
-use resources::AddressRange;
 use resources::SystemAllocator;
 use resources::SystemAllocatorConfig;
 use serde::de::Visitor;
@@ -343,6 +341,26 @@ pub enum VcpuAffinity {
     PerVcpu(BTreeMap<usize, CpuSet>),
 }
 
+/// Memory region with optional size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, FromKeyValues)]
+pub struct MemoryRegionConfig {
+    pub start: u64,
+    pub size: Option<u64>,
+}
+
+/// General PCI config.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromKeyValues)]
+pub struct PciConfig {
+    /// region for PCI Configuration Access Mechanism
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub cam: Option<MemoryRegionConfig>,
+    /// region for PCIe Enhanced Configuration Access Mechanism
+    #[cfg(target_arch = "x86_64")]
+    pub ecam: Option<MemoryRegionConfig>,
+    /// region for non-prefetchable PCI device memory below 4G
+    pub mem: Option<MemoryRegionConfig>,
+}
+
 /// Holds the pieces needed to build a VM. Passed to `build_vm` in the `LinuxArch` trait below to
 /// create a `RunnableLinuxVm`.
 #[sorted]
@@ -383,10 +401,7 @@ pub struct VmComponents {
         any(target_os = "android", target_os = "linux")
     ))]
     pub normalized_cpu_capacities: BTreeMap<usize, u32>,
-    #[cfg(target_arch = "x86_64")]
-    pub pci_low_start: Option<u64>,
-    #[cfg(target_arch = "x86_64")]
-    pub pcie_ecam: Option<AddressRange>,
+    pub pci_config: PciConfig,
     pub pflash_block_size: u32,
     pub pflash_image: Option<File>,
     pub pstore: Option<Pstore>,
