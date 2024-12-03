@@ -42,7 +42,6 @@ rust_library {
     shared_libs: [
         "libc++",
         "libbase",
-        "libgfxstream_backend",
     ],
     target: {
         android: {
@@ -61,6 +60,7 @@ rust_library {
     },
     static_libs: [
         "libepoxy",
+        "libgfxstream_backend",
         "libvirglrenderer",
     ],
 }

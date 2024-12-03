@@ -45,5 +45,4 @@ rust_library {
         "libserde",
         "libzerocopy",
     ],
-    visibility: ["//external/libchromeos-rs"],
 }
