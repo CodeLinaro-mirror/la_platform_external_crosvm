@@ -5,7 +5,6 @@ rust_protobuf {
     source_stem: "cdisk_spec",
     host_supported: true,
     apex_available: [
-        "//apex_available:platform",
         "com.android.virt",
     ],
 }
@@ -17,7 +16,6 @@ rust_protobuf {
     source_stem: "registered_events",
     host_supported: true,
     apex_available: [
-        "//apex_available:platform",
         "com.android.virt",
     ],
 }
