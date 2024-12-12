@@ -115,7 +115,7 @@ rust_binary {
         "libvm_control",
         "libvm_memory",
         "libvmm_vhost",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libargh_helpers",
@@ -261,7 +261,7 @@ rust_test {
         "libvm_control",
         "libvm_memory",
         "libvmm_vhost",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libargh_helpers",

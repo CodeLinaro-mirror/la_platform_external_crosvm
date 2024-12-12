@@ -31,7 +31,7 @@ rust_test {
         "libdata_model",
         "libkvm_sys",
         "liblibc",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -48,6 +48,6 @@ rust_library {
         "libbase_rust",
         "libdata_model",
         "liblibc",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
