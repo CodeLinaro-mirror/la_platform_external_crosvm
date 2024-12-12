@@ -29,7 +29,7 @@ rust_library {
         "libsync_rust",
         "libthiserror",
         "libusb_sys",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
 }
@@ -56,7 +56,7 @@ rust_test {
         "libsync_rust",
         "libthiserror",
         "libusb_sys",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
 }

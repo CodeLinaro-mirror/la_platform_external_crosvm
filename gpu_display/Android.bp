@@ -41,7 +41,7 @@ rust_library {
         "libsync_rust",
         "libthiserror",
         "libvm_control",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
     static_libs: ["libdisplay_wl"],
