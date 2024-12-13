@@ -1225,7 +1225,6 @@ dependencies = [
  "uuid",
  "walkdir",
  "zerocopy",
- "zerocopy-derive",
 ]
 
 [[package]]
