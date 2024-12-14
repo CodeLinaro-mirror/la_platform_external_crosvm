@@ -94,6 +94,7 @@ fn build_and_probe_minigbm(out_dir: &Path) -> Result<()> {
         .env("MAKEFLAGS", make_flags)
         .env("VERBOSE", "1")
         .env("CROSS_COMPILE", get_cross_compile_prefix())
+        .env("PKG_CONFIG", "pkg-config")
         .arg(format!("OUT={}", out_dir.display()))
         .arg("CC_STATIC_LIBRARY(libminigbm.pie.a)")
         .current_dir(SOURCE_DIR)
@@ -278,8 +279,10 @@ fn gfxstream() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    println!("cargo:rustc-check-cfg=cfg(fence_passing_option1)");
     println!("cargo:rustc-check-cfg=cfg(gfxstream_unstable)");
     println!("cargo:rustc-check-cfg=cfg(virgl_renderer_unstable)");
+    let mut use_fence_passing_option1 = true;
 
     // Skip installing dependencies when generating documents.
     if env::var("CARGO_DOC").is_ok() {
@@ -292,12 +295,17 @@ fn main() -> Result<()> {
 
     if env::var("CARGO_FEATURE_VIRGL_RENDERER").is_ok() {
         virglrenderer()?;
+        use_fence_passing_option1 = false;
     }
 
     if env::var("CARGO_FEATURE_GFXSTREAM").is_ok()
         && env::var("CARGO_FEATURE_GFXSTREAM_STUB").is_err()
     {
         gfxstream()?;
+    }
+
+    if use_fence_passing_option1 {
+        println!("cargo:rustc-cfg=fence_passing_option1");
     }
 
     Ok(())

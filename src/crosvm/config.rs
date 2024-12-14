@@ -14,6 +14,7 @@ use std::time::Duration;
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
 use arch::FdtPosition;
+use arch::PciConfig;
 use arch::Pstore;
 #[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
@@ -81,14 +82,6 @@ cfg_if::cfg_if! {
         use base::{Event, Tube};
     }
 }
-
-#[cfg(target_arch = "x86_64")]
-const ONE_MB: u64 = 1 << 20;
-#[cfg(target_arch = "x86_64")]
-const MB_ALIGNED: u64 = ONE_MB - 1;
-// the max bus number is 256 and each bus occupy 1MB, so the max pcie cfg mmio size = 256M
-#[cfg(target_arch = "x86_64")]
-const MAX_PCIE_ECAM_SIZE: u64 = ONE_MB * 256;
 
 // by default, if enabled, the balloon WS features will use 4 bins.
 #[cfg(feature = "balloon")]
@@ -386,6 +379,11 @@ pub enum InputDeviceOption {
         height: Option<u32>,
         name: Option<String>,
     },
+    #[serde(rename_all = "kebab-case")]
+    Custom {
+        path: PathBuf,
+        config_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, FromKeyValues)]
@@ -472,63 +470,6 @@ pub fn parse_serial_options(s: &str) -> Result<SerialParameters, String> {
     validate_serial_parameters(&params)?;
 
     Ok(params)
-}
-
-#[cfg(target_arch = "x86_64")]
-pub fn parse_memory_region(value: &str) -> Result<AddressRange, String> {
-    let paras: Vec<&str> = value.split(',').collect();
-    if paras.len() != 2 {
-        return Err(invalid_value_err(
-            value,
-            "pcie-ecam must have exactly 2 parameters: ecam_base,ecam_size",
-        ));
-    }
-    let base = parse_hex_or_decimal(paras[0]).map_err(|_| {
-        invalid_value_err(
-            value,
-            "pcie-ecam, the first parameter base should be integer",
-        )
-    })?;
-    let mut len = parse_hex_or_decimal(paras[1]).map_err(|_| {
-        invalid_value_err(
-            value,
-            "pcie-ecam, the second parameter size should be integer",
-        )
-    })?;
-
-    if (base & MB_ALIGNED != 0) || (len & MB_ALIGNED != 0) {
-        return Err(invalid_value_err(
-            value,
-            "pcie-ecam, the base and len should be aligned to 1MB",
-        ));
-    }
-
-    if len > MAX_PCIE_ECAM_SIZE {
-        len = MAX_PCIE_ECAM_SIZE;
-    }
-
-    if base + len >= 0x1_0000_0000 {
-        return Err(invalid_value_err(
-            value,
-            "pcie-ecam, the end address couldn't beyond 4G",
-        ));
-    }
-
-    if base % len != 0 {
-        return Err(invalid_value_err(
-            value,
-            "pcie-ecam, base should be multiple of len",
-        ));
-    }
-
-    if let Some(range) = AddressRange::from_start_and_size(base, len) {
-        Ok(range)
-    } else {
-        Err(invalid_value_err(
-            value,
-            "pcie-ecam must be representable as AddressRange",
-        ))
-    }
 }
 
 pub fn parse_bus_id_addr(v: &str) -> Result<(u8, u8, u16, u16), String> {
@@ -838,12 +779,9 @@ pub struct Config {
     pub no_rtc: bool,
     pub no_smt: bool,
     pub params: Vec<String>,
+    pub pci_config: PciConfig,
     #[cfg(feature = "pci-hotplug")]
     pub pci_hotplug_slots: Option<u8>,
-    #[cfg(target_arch = "x86_64")]
-    pub pci_low_start: Option<u64>,
-    #[cfg(target_arch = "x86_64")]
-    pub pcie_ecam: Option<AddressRange>,
     pub per_vm_core_scheduling: bool,
     pub pflash_parameters: Option<PflashParameters>,
     #[cfg(feature = "plugin")]
@@ -881,6 +819,8 @@ pub struct Config {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[serde(skip)]
     pub shared_dirs: Vec<SharedDir>,
+    #[cfg(feature = "media")]
+    pub simple_media_device: bool,
     #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
     pub slirp_capture_file: Option<String>,
     #[cfg(target_arch = "x86_64")]
@@ -901,6 +841,9 @@ pub struct Config {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub unmap_guest_memory_on_fork: bool,
     pub usb: bool,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(feature = "media")]
+    pub v4l2_proxy: Vec<PathBuf>,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_cgroup_path: Option<PathBuf>,
     pub vcpu_count: Option<usize>,
@@ -1071,12 +1014,9 @@ impl Default for Config {
             no_rtc: false,
             no_smt: false,
             params: Vec::new(),
+            pci_config: Default::default(),
             #[cfg(feature = "pci-hotplug")]
             pci_hotplug_slots: None,
-            #[cfg(target_arch = "x86_64")]
-            pci_low_start: None,
-            #[cfg(target_arch = "x86_64")]
-            pcie_ecam: None,
             per_vm_core_scheduling: false,
             pflash_parameters: None,
             #[cfg(feature = "plugin")]
@@ -1107,6 +1047,8 @@ impl Default for Config {
             service_pipe_name: None,
             #[cfg(any(target_os = "android", target_os = "linux"))]
             shared_dirs: Vec::new(),
+            #[cfg(feature = "media")]
+            simple_media_device: Default::default(),
             #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             slirp_capture_file: None,
             #[cfg(target_arch = "x86_64")]
@@ -1159,6 +1101,9 @@ impl Default for Config {
             virtio_input: Vec::new(),
             #[cfg(feature = "audio")]
             virtio_snds: Vec::new(),
+            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(feature = "media")]
+            v4l2_proxy: Vec::new(),
             #[cfg(feature = "vtpm")]
             vtpm_proxy: false,
             wayland_socket_paths: BTreeMap::new(),
@@ -1422,6 +1367,13 @@ mod tests {
     use uuid::uuid;
 
     use super::*;
+
+    fn config_from_args(args: &[&str]) -> Config {
+        crate::crosvm::cmdline::RunCommand::from_args(&[], args)
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
 
     #[test]
     fn parse_cpu_opts() {
@@ -2487,6 +2439,80 @@ mod tests {
             InputDeviceOption::Rotary {
                 path: PathBuf::from("/dev/rotary-test")
             }
+        );
+    }
+
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[test]
+    fn parse_pci_cam() {
+        assert_eq!(
+            config_from_args(&["--pci", "cam=[start=0x123]", "/dev/null"]).pci_config,
+            PciConfig {
+                cam: Some(arch::MemoryRegionConfig {
+                    start: 0x123,
+                    size: None,
+                }),
+                ..PciConfig::default()
+            }
+        );
+        assert_eq!(
+            config_from_args(&["--pci", "cam=[start=0x123,size=0x456]", "/dev/null"]).pci_config,
+            PciConfig {
+                cam: Some(arch::MemoryRegionConfig {
+                    start: 0x123,
+                    size: Some(0x456),
+                }),
+                ..PciConfig::default()
+            },
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn parse_pci_ecam() {
+        assert_eq!(
+            config_from_args(&["--pci", "ecam=[start=0x123]", "/dev/null"]).pci_config,
+            PciConfig {
+                ecam: Some(arch::MemoryRegionConfig {
+                    start: 0x123,
+                    size: None,
+                }),
+                ..PciConfig::default()
+            }
+        );
+        assert_eq!(
+            config_from_args(&["--pci", "ecam=[start=0x123,size=0x456]", "/dev/null"]).pci_config,
+            PciConfig {
+                ecam: Some(arch::MemoryRegionConfig {
+                    start: 0x123,
+                    size: Some(0x456),
+                }),
+                ..PciConfig::default()
+            },
+        );
+    }
+
+    #[test]
+    fn parse_pci_mem() {
+        assert_eq!(
+            config_from_args(&["--pci", "mem=[start=0x123]", "/dev/null"]).pci_config,
+            PciConfig {
+                mem: Some(arch::MemoryRegionConfig {
+                    start: 0x123,
+                    size: None,
+                }),
+                ..PciConfig::default()
+            }
+        );
+        assert_eq!(
+            config_from_args(&["--pci", "mem=[start=0x123,size=0x456]", "/dev/null"]).pci_config,
+            PciConfig {
+                mem: Some(arch::MemoryRegionConfig {
+                    start: 0x123,
+                    size: Some(0x456),
+                }),
+                ..PciConfig::default()
+            },
         );
     }
 
