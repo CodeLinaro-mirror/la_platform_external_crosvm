@@ -2,14 +2,14 @@ diff --git a/gpu_display/Android.bp b/gpu_display/Android.bp
 index dc5db8549..18a04722e 100644
 --- a/gpu_display/Android.bp
 +++ b/gpu_display/Android.bp
-@@ -27,7 +27,6 @@ rust_library {
+@@ -29,7 +29,6 @@ rust_library {
      edition: "2021",
      features: [
          "android_display",
 -        "android_display_stub",
+         "gfxstream",
      ],
      rustlibs: [
-         "libanyhow",
 @@ -43,7 +42,26 @@ rust_library {
      ],
      proc_macros: ["libremain"],

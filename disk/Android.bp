@@ -32,6 +32,7 @@ rust_test {
         "qcow",
     ],
     rustlibs: [
+        "libanyhow",
         "libbase_rust",
         "libcfg_if",
         "libcrc32fast", // Added manually
@@ -70,6 +71,7 @@ rust_library {
         "qcow",
     ],
     rustlibs: [
+        "libanyhow",
         "libbase_rust",
         "libcfg_if",
         "libcrc32fast", // Added manually

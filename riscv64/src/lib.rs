@@ -134,7 +134,9 @@ pub enum Error {
     InitrdLoadFailure(arch::LoadImageError),
     #[error("kernel could not be loaded: {0}")]
     KernelLoadFailure(arch::LoadImageError),
-    #[error("protected vms not supported on riscv(yet)")]
+    #[error("PCI mem region not configurable on riscv (yet)")]
+    PciMemNotConfigurable,
+    #[error("protected vms not supported on riscv (yet)")]
     ProtectedVmUnsupported,
     #[error("ramoops address is different from high_mmio_base: {0} vs {1}")]
     RamoopsAddress(u64, u64),
@@ -167,8 +169,11 @@ impl arch::LinuxArch for Riscv64 {
     type ArchMemoryLayout = ArchMemoryLayout;
 
     fn arch_memory_layout(
-        _components: &VmComponents,
+        components: &VmComponents,
     ) -> std::result::Result<Self::ArchMemoryLayout, Self::Error> {
+        if components.pci_config.mem.is_some() {
+            return Err(Error::PciMemNotConfigurable);
+        }
         Ok(ArchMemoryLayout {})
     }
 
@@ -190,7 +195,17 @@ impl arch::LinuxArch for Riscv64 {
         vm: &V,
         _arch_memory_layout: &Self::ArchMemoryLayout,
     ) -> SystemAllocatorConfig {
-        get_resource_allocator_config(vm.get_memory().memory_size(), vm.get_guest_phys_addr_bits())
+        let (high_mmio_base, high_mmio_size) =
+            get_high_mmio_base_size(vm.get_memory().memory_size(), vm.get_guest_phys_addr_bits());
+        SystemAllocatorConfig {
+            io: None,
+            low_mmio: AddressRange::from_start_and_size(RISCV64_MMIO_BASE, RISCV64_MMIO_SIZE)
+                .expect("invalid mmio region"),
+            high_mmio: AddressRange::from_start_and_size(high_mmio_base, high_mmio_size)
+                .expect("invalid high mmio region"),
+            platform_mmio: None,
+            first_irq: RISCV64_IRQ_BASE,
+        }
     }
 
     fn build_vm<V, Vcpu>(
@@ -566,23 +581,4 @@ fn get_base_linux_cmdline() -> kernel_cmdline::Cmdline {
     let mut cmdline = kernel_cmdline::Cmdline::new();
     cmdline.insert_str("panic=-1").unwrap();
     cmdline
-}
-
-/// Returns a system resource allocator coniguration.
-///
-/// # Arguments
-///
-/// * `mem_size` - Size of guest memory (RAM) in bytes.
-/// * `guest_phys_addr_bits` - Size of guest physical addresses (IPA) in bits.
-fn get_resource_allocator_config(mem_size: u64, guest_phys_addr_bits: u8) -> SystemAllocatorConfig {
-    let (high_mmio_base, high_mmio_size) = get_high_mmio_base_size(mem_size, guest_phys_addr_bits);
-    SystemAllocatorConfig {
-        io: None,
-        low_mmio: AddressRange::from_start_and_size(RISCV64_MMIO_BASE, RISCV64_MMIO_SIZE)
-            .expect("invalid mmio region"),
-        high_mmio: AddressRange::from_start_and_size(high_mmio_base, high_mmio_size)
-            .expect("invalid high mmio region"),
-        platform_mmio: None,
-        first_irq: RISCV64_IRQ_BASE,
-    }
 }
