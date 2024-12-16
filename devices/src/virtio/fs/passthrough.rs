@@ -9,6 +9,8 @@ use std::collections::btree_map;
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::ffi::CString;
+#[cfg(feature = "fs_runtime_ugid_map")]
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::mem;
@@ -16,6 +18,10 @@ use std::mem::size_of;
 use std::mem::MaybeUninit;
 use std::os::raw::c_int;
 use std::os::raw::c_long;
+#[cfg(feature = "fs_runtime_ugid_map")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(feature = "fs_runtime_ugid_map")]
+use std::path::Path;
 use std::ptr;
 use std::ptr::addr_of;
 use std::ptr::addr_of_mut;
@@ -92,10 +98,9 @@ use crate::virtio::fs::expiring_map::ExpiringMap;
 use crate::virtio::fs::multikey::MultikeyBTreeMap;
 use crate::virtio::fs::read_dir::ReadDir;
 
-const EMPTY_CSTR: &[u8] = b"\0";
-const ROOT_CSTR: &[u8] = b"/\0";
-const PROC_CSTR: &[u8] = b"/proc\0";
-const UNLABELED_CSTR: &[u8] = b"unlabeled\0";
+const EMPTY_CSTR: &CStr = c"";
+const PROC_CSTR: &CStr = c"/proc";
+const UNLABELED_CSTR: &CStr = c"unlabeled";
 
 const USER_VIRTIOFS_XATTR: &[u8] = b"user.virtiofs.";
 const SECURITY_XATTR: &[u8] = b"security.";
@@ -377,8 +382,7 @@ thread_local!(static THREAD_FSCREATE: RefCell<Option<File>> = const { RefCell::n
 // Opens and returns a write-only handle to /proc/thread-self/attr/fscreate. Panics if it fails to
 // open the file.
 fn open_fscreate(proc: &File) -> File {
-    // SAFETY: This string is nul-terminated and does not contain any interior nul bytes
-    let fscreate = unsafe { CStr::from_bytes_with_nul_unchecked(b"thread-self/attr/fscreate\0") };
+    let fscreate = c"thread-self/attr/fscreate";
 
     // SAFETY: this doesn't modify any memory and we check the return value.
     let raw_descriptor = unsafe {
@@ -512,14 +516,11 @@ fn eexist() -> io::Error {
 fn stat<F: AsRawDescriptor + ?Sized>(f: &F) -> io::Result<libc::stat64> {
     let mut st: MaybeUninit<libc::stat64> = MaybeUninit::<libc::stat64>::zeroed();
 
-    // SAFETY: this is a constant value that is a nul-terminated string without interior nul bytes.
-    let pathname = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
-
     // SAFETY: the kernel will only write data in `st` and we check the return value.
     syscall!(unsafe {
         libc::fstatat64(
             f.as_raw_descriptor(),
-            pathname.as_ptr(),
+            EMPTY_CSTR.as_ptr(),
             st.as_mut_ptr(),
             libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
         )
@@ -730,6 +731,16 @@ pub struct PassthroughFs {
     xattr_paths: RwLock<Vec<XattrData>>,
 
     cfg: Config,
+
+    // Set the root directory when pivot root isn't enabled for jailed process.
+    //
+    // virtio-fs typically uses mount namespaces and pivot_root for file system isolation,
+    // making the jailed process's root directory "/".
+    //
+    // However, Android's security model prevents crosvm from having the necessary SYS_ADMIN
+    // capability for mount namespaces and pivot_root. This lack of isolation means that
+    // root_dir defaults to the path provided via "--shared-dir".
+    root_dir: String,
 }
 
 impl std::fmt::Debug for PassthroughFs {
@@ -749,15 +760,11 @@ impl std::fmt::Debug for PassthroughFs {
 
 impl PassthroughFs {
     pub fn new(tag: &str, cfg: Config) -> io::Result<PassthroughFs> {
-        // SAFETY: this is a constant value that is a nul-terminated string without interior
-        // nul bytes.
-        let proc_cstr = unsafe { CStr::from_bytes_with_nul_unchecked(PROC_CSTR) };
-
         // SAFETY: this doesn't modify any memory and we check the return value.
         let raw_descriptor = syscall!(unsafe {
             libc::openat64(
                 libc::AT_FDCWD,
-                proc_cstr.as_ptr(),
+                PROC_CSTR.as_ptr(),
                 libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         })?;
@@ -813,6 +820,7 @@ impl PassthroughFs {
             #[cfg(feature = "arc_quota")]
             xattr_paths: RwLock::new(Vec::new()),
             cfg,
+            root_dir: "/".to_string(),
         };
 
         #[cfg(feature = "fs_runtime_ugid_map")]
@@ -835,6 +843,21 @@ impl PassthroughFs {
                 .expect("Failed to acquire write lock on permission_paths");
             *write_lock = self.cfg.ugid_map.clone();
         }
+    }
+
+    #[cfg(feature = "fs_runtime_ugid_map")]
+    pub fn set_root_dir(&mut self, shared_dir: String) -> io::Result<()> {
+        let canonicalized_root = match std::fs::canonicalize(shared_dir) {
+            Ok(path) => path,
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Failed to canonicalize root_dir: {}", e),
+                ));
+            }
+        };
+        self.root_dir = canonicalized_root.to_string_lossy().to_string();
+        Ok(())
     }
 
     pub fn cfg(&self) -> &Config {
@@ -1704,9 +1727,12 @@ impl PassthroughFs {
 
 #[cfg(feature = "fs_runtime_ugid_map")]
 impl PassthroughFs {
-    /// Set permission according to path
-    fn set_ugid_permission(&self, st: &mut libc::stat64, path: &str) {
-        let is_root_path = path.is_empty();
+    fn find_and_set_ugid_permission(
+        &self,
+        st: &mut libc::stat64,
+        path: &str,
+        is_root_path: bool,
+    ) -> bool {
         for perm_data in self
             .permission_paths
             .read()
@@ -1718,11 +1744,35 @@ impl PassthroughFs {
                     && perm_data.perm_path != "/"
                     && perm_data.need_set_permission(path))
             {
-                st.st_uid = perm_data.guest_uid;
-                st.st_gid = perm_data.guest_gid;
-                st.st_mode = (st.st_mode & libc::S_IFMT) | (0o777 & !perm_data.umask);
-                return;
+                self.set_permission_from_data(st, perm_data);
+                return true;
             }
+        }
+        false
+    }
+
+    fn set_permission_from_data(&self, st: &mut libc::stat64, perm_data: &PermissionData) {
+        st.st_uid = perm_data.guest_uid;
+        st.st_gid = perm_data.guest_gid;
+        st.st_mode = (st.st_mode & libc::S_IFMT) | (0o777 & !perm_data.umask);
+    }
+
+    /// Set permission according to path
+    fn set_ugid_permission(&self, st: &mut libc::stat64, path: &str) {
+        let is_root_path = path.is_empty();
+
+        if self.find_and_set_ugid_permission(st, path, is_root_path) {
+            return;
+        }
+
+        if let Some(perm_data) = self
+            .permission_paths
+            .read()
+            .expect("acquire permission_paths read lock")
+            .iter()
+            .find(|pd| pd.perm_path == "/")
+        {
+            self.set_permission_from_data(st, perm_data);
         }
     }
 
@@ -1735,6 +1785,25 @@ impl PassthroughFs {
         );
 
         let is_root_path = path.is_empty();
+
+        if self.find_ugid_creds_for_path(&path, is_root_path).is_some() {
+            return self.find_ugid_creds_for_path(&path, is_root_path).unwrap();
+        }
+
+        if let Some(perm_data) = self
+            .permission_paths
+            .read()
+            .expect("acquire permission_paths read lock")
+            .iter()
+            .find(|pd| pd.perm_path == "/")
+        {
+            return (perm_data.host_uid, perm_data.host_gid);
+        }
+
+        (ctx.uid, ctx.gid)
+    }
+
+    fn find_ugid_creds_for_path(&self, path: &str, is_root_path: bool) -> Option<(u32, u32)> {
         for perm_data in self
             .permission_paths
             .read()
@@ -1744,13 +1813,12 @@ impl PassthroughFs {
             if (is_root_path && perm_data.perm_path == "/")
                 || (!is_root_path
                     && perm_data.perm_path != "/"
-                    && perm_data.need_set_permission(&path))
+                    && perm_data.need_set_permission(path))
             {
-                return (perm_data.host_uid, perm_data.host_gid);
+                return Some((perm_data.host_uid, perm_data.host_gid));
             }
         }
-
-        (ctx.uid, ctx.gid)
+        None
     }
 }
 
@@ -2053,9 +2121,8 @@ impl FileSystem for PassthroughFs {
     type DirIter = ReadDir<Box<[u8]>>;
 
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
-        // SAFETY: this is a constant value that is a nul-terminated string without interior
-        // nul bytes.
-        let root = unsafe { CStr::from_bytes_with_nul_unchecked(ROOT_CSTR) };
+        let root = CString::new(self.root_dir.clone())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
         let flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         // SAFETY: this doesn't modify any memory and we check the return value.
@@ -2233,7 +2300,7 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(parent)?;
 
         let _ctx = security_ctx
-            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .filter(|ctx| *ctx != UNLABELED_CSTR)
             .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
             .transpose()?;
 
@@ -2348,14 +2415,13 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(parent)?;
 
         let _ctx = security_ctx
-            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .filter(|ctx| *ctx != UNLABELED_CSTR)
             .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
             .transpose()?;
 
         let tmpflags = libc::O_RDWR | libc::O_TMPFILE | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
-        // SAFETY: This string is nul-terminated and does not contain any interior nul bytes
-        let current_dir = unsafe { CStr::from_bytes_with_nul_unchecked(b".\0") };
+        let current_dir = c".";
 
         #[allow(unused_variables)]
         #[cfg(feature = "arc_quota")]
@@ -2416,7 +2482,7 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(parent)?;
 
         let _ctx = security_ctx
-            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .filter(|ctx| *ctx != UNLABELED_CSTR)
             .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
             .transpose()?;
 
@@ -2472,10 +2538,9 @@ impl FileSystem for PassthroughFs {
                 entry.inode,
                 flags as u32 & !((libc::O_CREAT | libc::O_EXCL | libc::O_NOCTTY) as u32),
             )
-            .map_err(|e| {
+            .inspect_err(|_e| {
                 // Don't leak the entry.
                 self.forget(ctx, entry.inode, 1);
-                e
             })?
         };
         Ok((entry, handle, opts))
@@ -2657,15 +2722,11 @@ impl FileSystem for PassthroughFs {
                 u32::MAX
             };
 
-            // SAFETY: this is a constant value that is a nul-terminated string without interior
-            // nul bytes.
-            let empty = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
-
             // SAFETY: this doesn't modify any memory and we check the return value.
             syscall!(unsafe {
                 libc::fchownat(
                     inode_data.as_raw_descriptor(),
-                    empty.as_ptr(),
+                    EMPTY_CSTR.as_ptr(),
                     uid,
                     gid,
                     libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
@@ -2789,7 +2850,7 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(parent)?;
 
         let _ctx = security_ctx
-            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .filter(|ctx| *ctx != UNLABELED_CSTR)
             .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
             .transpose()?;
 
@@ -2869,7 +2930,7 @@ impl FileSystem for PassthroughFs {
         let data = self.find_inode(parent)?;
 
         let _ctx = security_ctx
-            .filter(|ctx| ctx.to_bytes_with_nul() != UNLABELED_CSTR)
+            .filter(|ctx| *ctx != UNLABELED_CSTR)
             .map(|ctx| ScopedSecurityContext::new(&self.proc, ctx))
             .transpose()?;
 
@@ -2902,21 +2963,28 @@ impl FileSystem for PassthroughFs {
 
         let mut buf = vec![0; libc::PATH_MAX as usize];
 
-        // SAFETY: this is a constant value that is a nul-terminated string without interior nul
-        // bytes.
-        let empty = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
-
         // SAFETY: this will only modify the contents of `buf` and we check the return value.
         let res = syscall!(unsafe {
             libc::readlinkat(
                 data.as_raw_descriptor(),
-                empty.as_ptr(),
+                EMPTY_CSTR.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_char,
                 buf.len(),
             )
         })?;
 
         buf.resize(res as usize, 0);
+
+        #[cfg(feature = "fs_runtime_ugid_map")]
+        {
+            let link_target = Path::new(OsStr::from_bytes(&buf[..res as usize]));
+            if !link_target.starts_with(&self.root_dir) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Symbolic link points outside of root_dir",
+                ));
+            }
+        }
         Ok(buf)
     }
 
@@ -3773,24 +3841,19 @@ mod tests {
         let p = PassthroughFs::new("tag", cfg).expect("Failed to create PassthroughFs");
 
         // Selinux shouldn't get overwritten.
-        // SAFETY: trivially safe
-        let selinux = unsafe { CStr::from_bytes_with_nul_unchecked(b"security.selinux\0") };
+        let selinux = c"security.selinux";
         assert_eq!(p.rewrite_xattr_name(selinux).to_bytes(), selinux.to_bytes());
 
         // user, trusted, and system should not be changed either.
-        // SAFETY: trivially safe
-        let user = unsafe { CStr::from_bytes_with_nul_unchecked(b"user.foobar\0") };
+        let user = c"user.foobar";
         assert_eq!(p.rewrite_xattr_name(user).to_bytes(), user.to_bytes());
-        // SAFETY: trivially safe
-        let trusted = unsafe { CStr::from_bytes_with_nul_unchecked(b"trusted.foobar\0") };
+        let trusted = c"trusted.foobar";
         assert_eq!(p.rewrite_xattr_name(trusted).to_bytes(), trusted.to_bytes());
-        // SAFETY: trivially safe
-        let system = unsafe { CStr::from_bytes_with_nul_unchecked(b"system.foobar\0") };
+        let system = c"system.foobar";
         assert_eq!(p.rewrite_xattr_name(system).to_bytes(), system.to_bytes());
 
         // sehash should be re-written.
-        // SAFETY: trivially safe
-        let sehash = unsafe { CStr::from_bytes_with_nul_unchecked(b"security.sehash\0") };
+        let sehash = c"security.sehash";
         assert_eq!(
             p.rewrite_xattr_name(sehash).to_bytes(),
             b"user.virtiofs.security.sehash"

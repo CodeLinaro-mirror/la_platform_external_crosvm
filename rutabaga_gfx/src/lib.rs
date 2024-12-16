@@ -33,12 +33,13 @@ pub use crate::rutabaga_gralloc::ImageMemoryRequirements;
 pub use crate::rutabaga_gralloc::RutabagaGralloc;
 pub use crate::rutabaga_gralloc::RutabagaGrallocBackendFlags;
 pub use crate::rutabaga_gralloc::RutabagaGrallocFlags;
+pub use crate::rutabaga_os::AsBorrowedDescriptor as RutabagaAsBorrowedDescriptor;
 pub use crate::rutabaga_os::AsRawDescriptor;
 pub use crate::rutabaga_os::FromRawDescriptor as RutabagaFromRawDescriptor;
 pub use crate::rutabaga_os::IntoRawDescriptor as RutabagaIntoRawDescriptor;
 pub use crate::rutabaga_os::MappedRegion as RutabagaMappedRegion;
+pub use crate::rutabaga_os::OwnedDescriptor as RutabagaDescriptor;
 pub use crate::rutabaga_os::RawDescriptor as RutabagaRawDescriptor;
-pub use crate::rutabaga_os::SafeDescriptor as RutabagaDescriptor;
 pub use crate::rutabaga_utils::*;
 
 pub mod kumquat_support {
@@ -53,4 +54,6 @@ pub mod kumquat_support {
     pub use crate::rutabaga_os::Tube as RutabagaTube;
     pub use crate::rutabaga_os::TubeType as RutabagaTubeType;
     pub use crate::rutabaga_os::WaitContext as RutabagaWaitContext;
+    pub use crate::rutabaga_os::WritePipe as RutabagaWritePipe;
+    pub use crate::rutabaga_os::DEFAULT_RAW_DESCRIPTOR as RUTABAGA_DEFAULT_RAW_DESCRIPTOR;
 }

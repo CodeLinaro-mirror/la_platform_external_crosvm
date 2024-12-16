@@ -173,6 +173,15 @@ impl FromIterator<usize> for CpuSet {
     }
 }
 
+/// The SVE config for Vcpus.
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SveConfig {
+    /// Use SVE
+    pub enable: bool,
+}
+
 fn parse_cpu_range(s: &str, cpuset: &mut Vec<usize>) -> Result<(), String> {
     fn parse_cpu(s: &str) -> Result<usize, String> {
         s.parse().map_err(|_| {
@@ -387,9 +396,26 @@ pub struct VmComponents {
     pub rt_cpus: CpuSet,
     #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub sve_config: SveConfig,
     pub swiotlb: Option<u64>,
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_count: usize,
+    #[cfg(all(
+        any(target_arch = "arm", target_arch = "aarch64"),
+        any(target_os = "android", target_os = "linux")
+    ))]
+    pub vcpu_domain_paths: BTreeMap<usize, PathBuf>,
+    #[cfg(all(
+        any(target_arch = "arm", target_arch = "aarch64"),
+        any(target_os = "android", target_os = "linux")
+    ))]
+    pub vcpu_domains: BTreeMap<usize, u32>,
+    #[cfg(all(
+        any(target_arch = "arm", target_arch = "aarch64"),
+        any(target_os = "android", target_os = "linux")
+    ))]
+    pub virt_cpufreq_v2: bool,
     pub vm_image: VmImage,
 }
 
@@ -433,6 +459,13 @@ pub struct VirtioDeviceStub {
 /// set up the memory, cpus, and system devices and to boot the kernel.
 pub trait LinuxArch {
     type Error: StdError;
+    type ArchMemoryLayout;
+
+    /// Decide architecture specific memory layout details to be used by later stages of the VM
+    /// setup.
+    fn arch_memory_layout(
+        components: &VmComponents,
+    ) -> std::result::Result<Self::ArchMemoryLayout, Self::Error>;
 
     /// Returns a Vec of the valid memory addresses as pairs of address and length. These should be
     /// used to configure the `GuestMemory` structure for the platform.
@@ -442,6 +475,7 @@ pub trait LinuxArch {
     /// * `components` - Parts used to determine the memory layout.
     fn guest_memory_layout(
         components: &VmComponents,
+        arch_memory_layout: &Self::ArchMemoryLayout,
         hypervisor: &impl hypervisor::Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error>;
 
@@ -454,7 +488,10 @@ pub trait LinuxArch {
     /// # Arguments
     ///
     /// * `vm` - The virtual machine to be used as a template for the `SystemAllocator`.
-    fn get_system_allocator_config<V: Vm>(vm: &V) -> SystemAllocatorConfig;
+    fn get_system_allocator_config<V: Vm>(
+        vm: &V,
+        arch_memory_layout: &Self::ArchMemoryLayout,
+    ) -> SystemAllocatorConfig;
 
     /// Takes `VmComponents` and generates a `RunnableLinuxVm`.
     ///
@@ -478,6 +515,7 @@ pub trait LinuxArch {
     /// * `device_tree_overlays` - Device tree overlay binaries
     fn build_vm<V, Vcpu>(
         components: VmComponents,
+        arch_memory_layout: &Self::ArchMemoryLayout,
         vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
@@ -891,7 +929,7 @@ pub fn generate_virtio_mmio_bus(
 }
 
 // Generate pci topology starting from parent bus
-pub fn generate_pci_topology(
+fn generate_pci_topology(
     parent_bus: Arc<Mutex<PciBus>>,
     resources: &mut SystemAllocator,
     io_ranges: &mut BTreeMap<usize, Vec<BarRange>>,

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use arch::DtbOverlay;
 use arch::FdtPosition;
 use arch::GetSerialCmdlineError;
 use arch::RunnableLinuxVm;
+use arch::SveConfig;
 use arch::VcpuAffinity;
 use arch::VmComponents;
 use arch::VmImage;
@@ -43,6 +45,8 @@ use devices::PciRootCommand;
 use devices::Serial;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::VirtCpufreq;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+use devices::VirtCpufreqV2;
 #[cfg(feature = "gdb")]
 use gdbstub::arch::Arch;
 #[cfg(feature = "gdb")]
@@ -207,6 +211,7 @@ const AARCH64_IRQ_BASE: u32 = 4;
 const AARCH64_VIRTFREQ_BASE: u64 = 0x1040000;
 const AARCH64_VIRTFREQ_SIZE: u64 = 0x8;
 const AARCH64_VIRTFREQ_MAXSIZE: u64 = 0x10000;
+const AARCH64_VIRTFREQ_V2_SIZE: u64 = 0x1000;
 
 // PMU PPI interrupt, same as qemu
 const AARCH64_PMU_IRQ: u32 = 7;
@@ -375,13 +380,23 @@ fn main_memory_size(components: &VmComponents, hypervisor: &(impl Hypervisor + ?
     main_memory_size
 }
 
+pub struct ArchMemoryLayout {}
+
 impl arch::LinuxArch for AArch64 {
     type Error = Error;
+    type ArchMemoryLayout = ArchMemoryLayout;
+
+    fn arch_memory_layout(
+        _components: &VmComponents,
+    ) -> std::result::Result<Self::ArchMemoryLayout, Self::Error> {
+        Ok(ArchMemoryLayout {})
+    }
 
     /// Returns a Vec of the valid memory addresses.
     /// These should be used to configure the GuestMemory structure for the platform.
     fn guest_memory_layout(
         components: &VmComponents,
+        _arch_memory_layout: &Self::ArchMemoryLayout,
         hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error> {
         let main_memory_size = main_memory_size(components, hypervisor);
@@ -414,7 +429,10 @@ impl arch::LinuxArch for AArch64 {
         Ok(memory_regions)
     }
 
-    fn get_system_allocator_config<V: Vm>(vm: &V) -> SystemAllocatorConfig {
+    fn get_system_allocator_config<V: Vm>(
+        vm: &V,
+        _arch_memory_layout: &Self::ArchMemoryLayout,
+    ) -> SystemAllocatorConfig {
         Self::get_resource_allocator_config(
             vm.get_memory().end_addr(),
             vm.get_guest_phys_addr_bits(),
@@ -423,6 +441,7 @@ impl arch::LinuxArch for AArch64 {
 
     fn build_vm<V, Vcpu>(
         mut components: VmComponents,
+        _arch_memory_layout: &Self::ArchMemoryLayout,
         _vm_evt_wrtube: &SendTube,
         system_allocator: &mut SystemAllocator,
         serial_parameters: &BTreeMap<(SerialHardware, u8), SerialParameters>,
@@ -559,8 +578,9 @@ impl arch::LinuxArch for AArch64 {
 
         // Initialize Vcpus after all Vcpu objects have been created.
         for (vcpu_id, vcpu) in vcpus.iter().enumerate() {
-            vcpu.init(&Self::vcpu_features(vcpu_id, use_pmu, components.boot_cpu))
-                .map_err(Error::VcpuInit)?;
+            let features =
+                &Self::vcpu_features(vcpu_id, use_pmu, components.boot_cpu, components.sve_config);
+            vcpu.init(features).map_err(Error::VcpuInit)?;
         }
 
         irq_chip.finalize().map_err(Error::FinalizeIrqChip)?;
@@ -705,40 +725,76 @@ impl arch::LinuxArch for AArch64 {
             .insert(pci_bus, AARCH64_PCI_CFG_BASE, AARCH64_PCI_CFG_SIZE)
             .map_err(Error::RegisterPci)?;
 
+        let (vcpufreq_host_tube, vcpufreq_control_tube) =
+            Tube::pair().map_err(Error::CreateTube)?;
+        let vcpufreq_shared_tube = Arc::new(Mutex::new(vcpufreq_control_tube));
         #[cfg(any(target_os = "android", target_os = "linux"))]
         if !components.cpu_frequencies.is_empty() {
+            let mut freq_domain_vcpus: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+            let mut freq_domain_perfs: BTreeMap<u32, Arc<AtomicU32>> = BTreeMap::new();
+            let mut vcpu_affinities: Vec<u32> = Vec::new();
             for vcpu in 0..vcpu_count {
+                let freq_domain = *components.vcpu_domains.get(&vcpu).unwrap_or(&(vcpu as u32));
+                freq_domain_vcpus.entry(freq_domain).or_default().push(vcpu);
                 let vcpu_affinity = match components.vcpu_affinity.clone() {
                     Some(VcpuAffinity::Global(v)) => v,
                     Some(VcpuAffinity::PerVcpu(mut m)) => m.remove(&vcpu).unwrap_or_default(),
                     None => panic!("vcpu_affinity needs to be set for VirtCpufreq"),
                 };
-
-                let virt_cpufreq = Arc::new(Mutex::new(VirtCpufreq::new(
-                    vcpu_affinity[0].try_into().unwrap(),
-                    *components.normalized_cpu_capacities.get(&vcpu).unwrap(),
-                    *components
-                        .cpu_frequencies
-                        .get(&vcpu)
-                        .unwrap()
-                        .iter()
-                        .max()
-                        .unwrap(),
-                )));
-
-                if vcpu as u64 * AARCH64_VIRTFREQ_SIZE + AARCH64_VIRTFREQ_SIZE
-                    > AARCH64_VIRTFREQ_MAXSIZE
-                {
-                    panic!("Exceeded maximum number of virt cpufreq devices");
+                vcpu_affinities.push(vcpu_affinity[0].try_into().unwrap());
+            }
+            for domain in freq_domain_vcpus.keys() {
+                let domain_perf = Arc::new(AtomicU32::new(0));
+                freq_domain_perfs.insert(*domain, domain_perf);
+            }
+            let largest_vcpu_affinity_idx = *vcpu_affinities.iter().max().unwrap() as usize;
+            for (vcpu, vcpu_affinity) in vcpu_affinities.iter().enumerate() {
+                let mut virtfreq_size = AARCH64_VIRTFREQ_SIZE;
+                if components.virt_cpufreq_v2 {
+                    let domain = *components.vcpu_domains.get(&vcpu).unwrap_or(&(vcpu as u32));
+                    virtfreq_size = AARCH64_VIRTFREQ_V2_SIZE;
+                    let virt_cpufreq = Arc::new(Mutex::new(VirtCpufreqV2::new(
+                        *vcpu_affinity,
+                        components.cpu_frequencies.get(&vcpu).unwrap().clone(),
+                        components.vcpu_domain_paths.get(&vcpu).cloned(),
+                        domain,
+                        *components.normalized_cpu_capacities.get(&vcpu).unwrap(),
+                        largest_vcpu_affinity_idx,
+                        vcpufreq_shared_tube.clone(),
+                        freq_domain_vcpus.get(&domain).unwrap().clone(),
+                        freq_domain_perfs.get(&domain).unwrap().clone(),
+                    )));
+                    mmio_bus
+                        .insert(
+                            virt_cpufreq,
+                            AARCH64_VIRTFREQ_BASE + (vcpu as u64 * virtfreq_size),
+                            virtfreq_size,
+                        )
+                        .map_err(Error::RegisterVirtCpufreq)?;
+                } else {
+                    let virt_cpufreq = Arc::new(Mutex::new(VirtCpufreq::new(
+                        *vcpu_affinity,
+                        *components.normalized_cpu_capacities.get(&vcpu).unwrap(),
+                        *components
+                            .cpu_frequencies
+                            .get(&vcpu)
+                            .unwrap()
+                            .iter()
+                            .max()
+                            .unwrap(),
+                    )));
+                    mmio_bus
+                        .insert(
+                            virt_cpufreq,
+                            AARCH64_VIRTFREQ_BASE + (vcpu as u64 * virtfreq_size),
+                            virtfreq_size,
+                        )
+                        .map_err(Error::RegisterVirtCpufreq)?;
                 }
 
-                mmio_bus
-                    .insert(
-                        virt_cpufreq,
-                        AARCH64_VIRTFREQ_BASE + (vcpu as u64 * AARCH64_VIRTFREQ_SIZE),
-                        AARCH64_VIRTFREQ_SIZE,
-                    )
-                    .map_err(Error::RegisterVirtCpufreq)?;
+                if vcpu as u64 * AARCH64_VIRTFREQ_SIZE + virtfreq_size > AARCH64_VIRTFREQ_MAXSIZE {
+                    panic!("Exceeded maximum number of virt cpufreq devices");
+                }
             }
         }
 
@@ -846,6 +902,7 @@ impl arch::LinuxArch for AArch64 {
             components.dynamic_power_coefficient,
             device_tree_overlays,
             &serial_devices,
+            components.virt_cpufreq_v2,
         )
         .map_err(Error::CreateFdt)?;
 
@@ -856,7 +913,7 @@ impl arch::LinuxArch for AArch64 {
         )
         .map_err(Error::InitVmError)?;
 
-        let vm_request_tubes = vec![vmwdt_host_tube];
+        let vm_request_tubes = vec![vmwdt_host_tube, vcpufreq_host_tube];
 
         Ok(RunnableLinuxVm {
             vm,
@@ -1272,7 +1329,12 @@ impl AArch64 {
     ///
     /// * `vcpu_id` - The VM's index for `vcpu`.
     /// * `use_pmu` - Should `vcpu` be configured to use the Performance Monitor Unit.
-    fn vcpu_features(vcpu_id: usize, use_pmu: bool, boot_cpu: usize) -> Vec<VcpuFeature> {
+    fn vcpu_features(
+        vcpu_id: usize,
+        use_pmu: bool,
+        boot_cpu: usize,
+        sve: SveConfig,
+    ) -> Vec<VcpuFeature> {
         let mut features = vec![VcpuFeature::PsciV0_2];
         if use_pmu {
             features.push(VcpuFeature::PmuV3);
@@ -1280,6 +1342,9 @@ impl AArch64 {
         // Non-boot cpus are powered off initially
         if vcpu_id != boot_cpu {
             features.push(VcpuFeature::PowerOff);
+        }
+        if sve.enable {
+            features.push(VcpuFeature::Sve);
         }
 
         features

@@ -646,6 +646,7 @@ pub struct UsbAttachCommand {
         arg_name = "BUS_ID:ADDR:BUS_NUM:DEV_NUM",
         from_str_fn(parse_bus_id_addr)
     )]
+    #[allow(dead_code)]
     pub addr: (u8, u8, u16, u16),
     #[argh(positional)]
     /// usb device path
@@ -1150,7 +1151,11 @@ pub struct RunCommand {
     )]
     #[serde(skip)]
     #[merge(strategy = overwrite_option)]
-    /// set the list of frequencies in KHz for the given CPU (default: no frequencies)
+    /// set the list of frequencies in KHz for the given CPU (default: no frequencies).
+    /// In the event that the user specifies a frequency (after normalizing for cpu_capacity)
+    /// that results in a performance point that goes below the lowest frequency that the pCPU can
+    /// support, the virtual cpufreq device will actively throttle the vCPU to deliberately slow
+    /// its performance to match the guest's request.
     pub cpu_frequencies_khz: Option<BTreeMap<usize, Vec<u32>>>, // CPU index -> frequencies
 
     #[argh(option, short = 'c')]
@@ -1179,6 +1184,22 @@ pub struct RunCommand {
     ///       vCPU 1 as intel Atom type, also set vCPU 2 and vCPU 3
     ///       as intel Core type.
     ///     boot-cpu=NUM - Select vCPU to boot from. (default: 0) (aarch64 only)
+    ///     freq_domains=[[FREQ_DOMAIN],...] - CPU freq_domains (default: None) (aarch64 only)
+    ///       Usage is identical to clusters, each FREQ_DOMAIN is a set containing a
+    ///       list of CPUs that should belong to the same freq_domain. Individual
+    ///       CPU ids or ranges can be specified, comma-separated.
+    ///       Examples:
+    ///       freq_domains=[[0],[1],[2],[3]] - creates 4 freq_domains, one
+    ///         for each specified core.
+    ///       freq_domains=[[0-3]] - creates a freq_domain for cores 0 to 3
+    ///         included.
+    ///       freq_domains=[[0,2],[1,3],[4-7,12]] - creates one freq_domain
+    ///         for cores 0 and 2, another one for cores 1 and 3,
+    ///         and one last for cores 4, 5, 6, 7 and 12.
+    ///     sve=[enabled=bool] - SVE Config. (aarch64 only)
+    ///         Examples:
+    ///         sve=[enabled=true] - Enables SVE on device. Will fail is SVE unsupported.
+    ///         default value = false.
     pub cpus: Option<CpuOptions>,
 
     #[cfg(feature = "crash-report")]
@@ -2587,6 +2608,17 @@ pub struct RunCommand {
     /// enable a virtual cpu freq device
     pub virt_cpufreq: Option<bool>,
 
+    #[cfg(all(
+        any(target_arch = "arm", target_arch = "aarch64"),
+        any(target_os = "android", target_os = "linux")
+    ))]
+    #[argh(switch)]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// enable version of the virtual cpu freq device compatible
+    /// with the driver in upstream linux
+    pub virt_cpufreq_upstream: Option<bool>,
+
     #[cfg(feature = "audio")]
     #[argh(
         option,
@@ -2731,6 +2763,7 @@ impl TryFrom<RunCommand> for super::config::Config {
             let cpus = cmd.cpus.unwrap_or_default();
             cfg.vcpu_count = cpus.num_cores;
             cfg.boot_cpu = cpus.boot_cpu.unwrap_or_default();
+            cfg.cpu_freq_domains = cpus.freq_domains;
 
             // Only allow deprecated `--cpu-cluster` option only if `--cpu clusters=[...]` is not
             // used.
@@ -2765,6 +2798,10 @@ impl TryFrom<RunCommand> for super::config::Config {
                     }
                 }
             }
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            {
+                cfg.sve = cpus.sve;
+            }
         }
 
         cfg.vcpu_affinity = cmd.cpu_affinity;
@@ -2783,6 +2820,10 @@ impl TryFrom<RunCommand> for super::config::Config {
         ))]
         {
             cfg.virt_cpufreq = cmd.virt_cpufreq.unwrap_or_default();
+            cfg.virt_cpufreq_v2 = cmd.virt_cpufreq_upstream.unwrap_or_default();
+            if cfg.virt_cpufreq && cfg.virt_cpufreq_v2 {
+                return Err("Only one version of virt-cpufreq can be used!".to_string());
+            }
             if let Some(frequencies) = cmd.cpu_frequencies_khz {
                 cfg.cpu_frequencies_khz = frequencies;
             }

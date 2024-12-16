@@ -30,6 +30,8 @@ rust_library {
         "liblibc",
         "liblog_rust",
         "libnix",
+        "libserde",
+        "libserde_json",
         "libthiserror",
         "libzerocopy",
     ],
@@ -40,7 +42,6 @@ rust_library {
     shared_libs: [
         "libc++",
         "libbase",
-        "libgfxstream_backend",
     ],
     target: {
         android: {
@@ -59,6 +60,7 @@ rust_library {
     },
     static_libs: [
         "libepoxy",
+        "libgfxstream_backend",
         "libvirglrenderer",
     ],
 }
@@ -77,6 +79,8 @@ rust_library {
         "liblibc",
         "liblog_rust",
         "libnix",
+        "libserde",
+        "libserde_json",
         "libthiserror",
         "libzerocopy",
     ],
@@ -129,6 +133,8 @@ rust_test {
         "liblibc",
         "liblog_rust",
         "libnix",
+        "libserde",
+        "libserde_json",
         "libthiserror",
         "libzerocopy",
     ],

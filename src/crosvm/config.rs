@@ -17,6 +17,8 @@ use arch::FdtPosition;
 use arch::Pstore;
 #[cfg(target_arch = "x86_64")]
 use arch::SmbiosOptions;
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+use arch::SveConfig;
 use arch::VcpuAffinity;
 use base::debug;
 use base::pagesize;
@@ -141,6 +143,12 @@ pub struct CpuOptions {
     /// Select which CPU to boot from.
     #[serde(default)]
     pub boot_cpu: Option<usize>,
+    /// Vector of CPU ids to be grouped into the same freq domain.
+    #[serde(default)]
+    pub freq_domains: Vec<CpuSet>,
+    /// Scalable Vector Extension.
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub sve: Option<SveConfig>,
 }
 
 /// Device tree overlay configuration.
@@ -448,10 +456,7 @@ pub fn validate_serial_parameters(params: &SerialParameters) -> Result<(), Strin
         ));
     }
 
-    if params.pci_address.is_some()
-        && params.hardware != SerialHardware::VirtioConsole
-        && params.hardware != SerialHardware::LegacyVirtioConsole
-    {
+    if params.pci_address.is_some() && params.hardware != SerialHardware::VirtioConsole {
         return Err(invalid_value_err(
             params.pci_address.unwrap().to_string(),
             "Providing serial PCI address is only supported for virtio-console hardware type",
@@ -753,6 +758,7 @@ pub struct Config {
     pub core_scheduling: bool,
     pub cpu_capacity: BTreeMap<usize, u32>, // CPU index -> capacity
     pub cpu_clusters: Vec<CpuSet>,
+    pub cpu_freq_domains: Vec<CpuSet>,
     #[cfg(all(
         any(target_arch = "arm", target_arch = "aarch64"),
         any(target_os = "android", target_os = "linux")
@@ -886,6 +892,8 @@ pub struct Config {
     pub sound: Option<PathBuf>,
     pub stub_pci_devices: Vec<StubPciParameters>,
     pub suspended: bool,
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub sve: Option<SveConfig>,
     pub swap_dir: Option<PathBuf>,
     pub swiotlb: Option<u64>,
     #[cfg(target_os = "android")]
@@ -920,6 +928,7 @@ pub struct Config {
         any(target_os = "android", target_os = "linux")
     ))]
     pub virt_cpufreq: bool,
+    pub virt_cpufreq_v2: bool,
     pub virtio_input: Vec<InputDeviceOption>,
     #[cfg(feature = "audio")]
     #[serde(skip)]
@@ -981,6 +990,7 @@ impl Default for Config {
                 any(target_os = "android", target_os = "linux")
             ))]
             cpu_frequencies_khz: BTreeMap::new(),
+            cpu_freq_domains: Vec::new(),
             delay_rt: false,
             device_tree_overlay: Vec::new(),
             disks: Vec::new(),
@@ -1108,6 +1118,8 @@ impl Default for Config {
             sound: None,
             stub_pci_devices: Vec::new(),
             suspended: false,
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            sve: None,
             swap_dir: None,
             swiotlb: None,
             #[cfg(target_os = "android")]
@@ -1143,6 +1155,7 @@ impl Default for Config {
                 any(target_os = "android", target_os = "linux")
             ))]
             virt_cpufreq: false,
+            virt_cpufreq_v2: false,
             virtio_input: Vec::new(),
             #[cfg(feature = "audio")]
             virtio_snds: Vec::new(),
@@ -1238,8 +1251,8 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         any(target_os = "android", target_os = "linux")
     ))]
     if !cfg.cpu_frequencies_khz.is_empty() {
-        if !cfg.virt_cpufreq {
-            return Err("`cpu-frequencies` requires `virt-cpufreq`".to_string());
+        if !cfg.virt_cpufreq_v2 {
+            return Err("`cpu-frequencies` requires `virt-cpufreq-upstream`".to_string());
         }
 
         if cfg.host_cpu_topology {
