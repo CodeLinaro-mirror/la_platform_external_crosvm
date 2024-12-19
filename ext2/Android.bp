@@ -34,11 +34,11 @@ rust_test {
         "libtempfile",
         "libuuid",
         "libwalkdir",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libenumn",
-        "libzerocopy_derive",
+        "libzerocopy_derive-0.7.35",
     ],
 }
 
@@ -65,11 +65,11 @@ rust_test {
         "libtempfile",
         "libuuid",
         "libwalkdir",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libenumn",
-        "libzerocopy_derive",
+        "libzerocopy_derive-0.7.35",
     ],
 }
 
@@ -87,10 +87,10 @@ rust_library {
         "libbase_rust",
         "liblibc",
         "libuuid",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libenumn",
-        "libzerocopy_derive",
+        "libzerocopy_derive-0.7.35",
     ],
 }

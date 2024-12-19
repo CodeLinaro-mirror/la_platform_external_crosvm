@@ -28,7 +28,7 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libtempfile",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -41,5 +41,5 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
     edition: "2021",
-    rustlibs: ["libzerocopy"],
+    rustlibs: ["libzerocopy-0.7.35"],
 }
