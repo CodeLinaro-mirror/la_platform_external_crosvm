@@ -33,7 +33,7 @@ rust_test {
         "libcrossbeam_utils",
         "liblibc",
         "libthiserror",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libenumn",
@@ -57,7 +57,7 @@ rust_library {
         "libcrossbeam_utils",
         "liblibc",
         "libthiserror",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libenumn",

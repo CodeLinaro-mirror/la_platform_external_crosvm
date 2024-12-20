@@ -25,6 +25,6 @@ rust_library {
         "libbase_rust",
         "libdata_model",
         "liblibc",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }

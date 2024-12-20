@@ -31,7 +31,7 @@ rust_library {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
 }
@@ -61,7 +61,7 @@ rust_test {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
 }
@@ -92,7 +92,7 @@ rust_test {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
 }
