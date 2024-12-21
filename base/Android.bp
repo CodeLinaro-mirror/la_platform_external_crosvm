@@ -41,7 +41,7 @@ rust_test {
         "libtempfile",
         "libthiserror",
         "libuuid",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libbase_event_token_derive",
@@ -98,7 +98,7 @@ rust_test {
         "libtempfile",
         "libthiserror",
         "libuuid",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libbase_event_token_derive",
@@ -136,7 +136,7 @@ rust_test {
         "libtempfile",
         "libthiserror",
         "libuuid",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libbase_event_token_derive",
@@ -174,7 +174,7 @@ rust_test {
         "libtempfile",
         "libthiserror",
         "libuuid",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libbase_event_token_derive",
@@ -224,7 +224,7 @@ rust_library {
         "libsync_rust",
         "libthiserror",
         "libuuid",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libbase_event_token_derive",
