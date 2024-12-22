@@ -48,7 +48,7 @@ rust_test {
         "libthiserror",
         "libuuid", // Added manually
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libasync_trait",
@@ -86,7 +86,7 @@ rust_library {
         "libthiserror",
         "libuuid", // Added manually
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: [
         "libasync_trait",

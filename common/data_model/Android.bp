@@ -28,7 +28,7 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libserde",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -43,6 +43,6 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libserde",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }

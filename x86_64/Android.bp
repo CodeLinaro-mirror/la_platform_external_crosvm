@@ -50,7 +50,7 @@ rust_library {
         "libuuid",
         "libvm_control",
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
     // Exclude arm family manually
@@ -108,7 +108,7 @@ rust_test {
         "libuuid",
         "libvm_control",
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
     // Exclude arm family manually
