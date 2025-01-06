@@ -139,6 +139,11 @@ balloon = ["devices/balloon", "vm_control/balloon"]
 ## concatenate large file system images into a single disk image.
 composite-disk = ["protos/composite-disk", "protobuf", "disk/composite-disk"]
 
+## Enables support for using a seekable zstd archive of a raw disk image as a read-only disk.
+## See [Format Specs](https://github.com/facebook/zstd/tree/v1.5.6/contrib/seekable_format) for
+## more information.
+zstd-disk = ["disk/zstd-disk"]
+
 ## Enables virtiofs uid-gid mapping from the host side through command line when user-namespace
 ## isn't available for non-root users. This format is supported only for vhost-user-fs.
 fs_runtime_ugid_map = ["devices/fs_runtime_ugid_map"]
@@ -248,6 +253,9 @@ ffmpeg = ["devices/ffmpeg"]
 # Enables the VAAPI backend of video devices.
 vaapi = ["devices/vaapi"]
 
+## Enables the virtio-media device.
+media = ["devices/media"]
+
 #! ### Linux-specific feature flags
 
 ## Enables the use of the GenieZone hypervisor
@@ -354,7 +362,10 @@ vtpm = ["devices/vtpm"]
 ## Enables reporting of crosvm crashes
 crash-report = ["broker_ipc/crash-report", "crash_report"]
 
+gvm = []
+perfetto = []
 process-invariants = []
+prod-build = []
 sandbox = []
 
 #! ### Platform Feature Sets
@@ -378,6 +389,7 @@ all-default = [
     "gfxstream",
     "gfxstream_stub",
     "libvda-stub",
+    "media",
     "net",
     "noncoherent-dma",
     "pci-hotplug",
@@ -395,6 +407,7 @@ all-default = [
     "vtpm",
     "wl-dmabuf",
     "x",
+    "zstd-disk"
 ]
 
 ## All features that are compiled and tested for aarch64

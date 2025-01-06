@@ -649,7 +649,7 @@ enum RegisteredMemory {
 }
 
 pub struct VmMappedMemoryRegion {
-    gfn: u64,
+    guest_address: GuestAddress,
     slot: MemSlot,
 }
 
@@ -674,7 +674,10 @@ fn try_map_to_prepared_region(
         return None;
     };
 
-    let VmMappedMemoryRegion { gfn, slot } = region_state.mapped_regions.get(allocation)?;
+    let VmMappedMemoryRegion {
+        guest_address,
+        slot,
+    } = region_state.mapped_regions.get(allocation)?;
 
     let (descriptor, file_offset, size) = match source {
         VmMemorySource::Descriptor {
@@ -709,8 +712,8 @@ fn try_map_to_prepared_region(
         return Some(VmMemoryResponse::Err(err));
     }
 
-    let gfn = gfn + (dest_offset >> 12);
-    let region_id = VmMemoryRegionId(gfn);
+    let guest_address = GuestAddress(guest_address.0 + dest_offset);
+    let region_id = VmMemoryRegionId(guest_address);
     region_state.registered_memory.insert(
         region_id,
         RegisteredMemory::FixedMapping {
@@ -804,7 +807,7 @@ impl VmMemoryRequest {
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
 
-                let region_id = VmMemoryRegionId(guest_addr.0 >> 12);
+                let region_id = VmMemoryRegionId(guest_addr);
                 if let (Some(descriptor), Some(iommu_client)) = (descriptor, iommu_client) {
                     let request =
                         VirtioIOMMURequest::VfioCommand(VirtioIOMMUVfioCommand::VfioDmabufMap {
@@ -921,7 +924,7 @@ impl VmMemoryRequest {
                     Err(e) => return VmMemoryResponse::Err(e),
                 };
 
-                let region_id = VmMemoryRegionId(guest_addr.0 >> 12);
+                let region_id = VmMemoryRegionId(guest_addr);
 
                 region_state
                     .registered_memory
@@ -1051,8 +1054,8 @@ impl VmMemoryRequest {
 
 #[derive(Serialize, Deserialize, Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
 /// Identifer for registered memory regions. Globally unique.
-// The current implementation uses gfn as the unique identifier.
-pub struct VmMemoryRegionId(u64);
+// The current implementation uses guest physical address as the unique identifier.
+pub struct VmMemoryRegionId(GuestAddress);
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum VmMemoryResponse {
@@ -2466,9 +2469,8 @@ pub enum VmResponse {
     Err(SysError),
     /// Indicates the request encountered some error during execution.
     ErrString(String),
-    /// The request to register memory into guest address space was successfully done at guest page
-    /// frame number `gfn` and memory slot number `slot`.
-    RegisterMemory { gfn: u64, slot: u32 },
+    /// The memory was registered into guest address space in memory slot number `slot`.
+    RegisterMemory { slot: u32 },
     /// Results of balloon control commands.
     #[cfg(feature = "balloon")]
     BalloonStats {
@@ -2509,11 +2511,7 @@ impl Display for VmResponse {
             Ok => write!(f, "ok"),
             Err(e) => write!(f, "error: {}", e),
             ErrString(e) => write!(f, "error: {}", e),
-            RegisterMemory { gfn, slot } => write!(
-                f,
-                "memory registered to guest page frame number {:#x} and memory slot {}",
-                gfn, slot
-            ),
+            RegisterMemory { slot } => write!(f, "memory registered in slot {}", slot),
             #[cfg(feature = "balloon")]
             VmResponse::BalloonStats {
                 stats,
