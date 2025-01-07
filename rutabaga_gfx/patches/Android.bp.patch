@@ -64,7 +64,7 @@ index ab64209dd..1795150d6 100644
 +        "libserde",
 +        "libserde_json",
 +        "libthiserror",
-+        "libzerocopy",
++        "libzerocopy-0.7.35",
 +    ],
 +    proc_macros: ["libremain"],
 +    target: {

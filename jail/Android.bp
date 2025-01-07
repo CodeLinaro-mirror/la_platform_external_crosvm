@@ -38,7 +38,7 @@ rust_test {
         "libserde",
         "libserde_keyvalue",
         "libstatic_assertions",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -61,6 +61,6 @@ rust_library {
         "libserde",
         "libserde_keyvalue",
         "libstatic_assertions",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }

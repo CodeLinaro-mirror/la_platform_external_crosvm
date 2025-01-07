@@ -23,6 +23,6 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libbase_rust",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
