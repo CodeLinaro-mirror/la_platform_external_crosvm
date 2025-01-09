@@ -19,10 +19,9 @@ use base::geteuid;
 use base::warn;
 use libc::c_ulong;
 use minijail::Minijail;
-#[cfg(not(feature = "seccomp_trace"))]
 use once_cell::sync::Lazy;
 #[cfg(feature = "seccomp_trace")]
-use static_assertions::assert_eq_size;
+use static_assertions::const_assert;
 #[cfg(feature = "seccomp_trace")]
 use zerocopy::AsBytes;
 
@@ -358,6 +357,7 @@ pub fn create_gpu_minijail(
     root: &Path,
     config: &SandboxConfig,
     render_node_only: bool,
+    snapshot_scratch_directory: Option<&Path>,
 ) -> Result<Minijail> {
     let mut jail = create_sandbox_minijail(root, MAX_OPEN_FILES_FOR_GPU, config)?;
 
@@ -420,6 +420,17 @@ pub fn create_gpu_minijail(
         jail.mount_bind(perfetto_path, perfetto_path, true)?;
     }
 
+    // Provide scratch space for the GPU device to build or unpack snapshots.
+    if let Some(snapshot_scratch_directory) = snapshot_scratch_directory {
+        jail.mount_with_data(
+            Path::new("none"),
+            snapshot_scratch_directory,
+            "tmpfs",
+            (libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as usize,
+            "size=4294967296",
+        )?;
+    }
+
     Ok(jail)
 }
 
@@ -479,8 +490,9 @@ pub fn mount_proc(jail: &mut Minijail) -> Result<()> {
 /// Read minijail internal struct address for uniquely identifying and tracking jail's lifetime
 #[cfg(feature = "seccomp_trace")]
 pub fn read_jail_addr(jail: &Minijail) -> usize {
-    // We can only hope minijail's rust object will always only contain a pointer to C jail struct
-    assert_eq_size!(Minijail, usize);
+    // We can only hope minijail's rust object will always contain a pointer to C jail struct as the
+    // first field.
+    const_assert!(std::mem::size_of::<Minijail>() >= std::mem::size_of::<usize>());
     // Safe because it's only doing a read within bound checked by static assert
     unsafe { *(jail as *const Minijail as *const usize) }
 }
