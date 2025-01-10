@@ -15,9 +15,21 @@ use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
 
-// TODO(b/316337317): Update if new memslot flag is accepted in upstream
-pub const KVM_MEM_NON_COHERENT_DMA: u32 = 8;
-pub const KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA: u32 = 236;
+// TODO(b/369492345): Remove once bindgen generates from newer kernel headers (e.g. 6.12)
+pub const KVM_CAP_USER_MEMORY2: u32 = 231;
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct kvm_userspace_memory_region2 {
+    pub slot: u32,
+    pub flags: u32,
+    pub guest_phys_addr: u64,
+    pub memory_size: u64,
+    pub userspace_addr: u64,
+    pub guest_memfd_offset: u64,
+    pub guest_memfd: u32,
+    pub pad1: u32,
+    pub pad2: [u64; 14usize],
+}
 
 // TODO(qwandor): Update this once the pKVM patches are merged upstream with a stable capability ID.
 pub const KVM_CAP_ARM_PROTECTED_VM: u32 = 0xffbadab1;
@@ -25,6 +37,9 @@ pub const KVM_CAP_ARM_PROTECTED_VM_FLAGS_SET_FW_IPA: u32 = 0;
 pub const KVM_CAP_ARM_PROTECTED_VM_FLAGS_INFO: u32 = 1;
 pub const KVM_VM_TYPE_ARM_PROTECTED: u32 = 0x80000000;
 pub const KVM_X86_PKVM_PROTECTED_VM: u32 = 28;
+pub const KVM_CAP_X86_PROTECTED_VM: u32 = 0xffbadab2;
+pub const KVM_CAP_X86_PROTECTED_VM_FLAGS_SET_FW_GPA: u32 = 0;
+pub const KVM_CAP_X86_PROTECTED_VM_FLAGS_INFO: u32 = 1;
 pub const KVM_DEV_VFIO_PVIOMMU: u32 = 2;
 pub const KVM_DEV_VFIO_PVIOMMU_ATTACH: u32 = 1;
 #[repr(C)]
