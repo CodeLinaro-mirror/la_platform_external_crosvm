@@ -54,8 +54,8 @@ const VIRTIO_FASTRPC_F_HYBRID: u32 = 9;
 
 /*version should be 0x00010000*/
 const VUFRPC_VERSION : u32 = 0x0001_0000;
-/*domain_num should be 0x00000004*/
-const VUFRPC_DOMAIN_NUM : u32 = 0x0000_0004;
+/*domain_num should be 0x00000005*/
+const VUFRPC_DOMAIN_NUM : u32 = 0x0000_0005;
 /*max_buf_size should be 0x00001000(4K) for test as bounce buffer only have 16M*/
 const VUFRPC_MAX_BUF_SZ : u32 = 0x0002_0000;
 
