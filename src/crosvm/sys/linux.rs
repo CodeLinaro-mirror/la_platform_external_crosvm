@@ -663,7 +663,7 @@ fn create_virtio_devices(
     #[cfg(feature = "balloon")]
     if cfg.balloon {
         let balloon_device_tube = if let Some(ref path) = cfg.balloon_control {
-            Tube::new_from_unix_seqpacket(UnixSeqpacket::connect(path).with_context(|| {
+            Tube::try_from(UnixSeqpacket::connect(path).with_context(|| {
                 format!(
                     "failed to connect to balloon control socket {}",
                     path.display(),
@@ -2675,7 +2675,7 @@ fn remove_hotplug_bridge<V: VmArch, Vcpu: VcpuArch>(
     for (bus_num, hp_bus) in linux.hotplug_bus.iter() {
         let mut hp_bus_lock = hp_bus.lock();
         if let Some(pci_addr) = hp_bus_lock.get_hotplug_device(hotplug_key) {
-            sys_allocator.release_pci(pci_addr.bus, pci_addr.dev, pci_addr.func);
+            sys_allocator.release_pci(pci_addr);
             hp_bus_lock.hot_unplug(pci_addr)?;
             buses_to_remove.push(child_bus);
             if hp_bus_lock.is_empty() {
@@ -2765,7 +2765,7 @@ fn remove_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
                 hp_bus_lock.hot_unplug(pci_addr)?;
             }
 
-            sys_allocator.release_pci(pci_addr.bus, pci_addr.dev, pci_addr.func);
+            sys_allocator.release_pci(pci_addr);
             if empty_simbling || hp_bus_lock.is_empty() {
                 if let Some(hotplug_key) = hp_bus_lock.get_hotplug_key() {
                     removed_key = Some(hotplug_key);
@@ -3400,7 +3400,7 @@ fn make_addr_tube_from_maybe_existing(
         let sock = UnixSeqpacket::connect(addr.clone()).with_context(|| {
             format!("failed to connect to registered listening socket {}", addr)
         })?;
-        let tube = ProtoTube::new_from_unix_seqpacket(sock)?;
+        let tube = ProtoTube::from(Tube::try_from(sock)?);
         Ok(AddressedProtoTube {
             tube: Rc::new(tube),
             socket_addr: addr,
@@ -4068,10 +4068,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 wait_ctx
                                     .add(&socket, Token::VmControl { id })
                                     .context("failed to add descriptor to wait context")?;
-                                control_tubes.insert(
-                                    id,
-                                    TaggedControlTube::Vm(Tube::new_from_unix_seqpacket(socket)?),
-                                );
+                                control_tubes
+                                    .insert(id, TaggedControlTube::Vm(Tube::try_from(socket)?));
                             }
                             Err(e) => error!("failed to accept socket: {}", e),
                         }
@@ -4829,7 +4827,7 @@ fn start_vhost_user_control_server(
     loop {
         match control_server_socket.accept() {
             Ok(socket) => {
-                let tube = match Tube::new_from_unix_seqpacket(socket) {
+                let tube = match Tube::try_from(socket) {
                     Ok(tube) => tube,
                     Err(e) => {
                         error!("failed to open tube: {:#}", e);

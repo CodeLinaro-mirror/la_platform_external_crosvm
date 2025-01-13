@@ -275,6 +275,7 @@ rust_library {
         "libsmallvec",
         "libswap",
         "libsync_rust",
+        "libtempfile",
         "libthiserror",
         "libusb_util",
         "libvfio_sys",
