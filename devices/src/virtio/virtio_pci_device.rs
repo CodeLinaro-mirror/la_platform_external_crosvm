@@ -26,6 +26,7 @@ use hypervisor::MemCacheType;
 use libc::ERANGE;
 #[cfg(target_arch = "x86_64")]
 use metrics::MetricEventType;
+use resources::AddressRange;
 use resources::Alloc;
 use resources::AllocOptions;
 use resources::SystemAllocator;
@@ -43,7 +44,6 @@ use vm_control::api::VmMemoryClient;
 use vm_control::VmMemoryDestination;
 use vm_control::VmMemoryRegionId;
 use vm_control::VmMemorySource;
-use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
@@ -725,28 +725,12 @@ impl PciDevice for VirtioPciDevice {
     ) -> std::result::Result<PciAddress, PciDeviceError> {
         if self.pci_address.is_none() {
             if let Some(address) = self.preferred_address {
-                if !resources.reserve_pci(
-                    Alloc::PciBar {
-                        bus: address.bus,
-                        dev: address.dev,
-                        func: address.func,
-                        bar: 0,
-                    },
-                    self.debug_label(),
-                ) {
+                if !resources.reserve_pci(address, self.debug_label()) {
                     return Err(PciDeviceError::PciAllocationFailed);
                 }
                 self.pci_address = Some(address);
             } else {
-                self.pci_address = match resources.allocate_pci(0, self.debug_label()) {
-                    Some(Alloc::PciBar {
-                        bus,
-                        dev,
-                        func,
-                        bar: _,
-                    }) => Some(PciAddress { bus, dev, func }),
-                    _ => None,
-                }
+                self.pci_address = resources.allocate_pci(0, self.debug_label());
             }
         }
         self.pci_address.ok_or(PciDeviceError::PciAllocationFailed)
@@ -914,8 +898,6 @@ impl PciDevice for VirtioPciDevice {
                 }
                 _ => (),
             }
-        } else {
-            self.device.read_bar(bar_index, offset, data);
         }
     }
 
@@ -969,8 +951,6 @@ impl PciDevice for VirtioPciDevice {
                 }
                 _ => (),
             }
-        } else {
-            self.device.write_bar(bar_index, offset, data);
         }
 
         if !self.device_activated && self.is_driver_ready() {
@@ -1151,9 +1131,11 @@ where
         .get_shared_memory_region()
         .is_some()
     {
+        let shmem_region = AddressRange::from_start_and_size(ranges[0].addr, ranges[0].size)
+            .expect("invalid shmem region");
         virtio_pci_device
             .device
-            .set_shared_memory_region_base(GuestAddress(ranges[0].addr));
+            .set_shared_memory_region(shmem_region);
     }
 
     Ok(ranges)
