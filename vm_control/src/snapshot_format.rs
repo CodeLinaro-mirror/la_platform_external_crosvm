@@ -195,9 +195,8 @@ impl SnapshotReader {
 
     /// Reads a fragment.
     pub fn read_fragment<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<T> {
-        Ok(serde_json::from_reader(std::io::BufReader::new(
-            self.raw_fragment(name)?,
-        ))?)
+        serde_json::from_reader(std::io::BufReader::new(self.raw_fragment(name)?))
+            .with_context(|| format!("failed to parse json from snapshot fragment named {}", name))
     }
 
     /// Reads the names of all fragments in this namespace.
@@ -205,10 +204,8 @@ impl SnapshotReader {
         let mut result = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
-            if entry.path().is_file() {
-                if let Some(file_name) = entry.path().file_name() {
-                    result.push(file_name.to_string_lossy().into_owned());
-                }
+            if entry.file_type()?.is_file() {
+                result.push(entry.file_name().to_string_lossy().into_owned());
             }
         }
         Ok(result)
