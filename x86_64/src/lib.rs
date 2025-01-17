@@ -1171,6 +1171,7 @@ impl arch::LinuxArch for X8664arch {
                     params,
                     dump_device_tree_blob,
                     device_tree_overlays,
+                    protection_type,
                 )?;
 
                 if protection_type.needs_firmware_loaded() {
@@ -1215,9 +1216,11 @@ impl arch::LinuxArch for X8664arch {
 
                 if protection_type.runs_firmware() {
                     // Pass pVM payload entry address to pVM firmware.
-                    // NOTE: this ABI is subject to change. Possibly we will pass
-                    // all the needed info (payload entry, start and size) in in-memory
-                    // structures (e.g. DTB) instead.
+                    // NOTE: this is only for development purposes. An actual pvmfw
+                    // implementation should not use this value and should instead receive
+                    // the pVM payload start and size info from crosvm as the DTB properties
+                    // /config/kernel-address and /config/kernel-size and determine the offset
+                    // of the entry point on its own, not trust crosvm to provide it.
                     vcpu_init[0].regs.rdi = kernel_entry.offset();
                 }
 
@@ -1644,6 +1647,7 @@ impl X8664arch {
         params: boot_params,
         dump_device_tree_blob: Option<PathBuf>,
         device_tree_overlays: Vec<DtbOverlay>,
+        protection_type: ProtectionType,
     ) -> Result<()> {
         // Some guest kernels expect a typical PC memory layout where the region between 640 KB and
         // 1 MB is reserved for device memory/ROMs and get confused if there is a RAM region
@@ -1700,10 +1704,20 @@ impl X8664arch {
         )?;
 
         let mut setup_data = Vec::<SetupData>::new();
-        if android_fstab.is_some() || !device_tree_overlays.is_empty() {
-            let device_tree_blob =
-                fdt::create_fdt(android_fstab, dump_device_tree_blob, device_tree_overlays)
-                    .map_err(Error::CreateFdt)?;
+        if android_fstab.is_some()
+            || !device_tree_overlays.is_empty()
+            || protection_type.runs_firmware()
+        {
+            let kernel_start = GuestAddress(KERNEL_START_OFFSET);
+            let kernel_size = (kernel_end - KERNEL_START_OFFSET) as usize;
+
+            let device_tree_blob = fdt::create_fdt(
+                android_fstab,
+                dump_device_tree_blob,
+                device_tree_overlays,
+                (kernel_start, kernel_size),
+            )
+            .map_err(Error::CreateFdt)?;
             setup_data.push(SetupData {
                 data: device_tree_blob,
                 type_: SetupDataType::Dtb,

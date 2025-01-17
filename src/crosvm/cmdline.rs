@@ -82,13 +82,12 @@ use super::sys::GpuRenderServerParameters;
 use crate::crosvm::config::from_key_values;
 use crate::crosvm::config::parse_bus_id_addr;
 use crate::crosvm::config::parse_cpu_affinity;
-use crate::crosvm::config::parse_cpu_capacity;
+use crate::crosvm::config::parse_cpu_btreemap_u32;
 #[cfg(all(
     any(target_arch = "arm", target_arch = "aarch64"),
     any(target_os = "android", target_os = "linux")
 ))]
 use crate::crosvm::config::parse_cpu_frequencies;
-use crate::crosvm::config::parse_dynamic_power_coefficient;
 use crate::crosvm::config::parse_mmio_address_range;
 use crate::crosvm::config::parse_pflash_parameters;
 use crate::crosvm::config::parse_serial_options;
@@ -1128,7 +1127,7 @@ pub struct RunCommand {
     #[argh(
         option,
         arg_name = "CPU=CAP[,CPU=CAP[,...]]",
-        from_str_fn(parse_cpu_capacity)
+        from_str_fn(parse_cpu_btreemap_u32)
     )]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1158,6 +1157,24 @@ pub struct RunCommand {
     /// support, the virtual cpufreq device will actively throttle the vCPU to deliberately slow
     /// its performance to match the guest's request.
     pub cpu_frequencies_khz: Option<BTreeMap<usize, Vec<u32>>>, // CPU index -> frequencies
+
+    #[argh(
+        option,
+        arg_name = "CPU=RATIO[,CPU=RATIO[,...]]",
+        from_str_fn(parse_cpu_btreemap_u32)
+    )]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// set the instructions per cycle (IPC) performance of the vCPU relative to the pCPU it is
+    /// affined to normalized to 1024. Defaults to 1024 which represents the baseline performance
+    /// of the pCPU, setting the vCPU to 1024 means it will match the per cycle performance of the
+    /// pCPU.  This ratio determines how quickly the same workload will complete on the vCPU
+    /// compared to the pCPU. Ex. Setting the ratio to 512 will result in the task taking twice as
+    /// long if it were set to 1024 given the same frequency. Conversely, using a value > 1024 will
+    /// result in faster per cycle perf relative to the pCPU with some important limitations. In
+    /// combination with virtual frequencies defined with "cpu_frequencies_khz", performance points
+    /// with vCPU frequencies * vCPU IPC > pCPU@FMax * 1024 will not be properly supported.
+    pub cpu_ipc_ratio: Option<BTreeMap<usize, u32>>, // CPU index -> ipc_ratio
 
     #[argh(option, short = 'c')]
     #[merge(strategy = overwrite_option)]
@@ -1280,7 +1297,7 @@ pub struct RunCommand {
     #[argh(
         option,
         arg_name = "CPU=DYN_PWR[,CPU=DYN_PWR[,...]]",
-        from_str_fn(parse_dynamic_power_coefficient)
+        from_str_fn(parse_cpu_btreemap_u32)
     )]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -2858,6 +2875,9 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
             if let Some(frequencies) = cmd.cpu_frequencies_khz {
                 cfg.cpu_frequencies_khz = frequencies;
+            }
+            if let Some(ipc_ratio) = cmd.cpu_ipc_ratio {
+                cfg.cpu_ipc_ratio = ipc_ratio;
             }
         }
 
