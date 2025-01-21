@@ -184,6 +184,12 @@ pub struct RutabagaDebug {
     pub message: *const c_char,
 }
 
+/// Rutabaga import flags
+pub const RUTABAGA_IMPORT_FLAG_3D_INFO: u32 = 1 << 0;
+pub const RUTABAGA_IMPORT_FLAG_VULKAN_INFO: u32 = 1 << 1;
+pub const RUTABAGA_IMPORT_FLAG_RESOURCE_EXISTS: u32 = 1 << 30;
+pub const RUTABAGA_IMPORT_FLAG_PRESERVE_CONTENT: u32 = 1 << 31;
+
 /// Import Data for resource_import
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -672,18 +678,20 @@ pub enum RutabagaComponentType {
 }
 
 /// Rutabaga handle types (memory and sync in same namespace)
-pub const RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD: u32 = 0x0001;
-pub const RUTABAGA_MEM_HANDLE_TYPE_DMABUF: u32 = 0x0002;
-pub const RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_WIN32: u32 = 0x0003;
-pub const RUTABAGA_MEM_HANDLE_TYPE_SHM: u32 = 0x0004;
-pub const RUTABAGA_MEM_HANDLE_TYPE_ZIRCON: u32 = 0x0005;
+pub const RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_FD: u32 = 0x0001;
+pub const RUTABAGA_HANDLE_TYPE_MEM_DMABUF: u32 = 0x0002;
+pub const RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_WIN32: u32 = 0x0003;
+pub const RUTABAGA_HANDLE_TYPE_MEM_SHM: u32 = 0x0004;
+pub const RUTABAGA_HANDLE_TYPE_MEM_ZIRCON: u32 = 0x0005;
 
-pub const RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_FD: u32 = 0x0006;
-pub const RUTABAGA_FENCE_HANDLE_TYPE_SYNC_FD: u32 = 0x0007;
-pub const RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_WIN32: u32 = 0x0008;
-pub const RUTABAGA_FENCE_HANDLE_TYPE_ZIRCON: u32 = 0x0009;
+pub const RUTABAGA_HANDLE_TYPE_SIGNAL_OPAQUE_FD: u32 = 0x0010;
+pub const RUTABAGA_HANDLE_TYPE_SIGNAL_SYNC_FD: u32 = 0x0020;
+pub const RUTABAGA_HANDLE_TYPE_SIGNAL_OPAQUE_WIN32: u32 = 0x0030;
+pub const RUTABAGA_HANDLE_TYPE_SIGNAL_ZIRCON: u32 = 0x0040;
+pub const RUTABAGA_HANDLE_TYPE_SIGNAL_EVENT_FD: u32 = 0x0050;
 
-pub const RUTABAGA_FENCE_HANDLE_TYPE_EVENT_FD: u32 = 0x000a;
+pub const RUTABAGA_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX: u32 = 0x01000000;
+pub const RUTABAGA_HANDLE_TYPE_PLATFORM_EGL_NATIVE_PIXMAP: u32 = 0x02000000;
 
 /// Handle to OS-specific memory or synchronization objects.
 pub struct RutabagaHandle {
