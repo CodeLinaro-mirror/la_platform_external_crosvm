@@ -82,7 +82,19 @@ pub const DEFAULT_BUFFER_SIZE: usize = 50 * 1024;
 
 static NEXT_PIPE_INDEX: AtomicUsize = AtomicUsize::new(1);
 
+#[remain::sorted]
+#[derive(Debug, thiserror::Error)]
+pub enum PipeError {
+    #[error("read zero bytes, but this is not an EOF")]
+    ZeroByteReadNoEof,
+}
+
 /// Represents one end of a named pipe
+///
+/// NOTE: implementations of Read & Write are trait complaint for EOF/broken pipe handling
+/// (returning a successful zero byte read), but overlapped read/write versions are NOT (they will
+/// return broken pipe directly due to API limitations; see PipeConnection::read for
+/// details).
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PipeConnection {
     handle: SafeDescriptor,
@@ -530,7 +542,38 @@ impl PipeConnection {
     /// If buf's type is file descriptors, this is only safe when those file descriptors are valid
     /// for the process where this function was called.
     pub unsafe fn read<T: PipeSendable>(&self, buf: &mut [T]) -> Result<usize> {
-        PipeConnection::read_internal(&self.handle, self.blocking_mode, buf, None)
+        match PipeConnection::read_internal(&self.handle, self.blocking_mode, buf, None) {
+            // Windows allows for zero byte writes on one end of a pipe to be read by the other as
+            // zero byte reads. These zero byte reads DO NOT signify EOF, so from the perspective
+            // of std::io::Read, they cannot be reported as Ok(0). We translate them to errors.
+            //
+            // Within CrosVM, this behavior is not used, but it has been implemented to avoid UB
+            // either in the future, or when talking to non CrosVM named pipes. If we need to
+            // actually use/understand this error from other parts of KiwiVM (e.g. PipeConnection
+            // consumers), we could use ErrorKind::Interrupted (which as of 24/11/26 is not used by
+            // Rust for other purposes).
+            Ok(len) if len == 0 && !buf.is_empty() => Err(io::Error::new(
+                io::ErrorKind::Other,
+                PipeError::ZeroByteReadNoEof,
+            )),
+
+            // Read at least 1 byte, or 0 bytes if a zero byte buffer was provided.
+            Ok(len) => Ok(len),
+
+            // Treat a closed pipe like an EOF, because that is consistent with the Read trait.
+            //
+            // NOTE: this is explicitly NOT done for overlapped operations for a few reasons:
+            // 1. Overlapped operations do not follow the Read trait, so there is no strong reason
+            //    *to* do it.
+            // 2. Ok(0) also means "overlapped operation started successfully." This is a real
+            //    problem because the general pattern is to start an overlapped operation and then
+            //    wait for it. So if we did that and the Ok(0) meant the pipe is closed, we would
+            //    enter an infinite wait. (The kernel already told us when we started the operation
+            //    that the pipe was closed. It won't tell us again.)
+            Err(e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
+
+            Err(e) => Err(e),
+        }
     }
 
     /// Similar to `PipeConnection::read` except it also allows:
@@ -589,9 +632,12 @@ impl PipeConnection {
         );
         match res {
             Ok(bytes_read) => Ok(bytes_read),
-            // Treat a closed pipe like an EOF.
-            // We check the raw error because `ErrorKind::BrokenPipe` is ambiguous on Windows.
-            Err(e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
+            // For message mode pipes, if the buffer is too small for the entire message, the kernel
+            // will return ERROR_MORE_DATA. This isn't strictly an "error" because the operation
+            // succeeds. Making it an error also means it's hard to handle this cleanly from the
+            // perspective of an io::Read consumer. So we discard the non-error, and return the
+            // successful result of filling the entire buffer.
+            Err(e) if e.raw_os_error() == Some(ERROR_MORE_DATA as i32) => Ok(buf.len()),
             Err(e)
                 if blocking_mode == BlockingMode::NoWait
                     && e.raw_os_error() == Some(ERROR_NO_DATA as i32) =>
@@ -619,9 +665,6 @@ impl PipeConnection {
         // Safe because we are providing a valid buffer slice and also providing a valid
         // overlapped struct.
         match unsafe { self.read_overlapped(buf, overlapped_wrapper) } {
-            // More data isn't necessarily an error as long as we've filled the provided buffer,
-            // as is checked later in this function.
-            Err(e) if e.raw_os_error() == Some(ERROR_MORE_DATA as i32) => Ok(()),
             Err(e) => Err(e),
             Ok(()) => Ok(()),
         }?;
@@ -930,20 +973,30 @@ impl PipeConnection {
                 "Overlapped struct is not in use",
             ));
         }
+
         let mut size_transferred = 0;
         // SAFETY:
         // Safe as long as `overlapped_struct` isn't copied and also contains a valid event.
         // Also the named pipe handle must created with `FILE_FLAG_OVERLAPPED`.
-        fail_if_zero!(unsafe {
+        if (unsafe {
             GetOverlappedResult(
                 self.handle.as_raw_descriptor(),
                 &mut *overlapped_wrapper.overlapped.0,
                 &mut size_transferred,
                 if wait { TRUE } else { FALSE },
             )
-        });
-
-        Ok(size_transferred)
+        }) != 0
+        {
+            Ok(size_transferred)
+        } else {
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                // More data => partial read of a message on a message pipe. This isn't really an
+                // error (see PipeConnection::read_internal) since we filled the provided buffer.
+                Some(error_code) if error_code as u32 == ERROR_MORE_DATA => Ok(size_transferred),
+                _ => Err(e),
+            }
+        }
     }
 
     /// Cancels I/O Operations in the current process. Since `lpOverlapped` is null, this will
