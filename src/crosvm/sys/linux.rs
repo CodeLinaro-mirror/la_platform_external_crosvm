@@ -257,6 +257,18 @@ fn create_virtio_devices(
         )?);
     }
 
+    #[cfg(all(feature = "media", feature = "video-decoder"))]
+    let media_adapter_cfg = cfg
+        .media_decoder
+        .iter()
+        .map(|config| {
+            let (video_tube, gpu_tube) =
+                Tube::pair().expect("failed to create tube for media adapter");
+            resource_bridges.push(gpu_tube);
+            (video_tube, config.backend)
+        })
+        .collect::<Vec<_>>();
+
     #[cfg(feature = "video-decoder")]
     let video_dec_cfg = cfg
         .video_dec
@@ -700,12 +712,25 @@ fn create_virtio_devices(
             0
         };
 
+        // The balloon device also needs a tube to communicate back to the main process to
+        // handle remapping memory dynamically.
+        let (dynamic_mapping_host_tube, dynamic_mapping_device_tube) =
+            Tube::pair().context("failed to create tube")?;
+        add_control_tube(
+            VmMemoryTube {
+                tube: dynamic_mapping_host_tube,
+                expose_with_viommu: false,
+            }
+            .into(),
+        );
+
         devs.push(create_balloon_device(
             cfg.protection_type,
             &cfg.jail_config,
             balloon_device_tube,
             balloon_inflate_tube,
             init_balloon_size,
+            VmMemoryClient::new(dynamic_mapping_device_tube),
             balloon_features,
             #[cfg(feature = "registered_events")]
             Some(
@@ -747,6 +772,17 @@ fn create_virtio_devices(
     #[cfg(feature = "media")]
     if cfg.simple_media_device {
         devs.push(create_simple_media_device(cfg.protection_type)?);
+    }
+
+    #[cfg(all(feature = "media", feature = "video-decoder"))]
+    {
+        for (tube, backend) in media_adapter_cfg {
+            devs.push(create_virtio_media_adapter(
+                cfg.protection_type,
+                tube,
+                backend,
+            )?);
+        }
     }
 
     #[cfg(feature = "video-decoder")]
@@ -1388,10 +1424,10 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
 
             for (cpu_id, max_freq) in max_freqs.iter().enumerate() {
                 let normalized_cpu_ipc_ratio =
-                    u64::from(*cfg.cpu_ipc_ratio.get(&cpu_id).unwrap_or(&1024))
-                        * u64::from(*max_freq)
-                            .checked_div(u64::from(*largest_host_max_freq))
-                            .ok_or(Error::new(libc::EINVAL))?;
+                    (u64::from(*cfg.cpu_ipc_ratio.get(&cpu_id).unwrap_or(&1024))
+                        * u64::from(*max_freq))
+                    .checked_div(u64::from(*largest_host_max_freq))
+                    .ok_or(Error::new(libc::EINVAL))?;
                 normalized_cpu_ipc_ratios.insert(
                     cpu_id,
                     u32::try_from(normalized_cpu_ipc_ratio)
@@ -1585,7 +1621,7 @@ fn create_guest_memory(
     let guest_mem_layout =
         punch_holes_in_guest_mem_layout_for_mappings(guest_mem_layout, &cfg.file_backed_mappings);
 
-    let guest_mem = GuestMemory::new_with_options(&guest_mem_layout)
+    let mut guest_mem = GuestMemory::new_with_options(&guest_mem_layout)
         .context("failed to create guest memory")?;
     let mut mem_policy = MemoryPolicy::empty();
     if components.hugepages {
