@@ -836,6 +836,7 @@ pub fn create_balloon_device(
     tube: Tube,
     inflate_tube: Option<Tube>,
     init_balloon_size: u64,
+    vm_memory_client: VmMemoryClient,
     enabled_features: u64,
     #[cfg(feature = "registered_events")] registered_evt_q: Option<SendTube>,
     ws_num_bins: u8,
@@ -843,6 +844,7 @@ pub fn create_balloon_device(
     let dev = virtio::Balloon::new(
         virtio::base_features(protection_type),
         tube,
+        vm_memory_client,
         inflate_tube,
         init_balloon_size,
         enabled_features,
@@ -1143,6 +1145,20 @@ pub fn create_v4l2_device<P: AsRef<Path>>(
 
     let features = virtio::base_features(protection_type);
     let dev = create_virtio_media_v4l2_proxy_device(features, path)?;
+
+    Ok(VirtioDeviceStub { dev, jail: None })
+}
+
+#[cfg(all(feature = "media", feature = "video-decoder"))]
+pub fn create_virtio_media_adapter(
+    protection_type: ProtectionType,
+    tube: Tube,
+    backend: VideoBackendType,
+) -> DeviceResult {
+    use devices::virtio::media::create_virtio_media_decoder_adapter_device;
+
+    let features = virtio::base_features(protection_type);
+    let dev = create_virtio_media_decoder_adapter_device(features, tube, backend)?;
 
     Ok(VirtioDeviceStub { dev, jail: None })
 }
