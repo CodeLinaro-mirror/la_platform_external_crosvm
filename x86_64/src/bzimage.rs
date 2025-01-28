@@ -14,6 +14,7 @@ use base::FileGetLen;
 use base::FileReadWriteAtVolatile;
 use base::VolatileSlice;
 use remain::sorted;
+use resources::AddressRange;
 use thiserror::Error;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -37,6 +38,8 @@ pub enum Error {
     GetFileLen(io::Error),
     #[error("guest memory error {0}")]
     GuestMemoryError(GuestMemoryError),
+    #[error("invalid address range")]
+    InvalidAddressRange,
     #[error("invalid setup_header_end value {0}")]
     InvalidSetupHeaderEnd(usize),
     #[error("invalid setup_sects value {0}")]
@@ -58,13 +61,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// # Arguments
 ///
 /// * `guest_mem` - The guest memory region the kernel is written to.
-/// * `kernel_start` - The offset into `guest_mem` at which to load the kernel.
+/// * `kernel_start` - The offset into `guest_mem` at which to load the kernel. The header and setup
+///   code will be loaded before this address such that the actual kernel payload will be located at
+///   `kernel_start`.
 /// * `kernel_image` - Input bzImage.
 pub fn load_bzimage<F>(
     guest_mem: &GuestMemory,
     kernel_start: GuestAddress,
     kernel_image: &mut F,
-) -> Result<(boot_params, u64, GuestAddress, CpuMode)>
+) -> Result<(boot_params, AddressRange, GuestAddress, CpuMode)>
 where
     F: FileReadWriteAtVolatile + FileGetLen,
 {
@@ -116,21 +121,21 @@ where
         params.hdr.setup_sects as u64
     };
 
-    let kernel_offset = setup_sects
-        .checked_add(1)
-        .and_then(|sectors| sectors.checked_mul(512))
+    let setup_size = (setup_sects + 1) * 512;
+    let sys_size = u64::from(params.hdr.syssize) * 16;
+    let expected_size = setup_size + sys_size;
+
+    // Adjust the load address so the kernel payload will end up at the original `kernel_start`
+    // location when loading the entire file (including boot sector/setup sectors).
+    let load_addr = kernel_start
+        .checked_sub(setup_size)
         .ok_or(Error::InvalidSetupSects(params.hdr.setup_sects))?;
-    let kernel_size = (params.hdr.syssize as usize)
-        .checked_mul(16)
-        .ok_or(Error::InvalidSysSize(params.hdr.syssize))?;
 
     let file_size = kernel_image.get_len().map_err(Error::GetFileLen)?;
-    let load_size = file_size
-        .checked_sub(kernel_offset)
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or(Error::InvalidSetupSects(params.hdr.setup_sects))?;
+    let file_size_usize =
+        usize::try_from(file_size).map_err(|_| Error::InvalidSetupSects(params.hdr.setup_sects))?;
 
-    match kernel_size.cmp(&load_size) {
+    match expected_size.cmp(&file_size) {
         Ordering::Greater => {
             // `syssize` from header was larger than the actual file.
             return Err(Error::InvalidSysSize(params.hdr.syssize));
@@ -138,18 +143,18 @@ where
         Ordering::Less => {
             debug!(
                 "loading {} extra bytes appended to bzImage",
-                load_size - kernel_size
+                file_size - expected_size
             );
         }
         Ordering::Equal => {}
     }
 
-    // Load the whole kernel image to kernel_start
+    // Load the whole kernel image to `load_addr`
     let guest_slice = guest_mem
-        .get_slice_at_addr(kernel_start, load_size)
+        .get_slice_at_addr(load_addr, file_size_usize)
         .map_err(Error::GuestMemoryError)?;
     kernel_image
-        .read_exact_at_volatile(guest_slice, kernel_offset)
+        .read_exact_at_volatile(guest_slice, 0)
         .map_err(Error::ReadKernelImage)?;
 
     let (entry_offset, cpu_mode) = if params.hdr.xloadflags & XLF_KERNEL_64 != 0 {
@@ -162,10 +167,8 @@ where
         .checked_offset(kernel_start, entry_offset)
         .ok_or(Error::EntryPointOutOfRange)?;
 
-    Ok((
-        params,
-        kernel_start.offset() + load_size as u64,
-        bzimage_entry,
-        cpu_mode,
-    ))
+    let kernel_region = AddressRange::from_start_and_size(load_addr.offset(), file_size)
+        .ok_or(Error::InvalidAddressRange)?;
+
+    Ok((params, kernel_region, bzimage_entry, cpu_mode))
 }

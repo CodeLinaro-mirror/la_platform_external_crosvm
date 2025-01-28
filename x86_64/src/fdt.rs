@@ -15,18 +15,39 @@ use arch::DtbOverlay;
 use base::open_file_or_duplicate;
 use cros_fdt::Error;
 use cros_fdt::Fdt;
+use resources::AddressRange;
 use vm_memory::GuestAddress;
 
-fn create_config_node(fdt: &mut Fdt, (addr, size): (GuestAddress, usize)) -> cros_fdt::Result<()> {
-    let addr: u32 = addr
-        .offset()
+fn create_config_node(fdt: &mut Fdt, kernel_region: AddressRange) -> cros_fdt::Result<()> {
+    let addr: u32 = kernel_region
+        .start
         .try_into()
         .map_err(|_| Error::PropertyValueTooLarge)?;
-    let size: u32 = size.try_into().map_err(|_| Error::PropertyValueTooLarge)?;
+    let size: u32 = kernel_region
+        .len()
+        .expect("invalid kernel_region")
+        .try_into()
+        .map_err(|_| Error::PropertyValueTooLarge)?;
 
     let config_node = fdt.root_mut().subnode_mut("config")?;
     config_node.set_prop("kernel-address", addr)?;
     config_node.set_prop("kernel-size", size)?;
+    Ok(())
+}
+
+fn create_chosen_node(
+    fdt: &mut Fdt,
+    initrd: Option<(GuestAddress, usize)>,
+) -> cros_fdt::Result<()> {
+    let chosen_node = fdt.root_mut().subnode_mut("chosen")?;
+
+    if let Some((initrd_addr, initrd_size)) = initrd {
+        let initrd_start = initrd_addr.offset() as u32;
+        let initrd_end = initrd_start + initrd_size as u32;
+        chosen_node.set_prop("linux,initrd-start", initrd_start)?;
+        chosen_node.set_prop("linux,initrd-end", initrd_end)?;
+    }
+
     Ok(())
 }
 
@@ -40,7 +61,8 @@ pub fn create_fdt(
     android_fstab: Option<File>,
     dump_device_tree_blob: Option<PathBuf>,
     device_tree_overlays: Vec<DtbOverlay>,
-    image: (GuestAddress, usize),
+    kernel_region: AddressRange,
+    initrd: Option<(GuestAddress, usize)>,
 ) -> Result<Vec<u8>, Error> {
     let mut fdt = Fdt::new(&[]);
     // The whole thing is put into one giant node with some top level properties
@@ -48,7 +70,8 @@ pub fn create_fdt(
         create_android_fdt(&mut fdt, android_fstab)?;
     }
 
-    create_config_node(&mut fdt, image)?;
+    create_config_node(&mut fdt, kernel_region)?;
+    create_chosen_node(&mut fdt, initrd)?;
 
     // Done writing base FDT, now apply DT overlays
     apply_device_tree_overlays(

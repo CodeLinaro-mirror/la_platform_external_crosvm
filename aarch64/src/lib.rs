@@ -201,6 +201,21 @@ impl PayloadType {
             Self::Kernel(k) => k.size,
         }
     }
+
+    fn address_range(&self) -> AddressRange {
+        match self {
+            Self::Bios { entry, image_size } => {
+                AddressRange::from_start_and_size(entry.offset(), *image_size)
+                    .expect("invalid BIOS address range")
+            }
+            Self::Kernel(k) => {
+                // TODO: b/389759119: use `k.address_range` to include regions that are present in
+                // memory but not in the original image file (e.g. `.bss` section).
+                AddressRange::from_start_and_size(k.entry.offset(), k.size)
+                    .expect("invalid kernel address range")
+            }
+        }
+    }
 }
 
 // When static swiotlb allocation is required, returns the address it should be allocated at.
@@ -638,6 +653,10 @@ impl arch::LinuxArch for AArch64 {
             vcpu_init.push(per_vcpu_init);
         }
 
+        if components.sve_config.auto {
+            components.sve_config.enable = vm.get_hypervisor().check_capability(HypervisorCap::Sve);
+        }
+
         // Initialize Vcpus after all Vcpu objects have been created.
         for (vcpu_id, vcpu) in vcpus.iter().enumerate() {
             let features =
@@ -949,7 +968,7 @@ impl arch::LinuxArch for AArch64 {
             cmdline
                 .as_str_with_max_len(AARCH64_CMDLINE_MAX_SIZE - 1)
                 .map_err(Error::Cmdline)?,
-            (payload.entry(), payload.size() as usize),
+            payload.address_range(),
             initrd,
             components.android_fstab,
             irq_chip.get_vgic_version() == DeviceKind::ArmVgicV3,
@@ -1445,6 +1464,13 @@ mod tests {
             size: 0x1000,
             entry: GuestAddress(0x8080_0000),
         });
+        assert_eq!(
+            payload.address_range(),
+            AddressRange {
+                start: 0x8080_0000,
+                end: 0x8080_0fff
+            }
+        );
         let fdt_address = GuestAddress(0x1234);
         let prot = ProtectionType::Unprotected;
 
@@ -1463,6 +1489,13 @@ mod tests {
             entry: GuestAddress(0x8020_0000),
             image_size: 0x1000,
         };
+        assert_eq!(
+            payload.address_range(),
+            AddressRange {
+                start: 0x8020_0000,
+                end: 0x8020_0fff
+            }
+        );
         let fdt_address = GuestAddress(0x1234);
         let prot = ProtectionType::Unprotected;
 
@@ -1482,6 +1515,13 @@ mod tests {
             size: 0x1000,
             entry: GuestAddress(0x8080_0000),
         });
+        assert_eq!(
+            payload.address_range(),
+            AddressRange {
+                start: 0x8080_0000,
+                end: 0x8080_0fff
+            }
+        );
         let fdt_address = GuestAddress(0x1234);
         let prot = ProtectionType::Protected;
 
