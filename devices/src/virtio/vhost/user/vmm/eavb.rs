@@ -43,7 +43,7 @@ use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
 use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_QCOM_EAVB};
-
+/* set queues_num to 2 for eavb*/
 const QUEUE_SIZE: u16 = 16;
 const VIRTIO_EAVB_F_VERSION: u32 = 5;
 /* indicates domain num is available in config space */
@@ -135,7 +135,6 @@ impl Drop for Eavb {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
             let _ = kill_evt.write(1);
-            println!("eavb---------------drop--------------------eavb------");
         }
         if let Some(worker_thread) = self.worker_thread.take() {
             let _ = worker_thread.join();
@@ -145,42 +144,36 @@ impl Drop for Eavb {
 
 impl VirtioDevice for Eavb {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
-        println!("eavb--------------virtiodevice-------------------------eavb------1");
         Vec::new()
-        
     }
+
     fn features(&self) -> u64 {
-        println!("eavb--------------virtiodevice-------------------------eavb------2");
         self.handler.borrow().avail_features
     }
 
     fn ack_features(&mut self, features: u64) {
-        println!("eavb--------------virtiodevice--------------------------eavb------3");
         if let Err(e) = self.handler.borrow_mut().ack_features(features) {
             error!("failed to enable features 0x{:x}: {}", features, e);
         }
     }
 
-
     fn device_type(&self) -> u32 {
-        println!("eavb--------------device_type--------------------------eavb------4");
         TYPE_QCOM_EAVB
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
-        println!("eavb--------------queue_max_sizes--------------------------eavb------5");
         self.queue_sizes.as_slice()
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-       let mut vueavb_cspace = vueavb_config_data {
-      version: VUEAVB_VERSION,
-      domain_num: VUEAVB_DOMAIN_NUM,
-      max_buff_size: VUEAVB_MAX_BUF_SZ,
-      };
+        let mut vueavb_cspace = vueavb_config_data {
+            version: VUEAVB_VERSION,
+            domain_num: VUEAVB_DOMAIN_NUM,
+            max_buff_size: VUEAVB_MAX_BUF_SZ,
+        };
 
-      // Copy the struct data to the byte array at a specific offset (e.g., at 256 offset)
-      vueavb_cspace.copy_cfg_space_at_offset(data, offset);
+        // Copy the struct data to the byte array at a specific offset (e.g., at 256 offset)
+        vueavb_cspace.copy_cfg_space_at_offset(data, offset);
     }
 
     fn activate(
@@ -193,12 +186,11 @@ impl VirtioDevice for Eavb {
         if let Err(e) = self
             .handler
             .borrow_mut()
-            .activate(&mem, &interrupt, &queues, &queue_evts)
-        {
-            error!("eavb zhzh failed to activate queues: {}", e);
+            .activate(&mem, &interrupt, &queues, &queue_evts) {
+            error!("failed to activate queues: {}", e);
             return;
         }
-        println!("eavb--------------activate--------------------------eavb------7");
+
         let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
             Err(e) => {
