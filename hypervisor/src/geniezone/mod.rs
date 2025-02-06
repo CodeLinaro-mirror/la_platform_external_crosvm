@@ -48,6 +48,7 @@ use libc::ENOTSUP;
 use libc::EOVERFLOW;
 use libc::O_CLOEXEC;
 use libc::O_RDWR;
+use snapshot::AnySnapshot;
 use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
@@ -448,14 +449,14 @@ impl VcpuAArch64 for GeniezoneVcpu {
         Err(Error::new(EINVAL))
     }
 
-    fn hypervisor_specific_snapshot(&self) -> anyhow::Result<serde_json::Value> {
+    fn hypervisor_specific_snapshot(&self) -> anyhow::Result<AnySnapshot> {
         // TODO: Geniezone not support gdb currently
         Err(anyhow::anyhow!(
             "Geniezone: not support hypervisor_specific_snapshot"
         ))
     }
 
-    fn hypervisor_specific_restore(&self, _data: serde_json::Value) -> anyhow::Result<()> {
+    fn hypervisor_specific_restore(&self, _data: AnySnapshot) -> anyhow::Result<()> {
         // TODO: Geniezone not support gdb currently
         Err(anyhow::anyhow!(
             "Geniezone: not support hypervisor_specific_restore"
@@ -603,6 +604,7 @@ impl GeniezoneVm {
                 MemoryRegionPurpose::Bios => GZVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::GuestMemoryRegion => GZVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::ProtectedFirmwareRegion => GZVM_USER_MEM_REGION_PROTECT_FW,
+                MemoryRegionPurpose::ReservedMemory => GZVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::StaticSwiotlbRegion => GZVM_USER_MEM_REGION_STATIC_SWIOTLB,
             };
             // SAFETY:
