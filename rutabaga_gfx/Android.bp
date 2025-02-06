@@ -33,7 +33,7 @@ rust_library {
         "libserde",
         "libserde_json",
         "libthiserror",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     cfgs: [
@@ -82,7 +82,7 @@ rust_library {
         "libserde",
         "libserde_json",
         "libthiserror",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     target: {
@@ -138,7 +138,7 @@ rust_test {
         "libserde",
         "libserde_json",
         "libthiserror",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     shared_libs: [

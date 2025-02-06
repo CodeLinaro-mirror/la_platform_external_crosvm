@@ -353,15 +353,14 @@ struct E820Entry {
     pub mem_type: E820Type,
 }
 
+const KB: u64 = 1 << 10;
 const MB: u64 = 1 << 20;
 const GB: u64 = 1 << 30;
 
 pub const BOOT_STACK_POINTER: u64 = 0x8000;
-const FIRST_ADDR_PAST_20BITS: u64 = 1 << 20;
 const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 // Make sure it align to 256MB for MTRR convenient
 const MEM_32BIT_GAP_SIZE: u64 = 768 * MB;
-const END_ADDR_BEFORE_32BITS: u64 = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE;
 // Reserved memory for nand_bios/LAPIC/IOAPIC/HPET/.....
 const RESERVED_MEM_SIZE: u64 = 0x800_0000;
 const DEFAULT_PCI_MEM_END: u64 = FIRST_ADDR_PAST_32BITS - RESERVED_MEM_SIZE - 1;
@@ -399,7 +398,8 @@ const ACPI_HI_RSDP_WINDOW_BASE: u64 = 0x000E_0000;
 // by setup_page_tables() when a protected VM boots in long mode, since the pVM firmware is
 // the VM entry point.
 const PROTECTED_VM_FW_MAX_SIZE: u64 = 0x40_0000;
-const PROTECTED_VM_FW_START: u64 = END_ADDR_BEFORE_32BITS - PROTECTED_VM_FW_MAX_SIZE;
+// Load the pVM firmware just below 2 GB to allow use of `-mcmodel=small`.
+const PROTECTED_VM_FW_START: u64 = 0x8000_0000 - PROTECTED_VM_FW_MAX_SIZE;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CpuManufacturer {
@@ -489,15 +489,6 @@ pub fn create_arch_memory_layout(
         pcie_cfg_mmio,
         pvmfw_mem,
     })
-}
-
-fn max_ram_end_before_32bit(arch_memory_layout: &ArchMemoryLayout) -> u64 {
-    let pci_start = arch_memory_layout.pci_mmio_before_32bit.start;
-    if let Some(pvmfw_mem) = arch_memory_layout.pvmfw_mem {
-        pci_start.min(pvmfw_mem.start)
-    } else {
-        pci_start
-    }
 }
 
 /// The x86 reset vector for i386+ and x86_64 puts the processor into an "unreal mode" where it
@@ -670,23 +661,22 @@ fn add_e820_entry(
 fn generate_e820_memory_map(
     arch_memory_layout: &ArchMemoryLayout,
     guest_mem: &GuestMemory,
-    ram_below_1m: AddressRange,
-    ram_below_4g: AddressRange,
-    ram_above_4g: AddressRange,
 ) -> Result<Vec<E820Entry>> {
     let mut e820_entries = Vec::new();
 
-    add_e820_entry(&mut e820_entries, ram_below_1m, E820Type::Ram)?;
-    add_e820_entry(&mut e820_entries, ram_below_4g, E820Type::Ram)?;
-    if !ram_above_4g.is_empty() {
-        add_e820_entry(&mut e820_entries, ram_above_4g, E820Type::Ram)?
-    }
-
-    if let Some(pvmfw_mem) = arch_memory_layout.pvmfw_mem {
-        // After the pVM firmware jumped to the guest, the pVM firmware itself
-        // is no longer running, so its memory is reusable by the guest OS.
-        // So add this memory as RAM rather than Reserved.
-        add_e820_entry(&mut e820_entries, pvmfw_mem, E820Type::Ram)?;
+    for r in guest_mem.regions() {
+        let range = AddressRange::from_start_and_size(r.guest_addr.offset(), r.size as u64)
+            .expect("invalid guest mem region");
+        let mem_type = match r.options.purpose {
+            MemoryRegionPurpose::Bios => E820Type::Reserved,
+            MemoryRegionPurpose::GuestMemoryRegion => E820Type::Ram,
+            // After the pVM firmware jumped to the guest, the pVM firmware itself is no longer
+            // running, so its memory is reusable by the guest OS. So add this memory as RAM rather
+            // than Reserved.
+            MemoryRegionPurpose::ProtectedFirmwareRegion => E820Type::Ram,
+            MemoryRegionPurpose::ReservedMemory => E820Type::Reserved,
+        };
+        add_e820_entry(&mut e820_entries, range, mem_type)?;
     }
 
     let pcie_cfg_mmio_range = arch_memory_layout.pcie_cfg_mmio;
@@ -717,35 +707,42 @@ fn generate_e820_memory_map(
 /// carve out at the end of 32bit address space.
 pub fn arch_memory_regions(
     arch_memory_layout: &ArchMemoryLayout,
-    size: u64,
+    mem_size: u64,
     bios_size: Option<u64>,
 ) -> Vec<(GuestAddress, u64, MemoryRegionOptions)> {
-    let mut mem_size = size;
     let mut regions = Vec::new();
 
-    if let Some(pvmfw_mem) = arch_memory_layout.pvmfw_mem {
-        regions.push((
-            GuestAddress(pvmfw_mem.start),
-            pvmfw_mem.len().expect("invalid pvmfw_mem region"),
-            MemoryRegionOptions::new().purpose(MemoryRegionPurpose::ProtectedFirmwareRegion),
-        ));
-
-        // pVM firmware memory is a part of normal guest memory, since it is reusable
-        // by the guest OS once the pVM firmware jumped to the guest. So count its size
-        // as a part of the total guest memory size.
-        if mem_size > PROTECTED_VM_FW_MAX_SIZE {
-            mem_size -= PROTECTED_VM_FW_MAX_SIZE;
-        }
-    }
-
-    let mem_below_4g = max_ram_end_before_32bit(arch_memory_layout).min(mem_size);
+    // Some guest kernels expect a typical PC memory layout where the region between 640 KB and
+    // 1 MB is reserved for device memory/ROMs and get confused if there is a RAM region
+    // spanning this area, so we provide the traditional 640 KB low memory and 1 MB+
+    // high memory regions.
+    let mem_below_1m = 640 * KB;
     regions.push((
         GuestAddress(0),
-        mem_below_4g,
+        mem_below_1m,
         MemoryRegionOptions::new().purpose(MemoryRegionPurpose::GuestMemoryRegion),
     ));
 
-    let mem_above_4g = mem_size.saturating_sub(mem_below_4g);
+    // Reserved/BIOS data area between 640 KB and 1 MB.
+    // This needs to be backed by an actual GuestMemory region so we can write BIOS tables here, but
+    // it should be reported as "reserved" in the e820 memory map to match PC architecture
+    // expectations.
+    regions.push((
+        GuestAddress(640 * KB),
+        (1 * MB) - (640 * KB),
+        MemoryRegionOptions::new().purpose(MemoryRegionPurpose::ReservedMemory),
+    ));
+
+    // RAM between 1 MB and 4 GB
+    let mem_1m_to_4g = arch_memory_layout.pci_mmio_before_32bit.start.min(mem_size) - 1 * MB;
+    regions.push((
+        GuestAddress(1 * MB),
+        mem_1m_to_4g,
+        MemoryRegionOptions::new().purpose(MemoryRegionPurpose::GuestMemoryRegion),
+    ));
+
+    // RAM above 4 GB
+    let mem_above_4g = mem_size.saturating_sub(1 * MB + mem_1m_to_4g);
     if mem_above_4g > 0 {
         regions.push((
             GuestAddress(FIRST_ADDR_PAST_32BITS),
@@ -759,6 +756,44 @@ pub fn arch_memory_regions(
             bios_start(bios_size),
             bios_size,
             MemoryRegionOptions::new().purpose(MemoryRegionPurpose::Bios),
+        ));
+    }
+
+    if let Some(pvmfw_mem) = arch_memory_layout.pvmfw_mem {
+        // Remove any areas of guest memory regions that overlap the pVM firmware range.
+        while let Some(overlapping_region_index) = regions.iter().position(|(addr, size, _opts)| {
+            let region_addr_range = AddressRange::from_start_and_size(addr.offset(), *size)
+                .expect("invalid GuestMemory range");
+            region_addr_range.overlaps(pvmfw_mem)
+        }) {
+            let overlapping_region = regions.swap_remove(overlapping_region_index);
+            let overlapping_region_range = AddressRange::from_start_and_size(
+                overlapping_region.0.offset(),
+                overlapping_region.1,
+            )
+            .unwrap();
+            let (first, second) = overlapping_region_range.non_overlapping_ranges(pvmfw_mem);
+            if !first.is_empty() {
+                regions.push((
+                    GuestAddress(first.start),
+                    first.len().unwrap(),
+                    overlapping_region.2,
+                ));
+            }
+            if !second.is_empty() {
+                regions.push((
+                    GuestAddress(second.start),
+                    second.len().unwrap(),
+                    overlapping_region.2,
+                ));
+            }
+        }
+
+        // Insert a region for the pVM firmware area.
+        regions.push((
+            GuestAddress(pvmfw_mem.start),
+            pvmfw_mem.len().expect("invalid pvmfw region"),
+            MemoryRegionOptions::new().purpose(MemoryRegionPurpose::ProtectedFirmwareRegion),
         ));
     }
 
@@ -1649,45 +1684,7 @@ impl X8664arch {
         device_tree_overlays: Vec<DtbOverlay>,
         protection_type: ProtectionType,
     ) -> Result<()> {
-        // Some guest kernels expect a typical PC memory layout where the region between 640 KB and
-        // 1 MB is reserved for device memory/ROMs and get confused if there is a RAM region
-        // spanning this area, so we provide the traditional 640 KB low memory and 1 MB+
-        // high memory regions.
-        let ram_below_1m_end = 640 * 1024;
-        let ram_below_1m = AddressRange {
-            start: 0,
-            end: ram_below_1m_end - 1,
-        };
-
-        // GuestMemory::end_addr() returns the first address past the end, so subtract 1 to get the
-        // inclusive end.
-        let guest_mem_end = mem.end_addr().offset() - 1;
-
-        // Find the end of the part of guest memory below 4G that is not pVM firmware memory.
-        // This part of guest memory includes just one region, so just find the end of this region.
-        let max_ram_end_below_4g = max_ram_end_before_32bit(arch_memory_layout) - 1;
-        let guest_mem_end_below_4g = mem
-            .regions()
-            .map(|r| r.guest_addr.offset() + r.size as u64 - 1)
-            .find(|&addr| addr <= max_ram_end_below_4g)
-            .expect("no memory region below 4G");
-
-        let ram_below_4g = AddressRange {
-            start: FIRST_ADDR_PAST_20BITS,
-            end: guest_mem_end_below_4g,
-        };
-        let ram_above_4g = AddressRange {
-            start: FIRST_ADDR_PAST_32BITS,
-            end: guest_mem_end,
-        };
-
-        let e820_entries = generate_e820_memory_map(
-            arch_memory_layout,
-            mem,
-            ram_below_1m,
-            ram_below_4g,
-            ram_above_4g,
-        )?;
+        let e820_entries = generate_e820_memory_map(arch_memory_layout, mem)?;
 
         let kernel_max_cmdline_len = if params.hdr.cmdline_size == 0 {
             // Old kernels have a maximum length of 255 bytes, not including the NUL.
@@ -2425,14 +2422,32 @@ mod tests {
         let regions = arch_memory_regions(&arch_memory_layout, 512 * MB, /* bios_size */ None);
         assert_eq!(
             regions,
-            [(
-                GuestAddress(0),
-                1u64 << 29,
-                MemoryRegionOptions {
-                    align: 0,
-                    purpose: MemoryRegionPurpose::GuestMemoryRegion,
-                },
-            )]
+            [
+                (
+                    GuestAddress(0),
+                    640 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(640 * KB),
+                    384 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::ReservedMemory,
+                    },
+                ),
+                (
+                    GuestAddress(1 * MB),
+                    512 * MB - 1 * MB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                )
+            ]
         );
     }
 
@@ -2446,7 +2461,23 @@ mod tests {
             [
                 (
                     GuestAddress(0),
-                    2 * GB,
+                    640 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(640 * KB),
+                    384 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::ReservedMemory,
+                    },
+                ),
+                (
+                    GuestAddress(1 * MB),
+                    2 * GB - 1 * MB,
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
@@ -2474,7 +2505,23 @@ mod tests {
             [
                 (
                     GuestAddress(0),
-                    512 * MB,
+                    640 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(640 * KB),
+                    384 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::ReservedMemory,
+                    },
+                ),
+                (
+                    GuestAddress(1 * MB),
+                    512 * MB - 1 * MB,
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
@@ -2502,7 +2549,23 @@ mod tests {
             [
                 (
                     GuestAddress(0),
-                    2 * GB,
+                    640 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(640 * KB),
+                    384 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::ReservedMemory,
+                    },
+                ),
+                (
+                    GuestAddress(1 * MB),
+                    2 * GB - 1 * MB,
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
@@ -2535,14 +2598,32 @@ mod tests {
         let regions = arch_memory_regions(&arch_memory_layout, 2 * GB, /* bios_size */ None);
         assert_eq!(
             regions,
-            [(
-                GuestAddress(0),
-                2 * GB,
-                MemoryRegionOptions {
-                    align: 0,
-                    purpose: MemoryRegionPurpose::GuestMemoryRegion,
-                },
-            )]
+            [
+                (
+                    GuestAddress(0),
+                    640 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(640 * KB),
+                    384 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::ReservedMemory,
+                    },
+                ),
+                (
+                    GuestAddress(1 * MB),
+                    2 * GB - 1 * MB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                )
+            ]
         );
     }
 
@@ -2557,7 +2638,23 @@ mod tests {
             [
                 (
                     GuestAddress(0),
-                    2 * GB,
+                    640 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(640 * KB),
+                    384 * KB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::ReservedMemory,
+                    },
+                ),
+                (
+                    GuestAddress(1 * MB),
+                    2 * GB - 1 * MB,
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
