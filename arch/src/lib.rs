@@ -177,7 +177,11 @@ impl FromIterator<usize> for CpuSet {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct SveConfig {
     /// Use SVE
+    #[serde(default)]
     pub enable: bool,
+    /// Detect if SVE is available and enable accordingly. `enable` is ignored if auto is true
+    #[serde(default)]
+    pub auto: bool,
 }
 
 fn parse_cpu_range(s: &str, cpuset: &mut Vec<usize>) -> Result<(), String> {
@@ -400,7 +404,7 @@ pub struct VmComponents {
         any(target_arch = "arm", target_arch = "aarch64"),
         any(target_os = "android", target_os = "linux")
     ))]
-    pub normalized_cpu_capacities: BTreeMap<usize, u32>,
+    pub normalized_cpu_ipc_ratios: BTreeMap<usize, u32>,
     pub pci_config: PciConfig,
     pub pflash_block_size: u32,
     pub pflash_image: Option<File>,
@@ -628,6 +632,8 @@ pub trait GdbOps<T: VcpuArch> {
     ) -> Result<(), Self::Error>;
 
     /// Reads bytes from the guest register.
+    ///
+    /// Returns an empty vector if `reg_id` is valid but the register is not available.
     fn read_register(vcpu: &T, reg_id: <GdbArch as Arch>::RegId) -> Result<Vec<u8>, Self::Error>;
 
     /// Writes bytes to the specified guest register.

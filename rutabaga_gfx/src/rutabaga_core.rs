@@ -173,6 +173,15 @@ pub trait RutabagaComponent {
         })
     }
 
+    fn import(
+        &self,
+        _resource_id: u32,
+        _import_handle: RutabagaHandle,
+        _import_data: RutabagaImportData,
+    ) -> RutabagaResult<Option<RutabagaResource>> {
+        Err(RutabagaError::Unsupported)
+    }
+
     /// Implementations must attach `vecs` to the resource.
     fn attach_backing(
         &self,
@@ -656,6 +665,33 @@ impl Rutabaga {
         Ok(())
     }
 
+    /// Creates and imports to a resource with the external `import_handle` and the `import_data`
+    /// metadata.
+    pub fn resource_import(
+        &mut self,
+        resource_id: u32,
+        import_handle: RutabagaHandle,
+        import_data: RutabagaImportData,
+    ) -> RutabagaResult<()> {
+        let component = self
+            .components
+            .get_mut(&self.default_component)
+            .ok_or(RutabagaError::InvalidComponent)?;
+
+        match component.import(resource_id, import_handle, import_data) {
+            Ok(Some(resource)) => {
+                self.resources.insert(resource_id, resource);
+            }
+            Ok(None) => {
+                if !self.resources.contains_key(&resource_id) {
+                    return Err(RutabagaError::InvalidResourceId);
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(())
+    }
+
     /// Attaches `vecs` to the resource.
     pub fn attach_backing(
         &mut self,
@@ -826,7 +862,7 @@ impl Rutabaga {
             let handle_opt = resource.handle.take();
             match handle_opt {
                 Some(handle) => {
-                    if handle.handle_type != RUTABAGA_MEM_HANDLE_TYPE_SHM {
+                    if handle.handle_type != RUTABAGA_HANDLE_TYPE_MEM_SHM {
                         return Err(RutabagaError::SpecViolation(
                             "expected a shared memory handle",
                         ));

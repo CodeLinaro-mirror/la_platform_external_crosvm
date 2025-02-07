@@ -596,27 +596,13 @@ pub enum VmMemoryRequest {
         num_file_mappings: usize,
     },
     /// Call hypervisor to free the given memory range.
-    DynamicallyFreeMemoryRange {
-        guest_address: GuestAddress,
-        size: u64,
-    },
+    DynamicallyFreeMemoryRanges { ranges: Vec<(GuestAddress, u64)> },
     /// Call hypervisor to reclaim a priorly freed memory range.
-    DynamicallyReclaimMemoryRange {
-        guest_address: GuestAddress,
-        size: u64,
-    },
+    DynamicallyReclaimMemoryRanges { ranges: Vec<(GuestAddress, u64)> },
     /// Balloon allocation/deallocation target reached.
     BalloonTargetReached { size: u64 },
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
     UnregisterMemory(VmMemoryRegionId),
-    /// Register an ioeventfd by looking up using Alloc info.
-    IoEventWithAlloc {
-        evt: Event,
-        allocation: Alloc,
-        offset: u64,
-        datamatch: Datamatch,
-        register: bool,
-    },
     /// Register an eventfd with raw guest memory address.
     IoEventRaw(IoEventUpdateRequest),
 }
@@ -969,62 +955,40 @@ impl VmMemoryRequest {
                 }
                 None => VmMemoryResponse::Err(SysError::new(EINVAL)),
             },
-            DynamicallyFreeMemoryRange {
-                guest_address,
-                size,
-            } => match vm.handle_balloon_event(BalloonEvent::Inflate(MemRegion {
-                guest_address,
-                size,
-            })) {
-                Ok(_) => VmMemoryResponse::Ok,
-                Err(e) => VmMemoryResponse::Err(e),
-            },
-            DynamicallyReclaimMemoryRange {
-                guest_address,
-                size,
-            } => match vm.handle_balloon_event(BalloonEvent::Deflate(MemRegion {
-                guest_address,
-                size,
-            })) {
-                Ok(_) => VmMemoryResponse::Ok,
-                Err(e) => VmMemoryResponse::Err(e),
-            },
+            DynamicallyFreeMemoryRanges { ranges } => {
+                let mut r = VmMemoryResponse::Ok;
+                for (guest_address, size) in ranges {
+                    match vm.handle_balloon_event(BalloonEvent::Inflate(MemRegion {
+                        guest_address,
+                        size,
+                    })) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            r = VmMemoryResponse::Err(e);
+                            break;
+                        }
+                    }
+                }
+                r
+            }
+            DynamicallyReclaimMemoryRanges { ranges } => {
+                let mut r = VmMemoryResponse::Ok;
+                for (guest_address, size) in ranges {
+                    match vm.handle_balloon_event(BalloonEvent::Deflate(MemRegion {
+                        guest_address,
+                        size,
+                    })) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            r = VmMemoryResponse::Err(e);
+                            break;
+                        }
+                    }
+                }
+                r
+            }
             BalloonTargetReached { size } => {
                 match vm.handle_balloon_event(BalloonEvent::BalloonTargetReached(size)) {
-                    Ok(_) => VmMemoryResponse::Ok,
-                    Err(e) => VmMemoryResponse::Err(e),
-                }
-            }
-            IoEventWithAlloc {
-                evt,
-                allocation,
-                offset,
-                datamatch,
-                register,
-            } => {
-                let len = match datamatch {
-                    Datamatch::AnyLength => 1,
-                    Datamatch::U8(_) => 1,
-                    Datamatch::U16(_) => 2,
-                    Datamatch::U32(_) => 4,
-                    Datamatch::U64(_) => 8,
-                };
-                let addr = match sys_allocator
-                    .mmio_allocator_any()
-                    .address_from_pci_offset(allocation, offset, len)
-                {
-                    Ok(addr) => addr,
-                    Err(e) => {
-                        error!("error getting target address: {:#}", e);
-                        return VmMemoryResponse::Err(SysError::new(EINVAL));
-                    }
-                };
-                let res = if register {
-                    vm.register_ioevent(&evt, IoEventAddress::Mmio(addr), datamatch)
-                } else {
-                    vm.unregister_ioevent(&evt, IoEventAddress::Mmio(addr), datamatch)
-                };
-                match res {
                     Ok(_) => VmMemoryResponse::Ok,
                     Err(e) => VmMemoryResponse::Err(e),
                 }
@@ -1373,21 +1337,6 @@ impl From<BatHealth> for u32 {
     fn from(status: BatHealth) -> Self {
         status as u32
     }
-}
-
-/// Configuration of fake battery status information.
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub enum BatConfig {
-    // Propagates host's battery status
-    #[default]
-    Real,
-    // Fake on battery status. Simulates a disconnected AC adapter.
-    // This forces ac_online to false and sets the battery status
-    // to DISCHARGING
-    Fake {
-        // Sets the maximum battery capacity reported to the guest
-        max_capacity: u32,
-    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]

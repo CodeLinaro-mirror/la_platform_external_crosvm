@@ -48,6 +48,7 @@ rust_test {
         "libbase_rust",
         "liblibc",
         "libserde",
+        "libserde_json",
         "libthiserror",
     ],
     proc_macros: ["libremain"],

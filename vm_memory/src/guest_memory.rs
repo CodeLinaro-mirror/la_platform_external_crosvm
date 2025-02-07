@@ -115,10 +115,16 @@ pub struct MemoryRegionInformation<'a> {
 #[sorted]
 #[derive(Clone, Copy, Debug, Default, PartialOrd, PartialEq, Eq, Ord)]
 pub enum MemoryRegionPurpose {
-    // General purpose guest memory
+    /// BIOS/firmware ROM
+    Bios,
+
+    /// General purpose guest memory
     #[default]
     GuestMemoryRegion,
+
+    /// PVMFW
     ProtectedFirmwareRegion,
+
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     StaticSwiotlbRegion,
 }
@@ -229,6 +235,7 @@ impl MemoryRegion {
 #[derive(Clone, Debug)]
 pub struct GuestMemory {
     regions: Arc<[MemoryRegion]>,
+    locked: bool,
 }
 
 impl AsRawDescriptors for GuestMemory {
@@ -311,6 +318,7 @@ impl GuestMemory {
 
         Ok(GuestMemory {
             regions: Arc::from(regions),
+            locked: false,
         })
     }
 
@@ -351,7 +359,13 @@ impl GuestMemory {
 
         Ok(GuestMemory {
             regions: Arc::from(regions),
+            locked: false,
         })
+    }
+
+    // Whether `MemoryPolicy::LOCK_GUEST_MEMORY` was set.
+    pub fn locked(&self) -> bool {
+        self.locked
     }
 
     /// Returns the end address of memory.

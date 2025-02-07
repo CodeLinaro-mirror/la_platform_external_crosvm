@@ -99,6 +99,8 @@ impl Hypervisor for Gunyah {
             HypervisorCap::S390UserSigp | HypervisorCap::TscDeadlineTimer => false,
             #[cfg(target_arch = "x86_64")]
             HypervisorCap::Xcrs | HypervisorCap::CalibratedTscLeafRequired => false,
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            HypervisorCap::Sve => false,
         }
     }
 }
@@ -209,6 +211,7 @@ impl GunyahVm {
         for region in guest_mem.regions() {
             let lend = if cfg.protection_type.isolates_memory() {
                 match region.options.purpose {
+                    MemoryRegionPurpose::Bios => true,
                     MemoryRegionPurpose::GuestMemoryRegion => true,
                     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
                     MemoryRegionPurpose::ProtectedFirmwareRegion => true,

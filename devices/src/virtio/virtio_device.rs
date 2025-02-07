@@ -11,15 +11,14 @@ use anyhow::Result;
 use base::Protection;
 use base::RawDescriptor;
 use hypervisor::MemCacheType;
+use resources::AddressRange;
 use vm_control::VmMemorySource;
-use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
 use super::*;
 use crate::pci::MsixStatus;
 use crate::pci::PciAddress;
 use crate::pci::PciBarConfiguration;
-use crate::pci::PciBarIndex;
 use crate::pci::PciCapability;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,16 +174,6 @@ pub trait VirtioDevice: Send {
         Some(sdts)
     }
 
-    /// Reads from a BAR region mapped in to the device.
-    /// * `addr` - The guest address inside the BAR.
-    /// * `data` - Filled with the data from `addr`.
-    fn read_bar(&mut self, _bar_index: PciBarIndex, _offset: u64, _data: &mut [u8]) {}
-
-    /// Writes to a BAR region mapped in to the device.
-    /// * `addr` - The guest address inside the BAR.
-    /// * `data` - The data to write.
-    fn write_bar(&mut self, _bar_index: PciBarIndex, _offset: u64, _data: &[u8]) {}
-
     /// Returns the PCI address where the device will be allocated.
     /// Returns `None` if any address is good for the device.
     fn pci_address(&self) -> Option<PciAddress> {
@@ -218,13 +207,11 @@ pub trait VirtioDevice: Send {
     /// before `activate`.
     fn set_shared_memory_mapper(&mut self, _mapper: Box<dyn SharedMemoryMapper>) {}
 
-    /// Provides the base address of the shared memory region, if one is present. Will
+    /// Provides the guest address range of the shared memory region, if one is present. Will
     /// be called before `activate`.
-    ///
-    /// NOTE: Mappings in shared memory regions should be accessed via offset, rather
-    /// than via raw guest physical address. This function is only provided so
-    /// devices can remain backwards compatible with older drivers.
-    fn set_shared_memory_region_base(&mut self, _addr: GuestAddress) {}
+    fn set_shared_memory_region(&mut self, shmem_region: AddressRange) {
+        let _ = shmem_region;
+    }
 
     /// Queries the implementation whether a single prepared hypervisor memory mapping with explicit
     /// caching type should be setup lazily on first mapping request, or whether to dynamically
@@ -304,6 +291,7 @@ macro_rules! suspendable_virtio_tests {
             use super::*;
 
             fn memory() -> GuestMemory {
+                use vm_memory::GuestAddress;
                 GuestMemory::new(&[(GuestAddress(0u64), 4 * 1024 * 1024)])
                     .expect("Creating guest memory failed.")
             }

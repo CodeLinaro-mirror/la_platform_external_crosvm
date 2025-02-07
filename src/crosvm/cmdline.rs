@@ -82,13 +82,12 @@ use super::sys::GpuRenderServerParameters;
 use crate::crosvm::config::from_key_values;
 use crate::crosvm::config::parse_bus_id_addr;
 use crate::crosvm::config::parse_cpu_affinity;
-use crate::crosvm::config::parse_cpu_capacity;
+use crate::crosvm::config::parse_cpu_btreemap_u32;
 #[cfg(all(
     any(target_arch = "arm", target_arch = "aarch64"),
     any(target_os = "android", target_os = "linux")
 ))]
 use crate::crosvm::config::parse_cpu_frequencies;
-use crate::crosvm::config::parse_dynamic_power_coefficient;
 use crate::crosvm::config::parse_mmio_address_range;
 use crate::crosvm::config::parse_pflash_parameters;
 use crate::crosvm::config::parse_serial_options;
@@ -1128,7 +1127,7 @@ pub struct RunCommand {
     #[argh(
         option,
         arg_name = "CPU=CAP[,CPU=CAP[,...]]",
-        from_str_fn(parse_cpu_capacity)
+        from_str_fn(parse_cpu_btreemap_u32)
     )]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1158,6 +1157,24 @@ pub struct RunCommand {
     /// support, the virtual cpufreq device will actively throttle the vCPU to deliberately slow
     /// its performance to match the guest's request.
     pub cpu_frequencies_khz: Option<BTreeMap<usize, Vec<u32>>>, // CPU index -> frequencies
+
+    #[argh(
+        option,
+        arg_name = "CPU=RATIO[,CPU=RATIO[,...]]",
+        from_str_fn(parse_cpu_btreemap_u32)
+    )]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// set the instructions per cycle (IPC) performance of the vCPU relative to the pCPU it is
+    /// affined to normalized to 1024. Defaults to 1024 which represents the baseline performance
+    /// of the pCPU, setting the vCPU to 1024 means it will match the per cycle performance of the
+    /// pCPU.  This ratio determines how quickly the same workload will complete on the vCPU
+    /// compared to the pCPU. Ex. Setting the ratio to 512 will result in the task taking twice as
+    /// long if it were set to 1024 given the same frequency. Conversely, using a value > 1024 will
+    /// result in faster per cycle perf relative to the pCPU with some important limitations. In
+    /// combination with virtual frequencies defined with "cpu_frequencies_khz", performance points
+    /// with vCPU frequencies * vCPU IPC > pCPU@FMax * 1024 will not be properly supported.
+    pub cpu_ipc_ratio: Option<BTreeMap<usize, u32>>, // CPU index -> ipc_ratio
 
     #[argh(option, short = 'c')]
     #[merge(strategy = overwrite_option)]
@@ -1280,7 +1297,7 @@ pub struct RunCommand {
     #[argh(
         option,
         arg_name = "CPU=DYN_PWR[,CPU=DYN_PWR[,...]]",
-        from_str_fn(parse_dynamic_power_coefficient)
+        from_str_fn(parse_cpu_btreemap_u32)
     )]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -1618,6 +1635,13 @@ pub struct RunCommand {
     /// MAC address for VM
     pub mac_address: Option<net_util::MacAddress>,
 
+    #[cfg(all(unix, feature = "media", feature = "video-decoder"))]
+    #[argh(option, arg_name = "[backend]")]
+    #[serde(default)]
+    #[merge(strategy = append)]
+    /// add a virtio-media adapter device.
+    pub media_decoder: Vec<VideoDeviceConfig>,
+
     #[argh(option, short = 'm', arg_name = "N")]
     #[merge(strategy = overwrite_option)]
     /// memory parameters.
@@ -1792,13 +1816,16 @@ pub struct RunCommand {
     /// PCI parameters.
     ///
     /// Possible key values:
-    ///     mem=[start=INT,size=INT] - region for non-prefetchable PCI device memory below 4G
+    ///     mem=[start=INT,size=INT] - region for non-prefetchable
+    ///         PCI device memory below 4G
     ///
     /// Possible key values (aarch64 only):
-    ///     cam=[start=INT,size=INT] - region for PCI Configuration Access Mechanism
+    ///     cam=[start=INT,size=INT] - region for PCI Configuration
+    ///         Access Mechanism
     ///
     /// Possible key values (x86_64 only):
-    ///     ecam=[start=INT,size=INT] - region for PCIe Enhanced Configuration Access Mechanism
+    ///     ecam=[start=INT,size=INT] - region for PCIe Enhanced
+    ///         Configuration Access Mechanism
     pub pci: Option<PciConfig>,
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -2856,6 +2883,9 @@ impl TryFrom<RunCommand> for super::config::Config {
             if let Some(frequencies) = cmd.cpu_frequencies_khz {
                 cfg.cpu_frequencies_khz = frequencies;
             }
+            if let Some(ipc_ratio) = cmd.cpu_ipc_ratio {
+                cfg.cpu_ipc_ratio = ipc_ratio;
+            }
         }
 
         cfg.vcpu_cgroup_path = cmd.vcpu_cgroup_path;
@@ -3706,6 +3736,11 @@ impl TryFrom<RunCommand> for super::config::Config {
         {
             cfg.v4l2_proxy = cmd.v4l2_proxy;
             cfg.simple_media_device = cmd.simple_media_device.unwrap_or_default();
+        }
+
+        #[cfg(all(unix, feature = "media", feature = "video-decoder"))]
+        {
+            cfg.media_decoder = cmd.media_decoder;
         }
 
         cfg.file_backed_mappings = cmd.file_backed_mapping;

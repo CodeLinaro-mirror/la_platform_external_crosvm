@@ -126,67 +126,22 @@ impl VmMemoryClient {
         }
     }
 
-    /// Call hypervisor to free the given memory range.
-    pub fn dynamically_free_memory_range(
-        &self,
-        guest_address: GuestAddress,
-        size: u64,
-    ) -> Result<()> {
-        self.request_unit(&VmMemoryRequest::DynamicallyFreeMemoryRange {
-            guest_address,
-            size,
-        })
+    /// Call hypervisor to free the given memory ranges.
+    pub fn dynamically_free_memory_ranges(&self, ranges: Vec<(GuestAddress, u64)>) -> Result<()> {
+        self.request_unit(&VmMemoryRequest::DynamicallyFreeMemoryRanges { ranges })
     }
 
     /// Call hypervisor to reclaim a priorly freed memory range.
-    pub fn dynamically_reclaim_memory_range(
+    pub fn dynamically_reclaim_memory_ranges(
         &self,
-        guest_address: GuestAddress,
-        size: u64,
+        ranges: Vec<(GuestAddress, u64)>,
     ) -> Result<()> {
-        self.request_unit(&VmMemoryRequest::DynamicallyReclaimMemoryRange {
-            guest_address,
-            size,
-        })
+        self.request_unit(&VmMemoryRequest::DynamicallyReclaimMemoryRanges { ranges })
     }
 
     /// Unregister the given memory slot that was previously registered with `RegisterMemory`.
     pub fn unregister_memory(&self, region: VmMemoryRegionId) -> Result<()> {
         self.request_unit(&VmMemoryRequest::UnregisterMemory(region))
-    }
-
-    /// Register an ioeventfd by looking up using Alloc info.
-    pub fn register_io_event_with_alloc(
-        &self,
-        evt: Event,
-        allocation: Alloc,
-        offset: u64,
-        datamatch: Datamatch,
-    ) -> Result<()> {
-        self.request_unit(&VmMemoryRequest::IoEventWithAlloc {
-            evt,
-            allocation,
-            offset,
-            datamatch,
-            register: true,
-        })
-    }
-
-    /// Unregister an eventfd by looking up using Alloc info.
-    pub fn unregister_io_event_with_alloc(
-        &self,
-        evt: Event,
-        allocation: Alloc,
-        offset: u64,
-        datamatch: Datamatch,
-    ) -> Result<()> {
-        self.request_unit(&VmMemoryRequest::IoEventWithAlloc {
-            evt,
-            allocation,
-            offset,
-            datamatch,
-            register: false,
-        })
     }
 
     /// Register an eventfd with raw guest memory address.

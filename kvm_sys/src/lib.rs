@@ -115,6 +115,12 @@ ioctl_iow_nr!(
 );
 ioctl_io_nr!(KVM_SET_TSS_ADDR, KVMIO, 0x47);
 ioctl_iow_nr!(KVM_SET_IDENTITY_MAP_ADDR, KVMIO, 0x48, u64);
+ioctl_iow_nr!(
+    KVM_SET_USER_MEMORY_REGION2,
+    KVMIO,
+    0x49,
+    kvm_userspace_memory_region2
+);
 ioctl_io_nr!(KVM_CREATE_IRQCHIP, KVMIO, 0x60);
 ioctl_iow_nr!(KVM_IRQ_LINE, KVMIO, 0x61, kvm_irq_level);
 ioctl_iowr_nr!(KVM_GET_IRQCHIP, KVMIO, 0x62, kvm_irqchip);
@@ -133,19 +139,8 @@ ioctl_iow_nr!(
     0x68,
     kvm_coalesced_mmio_zone
 );
-ioctl_ior_nr!(KVM_ASSIGN_PCI_DEVICE, KVMIO, 0x69, kvm_assigned_pci_dev);
 ioctl_iow_nr!(KVM_SET_GSI_ROUTING, KVMIO, 0x6a, kvm_irq_routing);
-ioctl_iow_nr!(KVM_ASSIGN_DEV_IRQ, KVMIO, 0x70, kvm_assigned_irq);
 ioctl_io_nr!(KVM_REINJECT_CONTROL, KVMIO, 0x71);
-ioctl_iow_nr!(KVM_DEASSIGN_PCI_DEVICE, KVMIO, 0x72, kvm_assigned_pci_dev);
-ioctl_iow_nr!(KVM_ASSIGN_SET_MSIX_NR, KVMIO, 0x73, kvm_assigned_msix_nr);
-ioctl_iow_nr!(
-    KVM_ASSIGN_SET_MSIX_ENTRY,
-    KVMIO,
-    0x74,
-    kvm_assigned_msix_entry
-);
-ioctl_iow_nr!(KVM_DEASSIGN_DEV_IRQ, KVMIO, 0x75, kvm_assigned_irq);
 ioctl_iow_nr!(KVM_IRQFD, KVMIO, 0x76, kvm_irqfd);
 ioctl_iow_nr!(KVM_CREATE_PIT2, KVMIO, 0x77, kvm_pit_config);
 ioctl_io_nr!(KVM_SET_BOOT_CPU_ID, KVMIO, 0x78);
@@ -154,7 +149,6 @@ ioctl_iow_nr!(KVM_SET_CLOCK, KVMIO, 0x7b, kvm_clock_data);
 ioctl_ior_nr!(KVM_GET_CLOCK, KVMIO, 0x7c, kvm_clock_data);
 ioctl_io_nr!(KVM_SET_TSC_KHZ, KVMIO, 0xa2);
 ioctl_io_nr!(KVM_GET_TSC_KHZ, KVMIO, 0xa3);
-ioctl_iow_nr!(KVM_ASSIGN_SET_INTX_MASK, KVMIO, 0xa4, kvm_assigned_pci_dev);
 ioctl_iow_nr!(KVM_SIGNAL_MSI, KVMIO, 0xa5, kvm_msi);
 ioctl_iowr_nr!(KVM_CREATE_DEVICE, KVMIO, 0xe0, kvm_create_device);
 ioctl_iow_nr!(KVM_SET_DEVICE_ATTR, KVMIO, 0xe1, kvm_device_attr);

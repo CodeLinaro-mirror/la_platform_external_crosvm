@@ -15,9 +15,10 @@ use zerocopy::AsBytes;
 use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
 
-// TODO(b/316337317): Update if new memslot flag is accepted in upstream
-pub const KVM_MEM_NON_COHERENT_DMA: u32 = 8;
-pub const KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA: u32 = 236;
+// TODO(b/388092267): Replace this with an upstream equivalent when available.
+// The original index (236) used in the ChromeOS v6.6 kernel was reused upstream for another
+// capability, so this may return incorrect information on some kernels.
+pub const KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA_CROS: u32 = 236;
 
 // TODO(qwandor): Update this once the pKVM patches are merged upstream with a stable capability ID.
 pub const KVM_CAP_ARM_PROTECTED_VM: u32 = 0xffbadab1;
@@ -25,6 +26,9 @@ pub const KVM_CAP_ARM_PROTECTED_VM_FLAGS_SET_FW_IPA: u32 = 0;
 pub const KVM_CAP_ARM_PROTECTED_VM_FLAGS_INFO: u32 = 1;
 pub const KVM_VM_TYPE_ARM_PROTECTED: u32 = 0x80000000;
 pub const KVM_X86_PKVM_PROTECTED_VM: u32 = 28;
+pub const KVM_CAP_X86_PROTECTED_VM: u32 = 0xffbadab2;
+pub const KVM_CAP_X86_PROTECTED_VM_FLAGS_SET_FW_GPA: u32 = 0;
+pub const KVM_CAP_X86_PROTECTED_VM_FLAGS_INFO: u32 = 1;
 pub const KVM_DEV_VFIO_PVIOMMU: u32 = 2;
 pub const KVM_DEV_VFIO_PVIOMMU_ATTACH: u32 = 1;
 #[repr(C)]
@@ -70,7 +74,7 @@ bindgen_generate \
     --raw-line "${KVM_EXTRAS}" \
     --raw-line "${X86_64_EXTRAS}" \
     --blocklist-item='__kernel.*' \
-    --blocklist-item='__BITS_PER_LONG' \
+    --blocklist-item='__BITS_PER_.*' \
     --blocklist-item='__FD_SETSIZE' \
     --blocklist-item='_?IOC.*' \
     --with-derive-custom "kvm_regs=FromZeroes,FromBytes,AsBytes" \
@@ -105,7 +109,7 @@ bindgen_generate \
 bindgen_generate \
     --raw-line "${KVM_EXTRAS}" \
     --blocklist-item='__kernel.*' \
-    --blocklist-item='__BITS_PER_LONG' \
+    --blocklist-item='__BITS_PER_.*' \
     --blocklist-item='__FD_SETSIZE' \
     --blocklist-item='_?IOC.*' \
     --with-derive-custom "kvm_regs=FromZeroes,FromBytes,AsBytes" \
@@ -125,7 +129,7 @@ bindgen_generate \
 bindgen_generate \
     --raw-line "${KVM_EXTRAS}" \
     --blocklist-item='__kernel.*' \
-    --blocklist-item='__BITS_PER_LONG' \
+    --blocklist-item='__BITS_PER_.*' \
     --blocklist-item='__FD_SETSIZE' \
     --blocklist-item='_?IOC.*' \
     "${BINDGEN_LINUX_RISCV_HEADERS}/include/linux/kvm.h" \

@@ -72,16 +72,20 @@ extern "C" {
 /**
  * Rutabaga handle types
  */
-#define RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_FD 0x1
-#define RUTABAGA_MEM_HANDLE_TYPE_DMABUF 0x2
-#define RUTABAGA_MEM_HANDLE_TYPE_OPAQUE_WIN32 0x3
-#define RUTABAGA_MEM_HANDLE_TYPE_SHM 0x4
-#define RUTABAGA_MEM_HANDLE_TYPE_ZIRCON 0x5
+#define RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_FD 0x1
+#define RUTABAGA_HANDLE_TYPE_MEM_DMABUF 0x2
+#define RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_WIN32 0x3
+#define RUTABAGA_HANDLE_TYPE_MEM_SHM 0x4
+#define RUTABAGA_HANDLE_TYPE_MEM_ZIRCON 0x5
 
-#define RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_FD 0x6
-#define RUTABAGA_FENCE_HANDLE_TYPE_SYNC_FD 0x7
-#define RUTABAGA_FENCE_HANDLE_TYPE_OPAQUE_WIN32 0x8
-#define RUTABAGA_FENCE_HANDLE_TYPE_ZIRCON 0x9
+#define RUTABAGA_HANDLE_TYPE_SIGNAL_OPAQUE_FD 0x10
+#define RUTABAGA_HANDLE_TYPE_SIGNAL_SYNC_FD 0x20
+#define RUTABAGA_HANDLE_TYPE_SIGNAL_OPAQUE_WIN32 0x30
+#define RUTABAGA_HANDLE_TYPE_SIGNAL_ZIRCON 0x40
+#define RUTABAGA_HANDLE_TYPE_SIGNAL_EVENT_FD 0x50
+
+#define RUTABAGA_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX 0x01000000
+#define RUTABAGA_HANDLE_TYPE_PLATFORM_EGL_NATIVE_PIXMAP 0x02000000
 
 /**
  * Rutabaga channel types
@@ -107,6 +111,14 @@ extern "C" {
 #define RUTABAGA_DEBUG_WARN 0x2
 #define RUTABAGA_DEBUG_INFO 0x3
 
+/**
+ * Rutabaga resource import flags
+ */
+#define RUTABAGA_IMPORT_FLAG_3D_INFO (1 << 0)
+#define RUTABAGA_IMPORT_FLAG_VULKAN_INFO (1 << 1)
+#define RUTABAGA_IMPORT_FLAG_RESOURCE_EXISTS (1 << 30)
+#define RUTABAGA_IMPORT_FLAG_PRESERVE_CONTENT (1 << 31)
+
 struct rutabaga;
 
 struct rutabaga_create_blob {
@@ -127,6 +139,19 @@ struct rutabaga_create_3d {
     uint32_t last_level;
     uint32_t nr_samples;
     uint32_t flags;
+};
+
+struct rutabaga_import_data {
+    uint32_t flags;
+    struct {
+        uint32_t width;
+        uint32_t height;
+        uint32_t drm_fourcc;
+        uint32_t strides[4];
+        uint32_t offsets[4];
+        uint64_t modifier;
+        bool guest_cpu_mappable;
+    } info_3d;
 };
 
 struct rutabaga_transfer {
@@ -365,6 +390,10 @@ int32_t rutabaga_snapshot(struct rutabaga *ptr, const char *dir);
 int32_t rutabaga_restore(struct rutabaga *ptr, const char *dir);
 
 int32_t rutabaga_resource_wait_sync(struct rutabaga *ptr, uint32_t resource_id);
+
+int32_t rutabaga_resource_import(struct rutabaga *ptr, uint32_t resource_id,
+                                 const struct rutabaga_handle *import_handle,
+                                 const struct rutabaga_import_data *import_data);
 
 #ifdef __cplusplus
 }

@@ -241,6 +241,8 @@ pub enum Error {
     LoadKernel(kernel_loader::Error),
     #[error("error loading pflash: {0}")]
     LoadPflash(io::Error),
+    #[error("error loading pVM firmware: {0}")]
+    LoadPvmFw(base::Error),
     #[error("error translating address: Page not present")]
     PageNotPresent,
     #[error("pci mmio overlaps with pVM firmware memory")]
@@ -291,6 +293,8 @@ pub enum Error {
     SetupSmbios(smbios::Error),
     #[error("failed to set up sregs: {0}")]
     SetupSregs(base::Error),
+    #[error("too many vCPUs")]
+    TooManyVcpus,
     #[error("failed to translate virtual address")]
     TranslatingVirtAddr,
     #[error("protected VMs not supported on x86_64")]
@@ -353,7 +357,6 @@ const MB: u64 = 1 << 20;
 const GB: u64 = 1 << 30;
 
 pub const BOOT_STACK_POINTER: u64 = 0x8000;
-const START_OF_RAM_32BITS: u64 = 0;
 const FIRST_ADDR_PAST_20BITS: u64 = 1 << 20;
 const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 // Make sure it align to 256MB for MTRR convenient
@@ -488,13 +491,10 @@ pub fn create_arch_memory_layout(
     })
 }
 
-fn max_ram_end_before_32bit(
-    arch_memory_layout: &ArchMemoryLayout,
-    has_protected_vm_firmware: bool,
-) -> u64 {
+fn max_ram_end_before_32bit(arch_memory_layout: &ArchMemoryLayout) -> u64 {
     let pci_start = arch_memory_layout.pci_mmio_before_32bit.start;
-    if has_protected_vm_firmware {
-        pci_start.min(PROTECTED_VM_FW_START)
+    if let Some(pvmfw_mem) = arch_memory_layout.pvmfw_mem {
+        pci_start.min(pvmfw_mem.start)
     } else {
         pci_start
     }
@@ -673,7 +673,6 @@ fn generate_e820_memory_map(
     ram_below_1m: AddressRange,
     ram_below_4g: AddressRange,
     ram_above_4g: AddressRange,
-    has_protected_vm_firmware: bool,
 ) -> Result<Vec<E820Entry>> {
     let mut e820_entries = Vec::new();
 
@@ -683,12 +682,11 @@ fn generate_e820_memory_map(
         add_e820_entry(&mut e820_entries, ram_above_4g, E820Type::Ram)?
     }
 
-    if has_protected_vm_firmware {
+    if let Some(pvmfw_mem) = arch_memory_layout.pvmfw_mem {
         // After the pVM firmware jumped to the guest, the pVM firmware itself
         // is no longer running, so its memory is reusable by the guest OS.
         // So add this memory as RAM rather than Reserved.
-        let pvmfw_range = arch_memory_layout.pvmfw_mem.unwrap();
-        add_e820_entry(&mut e820_entries, pvmfw_range, E820Type::Ram)?;
+        add_e820_entry(&mut e820_entries, pvmfw_mem, E820Type::Ram)?;
     }
 
     let pcie_cfg_mmio_range = arch_memory_layout.pcie_cfg_mmio;
@@ -721,15 +719,14 @@ pub fn arch_memory_regions(
     arch_memory_layout: &ArchMemoryLayout,
     size: u64,
     bios_size: Option<u64>,
-    has_protected_vm_firmware: bool,
 ) -> Vec<(GuestAddress, u64, MemoryRegionOptions)> {
     let mut mem_size = size;
     let mut regions = Vec::new();
 
-    if has_protected_vm_firmware {
+    if let Some(pvmfw_mem) = arch_memory_layout.pvmfw_mem {
         regions.push((
-            GuestAddress(PROTECTED_VM_FW_START),
-            PROTECTED_VM_FW_MAX_SIZE,
+            GuestAddress(pvmfw_mem.start),
+            pvmfw_mem.len().expect("invalid pvmfw_mem region"),
             MemoryRegionOptions::new().purpose(MemoryRegionPurpose::ProtectedFirmwareRegion),
         ));
 
@@ -741,34 +738,39 @@ pub fn arch_memory_regions(
         }
     }
 
-    let mem_start = START_OF_RAM_32BITS;
-    let mem_end = GuestAddress(mem_size + mem_start);
-
-    let first_addr_past_32bits = GuestAddress(FIRST_ADDR_PAST_32BITS);
-    let max_end_32bits = GuestAddress(max_ram_end_before_32bit(
-        arch_memory_layout,
-        has_protected_vm_firmware,
+    let mem_below_4g = max_ram_end_before_32bit(arch_memory_layout).min(mem_size);
+    regions.push((
+        GuestAddress(0),
+        mem_below_4g,
+        MemoryRegionOptions::new().purpose(MemoryRegionPurpose::GuestMemoryRegion),
     ));
 
-    if mem_end <= max_end_32bits {
-        regions.push((GuestAddress(mem_start), mem_size, Default::default()));
-        if let Some(bios_size) = bios_size {
-            regions.push((bios_start(bios_size), bios_size, Default::default()));
-        }
-    } else {
+    let mem_above_4g = mem_size.saturating_sub(mem_below_4g);
+    if mem_above_4g > 0 {
         regions.push((
-            GuestAddress(mem_start),
-            max_end_32bits.offset() - mem_start,
-            Default::default(),
+            GuestAddress(FIRST_ADDR_PAST_32BITS),
+            mem_above_4g,
+            MemoryRegionOptions::new().purpose(MemoryRegionPurpose::GuestMemoryRegion),
         ));
-        if let Some(bios_size) = bios_size {
-            regions.push((bios_start(bios_size), bios_size, Default::default()));
-        }
+    }
+
+    if let Some(bios_size) = bios_size {
         regions.push((
-            first_addr_past_32bits,
-            mem_end.offset_from(max_end_32bits),
-            Default::default(),
+            bios_start(bios_size),
+            bios_size,
+            MemoryRegionOptions::new().purpose(MemoryRegionPurpose::Bios),
         ));
+    }
+
+    regions.sort_unstable();
+
+    for (addr, size, options) in &regions {
+        debug!(
+            "{:#018x}-{:#018x} {:?}",
+            addr.offset(),
+            addr.offset() + size - 1,
+            options.purpose,
+        );
     }
 
     regions
@@ -792,8 +794,6 @@ impl arch::LinuxArch for X8664arch {
         arch_memory_layout: &Self::ArchMemoryLayout,
         _hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error> {
-        let has_protected_vm_firmware = components.hv_cfg.protection_type.runs_firmware();
-
         let bios_size = match &components.vm_image {
             VmImage::Bios(bios_file) => Some(bios_file.metadata().map_err(Error::LoadBios)?.len()),
             VmImage::Kernel(_) => None,
@@ -803,7 +803,6 @@ impl arch::LinuxArch for X8664arch {
             arch_memory_layout,
             components.memory_size,
             bios_size,
-            has_protected_vm_firmware,
         ))
     }
 
@@ -992,7 +991,6 @@ impl arch::LinuxArch for X8664arch {
                 irq_chip,
                 device_tube,
                 components.memory_size,
-                components.hv_cfg.protection_type.runs_firmware(),
             )
             .map_err(Error::SetupCmos)?;
             Some(host_tube)
@@ -1083,6 +1081,12 @@ impl arch::LinuxArch for X8664arch {
         // If another guest does need a way to pass these tables down to it's BIOS, this approach
         // should be rethought.
 
+        // Make sure the `vcpu_count` casts below and the arithmetic in `setup_mptable` are well
+        // defined.
+        if vcpu_count >= u8::max_value().into() {
+            return Err(Error::TooManyVcpus);
+        }
+
         if mptable {
             // Note that this puts the mptable at 0x9FC00 in guest physical memory.
             mptable::setup_mptable(&mem, vcpu_count as u8, &pci_irqs)
@@ -1152,7 +1156,7 @@ impl arch::LinuxArch for X8664arch {
                 // The default values for `Regs` and `Sregs` already set up the reset vector.
             }
             VmImage::Kernel(ref mut kernel_image) => {
-                let (params, kernel_end, kernel_entry, cpu_mode, kernel_type) =
+                let (params, kernel_region, kernel_entry, cpu_mode, kernel_type) =
                     Self::load_kernel(&mem, kernel_image)?;
 
                 info!("Loaded {} kernel", kernel_type);
@@ -1163,11 +1167,11 @@ impl arch::LinuxArch for X8664arch {
                     cmdline,
                     components.initrd_image,
                     components.android_fstab,
-                    kernel_end,
+                    kernel_region,
                     params,
                     dump_device_tree_blob,
                     device_tree_overlays,
-                    protection_type.runs_firmware(),
+                    protection_type,
                 )?;
 
                 if protection_type.needs_firmware_loaded() {
@@ -1180,15 +1184,26 @@ impl arch::LinuxArch for X8664arch {
                         PROTECTED_VM_FW_MAX_SIZE,
                     )
                     .map_err(Error::LoadCustomPvmFw)?;
+                } else if protection_type.runs_firmware() {
+                    // Tell the hypervisor to load the pVM firmware.
+                    vm.load_protected_vm_firmware(
+                        GuestAddress(PROTECTED_VM_FW_START),
+                        PROTECTED_VM_FW_MAX_SIZE,
+                    )
+                    .map_err(Error::LoadPvmFw)?;
                 }
 
-                let entry_addr = if protection_type.runs_firmware() {
-                    PROTECTED_VM_FW_START
+                let entry_addr = if protection_type.needs_firmware_loaded() {
+                    Some(PROTECTED_VM_FW_START)
+                } else if protection_type.runs_firmware() {
+                    None // Initial RIP value is set by the hypervisor
                 } else {
-                    kernel_entry.offset()
+                    Some(kernel_entry.offset())
                 };
 
-                vcpu_init[0].regs.rip = entry_addr;
+                if let Some(entry) = entry_addr {
+                    vcpu_init[0].regs.rip = entry;
+                }
 
                 match kernel_type {
                     KernelType::BzImage | KernelType::Elf => {
@@ -1201,9 +1216,11 @@ impl arch::LinuxArch for X8664arch {
 
                 if protection_type.runs_firmware() {
                     // Pass pVM payload entry address to pVM firmware.
-                    // NOTE: this ABI is subject to change. Possibly we will pass
-                    // all the needed info (payload entry, start and size) in in-memory
-                    // structures (e.g. DTB) instead.
+                    // NOTE: this is only for development purposes. An actual pvmfw
+                    // implementation should not use this value and should instead receive
+                    // the pVM payload start and size info from crosvm as the DTB properties
+                    // /config/kernel-address and /config/kernel-size and determine the offset
+                    // of the entry point on its own, not trust crosvm to provide it.
                     vcpu_init[0].regs.rdi = kernel_entry.offset();
                 }
 
@@ -1569,13 +1586,13 @@ impl X8664arch {
     ///
     /// # Returns
     ///
-    /// On success, returns the Linux x86_64 boot protocol parameters, the first address past the
-    /// end of the kernel, the entry point (initial `RIP` value), the initial CPU mode, and the type
-    /// of kernel.
+    /// On success, returns the Linux x86_64 boot protocol parameters, the address range containing
+    /// the kernel, the entry point (initial `RIP` value), the initial CPU mode, and the type of
+    /// kernel.
     fn load_kernel(
         mem: &GuestMemory,
         kernel_image: &mut File,
-    ) -> Result<(boot_params, u64, GuestAddress, CpuMode, KernelType)> {
+    ) -> Result<(boot_params, AddressRange, GuestAddress, CpuMode, KernelType)> {
         let kernel_start = GuestAddress(KERNEL_START_OFFSET);
         match kernel_loader::load_elf64(mem, kernel_start, kernel_image, 0) {
             Ok(loaded_kernel) => {
@@ -1589,7 +1606,7 @@ impl X8664arch {
                 };
                 Ok((
                     boot_params,
-                    loaded_kernel.address_range.end,
+                    loaded_kernel.address_range,
                     loaded_kernel.entry,
                     CpuMode::LongMode,
                     KernelType::Elf,
@@ -1597,12 +1614,12 @@ impl X8664arch {
             }
             Err(kernel_loader::Error::InvalidMagicNumber) => {
                 // The image failed to parse as ELF, so try to load it as a bzImage.
-                let (boot_params, bzimage_end, bzimage_entry, cpu_mode) =
+                let (boot_params, bzimage_region, bzimage_entry, cpu_mode) =
                     bzimage::load_bzimage(mem, kernel_start, kernel_image)
                         .map_err(Error::LoadBzImage)?;
                 Ok((
                     boot_params,
-                    bzimage_end,
+                    bzimage_region,
                     bzimage_entry,
                     cpu_mode,
                     KernelType::BzImage,
@@ -1626,11 +1643,11 @@ impl X8664arch {
         cmdline: kernel_cmdline::Cmdline,
         initrd_file: Option<File>,
         android_fstab: Option<File>,
-        kernel_end: u64,
+        kernel_region: AddressRange,
         params: boot_params,
         dump_device_tree_blob: Option<PathBuf>,
         device_tree_overlays: Vec<DtbOverlay>,
-        has_protected_vm_firmware: bool,
+        protection_type: ProtectionType,
     ) -> Result<()> {
         // Some guest kernels expect a typical PC memory layout where the region between 640 KB and
         // 1 MB is reserved for device memory/ROMs and get confused if there is a RAM region
@@ -1638,7 +1655,7 @@ impl X8664arch {
         // high memory regions.
         let ram_below_1m_end = 640 * 1024;
         let ram_below_1m = AddressRange {
-            start: START_OF_RAM_32BITS,
+            start: 0,
             end: ram_below_1m_end - 1,
         };
 
@@ -1648,8 +1665,7 @@ impl X8664arch {
 
         // Find the end of the part of guest memory below 4G that is not pVM firmware memory.
         // This part of guest memory includes just one region, so just find the end of this region.
-        let max_ram_end_below_4g =
-            max_ram_end_before_32bit(arch_memory_layout, has_protected_vm_firmware) - 1;
+        let max_ram_end_below_4g = max_ram_end_before_32bit(arch_memory_layout) - 1;
         let guest_mem_end_below_4g = mem
             .regions()
             .map(|r| r.guest_addr.offset() + r.size as u64 - 1)
@@ -1671,7 +1687,6 @@ impl X8664arch {
             ram_below_1m,
             ram_below_4g,
             ram_above_4g,
-            has_protected_vm_firmware,
         )?;
 
         let kernel_max_cmdline_len = if params.hdr.cmdline_size == 0 {
@@ -1688,26 +1703,6 @@ impl X8664arch {
             kernel_max_cmdline_len,
         )?;
 
-        let mut setup_data = Vec::<SetupData>::new();
-        if android_fstab.is_some() || !device_tree_overlays.is_empty() {
-            let device_tree_blob =
-                fdt::create_fdt(android_fstab, dump_device_tree_blob, device_tree_overlays)
-                    .map_err(Error::CreateFdt)?;
-            setup_data.push(SetupData {
-                data: device_tree_blob,
-                type_: SetupDataType::Dtb,
-            });
-        }
-
-        setup_data.push(setup_data_rng_seed());
-
-        let setup_data = write_setup_data(
-            mem,
-            GuestAddress(SETUP_DATA_START),
-            GuestAddress(SETUP_DATA_END),
-            &setup_data,
-        )?;
-
         let initrd = match initrd_file {
             Some(mut initrd_file) => {
                 let initrd_addr_max = if params.hdr.xloadflags & XLF_CAN_BE_LOADED_ABOVE_4G != 0 {
@@ -1722,7 +1717,7 @@ impl X8664arch {
                 let (initrd_start, initrd_size) = arch::load_image_high(
                     mem,
                     &mut initrd_file,
-                    GuestAddress(kernel_end),
+                    GuestAddress(kernel_region.end + 1),
                     GuestAddress(initrd_addr_max),
                     Some(|region| {
                         region.options.purpose != MemoryRegionPurpose::ProtectedFirmwareRegion
@@ -1734,6 +1729,34 @@ impl X8664arch {
             }
             None => None,
         };
+
+        let mut setup_data = Vec::<SetupData>::new();
+        if android_fstab.is_some()
+            || !device_tree_overlays.is_empty()
+            || protection_type.runs_firmware()
+        {
+            let device_tree_blob = fdt::create_fdt(
+                android_fstab,
+                dump_device_tree_blob,
+                device_tree_overlays,
+                kernel_region,
+                initrd,
+            )
+            .map_err(Error::CreateFdt)?;
+            setup_data.push(SetupData {
+                data: device_tree_blob,
+                type_: SetupDataType::Dtb,
+            });
+        }
+
+        setup_data.push(setup_data_rng_seed());
+
+        let setup_data = write_setup_data(
+            mem,
+            GuestAddress(SETUP_DATA_START),
+            GuestAddress(SETUP_DATA_END),
+            &setup_data,
+        )?;
 
         configure_system(
             mem,
@@ -1883,14 +1906,8 @@ impl X8664arch {
         irq_chip: &mut dyn IrqChipX86_64,
         vm_control: Tube,
         mem_size: u64,
-        has_protected_vm_firmware: bool,
     ) -> anyhow::Result<()> {
-        let mem_regions = arch_memory_regions(
-            arch_memory_layout,
-            mem_size,
-            None,
-            has_protected_vm_firmware,
-        );
+        let mem_regions = arch_memory_regions(arch_memory_layout, mem_size, None);
 
         let mem_below_4g = mem_regions
             .iter()
@@ -2388,8 +2405,6 @@ mod tests {
 
     use super::*;
 
-    const TEST_MEMORY_SIZE: u64 = 2 * GB;
-
     fn setup() -> ArchMemoryLayout {
         let pci_config = PciConfig {
             ecam: Some(MemoryRegionConfig {
@@ -2407,87 +2422,128 @@ mod tests {
     #[test]
     fn regions_lt_4gb_nobios() {
         let arch_memory_layout = setup();
-        let regions = arch_memory_regions(
-            &arch_memory_layout,
-            512 * MB,
-            /* bios_size */ None,
-            /* has_protected_vm_firmware */ false,
+        let regions = arch_memory_regions(&arch_memory_layout, 512 * MB, /* bios_size */ None);
+        assert_eq!(
+            regions,
+            [(
+                GuestAddress(0),
+                1u64 << 29,
+                MemoryRegionOptions {
+                    align: 0,
+                    purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                },
+            )]
         );
-        assert_eq!(1, regions.len());
-        assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
-        assert_eq!(1u64 << 29, regions[0].1);
     }
 
     #[test]
     fn regions_gt_4gb_nobios() {
         let arch_memory_layout = setup();
         let size = 4 * GB + 0x8000;
-        let regions = arch_memory_regions(
-            &arch_memory_layout,
-            size,
-            /* bios_size */ None,
-            /* has_protected_vm_firmware */ false,
+        let regions = arch_memory_regions(&arch_memory_layout, size, /* bios_size */ None);
+        assert_eq!(
+            regions,
+            [
+                (
+                    GuestAddress(0),
+                    2 * GB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(4 * GB),
+                    2 * GB + 0x8000,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+            ]
         );
-        assert_eq!(2, regions.len());
-        assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
-        assert_eq!(GuestAddress(4 * GB), regions[1].0);
-        assert_eq!(4 * GB + 0x8000, regions[0].1 + regions[1].1);
     }
 
     #[test]
     fn regions_lt_4gb_bios() {
         let arch_memory_layout = setup();
         let bios_len = 1 * MB;
-        let regions = arch_memory_regions(
-            &arch_memory_layout,
-            512 * MB,
-            Some(bios_len),
-            /* has_protected_vm_firmware */ false,
-        );
-        assert_eq!(2, regions.len());
-        assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
-        assert_eq!(512 * MB, regions[0].1);
+        let regions = arch_memory_regions(&arch_memory_layout, 512 * MB, Some(bios_len));
         assert_eq!(
-            GuestAddress(FIRST_ADDR_PAST_32BITS - bios_len),
-            regions[1].0
+            regions,
+            [
+                (
+                    GuestAddress(0),
+                    512 * MB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(4 * GB - bios_len),
+                    bios_len,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::Bios,
+                    },
+                ),
+            ]
         );
-        assert_eq!(bios_len, regions[1].1);
     }
 
     #[test]
     fn regions_gt_4gb_bios() {
         let arch_memory_layout = setup();
         let bios_len = 1 * MB;
-        let regions = arch_memory_regions(
-            &arch_memory_layout,
-            4 * GB + 0x8000,
-            Some(bios_len),
-            /* has_protected_vm_firmware */ false,
-        );
-        assert_eq!(3, regions.len());
-        assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
+        let regions = arch_memory_regions(&arch_memory_layout, 4 * GB + 0x8000, Some(bios_len));
         assert_eq!(
-            GuestAddress(FIRST_ADDR_PAST_32BITS - bios_len),
-            regions[1].0
+            regions,
+            [
+                (
+                    GuestAddress(0),
+                    2 * GB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(4 * GB - bios_len),
+                    bios_len,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::Bios,
+                    },
+                ),
+                (
+                    GuestAddress(4 * GB),
+                    2 * GB + 0x8000,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+            ]
         );
-        assert_eq!(bios_len, regions[1].1);
-        assert_eq!(GuestAddress(4 * GB), regions[2].0);
     }
 
     #[test]
     fn regions_eq_4gb_nobios() {
         let arch_memory_layout = setup();
         // Test with exact size of 4GB - the overhead.
-        let regions = arch_memory_regions(
-            &arch_memory_layout,
-            TEST_MEMORY_SIZE - START_OF_RAM_32BITS,
-            /* bios_size */ None,
-            /* has_protected_vm_firmware */ false,
+        let regions = arch_memory_regions(&arch_memory_layout, 2 * GB, /* bios_size */ None);
+        assert_eq!(
+            regions,
+            [(
+                GuestAddress(0),
+                2 * GB,
+                MemoryRegionOptions {
+                    align: 0,
+                    purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                },
+            )]
         );
-        dbg!(&regions);
-        assert_eq!(1, regions.len());
-        assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
-        assert_eq!(TEST_MEMORY_SIZE - START_OF_RAM_32BITS, regions[0].1);
     }
 
     #[test]
@@ -2495,20 +2551,28 @@ mod tests {
         let arch_memory_layout = setup();
         // Test with exact size of 4GB - the overhead.
         let bios_len = 1 * MB;
-        let regions = arch_memory_regions(
-            &arch_memory_layout,
-            TEST_MEMORY_SIZE - START_OF_RAM_32BITS,
-            Some(bios_len),
-            /* has_protected_vm_firmware */ false,
-        );
-        assert_eq!(2, regions.len());
-        assert_eq!(GuestAddress(START_OF_RAM_32BITS), regions[0].0);
-        assert_eq!(TEST_MEMORY_SIZE - START_OF_RAM_32BITS, regions[0].1);
+        let regions = arch_memory_regions(&arch_memory_layout, 2 * GB, Some(bios_len));
         assert_eq!(
-            GuestAddress(FIRST_ADDR_PAST_32BITS - bios_len),
-            regions[1].0
+            regions,
+            [
+                (
+                    GuestAddress(0),
+                    2 * GB,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                    },
+                ),
+                (
+                    GuestAddress(4 * GB - bios_len),
+                    bios_len,
+                    MemoryRegionOptions {
+                        align: 0,
+                        purpose: MemoryRegionPurpose::Bios,
+                    },
+                ),
+            ]
         );
-        assert_eq!(bios_len, regions[1].1);
     }
 
     #[test]

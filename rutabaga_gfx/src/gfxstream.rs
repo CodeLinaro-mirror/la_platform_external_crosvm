@@ -44,6 +44,11 @@ const STREAM_RENDERER_PARAM_WIN0_HEIGHT: u64 = 5;
 const STREAM_RENDERER_PARAM_DEBUG_CALLBACK: u64 = 6;
 const STREAM_RENDERER_PARAM_RENDERER_FEATURES: u64 = 11;
 
+#[cfg(gfxstream_unstable)]
+const STREAM_RENDERER_IMPORT_FLAG_VULKAN_INFO: u32 = RUTABAGA_IMPORT_FLAG_VULKAN_INFO;
+#[cfg(gfxstream_unstable)]
+const STREAM_RENDERER_IMPORT_FLAG_RESOURCE_EXISTS: u32 = RUTABAGA_IMPORT_FLAG_RESOURCE_EXISTS;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct stream_renderer_param {
@@ -89,6 +94,25 @@ pub type stream_renderer_fence = RutabagaFence;
 
 #[allow(non_camel_case_types)]
 pub type stream_renderer_debug = RutabagaDebug;
+
+#[cfg(gfxstream_unstable)]
+#[repr(C)]
+pub struct stream_renderer_3d_info {
+    pub width: u32,
+    pub height: u32,
+    pub drm_fourcc: u32,
+    pub strides: [u32; 4],
+    pub offsets: [u32; 4],
+    pub modifier: u64,
+}
+
+#[cfg(gfxstream_unstable)]
+#[repr(C)]
+pub struct stream_renderer_import_data {
+    pub flags: u32,
+    pub info_3d: stream_renderer_3d_info,
+    pub info_vulkan: stream_renderer_vulkan_info,
+}
 
 extern "C" {
     // Entry point for the stream renderer.
@@ -198,6 +222,13 @@ extern "C" {
 
     #[cfg(gfxstream_unstable)]
     fn stream_renderer_wait_sync_resource(res_handle: u32) -> c_int;
+
+    #[cfg(gfxstream_unstable)]
+    fn stream_renderer_import_resource(
+        res_handle: u32,
+        import_handle: *const stream_renderer_handle,
+        import_data: *const stream_renderer_import_data,
+    ) -> c_int;
 }
 
 /// The virtio-gpu backend state tracker which supports accelerated rendering.
@@ -546,6 +577,66 @@ impl RutabagaComponent for Gfxstream {
             size: 0,
             mapping: None,
         })
+    }
+
+    #[cfg(gfxstream_unstable)]
+    fn import(
+        &self,
+        resource_id: u32,
+        import_handle: RutabagaHandle,
+        import_data: RutabagaImportData,
+    ) -> RutabagaResult<Option<RutabagaResource>> {
+        let stream_handle = stream_renderer_handle {
+            os_handle: import_handle.os_handle.into_raw_descriptor() as i64,
+            handle_type: import_handle.handle_type,
+        };
+
+        // VULKAN_INFO not currently supported in Rutabaga -> gfxstream translation
+        // for import_data
+        assert!(import_data.flags & STREAM_RENDERER_IMPORT_FLAG_VULKAN_INFO == 0);
+
+        // When importing and creating a new resource, 3D_INFO flag must be set. This flag should
+        // be the only flag set in the gfxstream call
+        let stream_import_data = stream_renderer_import_data {
+            flags: import_data.flags,
+            info_3d: stream_renderer_3d_info {
+                width: import_data.info_3d.width,
+                height: import_data.info_3d.height,
+                drm_fourcc: import_data.info_3d.drm_fourcc,
+                strides: import_data.info_3d.strides,
+                offsets: import_data.info_3d.offsets,
+                modifier: import_data.info_3d.modifier,
+            },
+            info_vulkan: Default::default(),
+        };
+
+        // SAFETY:
+        // Safe because gfxstream is initialized by now, and the return value is checked before
+        // returning a new resource. The backing buffers are not supplied with this call.
+        let ret = unsafe {
+            stream_renderer_import_resource(resource_id, &stream_handle, &stream_import_data)
+        };
+        ret_to_res(ret)?;
+
+        if (import_data.flags & STREAM_RENDERER_IMPORT_FLAG_RESOURCE_EXISTS) != 0 {
+            Ok(None)
+        } else {
+            Ok(Some(RutabagaResource {
+                resource_id,
+                handle: None,
+                blob: false,
+                blob_mem: 0,
+                blob_flags: 0,
+                map_info: None,
+                info_2d: None,
+                info_3d: None,
+                vulkan_info: None,
+                backing_iovecs: None,
+                component_mask: 1 << (RutabagaComponentType::Gfxstream as u8),
+                size: 0,
+                mapping: None,
+            }))
+        }
     }
 
     fn attach_backing(

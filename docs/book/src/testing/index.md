@@ -22,6 +22,32 @@ unit tests:
 This allows us to execute unit tests for any platform using emulators such as qemu-user-static or
 wine64.
 
+#### File Access in Unit Tests
+
+Some unit tests may need to access extra data files. The files should be accessed at build time
+using `include_str!()` macro, rather than at run time. The file is located relative to the current
+file (similarly to how modules are found). The contents of the file can be used directly in the test
+or at runtime the test can write this data to a temporary file. This approach is crucial because
+certain test environment may require to run the test binaries directly without access to the source
+code. Additionally, it ensures the test binary can be run manually within a debugger like GDB.
+
+These approaches ensure that units tests be able to find the correct paths in various build &
+execution environment.
+
+**Example:**
+
+```rust
+#[test]
+fn test_my_config() {
+    let temp_file = TempDir::new().unwrap();
+    let path = temp_file.path().join("my_config.cfg");
+    let test_config = include_str!("../../../data/config/my_config.cfg");
+    fs::write(&path, test_config).expect("Unable to write test file");
+    let config_file = File::open(path).expect("Failed to open config file");
+    // ... rest of your test ...
+}
+```
+
 ### Documentation tests
 
 Rust's

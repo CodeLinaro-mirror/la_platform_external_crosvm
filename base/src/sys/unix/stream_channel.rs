@@ -59,6 +59,9 @@ enum SocketType {
 
 /// An abstraction over named pipes and unix socketpairs. This abstraction can be used in a blocking
 /// and non blocking mode.
+///
+/// WARNING: partial reads of messages behave differently depending on the platform.
+/// See sys::unix::StreamChannel::inner_read for details.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct StreamChannel {
     stream: SocketType,
@@ -84,12 +87,18 @@ impl StreamChannel {
             SocketType::Byte(sock) => (&mut &*sock).read(buf),
 
             // On Windows, reading from SOCK_SEQPACKET with a buffer that is too small is an error,
-            // but on Linux will silently truncate unless MSG_TRUNC is passed. Here, we emulate
-            // Windows behavior on POSIX.
+            // and the extra data will be preserved inside the named pipe.
             //
-            // Note that Rust translates ERROR_MORE_DATA into io::ErrorKind::Other
-            // (see sys::decode_error_kind) on Windows, so we preserve this behavior on POSIX even
-            // though one could argue ErrorKind::UnexpectedEof is a closer match to the true error.
+            // Linux though, will silently truncate unless MSG_TRUNC is passed. So we pass it, but
+            // even in that case, Linux will still throw away the extra data. This means there is a
+            // slight behavior difference between platforms from the consumer's perspective.
+            // In practice on Linux, intentional partial reads of messages are usually accomplished
+            // by also passing MSG_PEEK. While we could do this, and hide this rough edge from
+            // consumers, it would add complexity & turn every read into two read syscalls.
+            //
+            // So the compromise is this:
+            // * On Linux: a partial read of a message is an Err and loses data.
+            // * On Windows: a partial read of a message is Ok and does not lose data.
             SocketType::Message(sock) => {
                 // SAFETY:
                 // Safe because buf is valid, we pass buf's size to recv to bound the return
@@ -147,22 +156,6 @@ impl StreamChannel {
         stream_a.set_nonblocking(is_non_blocking)?;
         stream_b.set_nonblocking(is_non_blocking)?;
         Ok((stream_a, stream_b))
-    }
-
-    pub fn from_unix_seqpacket(sock: UnixSeqpacket) -> StreamChannel {
-        StreamChannel {
-            stream: SocketType::Message(sock),
-        }
-    }
-
-    pub fn peek_size(&self) -> io::Result<usize> {
-        match &self.stream {
-            SocketType::Byte(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Cannot check the size of streamed data",
-            )),
-            SocketType::Message(sock) => Ok(sock.next_packet_size()?),
-        }
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -384,41 +377,5 @@ mod test {
         // Further reads should encounter an error since there is no available data and this is a
         // non blocking pipe.
         assert!(receiver.read(&mut recv_buffer).is_err());
-    }
-
-    #[test]
-    fn test_from_unix_seqpacket() {
-        let (sock_sender, sock_receiver) = UnixSeqpacket::pair().unwrap();
-        let mut sender = StreamChannel::from_unix_seqpacket(sock_sender);
-        let mut receiver = StreamChannel::from_unix_seqpacket(sock_receiver);
-
-        sender.write_all(&[75, 77, 54, 82, 76, 65]).unwrap();
-
-        // Wait for the data to arrive.
-        let event_ctx: EventContext<Token> =
-            EventContext::build_with(&[(receiver.get_read_notifier(), Token::ReceivedData)])
-                .unwrap();
-        let events = event_ctx.wait().unwrap();
-        let tokens: Vec<Token> = events
-            .iter()
-            .filter(|e| e.is_readable)
-            .map(|e| e.token)
-            .collect();
-        assert_eq!(tokens, vec! {Token::ReceivedData});
-
-        let mut recv_buffer: [u8; 6] = [0; 6];
-
-        let size = receiver.read(&mut recv_buffer).unwrap();
-        assert_eq!(size, 6);
-        assert_eq!(recv_buffer, [75, 77, 54, 82, 76, 65]);
-
-        // Now that we've polled for & received all data, polling again should show no events.
-        assert_eq!(
-            event_ctx
-                .wait_timeout(std::time::Duration::new(0, 0))
-                .unwrap()
-                .len(),
-            0
-        );
     }
 }

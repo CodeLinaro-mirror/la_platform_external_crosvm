@@ -122,8 +122,13 @@ pub enum KvmCap {
     ImmediateExit = KVM_CAP_IMMEDIATE_EXIT,
     ArmPmuV3 = KVM_CAP_ARM_PMU_V3,
     ArmProtectedVm = KVM_CAP_ARM_PROTECTED_VM,
+    X86ProtectedVm = KVM_CAP_X86_PROTECTED_VM,
     ArmMte = KVM_CAP_ARM_MTE,
     #[cfg(target_arch = "x86_64")]
     BusLockDetect = KVM_CAP_X86_BUS_LOCK_EXIT,
-    MemNoncoherentDma = KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA,
+    // TODO(b/388092267): use upstream cap when available
+    MemNoncoherentDma = KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA_CROS,
+    UserMemory2 = KVM_CAP_USER_MEMORY2,
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    Sve = KVM_CAP_ARM_SVE,
 }

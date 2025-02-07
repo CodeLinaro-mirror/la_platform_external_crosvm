@@ -257,6 +257,18 @@ fn create_virtio_devices(
         )?);
     }
 
+    #[cfg(all(feature = "media", feature = "video-decoder"))]
+    let media_adapter_cfg = cfg
+        .media_decoder
+        .iter()
+        .map(|config| {
+            let (video_tube, gpu_tube) =
+                Tube::pair().expect("failed to create tube for media adapter");
+            resource_bridges.push(gpu_tube);
+            (video_tube, config.backend)
+        })
+        .collect::<Vec<_>>();
+
     #[cfg(feature = "video-decoder")]
     let video_dec_cfg = cfg
         .video_dec
@@ -663,7 +675,7 @@ fn create_virtio_devices(
     #[cfg(feature = "balloon")]
     if cfg.balloon {
         let balloon_device_tube = if let Some(ref path) = cfg.balloon_control {
-            Tube::new_from_unix_seqpacket(UnixSeqpacket::connect(path).with_context(|| {
+            Tube::try_from(UnixSeqpacket::connect(path).with_context(|| {
                 format!(
                     "failed to connect to balloon control socket {}",
                     path.display(),
@@ -700,12 +712,25 @@ fn create_virtio_devices(
             0
         };
 
+        // The balloon device also needs a tube to communicate back to the main process to
+        // handle remapping memory dynamically.
+        let (dynamic_mapping_host_tube, dynamic_mapping_device_tube) =
+            Tube::pair().context("failed to create tube")?;
+        add_control_tube(
+            VmMemoryTube {
+                tube: dynamic_mapping_host_tube,
+                expose_with_viommu: false,
+            }
+            .into(),
+        );
+
         devs.push(create_balloon_device(
             cfg.protection_type,
             &cfg.jail_config,
             balloon_device_tube,
             balloon_inflate_tube,
             init_balloon_size,
+            VmMemoryClient::new(dynamic_mapping_device_tube),
             balloon_features,
             #[cfg(feature = "registered_events")]
             Some(
@@ -747,6 +772,17 @@ fn create_virtio_devices(
     #[cfg(feature = "media")]
     if cfg.simple_media_device {
         devs.push(create_simple_media_device(cfg.protection_type)?);
+    }
+
+    #[cfg(all(feature = "media", feature = "video-decoder"))]
+    {
+        for (tube, backend) in media_adapter_cfg {
+            devs.push(create_virtio_media_adapter(
+                cfg.protection_type,
+                tube,
+                backend,
+            )?);
+        }
     }
 
     #[cfg(feature = "video-decoder")]
@@ -1315,7 +1351,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     let mut cpu_frequencies = BTreeMap::new();
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-    let mut normalized_cpu_capacities = BTreeMap::new();
+    let mut normalized_cpu_ipc_ratios = BTreeMap::new();
 
     // if --enable-fw-cfg or --fw-cfg was given, we want to enable fw_cfg
     let fw_cfg_enable = cfg.enable_fw_cfg || !cfg.fw_cfg_parameters.is_empty();
@@ -1387,13 +1423,15 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
                 .ok_or(Error::new(libc::EINVAL))?;
 
             for (cpu_id, max_freq) in max_freqs.iter().enumerate() {
-                let normalized_cpu_capacity = (u64::from(*cpu_capacity.get(&cpu_id).unwrap())
-                    * u64::from(*max_freq))
-                .checked_div(u64::from(*largest_host_max_freq))
-                .ok_or(Error::new(libc::EINVAL))?;
-                normalized_cpu_capacities.insert(
+                let normalized_cpu_ipc_ratio =
+                    (u64::from(*cfg.cpu_ipc_ratio.get(&cpu_id).unwrap_or(&1024))
+                        * u64::from(*max_freq))
+                    .checked_div(u64::from(*largest_host_max_freq))
+                    .ok_or(Error::new(libc::EINVAL))?;
+                normalized_cpu_ipc_ratios.insert(
                     cpu_id,
-                    u32::try_from(normalized_cpu_capacity).map_err(|_| Error::new(libc::EINVAL))?,
+                    u32::try_from(normalized_cpu_ipc_ratio)
+                        .map_err(|_| Error::new(libc::EINVAL))?,
                 );
             }
 
@@ -1469,7 +1507,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         cpu_clusters,
         cpu_capacity,
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-        normalized_cpu_capacities,
+        normalized_cpu_ipc_ratios,
         no_smt: cfg.no_smt,
         hugepages: cfg.hugepages,
         hv_cfg: hypervisor::Config {
@@ -1583,7 +1621,7 @@ fn create_guest_memory(
     let guest_mem_layout =
         punch_holes_in_guest_mem_layout_for_mappings(guest_mem_layout, &cfg.file_backed_mappings);
 
-    let guest_mem = GuestMemory::new_with_options(&guest_mem_layout)
+    let mut guest_mem = GuestMemory::new_with_options(&guest_mem_layout)
         .context("failed to create guest memory")?;
     let mut mem_policy = MemoryPolicy::empty();
     if components.hugepages {
@@ -2675,7 +2713,7 @@ fn remove_hotplug_bridge<V: VmArch, Vcpu: VcpuArch>(
     for (bus_num, hp_bus) in linux.hotplug_bus.iter() {
         let mut hp_bus_lock = hp_bus.lock();
         if let Some(pci_addr) = hp_bus_lock.get_hotplug_device(hotplug_key) {
-            sys_allocator.release_pci(pci_addr.bus, pci_addr.dev, pci_addr.func);
+            sys_allocator.release_pci(pci_addr);
             hp_bus_lock.hot_unplug(pci_addr)?;
             buses_to_remove.push(child_bus);
             if hp_bus_lock.is_empty() {
@@ -2765,7 +2803,7 @@ fn remove_hotplug_device<V: VmArch, Vcpu: VcpuArch>(
                 hp_bus_lock.hot_unplug(pci_addr)?;
             }
 
-            sys_allocator.release_pci(pci_addr.bus, pci_addr.dev, pci_addr.func);
+            sys_allocator.release_pci(pci_addr);
             if empty_simbling || hp_bus_lock.is_empty() {
                 if let Some(hotplug_key) = hp_bus_lock.get_hotplug_key() {
                     removed_key = Some(hotplug_key);
@@ -3400,7 +3438,7 @@ fn make_addr_tube_from_maybe_existing(
         let sock = UnixSeqpacket::connect(addr.clone()).with_context(|| {
             format!("failed to connect to registered listening socket {}", addr)
         })?;
-        let tube = ProtoTube::new_from_unix_seqpacket(sock)?;
+        let tube = ProtoTube::from(Tube::try_from(sock)?);
         Ok(AddressedProtoTube {
             tube: Rc::new(tube),
             socket_addr: addr,
@@ -4068,10 +4106,8 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 wait_ctx
                                     .add(&socket, Token::VmControl { id })
                                     .context("failed to add descriptor to wait context")?;
-                                control_tubes.insert(
-                                    id,
-                                    TaggedControlTube::Vm(Tube::new_from_unix_seqpacket(socket)?),
-                                );
+                                control_tubes
+                                    .insert(id, TaggedControlTube::Vm(Tube::try_from(socket)?));
                             }
                             Err(e) => error!("failed to accept socket: {}", e),
                         }
@@ -4829,7 +4865,7 @@ fn start_vhost_user_control_server(
     loop {
         match control_server_socket.accept() {
             Ok(socket) => {
-                let tube = match Tube::new_from_unix_seqpacket(socket) {
+                let tube = match Tube::try_from(socket) {
                     Ok(tube) => tube,
                     Err(e) => {
                         error!("failed to open tube: {:#}", e);

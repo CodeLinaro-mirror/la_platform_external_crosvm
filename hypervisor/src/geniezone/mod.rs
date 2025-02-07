@@ -571,6 +571,8 @@ impl Hypervisor for Geniezone {
             HypervisorCap::StaticSwiotlbAllocationRequired => true,
             HypervisorCap::HypervisorInitializedBootContext => false,
             HypervisorCap::S390UserSigp | HypervisorCap::TscDeadlineTimer => false,
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            HypervisorCap::Sve => false,
         }
     }
 }
@@ -600,6 +602,7 @@ impl GeniezoneVm {
         let vm_descriptor = unsafe { SafeDescriptor::from_raw_descriptor(ret) };
         for region in guest_mem.regions() {
             let flags = match region.options.purpose {
+                MemoryRegionPurpose::Bios => GZVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::GuestMemoryRegion => GZVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::ProtectedFirmwareRegion => GZVM_USER_MEM_REGION_PROTECT_FW,
                 MemoryRegionPurpose::StaticSwiotlbRegion => GZVM_USER_MEM_REGION_STATIC_SWIOTLB,
