@@ -7,6 +7,7 @@ use std::collections::BTreeMap as Map;
 use std::collections::BTreeSet as Set;
 use std::io::Cursor;
 use std::os::raw::c_void;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -76,7 +77,6 @@ pub fn create_fence_handler(fence_state: FenceState) -> RutabagaFenceHandler {
 pub struct KumquatGpu {
     rutabaga: Rutabaga,
     fence_state: FenceState,
-    snapshot_buffer: Cursor<Vec<u8>>,
     id_allocator: u32,
     resources: Map<u32, KumquatGpuResource>,
 }
@@ -106,7 +106,6 @@ impl KumquatGpu {
         Ok(KumquatGpu {
             rutabaga,
             fence_state,
-            snapshot_buffer: Cursor::new(Vec::new()),
             id_allocator: 0,
             resources: Default::default(),
         })
@@ -437,10 +436,7 @@ impl KumquatGpuConnection {
                         .context_attach_resource(cmd.ctx_id, resource_id)?;
                 }
                 KumquatGpuProtocol::SnapshotSave => {
-                    kumquat_gpu.snapshot_buffer.set_position(0);
-                    kumquat_gpu
-                        .rutabaga
-                        .snapshot(&mut kumquat_gpu.snapshot_buffer, SNAPSHOT_DIR)?;
+                    kumquat_gpu.rutabaga.snapshot(&Path::new(SNAPSHOT_DIR))?;
 
                     let resp = kumquat_gpu_protocol_ctrl_hdr {
                         type_: KUMQUAT_GPU_PROTOCOL_RESP_OK_SNAPSHOT,
@@ -450,10 +446,7 @@ impl KumquatGpuConnection {
                     self.stream.write(KumquatGpuProtocolWrite::Cmd(resp))?;
                 }
                 KumquatGpuProtocol::SnapshotRestore => {
-                    kumquat_gpu.snapshot_buffer.set_position(0);
-                    kumquat_gpu
-                        .rutabaga
-                        .restore(&mut kumquat_gpu.snapshot_buffer, SNAPSHOT_DIR)?;
+                    kumquat_gpu.rutabaga.restore(&Path::new(SNAPSHOT_DIR))?;
 
                     let resp = kumquat_gpu_protocol_ctrl_hdr {
                         type_: KUMQUAT_GPU_PROTOCOL_RESP_OK_SNAPSHOT,
