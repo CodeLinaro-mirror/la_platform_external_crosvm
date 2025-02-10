@@ -107,6 +107,7 @@ const TYPE_TPM: u32 = MAX_VIRTIO_DEVICE_ID - 1;
 // TODO(abhishekbh): Fix this after this device is accepted upstream.
 const TYPE_VHOST_USER: u32 = MAX_VIRTIO_DEVICE_ID - 2;
 const VIRTIO_DT_QCOM_BASE: u32 = 0xc000;
+const TYPE_QCOM_EAVB: u32 = VIRTIO_DT_QCOM_BASE + 6;
 const TYPE_QCOM_GLINK: u32 = VIRTIO_DT_QCOM_BASE + 10;
 const TYPE_QCOM_FRPC: u32 = VIRTIO_DT_QCOM_BASE + 0x0b;
 const TYPE_QCOM_SSR: u32 = VIRTIO_DT_QCOM_BASE + 0x0e;
