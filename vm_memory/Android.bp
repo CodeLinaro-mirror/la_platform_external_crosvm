@@ -39,7 +39,6 @@ rust_library {
     ],
     proc_macros: ["libremain"],
     apex_available: ["com.android.virt"],
-    visibility: ["//vendor:__subpackages__"],
 }
 
 rust_test {

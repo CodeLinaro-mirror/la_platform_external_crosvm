@@ -93,8 +93,5 @@ rust_library {
         "libremain",
     ],
     apex_available: ["com.android.virt"],
-    visibility: [
-        "//packages/modules/Virtualization/android/virtmgr",
-        "//vendor:__subpackages__",
-    ],
+    visibility: ["//packages/modules/Virtualization/android/virtmgr"],
 }

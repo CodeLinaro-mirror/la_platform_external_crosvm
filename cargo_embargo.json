@@ -91,42 +91,16 @@
     "crosvm": [
       "//visibility:public"
     ],
-    "libaarch64": [
-      // For QCOM's crosvm fork.
-      "//vendor:__subpackages__"
-    ],
-    "libbase_rust": [
-      // For QCOM's crosvm fork.
-      "//vendor:__subpackages__"
-    ],
     "libcrosvm_control_static": [
       "//packages/modules/Virtualization/android/virtmgr"
     ],
-    "libdevices": [
-      // For QCOM's crosvm fork.
-      "//vendor:__subpackages__"
-    ],
     "libdisk": [
-      "//packages/modules/Virtualization/android/virtmgr",
-      // For QCOM's crosvm fork.
-      "//vendor:__subpackages__"
+      "//packages/modules/Virtualization/android/virtmgr"
     ],
     "libfuse_rust": [
         "//packages/modules/Virtualization/guest/authfs",
         "//packages/modules/Virtualization/guest/zipfuse",
         "//packages/modules/Virtualization/tests/authfs"
-    ],
-    "libhypervisor": [
-      // For QCOM's crosvm fork.
-      "//vendor:__subpackages__"
-    ],
-    "libsync_rust": [
-      // For QCOM's crosvm fork.
-      "//vendor:__subpackages__"
-    ],
-    "libvm_memory": [
-      // For QCOM's crosvm fork.
-      "//vendor:__subpackages__"
     ]
   },
   "package": {

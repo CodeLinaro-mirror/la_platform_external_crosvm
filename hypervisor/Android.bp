@@ -436,5 +436,4 @@ rust_library {
     ],
     proc_macros: ["libenumn"],
     apex_available: ["com.android.virt"],
-    visibility: ["//vendor:__subpackages__"],
 }

@@ -70,10 +70,9 @@ index 32859ea24..5d7e55e42 100644
  }
  
  rust_library {
-@@ -194,4 +232,23 @@ rust_library {
+@@ -194,3 +232,22 @@ rust_library {
      ],
      apex_available: ["com.android.virt"],
-     visibility: ["//vendor:__subpackages__"],
 +    target: {
 +        android: {
 +            rustlibs: ["libandroid_log_sys"],

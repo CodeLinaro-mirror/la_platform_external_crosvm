@@ -231,7 +231,6 @@ rust_library {
         "libremain",
     ],
     apex_available: ["com.android.virt"],
-    visibility: ["//vendor:__subpackages__"],
     target: {
         android: {
             rustlibs: ["libandroid_log_sys"],
