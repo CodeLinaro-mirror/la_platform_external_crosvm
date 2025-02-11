@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "kernel_cmdline_test_src_kernel_cmdline",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "kernel_cmdline",
     cargo_env_compat: true,

@@ -41,7 +41,7 @@ rust_library {
 
 rust_test {
     name: "serde_keyvalue_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "serde_keyvalue",
     cargo_env_compat: true,

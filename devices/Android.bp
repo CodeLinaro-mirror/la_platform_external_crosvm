@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "devices_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "devices",
     cargo_env_compat: true,
@@ -112,7 +112,7 @@ rust_test {
 
 rust_test {
     name: "devices_test_tests_irqchip_main",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "irqchip",
     cargo_env_compat: true,

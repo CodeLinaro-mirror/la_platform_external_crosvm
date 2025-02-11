@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "base_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: false, // Can't seem to access syslog in TH host tests.
     crate_name: "base",
     cargo_env_compat: true,
@@ -70,7 +70,7 @@ rust_test {
 
 rust_test {
     name: "base_test_tests_linux_main",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: false, // Can't seem to access syslog in TH host tests.
     crate_name: "linux",
     cargo_env_compat: true,
@@ -108,7 +108,7 @@ rust_test {
 
 rust_test {
     name: "base_test_tests_syslog",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "syslog",
     cargo_env_compat: true,
@@ -146,7 +146,7 @@ rust_test {
 
 rust_test {
     name: "base_test_tests_tube",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "tube",
     cargo_env_compat: true,
