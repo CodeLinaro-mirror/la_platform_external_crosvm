@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "base_tokio_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "base_tokio",
     cargo_env_compat: true,
@@ -57,4 +57,5 @@ rust_library {
         "libsync_rust",
         "libtokio",
     ],
+    apex_available: ["com.android.virt"],
 }

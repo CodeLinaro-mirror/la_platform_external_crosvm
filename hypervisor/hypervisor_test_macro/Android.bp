@@ -22,4 +22,5 @@ rust_proc_macro {
         "librand",
         "libsyn",
     ],
+    apex_available: ["com.android.virt"],
 }

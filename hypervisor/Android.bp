@@ -10,7 +10,7 @@ package {
 
 rust_test {
     name: "hypervisor_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "hypervisor",
     cargo_env_compat: true,
@@ -53,7 +53,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_dirty_log",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "dirty_log",
     cargo_env_compat: true,
@@ -97,7 +97,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_hypervisor_virtualization",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "hypervisor_virtualization",
     cargo_env_compat: true,
@@ -141,7 +141,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_kvm_main",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "kvm",
     cargo_env_compat: true,
@@ -185,7 +185,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_mmio_and_pio",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "mmio_and_pio",
     cargo_env_compat: true,
@@ -229,7 +229,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_read_only_memory",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "read_only_memory",
     cargo_env_compat: true,
@@ -273,7 +273,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_real_run_addr",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "real_run_addr",
     cargo_env_compat: true,
@@ -317,7 +317,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_remove_memory",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "remove_memory",
     cargo_env_compat: true,
@@ -361,7 +361,7 @@ rust_test {
 
 rust_test {
     name: "hypervisor_test_tests_tsc_offsets",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "tsc_offsets",
     cargo_env_compat: true,
@@ -435,5 +435,6 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libenumn"],
+    apex_available: ["com.android.virt"],
     visibility: ["//vendor:__subpackages__"],
 }

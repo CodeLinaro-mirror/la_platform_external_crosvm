@@ -25,4 +25,5 @@ rust_proc_macro {
         "libquote",
         "libsyn",
     ],
+    apex_available: ["com.android.virt"],
 }

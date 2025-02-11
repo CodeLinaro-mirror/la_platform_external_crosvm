@@ -23,4 +23,5 @@ rust_library {
         "libserde",
     ],
     aliases: ["metrics_events_generic:metrics_events_product"],
+    apex_available: ["com.android.virt"],
 }

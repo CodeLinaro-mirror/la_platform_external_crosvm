@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "disk_test_src_disk",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "disk",
     cargo_env_compat: true,
@@ -92,6 +92,7 @@ rust_library {
         "libasync_trait",
         "libremain",
     ],
+    apex_available: ["com.android.virt"],
     visibility: [
         "//packages/modules/Virtualization/android/virtmgr",
         "//vendor:__subpackages__",

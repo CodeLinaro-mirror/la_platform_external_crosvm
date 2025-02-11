@@ -49,6 +49,7 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    apex_available: ["com.android.virt"],
     visibility: ["//vendor:__subpackages__"],
     target: {
         // It is necessary to disable this specifically as well as the arch below, because

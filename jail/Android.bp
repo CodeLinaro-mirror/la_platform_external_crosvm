@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "jail_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "jail",
     cargo_env_compat: true,
@@ -63,4 +63,5 @@ rust_library {
         "libstatic_assertions",
         "libzerocopy-0.7.35",
     ],
+    apex_available: ["com.android.virt"],
 }

@@ -28,4 +28,5 @@ rust_library {
         "libmetrics",
         "libserde",
     ],
+    apex_available: ["com.android.virt"],
 }

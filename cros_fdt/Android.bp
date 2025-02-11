@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "cros_fdt_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "cros_fdt",
     cargo_env_compat: true,
@@ -49,4 +49,5 @@ rust_library {
         "libthiserror",
     ],
     proc_macros: ["libremain"],
+    apex_available: ["com.android.virt"],
 }

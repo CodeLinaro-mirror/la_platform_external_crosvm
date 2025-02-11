@@ -25,4 +25,5 @@ rust_library {
         "libanyhow",
         "libsync_rust",
     ],
+    apex_available: ["com.android.virt"],
 }

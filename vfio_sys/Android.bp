@@ -25,4 +25,5 @@ rust_library {
         "libbase_rust",
         "libzerocopy-0.7.35",
     ],
+    apex_available: ["com.android.virt"],
 }

@@ -25,4 +25,5 @@ rust_library {
         "libbase_rust",
         "liblibc",
     ],
+    apex_available: ["com.android.virt"],
 }

@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "kvm_test_tests_dirty_log",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "dirty_log",
     cargo_env_compat: true,
@@ -39,7 +39,7 @@ rust_test {
 
 rust_test {
     name: "kvm_test_tests_kvm_tests",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "kvm_tests",
     cargo_env_compat: true,
@@ -64,7 +64,7 @@ rust_test {
 
 rust_test {
     name: "kvm_test_tests_read_only_memory",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "read_only_memory",
     cargo_env_compat: true,
@@ -89,7 +89,7 @@ rust_test {
 
 rust_test {
     name: "kvm_test_tests_real_run_adder",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "real_run_adder",
     cargo_env_compat: true,
@@ -129,4 +129,5 @@ rust_library {
         "libsync_rust",
         "libvm_memory",
     ],
+    apex_available: ["com.android.virt"],
 }
