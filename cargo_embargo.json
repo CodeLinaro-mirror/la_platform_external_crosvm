@@ -84,6 +84,8 @@
     // also block all blueprint modules for excluded packages.
     "libprebuilts",
     "libproto_build_tools",
+    // Requires ext2 tools in $PATH. We don't use it.
+    "ext2_test_tests_tests",
     // Flaky with ENOMEM. We don't use io_uring yet, so turning it off for now.
     "io_uring_test_tests_uring"
   ],
