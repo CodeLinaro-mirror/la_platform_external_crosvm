@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "fuse_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "fuse",
     cargo_env_compat: true,
@@ -43,7 +43,7 @@ rust_test {
 
 rust_library {
     name: "libfuse_rust",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "fuse",
     cargo_env_compat: true,

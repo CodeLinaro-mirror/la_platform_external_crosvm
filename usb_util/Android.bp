@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libusb_util",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "usb_util",
     cargo_env_compat: true,
@@ -37,7 +37,7 @@ rust_library {
 
 rust_test {
     name: "usb_util_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "usb_util",
     cargo_env_compat: true,

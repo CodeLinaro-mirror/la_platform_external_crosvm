@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "disk_test_src_disk",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "disk",
     cargo_env_compat: true,
@@ -58,7 +58,7 @@ rust_test {
 
 rust_library {
     name: "libdisk",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "disk",
     cargo_env_compat: true,

@@ -63,7 +63,7 @@
     "win_audio",
     "win_util"
   ],
-  "global_defaults": "crosvm_inner_defaults",
+  "global_defaults": "crosvm_defaults",
   "apex_available": ["com.android.virt"],
   "product_available": false,
   "vendor_available": false,

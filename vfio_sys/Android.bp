@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libvfio_sys",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vfio_sys",
     cargo_env_compat: true,

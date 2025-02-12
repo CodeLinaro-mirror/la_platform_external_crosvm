@@ -9,7 +9,7 @@ package {
 
 rust_library {
     name: "libriscv64",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "riscv64",
     cargo_env_compat: true,

@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "liblibcras",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "libcras",
     cargo_env_compat: true,

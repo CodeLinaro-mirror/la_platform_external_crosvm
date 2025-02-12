@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libvm_control_product",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vm_control_product",
     cargo_env_compat: true,
