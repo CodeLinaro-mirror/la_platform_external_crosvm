@@ -14,7 +14,7 @@ package {
 
 rust_test_host {
     name: "bit_field_derive_test_bit_field_derive",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_cross_supported: false,
     crate_name: "bit_field_derive",
     cargo_env_compat: true,

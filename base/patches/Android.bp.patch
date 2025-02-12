@@ -5,7 +5,7 @@ index 734ab7c1..20f48f53 100644
 @@ -13,7 +13,7 @@ package {
  rust_test {
      name: "base_test_src_lib",
-     defaults: ["crosvm_inner_defaults"],
+     defaults: ["crosvm_inner_test_defaults"],
 -    host_supported: true,
 +    host_supported: false, // Can't seem to access syslog in TH host tests.
      crate_name: "base",
@@ -40,7 +40,7 @@ index 734ab7c1..20f48f53 100644
 @@ -86,7 +106,7 @@ rust_test {
  rust_test {
      name: "base_test_tests_linux_main",
-     defaults: ["crosvm_inner_defaults"],
+     defaults: ["crosvm_inner_test_defaults"],
 -    host_supported: true,
 +    host_supported: false, // Can't seem to access syslog in TH host tests.
      crate_name: "linux",

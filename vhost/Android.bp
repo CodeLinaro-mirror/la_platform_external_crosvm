@@ -35,7 +35,7 @@ rust_library {
 
 rust_test {
     name: "vhost_test_tests_linux",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "linux",
     cargo_env_compat: true,
