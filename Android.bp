@@ -144,10 +144,6 @@ rust_binary {
         },
         android: {
             shared_libs: [
-                // TODO(b/332677108): remove libc++ when display service is rewritten in rust.
-                "libc++",
-                "libbinder_ndk",
-                "libnativewindow",
                 "libprocessgroup",
             ],
         },
