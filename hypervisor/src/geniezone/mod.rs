@@ -571,8 +571,6 @@ impl Hypervisor for Geniezone {
             HypervisorCap::StaticSwiotlbAllocationRequired => true,
             HypervisorCap::HypervisorInitializedBootContext => false,
             HypervisorCap::S390UserSigp | HypervisorCap::TscDeadlineTimer => false,
-            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-            HypervisorCap::Sve => false,
         }
     }
 }
@@ -894,6 +892,7 @@ impl Vm for GeniezoneVm {
             VmCap::EarlyInitCpuid => false,
             VmCap::ReadOnlyMemoryRegion => false,
             VmCap::MemNoncoherentDma => false,
+            VmCap::Sve => false,
         }
     }
 
