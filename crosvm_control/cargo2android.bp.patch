@@ -2,7 +2,7 @@ diff --git a/crosvm_control/Android.bp b/crosvm_control/Android.bp
 index 34e77e142..d73c7ec15 100644
 --- a/crosvm_control/Android.bp
 +++ b/crosvm_control/Android.bp
-@@ -28,7 +28,11 @@ rust_ffi_shared {
+@@ -28,8 +28,12 @@ rust_ffi_shared {
          "libswap",
          "libvm_control",
      ],
@@ -12,10 +12,11 @@ index 34e77e142..d73c7ec15 100644
 +    // doesn't actually exist.
 +    //
 +    // static_libs: ["libcrosvm_control_test"],
+     apex_available: ["com.android.virt"],
  }
  
  rust_ffi_static {
-@@ -47,6 +51,10 @@ rust_ffi_static {
+@@ -47,7 +51,11 @@ rust_ffi_static {
          "libswap",
          "libvm_control",
      ],
@@ -25,5 +26,6 @@ index 34e77e142..d73c7ec15 100644
 +    // doesn't actually exist.
 +    //
 +    // static_libs: ["libcrosvm_control_test"],
+     apex_available: ["com.android.virt"],
      visibility: ["//packages/modules/Virtualization/android/virtmgr"],
  }

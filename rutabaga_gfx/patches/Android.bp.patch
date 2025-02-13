@@ -10,7 +10,7 @@ index 6308e792b..cc1bd610b 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -34,17 +33,85 @@ rust_library {
+@@ -34,18 +33,87 @@ rust_library {
          "libserde",
          "libserde_json",
          "libthiserror",
@@ -47,6 +47,7 @@ index 6308e792b..cc1bd610b 100644
 +        "libgfxstream_backend",
          "libvirglrenderer",
      ],
+     apex_available: ["com.android.virt"],
  }
  
 +rust_library {
@@ -94,6 +95,7 @@ index 6308e792b..cc1bd610b 100644
 +            ],
 +        },
 +    },
++    apex_available: ["com.android.virt"],
 +}
 +
  rust_test {
