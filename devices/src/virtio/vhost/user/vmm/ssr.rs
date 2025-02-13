@@ -116,13 +116,7 @@ impl VirtioDevice for Ssr {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self
-            .handler
-            .borrow_mut()
-            .read_config::<Le64>(offset, data)
-        {
-            error!("failed to read config: {}", e);
-        }
+        // no config for virtio-ssr, do nothing
     }
 
    fn activate(
