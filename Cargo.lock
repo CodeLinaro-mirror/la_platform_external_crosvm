@@ -879,6 +879,7 @@ dependencies = [
  "serde_json",
  "serde_keyvalue",
  "smallvec",
+ "snapshot",
  "static_assertions",
  "swap",
  "sync",
@@ -1081,6 +1082,7 @@ dependencies = [
  "serde_json",
  "serde_keyvalue",
  "smallvec",
+ "snapshot",
  "swap",
  "sync",
  "system_api",
@@ -1556,6 +1558,7 @@ dependencies = [
  "once_cell",
  "serde",
  "serde_json",
+ "snapshot",
  "sync",
  "tempfile",
  "thiserror",
@@ -2663,7 +2666,7 @@ dependencies = [
  "thiserror",
  "vulkano 0.33.0",
  "winapi",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -2804,6 +2807,17 @@ name = "smallvec"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fd0db749597d91ff862fd1d55ea87f7855a744a8425a64695b6fca237d1dad1"
+
+[[package]]
+name = "snapshot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base",
+ "crypto_generic",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "socket2"
@@ -3252,7 +3266,6 @@ dependencies = [
  "balloon_control",
  "base",
  "cfg-if",
- "crypto_generic",
  "gdbstub",
  "gdbstub_arch",
  "hypervisor",
@@ -3267,6 +3280,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_keyvalue",
+ "snapshot",
  "swap",
  "sync",
  "thiserror",
@@ -3297,6 +3311,7 @@ dependencies = [
  "remain",
  "serde",
  "serde_json",
+ "snapshot",
  "tempfile",
  "thiserror",
  "zerocopy 0.7.32",

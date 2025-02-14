@@ -283,6 +283,15 @@ pub trait RutabagaComponent {
         Err(RutabagaError::Unsupported)
     }
 
+    /// Implementations must restore the context from the given stream.
+    fn restore_context(
+        &self,
+        _snapshot: Vec<u8>,
+        _fence_handler: RutabagaFenceHandler,
+    ) -> RutabagaResult<Box<dyn RutabagaContext>> {
+        Err(RutabagaError::Unsupported)
+    }
+
     /// Implementations should resume workers.
     fn resume(&self) -> RutabagaResult<()> {
         Ok(())
@@ -333,6 +342,11 @@ pub trait RutabagaContext {
 
     /// Implementations must return the component type associated with the context.
     fn component_type(&self) -> RutabagaComponentType;
+
+    /// Implementations must serialize the context.
+    fn snapshot(&self) -> RutabagaResult<Vec<u8>> {
+        Err(RutabagaError::Unsupported)
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -445,8 +459,9 @@ pub struct Rutabaga {
 /// The serialized and deserialized parts of `Rutabaga` that are preserved across
 /// snapshot() and restore().
 #[derive(Deserialize, Serialize)]
-pub struct RutabagaSnapshot {
-    pub resources: Map<u32, RutabagaResourceSnapshot>,
+struct RutabagaSnapshot {
+    resources: Map<u32, RutabagaResourceSnapshot>,
+    contexts: Map<u32, Vec<u8>>,
 }
 
 impl Rutabaga {
@@ -475,9 +490,25 @@ impl Rutabaga {
                 .iter()
                 .map(|(i, r)| Ok((*i, RutabagaResourceSnapshot::try_from(r)?)))
                 .collect::<RutabagaResult<_>>()?,
+            contexts: self
+                .contexts
+                .iter()
+                .map(|(i, c)| Ok((*i, c.snapshot()?)))
+                .collect::<RutabagaResult<_>>()?,
         };
 
         serde_json::to_writer(w, &snapshot).map_err(|e| RutabagaError::IoError(e.into()))
+    }
+
+    fn destroy_objects(&mut self) -> RutabagaResult<()> {
+        let resource_ids: Vec<_> = self.resources.keys().cloned().collect();
+        resource_ids
+            .into_iter()
+            .try_for_each(|resource_id| self.unref_resource(resource_id))?;
+
+        self.contexts.clear();
+
+        Ok(())
     }
 
     /// Restore Rutabaga to a previously snapshot'd state.
@@ -502,6 +533,8 @@ impl Rutabaga {
     /// approach would scale to support 3D modes, which have others problems that require VMM help,
     /// like resource handles.
     pub fn restore(&mut self, r: &mut impl Read, directory: &str) -> RutabagaResult<()> {
+        self.destroy_objects()?;
+
         let component = self
             .components
             .get_mut(&self.default_component)
@@ -516,6 +549,11 @@ impl Rutabaga {
             .resources
             .into_iter()
             .map(|(i, s)| Ok((i, RutabagaResource::try_from(s)?)))
+            .collect::<RutabagaResult<_>>()?;
+        self.contexts = snapshot
+            .contexts
+            .into_iter()
+            .map(|(i, c)| Ok((i, component.restore_context(c, self.fence_handler.clone())?)))
             .collect::<RutabagaResult<_>>()?;
 
         Ok(())

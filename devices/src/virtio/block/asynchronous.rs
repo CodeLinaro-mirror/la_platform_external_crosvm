@@ -50,6 +50,7 @@ use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use futures::FutureExt;
 use remain::sorted;
+use snapshot::AnySnapshot;
 use thiserror::Error as ThisError;
 use virtio_sys::virtio_config::VIRTIO_F_RING_PACKED;
 use vm_control::DiskControlCommand;
@@ -1163,18 +1164,14 @@ impl VirtioDevice for BlockAsync {
         Ok(())
     }
 
-    fn virtio_snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
+    fn virtio_snapshot(&mut self) -> anyhow::Result<AnySnapshot> {
         // `virtio_sleep` ensures there is no pending state, except for the `Queue`s, which are
         // handled at a higher layer.
-        Ok(serde_json::Value::Null)
+        AnySnapshot::to_any(())
     }
 
-    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            data == serde_json::Value::Null,
-            "unexpected snapshot data: should be null, got {}",
-            data,
-        );
+    fn virtio_restore(&mut self, data: AnySnapshot) -> anyhow::Result<()> {
+        let () = AnySnapshot::from_any(data)?;
         Ok(())
     }
 
@@ -1799,14 +1796,12 @@ mod tests {
             [0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
             "read_config should read the resized capacity"
         );
-        assert_eq!(
-            interrupt
-                    .get_interrupt_evt()
-                    // Wait a bit until the blk signals the interrupt
-                    .wait_timeout(Duration::from_millis(300)),
-            Ok(base::EventWaitResult::Signaled),
-            "interrupt should be signaled"
-        );
+        // Wait until the blk signals the interrupt
+        interrupt
+            .get_interrupt_evt()
+            .wait()
+            .expect("interrupt should be signaled");
+
         assert_eq!(
             interrupt.read_interrupt_status(),
             crate::virtio::INTERRUPT_STATUS_CONFIG_CHANGED as u8,
