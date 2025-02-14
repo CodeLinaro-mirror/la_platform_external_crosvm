@@ -110,6 +110,7 @@ index 6308e792b..cc1bd610b 100644
 @@ -72,13 +138,12 @@ rust_test {
          "libserde",
          "libserde_json",
+         "libtempfile",
          "libthiserror",
 -        "libzerocopy-0.7.35",
 +        "libzerocopy",

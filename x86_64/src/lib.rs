@@ -777,7 +777,7 @@ pub fn arch_memory_regions(
                 regions.push((
                     GuestAddress(first.start),
                     first.len().unwrap(),
-                    overlapping_region.2,
+                    overlapping_region.2.clone(),
                 ));
             }
             if !second.is_empty() {
@@ -797,7 +797,7 @@ pub fn arch_memory_regions(
         ));
     }
 
-    regions.sort_unstable();
+    regions.sort_unstable_by_key(|(addr, _, _)| *addr);
 
     for (addr, size, options) in &regions {
         debug!(
@@ -1769,7 +1769,7 @@ impl X8664arch {
     fn get_pcie_vcfg_mmio_range(mem: &GuestMemory, pcie_cfg_mmio: &AddressRange) -> AddressRange {
         // Put PCIe VCFG region at a 2MB boundary after physical memory or 4gb, whichever is
         // greater.
-        let ram_end_round_2mb = (mem.end_addr().offset() + 2 * MB - 1) / (2 * MB) * (2 * MB);
+        let ram_end_round_2mb = mem.end_addr().offset().next_multiple_of(2 * MB);
         let start = std::cmp::max(ram_end_round_2mb, 4 * GB);
         // Each pci device's ECAM size is 4kb and its vcfg size is 8kb
         let end = start + pcie_cfg_mmio.len().unwrap() * 2 - 1;
@@ -2429,6 +2429,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2437,6 +2438,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::ReservedMemory,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2445,6 +2447,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 )
             ]
@@ -2465,6 +2468,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2473,6 +2477,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::ReservedMemory,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2481,6 +2486,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2489,6 +2495,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
             ]
@@ -2509,6 +2516,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2517,6 +2525,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::ReservedMemory,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2525,6 +2534,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2533,6 +2543,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::Bios,
+                        file_backed: None,
                     },
                 ),
             ]
@@ -2553,6 +2564,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2561,6 +2573,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::ReservedMemory,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2569,6 +2582,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2577,6 +2591,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::Bios,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2585,6 +2600,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
             ]
@@ -2605,6 +2621,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2613,6 +2630,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::ReservedMemory,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2621,6 +2639,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 )
             ]
@@ -2642,6 +2661,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2650,6 +2670,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::ReservedMemory,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2658,6 +2679,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::GuestMemoryRegion,
+                        file_backed: None,
                     },
                 ),
                 (
@@ -2666,6 +2688,7 @@ mod tests {
                     MemoryRegionOptions {
                         align: 0,
                         purpose: MemoryRegionPurpose::Bios,
+                        file_backed: None,
                     },
                 ),
             ]
