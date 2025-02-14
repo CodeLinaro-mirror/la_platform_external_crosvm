@@ -9,7 +9,7 @@ package {
 
 rust_library {
     name: "libmetrics_events",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "metrics_events",
     cargo_env_compat: true,
@@ -23,4 +23,5 @@ rust_library {
         "libserde",
     ],
     aliases: ["metrics_events_generic:metrics_events_product"],
+    apex_available: ["com.android.virt"],
 }

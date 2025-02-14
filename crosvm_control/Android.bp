@@ -14,7 +14,7 @@ package {
 
 rust_ffi_shared {
     name: "libcrosvm_control_shared",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "crosvm_control",
     cargo_env_compat: true,
@@ -33,11 +33,12 @@ rust_ffi_shared {
     // doesn't actually exist.
     //
     // static_libs: ["libcrosvm_control_test"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_ffi_static {
     name: "libcrosvm_control_static",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "crosvm_control",
     cargo_env_compat: true,
@@ -56,5 +57,6 @@ rust_ffi_static {
     // doesn't actually exist.
     //
     // static_libs: ["libcrosvm_control_test"],
+    apex_available: ["com.android.virt"],
     visibility: ["//packages/modules/Virtualization/android/virtmgr"],
 }

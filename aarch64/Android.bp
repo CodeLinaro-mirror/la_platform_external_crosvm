@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libaarch64",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "aarch64",
     cargo_env_compat: true,
@@ -49,7 +49,7 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    visibility: ["//vendor:__subpackages__"],
+    apex_available: ["com.android.virt"],
     target: {
         // It is necessary to disable this specifically as well as the arch below, because
         // crosvm_defaults enables it and the more specific target apparently takes precedence over

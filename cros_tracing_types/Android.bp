@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libcros_tracing_types",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "cros_tracing_types",
     cargo_env_compat: true,
@@ -25,4 +25,5 @@ rust_library {
         "libanyhow",
         "libsync_rust",
     ],
+    apex_available: ["com.android.virt"],
 }

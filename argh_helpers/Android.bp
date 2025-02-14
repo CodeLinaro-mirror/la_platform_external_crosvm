@@ -14,7 +14,7 @@ package {
 
 rust_proc_macro {
     name: "libargh_helpers",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     crate_name: "argh_helpers",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
@@ -25,4 +25,5 @@ rust_proc_macro {
         "libquote",
         "libsyn",
     ],
+    apex_available: ["com.android.virt"],
 }

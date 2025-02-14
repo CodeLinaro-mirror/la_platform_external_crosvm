@@ -14,12 +14,12 @@ package {
 
 rust_library {
     name: "libsync_rust",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "sync",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.99",
     crate_root: "src/lib.rs",
     edition: "2021",
-    visibility: ["//vendor:__subpackages__"],
+    apex_available: ["com.android.virt"],
 }

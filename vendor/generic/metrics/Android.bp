@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libmetrics_generic",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "metrics_generic",
     cargo_env_compat: true,
@@ -27,4 +27,5 @@ rust_library {
         "libbase_rust",
         "libmetrics_events",
     ],
+    apex_available: ["com.android.virt"],
 }

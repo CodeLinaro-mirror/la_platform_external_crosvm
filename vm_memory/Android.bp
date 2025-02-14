@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libvm_memory",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vm_memory",
     cargo_env_compat: true,
@@ -38,12 +38,12 @@ rust_library {
         "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
-    visibility: ["//vendor:__subpackages__"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
     name: "vm_memory_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vm_memory",
     cargo_env_compat: true,
