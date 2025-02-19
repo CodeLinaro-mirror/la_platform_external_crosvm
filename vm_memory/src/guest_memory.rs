@@ -32,6 +32,10 @@ use base::VolatileSlice;
 use cros_async::mem;
 use cros_async::BackingMemory;
 use remain::sorted;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_keyvalue::FromKeyValues;
+use snapshot::AnySnapshot;
 use thiserror::Error;
 use zerocopy::AsBytes;
 use zerocopy::FromBytes;
@@ -44,6 +48,10 @@ pub use sys::MemoryPolicy;
 #[sorted]
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("failed to map guest memory to file: {0}")]
+    FiledBackedMemoryMappingFailed(#[source] MmapError),
+    #[error("failed to open file for file backed mapping: {0}")]
+    FiledBackedOpenFailed(#[source] std::io::Error),
     #[error("invalid guest address {0}")]
     InvalidGuestAddress(GuestAddress),
     #[error("invalid offset {0}")]
@@ -125,11 +133,35 @@ pub enum MemoryRegionPurpose {
     /// PVMFW
     ProtectedFirmwareRegion,
 
+    /// An area that should be backed by a GuestMemory region but reported as reserved to the
+    /// guest.
+    ReservedMemory,
+
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     StaticSwiotlbRegion,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialOrd, PartialEq, Eq, Ord)]
+#[derive(Clone, Debug, Serialize, Deserialize, FromKeyValues, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct FileBackedMappingParameters {
+    pub path: std::path::PathBuf,
+    #[serde(rename = "addr")]
+    pub address: u64,
+    pub size: u64,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(rename = "rw", default)]
+    pub writable: bool,
+    #[serde(default)]
+    pub sync: bool,
+    #[serde(default)]
+    pub align: bool,
+    /// Whether the mapping is for RAM or MMIO.
+    #[serde(default)]
+    pub ram: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MemoryRegionOptions {
     /// Some hypervisors (presently: Gunyah) need explicit knowledge about
     /// which memory region is used for protected firwmare, static swiotlb,
@@ -139,6 +171,8 @@ pub struct MemoryRegionOptions {
     /// arm64 KVM support where a block alignment is required for transparent
     /// huge-pages support
     pub align: u64,
+    /// Backing file params.
+    pub file_backed: Option<FileBackedMappingParameters>,
 }
 
 impl MemoryRegionOptions {
@@ -153,6 +187,11 @@ impl MemoryRegionOptions {
 
     pub fn align(mut self, alignment: u64) -> Self {
         self.align = alignment;
+        self
+    }
+
+    pub fn file_backed(mut self, params: FileBackedMappingParameters) -> Self {
+        self.file_backed = Some(params);
         self
     }
 }
@@ -255,6 +294,10 @@ impl GuestMemory {
         let mut aligned_size = 0;
         let pg_size = pagesize();
         for range in ranges {
+            if range.2.file_backed.is_some() {
+                // Regions with a backing file don't use part of the `SharedMemory`.
+                continue;
+            }
             if range.1 % pg_size as u64 != 0 {
                 return Err(Error::MemoryNotAligned(range.0, range.1));
             }
@@ -283,7 +326,7 @@ impl GuestMemory {
 
         // Create memory regions
         let mut regions = Vec::<MemoryRegion>::new();
-        let mut offset = 0;
+        let mut shm_offset = 0;
 
         for range in ranges {
             if let Some(last) = regions.last() {
@@ -298,22 +341,43 @@ impl GuestMemory {
 
             let size = usize::try_from(range.1)
                 .map_err(|_| Error::MemoryRegionTooLarge(range.1 as u128))?;
-            let mapping = MemoryMappingBuilder::new(size)
-                .from_shared_memory(shm.as_ref())
-                .offset(offset)
-                .align(range.2.align)
-                .build()
-                .map_err(Error::MemoryMappingFailed)?;
-
-            regions.push(MemoryRegion {
-                mapping,
-                guest_base: range.0,
-                shared_obj: BackingObject::Shm(shm.clone()),
-                obj_offset: offset,
-                options: range.2,
-            });
-
-            offset += size as u64;
+            if let Some(file_backed) = &range.2.file_backed {
+                assert_eq!(usize::try_from(file_backed.size).unwrap(), size);
+                let file = file_backed.open().map_err(Error::FiledBackedOpenFailed)?;
+                let mapping = MemoryMappingBuilder::new(size)
+                    .from_file(&file)
+                    .offset(file_backed.offset)
+                    .align(range.2.align)
+                    .protection(if file_backed.writable {
+                        base::Protection::read_write()
+                    } else {
+                        base::Protection::read()
+                    })
+                    .build()
+                    .map_err(Error::FiledBackedMemoryMappingFailed)?;
+                regions.push(MemoryRegion {
+                    mapping,
+                    guest_base: range.0,
+                    shared_obj: BackingObject::File(Arc::new(file)),
+                    obj_offset: file_backed.offset,
+                    options: range.2.clone(),
+                });
+            } else {
+                let mapping = MemoryMappingBuilder::new(size)
+                    .from_shared_memory(shm.as_ref())
+                    .offset(shm_offset)
+                    .align(range.2.align)
+                    .build()
+                    .map_err(Error::MemoryMappingFailed)?;
+                regions.push(MemoryRegion {
+                    mapping,
+                    guest_base: range.0,
+                    shared_obj: BackingObject::Shm(shm.clone()),
+                    obj_offset: shm_offset,
+                    options: range.2.clone(),
+                });
+                shm_offset += size as u64;
+            }
         }
 
         Ok(GuestMemory {
@@ -466,7 +530,7 @@ impl GuestMemory {
                 host_addr: region.mapping.as_ptr() as usize,
                 shm: &region.shared_obj,
                 shm_offset: region.obj_offset,
-                options: region.options,
+                options: region.options.clone(),
             })
     }
 
@@ -827,7 +891,7 @@ impl GuestMemory {
     ///
     /// (i) the memory mapping associated with the target region.
     /// (ii) the relative offset from the start of the target region to `guest_addr`.
-    /// (iii) the absolute offset from the start of the memory mapping to the target region.
+    /// (iii) the absolute offset from the start of the backing object to the target region.
     ///
     /// If no target region is found, an error is returned.
     pub fn find_region(&self, guest_addr: GuestAddress) -> Result<(&MemoryMapping, usize, u64)> {
@@ -846,6 +910,10 @@ impl GuestMemory {
 
     /// Convert a GuestAddress into an offset within the associated shm region.
     ///
+    /// A `GuestMemory` may have multiple backing objects and the offset is
+    /// only meaningful in relation to the associated backing object, so a
+    /// reference to it is included in the return value.
+    ///
     /// Due to potential gaps within GuestMemory, it is helpful to know the
     /// offset within the shm where a given address is found. This offset
     /// can then be passed to another process mapping the shm to read data
@@ -863,16 +931,24 @@ impl GuestMemory {
     /// let mut gm = GuestMemory::new(&vec![
     ///     (addr_a, 0x20000),
     ///     (addr_b, 0x30000)]).expect("failed to create GuestMemory");
-    /// let offset = gm.offset_from_base(GuestAddress(0x95000))
+    /// let (_backing_object, offset) = gm.offset_from_base(GuestAddress(0x95000))
     ///                .expect("failed to get offset");
     /// assert_eq!(offset, 0x35000);
     /// ```
-    pub fn offset_from_base(&self, guest_addr: GuestAddress) -> Result<u64> {
+    pub fn offset_from_base(
+        &self,
+        guest_addr: GuestAddress,
+    ) -> Result<(&(dyn AsRawDescriptor + Send + Sync), u64)> {
         self.regions
             .iter()
             .find(|region| region.contains(guest_addr))
             .ok_or(Error::InvalidGuestAddress(guest_addr))
-            .map(|region| region.obj_offset + guest_addr.offset_from(region.start()))
+            .map(|region| {
+                (
+                    region.shared_obj.as_ref(),
+                    region.obj_offset + guest_addr.offset_from(region.start()),
+                )
+            })
     }
 
     /// Copy all guest memory into `w`.
@@ -888,7 +964,7 @@ impl GuestMemory {
         &self,
         w: &mut T,
         compress: bool,
-    ) -> anyhow::Result<serde_json::Value> {
+    ) -> anyhow::Result<AnySnapshot> {
         fn go(
             this: &GuestMemory,
             w: &mut impl Write,
@@ -934,10 +1010,10 @@ impl GuestMemory {
             go(self, w)?
         };
 
-        Ok(serde_json::to_value(MemorySnapshotMetadata {
+        AnySnapshot::to_any(MemorySnapshotMetadata {
             regions,
             compressed: compress,
-        })?)
+        })
     }
 
     /// Restore the guest memory using the bytes from `r`.
@@ -949,12 +1025,8 @@ impl GuestMemory {
     /// Returns an error if `metadata` doesn't match the configuration of the `GuestMemory` or if
     /// `r` doesn't produce exactly as many bytes as needed.
     #[deny(unsafe_op_in_unsafe_fn)]
-    pub unsafe fn restore<T: Read>(
-        &self,
-        metadata: serde_json::Value,
-        r: &mut T,
-    ) -> anyhow::Result<()> {
-        let metadata: MemorySnapshotMetadata = serde_json::from_value(metadata)?;
+    pub unsafe fn restore<T: Read>(&self, metadata: AnySnapshot, r: &mut T) -> anyhow::Result<()> {
+        let metadata: MemorySnapshotMetadata = AnySnapshot::from_any(metadata)?;
 
         let mut r: Box<dyn Read> = if metadata.compressed {
             Box::new(lz4_flex::frame::FrameDecoder::new(r))
@@ -1265,7 +1337,7 @@ mod tests {
         // no vm is running
         let metadata_json = unsafe { gm.snapshot(&mut data, false).unwrap() };
         let metadata: MemorySnapshotMetadata =
-            serde_json::from_value(metadata_json.clone()).unwrap();
+            AnySnapshot::from_any(metadata_json.clone()).unwrap();
 
         #[cfg(unix)]
         assert_eq!(

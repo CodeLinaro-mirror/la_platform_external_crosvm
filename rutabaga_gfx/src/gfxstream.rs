@@ -22,6 +22,9 @@ use std::ptr::null;
 use std::ptr::null_mut;
 use std::sync::Arc;
 
+use serde::Deserialize;
+use serde::Serialize;
+
 use crate::generated::virgl_renderer_bindings::iovec;
 use crate::generated::virgl_renderer_bindings::virgl_box;
 use crate::generated::virgl_renderer_bindings::virgl_renderer_resource_create_args;
@@ -34,6 +37,10 @@ use crate::rutabaga_os::IntoRawDescriptor;
 use crate::rutabaga_os::OwnedDescriptor;
 use crate::rutabaga_os::RawDescriptor;
 use crate::rutabaga_utils::*;
+#[cfg(gfxstream_unstable)]
+use crate::snapshot::RutabagaSnapshotReader;
+#[cfg(gfxstream_unstable)]
+use crate::snapshot::RutabagaSnapshotWriter;
 
 // See `virtgpu-gfxstream-renderer.h` for definitions
 const STREAM_RENDERER_PARAM_USER_DATA: u64 = 1;
@@ -237,6 +244,11 @@ pub struct Gfxstream {
     _cookie: Box<RutabagaCookie>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct GfxstreamContextSnapshot {
+    ctx_id: u32,
+}
+
 struct GfxstreamContext {
     ctx_id: u32,
     fence_handler: RutabagaFenceHandler,
@@ -338,6 +350,17 @@ impl RutabagaContext for GfxstreamContext {
         }
 
         Ok(hnd)
+    }
+
+    fn snapshot(&self) -> RutabagaResult<Vec<u8>> {
+        let snapshot = GfxstreamContextSnapshot {
+            ctx_id: self.ctx_id,
+        };
+
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        serde_json::to_writer(&mut buffer, &snapshot)
+            .map_err(|e| RutabagaError::IoError(e.into()))?;
+        Ok(buffer.into_inner())
     }
 }
 
@@ -893,26 +916,43 @@ impl RutabagaComponent for Gfxstream {
     }
 
     #[cfg(gfxstream_unstable)]
-    fn snapshot(&self, directory: &str) -> RutabagaResult<()> {
-        let cstring = CString::new(directory)?;
+    fn snapshot(&self, writer: RutabagaSnapshotWriter) -> RutabagaResult<()> {
+        let directory = String::from(writer.get_path().to_string_lossy());
+        let directory_cstring = CString::new(directory)?;
 
         // SAFETY:
         // Safe because directory string is valid
-        let ret = unsafe { stream_renderer_snapshot(cstring.as_ptr() as *const c_char) };
+        let ret = unsafe { stream_renderer_snapshot(directory_cstring.as_ptr() as *const c_char) };
         ret_to_res(ret)?;
 
         Ok(())
     }
 
     #[cfg(gfxstream_unstable)]
-    fn restore(&self, directory: &str) -> RutabagaResult<()> {
-        let cstring = CString::new(directory)?;
+    fn restore(&self, reader: RutabagaSnapshotReader) -> RutabagaResult<()> {
+        let directory = String::from(reader.get_path().to_string_lossy());
+        let directory_cstring = CString::new(directory)?;
 
         // SAFETY:
         // Safe because directory string is valid
-        let ret = unsafe { stream_renderer_restore(cstring.as_ptr() as *const c_char) };
+        let ret = unsafe { stream_renderer_restore(directory_cstring.as_ptr() as *const c_char) };
         ret_to_res(ret)?;
         Ok(())
+    }
+
+    #[cfg(gfxstream_unstable)]
+    fn restore_context(
+        &self,
+        snapshot: Vec<u8>,
+        fence_handler: RutabagaFenceHandler,
+    ) -> RutabagaResult<Box<dyn RutabagaContext>> {
+        let context_snapshot: GfxstreamContextSnapshot =
+            serde_json::from_reader(&snapshot[..]).map_err(|e| RutabagaError::IoError(e.into()))?;
+
+        Ok(Box::new(GfxstreamContext {
+            ctx_id: context_snapshot.ctx_id,
+            fence_handler,
+        }))
     }
 
     #[cfg(gfxstream_unstable)]
