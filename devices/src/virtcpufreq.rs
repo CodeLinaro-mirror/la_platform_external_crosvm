@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use serde::Deserialize;
 use serde::Serialize;
+use snapshot::AnySnapshot;
 use sync::Mutex;
 
 use crate::pci::CrosvmDeviceId;
@@ -193,12 +194,12 @@ impl Suspendable for VirtCpufreq {
         Ok(())
     }
 
-    fn snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
-        serde_json::to_value(&self).with_context(|| format!("failed to serialize"))
+    fn snapshot(&mut self) -> anyhow::Result<AnySnapshot> {
+        AnySnapshot::to_any(&self).context("failed to serialize")
     }
 
-    fn restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
-        let deser: Self = serde_json::from_value(data).with_context(|| format!("failed to deserialize"))?;
+    fn restore(&mut self, data: AnySnapshot) -> anyhow::Result<()> {
+        let deser: Self = AnySnapshot::from_any(data).context("failed to deserialize")?;
         *self = deser;
         Ok(())
     }

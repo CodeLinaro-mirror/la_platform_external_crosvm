@@ -7,6 +7,7 @@ use std::collections::BTreeMap as Map;
 use std::collections::BTreeSet as Set;
 use std::io::IoSliceMut;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::result::Result;
 use std::sync::atomic::AtomicBool;
@@ -66,6 +67,9 @@ use super::protocol::VIRTIO_GPU_BLOB_MEM_HOST3D;
 use super::VirtioScanoutBlobData;
 use crate::virtio::gpu::edid::DisplayInfo;
 use crate::virtio::gpu::edid::EdidBytes;
+use crate::virtio::gpu::snapshot::pack_directory_to_snapshot;
+use crate::virtio::gpu::snapshot::unpack_snapshot_to_directory;
+use crate::virtio::gpu::snapshot::DirectorySnapshot;
 use crate::virtio::gpu::GpuDisplayParameters;
 use crate::virtio::gpu::VIRTIO_GPU_MAX_SCANOUTS;
 use crate::virtio::resource_bridge::BufferInfo;
@@ -458,6 +462,7 @@ pub struct VirtioGpu {
     external_blob: bool,
     fixed_blob_mapping: bool,
     udmabuf_driver: Option<UdmabufDriver>,
+    snapshot_scratch_directory: Option<PathBuf>,
     deferred_snapshot_load: Option<VirtioGpuSnapshot>,
 }
 
@@ -477,7 +482,7 @@ pub struct VirtioGpuSnapshot {
     scanouts: Map<u32, VirtioGpuScanoutSnapshot>,
     scanouts_updated: bool,
     cursor_scanout: VirtioGpuScanoutSnapshot,
-    rutabaga: Vec<u8>,
+    rutabaga: DirectorySnapshot,
     resources: Map<u32, VirtioGpuResourceSnapshot>,
 }
 
@@ -533,6 +538,7 @@ impl VirtioGpu {
         external_blob: bool,
         fixed_blob_mapping: bool,
         udmabuf: bool,
+        snapshot_scratch_directory: Option<PathBuf>,
     ) -> Option<VirtioGpu> {
         let mut udmabuf_driver = None;
         if udmabuf {
@@ -567,6 +573,7 @@ impl VirtioGpu {
             fixed_blob_mapping,
             udmabuf_driver,
             deferred_snapshot_load: None,
+            snapshot_scratch_directory,
         })
     }
 
@@ -1298,6 +1305,18 @@ impl VirtioGpu {
     }
 
     pub fn snapshot(&self) -> anyhow::Result<VirtioGpuSnapshot> {
+        let snapshot_directory_tempdir = if let Some(dir) = &self.snapshot_scratch_directory {
+            tempfile::tempdir_in(dir).with_context(|| {
+                format!(
+                    "failed to create tempdir in {} for gpu rutabaga snapshot",
+                    dir.display()
+                )
+            })?
+        } else {
+            tempfile::tempdir().context("failed to create tempdir for gpu rutabaga snapshot")?
+        };
+        let snapshot_directory = snapshot_directory_tempdir.path();
+
         Ok(VirtioGpuSnapshot {
             scanouts: self
                 .scanouts
@@ -1307,11 +1326,16 @@ impl VirtioGpu {
             scanouts_updated: self.scanouts_updated.load(Ordering::SeqCst),
             cursor_scanout: self.cursor_scanout.snapshot(),
             rutabaga: {
-                let mut buffer = std::io::Cursor::new(Vec::new());
                 self.rutabaga
-                    .snapshot(&mut buffer, "")
+                    .snapshot(snapshot_directory)
                     .context("failed to snapshot rutabaga")?;
-                buffer.into_inner()
+
+                pack_directory_to_snapshot(snapshot_directory).with_context(|| {
+                    format!(
+                        "failed to pack rutabaga snapshot from {}",
+                        snapshot_directory.display()
+                    )
+                })?
             },
             resources: self
                 .resources
@@ -1356,8 +1380,28 @@ impl VirtioGpu {
                 )
                 .context("failed to restore cursor scanout")?;
 
+            let snapshot_directory_tempdir = if let Some(dir) = &self.snapshot_scratch_directory {
+                tempfile::tempdir_in(dir).with_context(|| {
+                    format!(
+                        "failed to create tempdir in {} for gpu rutabaga snapshot",
+                        dir.display()
+                    )
+                })?
+            } else {
+                tempfile::tempdir().context("failed to create tempdir for gpu rutabaga snapshot")?
+            };
+            let snapshot_directory = snapshot_directory_tempdir.path();
+
+            unpack_snapshot_to_directory(snapshot_directory, snapshot.rutabaga).with_context(
+                || {
+                    format!(
+                        "failed to unpack rutabaga snapshot to {}",
+                        snapshot_directory.display()
+                    )
+                },
+            )?;
             self.rutabaga
-                .restore(&mut &snapshot.rutabaga[..], "")
+                .restore(snapshot_directory)
                 .context("failed to restore rutabaga")?;
 
             for (id, s) in snapshot.resources.into_iter() {

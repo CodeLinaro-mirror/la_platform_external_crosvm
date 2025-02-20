@@ -1,4 +1,4 @@
-// Copyright 2024 The ChromiumOS Authors
+// Copyright 2025 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,6 +13,10 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use crypto::CryptKey;
+
+mod any_snapshot;
+
+pub use any_snapshot::AnySnapshot;
 
 // Use 4kB encrypted chunks by default (if encryption is used).
 const DEFAULT_ENCRYPTED_CHUNK_SIZE_BYTES: usize = 1024 * 4;

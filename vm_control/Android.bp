@@ -33,7 +33,6 @@ rust_library {
         "libballoon_control",
         "libbase_rust",
         "libcfg_if",
-        "libcrypto_generic",
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
@@ -46,6 +45,7 @@ rust_library {
         "libserde",
         "libserde_json",
         "libserde_keyvalue",
+        "libsnapshot_crosvm",
         "libswap",
         "libsync_rust",
         "libthiserror",
@@ -53,7 +53,6 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    aliases: ["crypto_generic:crypto"],
 }
 
 rust_test {
@@ -82,7 +81,6 @@ rust_test {
         "libballoon_control",
         "libbase_rust",
         "libcfg_if",
-        "libcrypto_generic",
         "libgdbstub",
         "libgdbstub_arch",
         "libhypervisor",
@@ -95,6 +93,7 @@ rust_test {
         "libserde",
         "libserde_json",
         "libserde_keyvalue",
+        "libsnapshot_crosvm",
         "libswap",
         "libsync_rust",
         "libthiserror",
@@ -102,5 +101,4 @@ rust_test {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
-    aliases: ["crypto_generic:crypto"],
 }

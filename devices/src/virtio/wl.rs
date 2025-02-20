@@ -124,6 +124,7 @@ use rutabaga_gfx::RutabagaIntoRawDescriptor;
 use rutabaga_gfx::RUTABAGA_MAP_CACHE_CACHED;
 #[cfg(feature = "minigbm")]
 use rutabaga_gfx::RUTABAGA_MAP_CACHE_MASK;
+use snapshot::AnySnapshot;
 use thiserror::Error as ThisError;
 use vm_control::VmMemorySource;
 use vm_memory::GuestMemory;
@@ -2131,16 +2132,12 @@ impl VirtioDevice for Wl {
     // implementation as part of b/266514618
     // virtio-wl is not used, but is created. As such, virtio_snapshot/restore will be called when
     // cuttlefish attempts to take a snapshot.
-    fn virtio_snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
-        Ok(serde_json::Value::Null)
+    fn virtio_snapshot(&mut self) -> anyhow::Result<AnySnapshot> {
+        AnySnapshot::to_any(())
     }
 
-    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            data == serde_json::Value::Null,
-            "unexpected snapshot data: should be null, got {}",
-            data,
-        );
+    fn virtio_restore(&mut self, data: AnySnapshot) -> anyhow::Result<()> {
+        let () = AnySnapshot::from_any(data)?;
         Ok(())
     }
 }
