@@ -72,7 +72,7 @@ git commit --amend -m "$OLD_MSG
 Bug: $bug_number
 Test: TH"
 
-$ANDROID_BUILD_TOP/external/crosvm/tools/install-deps
+$ANDROID_BUILD_TOP/external/crosvm/tools/deps/install-x86_64-other
 $ANDROID_BUILD_TOP/external/crosvm/android-fork-stats.sh
 
 # continue if the merge was clean
