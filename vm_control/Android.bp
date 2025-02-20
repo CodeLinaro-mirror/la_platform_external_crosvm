@@ -22,6 +22,7 @@ rust_library {
     crate_root: "src/lib.rs",
     edition: "2021",
     features: [
+        "audio",
         "balloon",
         "gdb",
         "gdbstub",
@@ -71,6 +72,7 @@ rust_test {
     },
     edition: "2021",
     features: [
+        "audio",
         "balloon",
         "gdb",
         "gdbstub",
