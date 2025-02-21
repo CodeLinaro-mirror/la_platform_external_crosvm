@@ -16,6 +16,7 @@ pub mod gdb;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
+use base::debug;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use base::linux::MemoryMappingBuilderUnix;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -1389,6 +1390,12 @@ pub struct BatControl {
     pub control_tube: Tube,
 }
 
+/// Used for VM to control for virtio-snd
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SndControlCommand {
+    MuteAll(bool),
+}
+
 // Used to mark hotplug pci device's device type
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum HotPlugDeviceType {
@@ -1476,6 +1483,9 @@ pub enum VmRequest {
     GpuCommand(GpuControlCommand),
     /// Command to set battery.
     BatCommand(BatteryType, BatControlCommand),
+    /// Command to control snd devices
+    #[cfg(feature = "audio")]
+    SndCommand(SndControlCommand),
     /// Command to add/remove multiple vfio-pci devices
     HotPlugVfioCommand {
         device: HotPlugDeviceInfo,
@@ -1779,6 +1789,7 @@ impl VmRequest {
         &self,
         vm: &impl Vm,
         disk_host_tubes: &[Tube],
+        snd_host_tubes: &[Tube],
         pm: &mut Option<Arc<Mutex<dyn PmResource + Send>>>,
         gpu_control_tube: Option<&Tube>,
         usb_control_tube: Option<&Tube>,
@@ -2169,6 +2180,30 @@ impl VmRequest {
                     None => VmResponse::BatResponse(BatControlResult::NoBatDevice),
                 }
             }
+            #[cfg(feature = "audio")]
+            VmRequest::SndCommand(ref cmd) => match cmd {
+                SndControlCommand::MuteAll(muted) => {
+                    for tube in snd_host_tubes {
+                        let res = tube.send(&SndControlCommand::MuteAll(*muted));
+                        if let Err(e) = res {
+                            error!("fail to send command to snd control socket: {}", e);
+                            return VmResponse::Err(SysError::new(EIO));
+                        }
+
+                        match tube.recv() {
+                            Ok(VmResponse::Ok) => {
+                                debug!("device is successfully muted");
+                            }
+                            Ok(resp) => {
+                                error!("mute failed: {}", resp);
+                                return VmResponse::ErrString("fail to mute the device".to_owned());
+                            }
+                            Err(e) => return VmResponse::Err(SysError::new(EIO)),
+                        }
+                    }
+                    VmResponse::Ok
+                }
+            },
             VmRequest::HotPlugVfioCommand { device: _, add: _ } => VmResponse::Ok,
             #[cfg(feature = "pci-hotplug")]
             VmRequest::HotPlugNetCommand(ref _net_cmd) => {
