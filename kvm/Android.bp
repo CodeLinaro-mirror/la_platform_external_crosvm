@@ -32,8 +32,10 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -57,8 +59,10 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -82,8 +86,10 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -107,8 +113,10 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -126,8 +134,10 @@ rust_library {
         "libdata_model",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
     apex_available: ["com.android.virt"],
 }

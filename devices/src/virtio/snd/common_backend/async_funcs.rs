@@ -7,6 +7,8 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,8 +17,10 @@ use audio_streams::AsyncPlaybackBuffer;
 use audio_streams::BoxError;
 use base::debug;
 use base::error;
+use base::info;
 use cros_async::sync::Condvar;
 use cros_async::sync::RwLock as AsyncRwLock;
+use cros_async::AsyncTube;
 use cros_async::EventAsync;
 use cros_async::Executor;
 use cros_async::TimerAsync;
@@ -28,6 +32,8 @@ use futures::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
 use thiserror::Error as ThisError;
+use vm_control::SndControlCommand;
+use vm_control::VmResponse;
 use zerocopy::AsBytes;
 
 use super::Error;
@@ -236,8 +242,8 @@ async fn write_data(
     }
 }
 
-async fn read_data<'a>(
-    mut src_buf: AsyncCaptureBuffer<'a>,
+async fn read_data(
+    mut src_buf: AsyncCaptureBuffer<'_>,
     writer: Option<&mut Writer>,
     period_bytes: usize,
 ) -> Result<u32, Error> {
@@ -320,6 +326,7 @@ pub async fn start_pcm_worker(
     mut sender: mpsc::UnboundedSender<PcmResponse>,
     period_dur: Duration,
     card_index: usize,
+    muted: Rc<AtomicBool>,
     release_signal: Rc<(AsyncRwLock<bool>, Condvar)>,
 ) -> Result<(), Error> {
     let res = pcm_worker_loop(
@@ -330,6 +337,7 @@ pub async fn start_pcm_worker(
         &mut sender,
         period_dur,
         card_index,
+        muted,
         release_signal,
     )
     .await;
@@ -355,6 +363,7 @@ async fn pcm_worker_loop(
     sender: &mut mpsc::UnboundedSender<PcmResponse>,
     period_dur: Duration,
     card_index: usize,
+    muted: Rc<AtomicBool>,
     release_signal: Rc<(AsyncRwLock<bool>, Condvar)>,
 ) -> Result<(), Error> {
     let on_release = async {
@@ -428,11 +437,13 @@ async fn pcm_worker_loop(
                         return Err(Error::InvalidPCMWorkerState);
                     }
                     Ok(Some(mut desc_chain)) => {
-                        // stream_id was already read in handle_pcm_queue
-                        let status =
-                            write_data(dst_buf, Some(&mut desc_chain.reader), buffer_writer)
-                                .await
-                                .into();
+                        let reader = if muted.load(Ordering::Relaxed) {
+                            None
+                        } else {
+                            // stream_id was already read in handle_pcm_queue
+                            Some(&mut desc_chain.reader)
+                        };
+                        let status = write_data(dst_buf, reader, buffer_writer).await.into();
                         sender
                             .send(PcmResponse {
                                 desc_chain,
@@ -486,9 +497,12 @@ async fn pcm_worker_loop(
                         return Err(Error::InvalidPCMWorkerState);
                     }
                     Ok(Some(mut desc_chain)) => {
-                        let status = read_data(src_buf, Some(&mut desc_chain.writer), period_bytes)
-                            .await
-                            .into();
+                        let writer = if muted.load(Ordering::Relaxed) {
+                            None
+                        } else {
+                            Some(&mut desc_chain.writer)
+                        };
+                        let status = read_data(src_buf, writer, period_bytes).await.into();
                         sender
                             .send(PcmResponse {
                                 desc_chain,
@@ -581,6 +595,52 @@ pub async fn send_pcm_response_worker(
             break;
         }
     }
+    Ok(())
+}
+
+/// Handle messages from the control tube. This one is not related to virtio spec.
+pub async fn handle_ctrl_tube(
+    streams: &Rc<AsyncRwLock<Vec<AsyncRwLock<StreamInfo>>>>,
+    control_tube: &AsyncTube,
+    reset_signal: Option<&(AsyncRwLock<bool>, Condvar)>,
+) -> Result<(), Error> {
+    let on_reset = await_reset_signal(reset_signal).fuse();
+    pin_mut!(on_reset);
+
+    loop {
+        let next_async = control_tube.next().fuse();
+        pin_mut!(next_async);
+
+        let cmd = select! {
+            _ = on_reset => break,
+            res = next_async => res,
+        };
+
+        match cmd {
+            Ok(cmd) => {
+                let resp = match cmd {
+                    SndControlCommand::MuteAll(muted) => {
+                        let streams = streams.read_lock().await;
+                        for stream in streams.iter() {
+                            let stream_info = stream.lock().await;
+                            stream_info.muted.store(muted, Ordering::Relaxed);
+                            info!("Stream muted = {:?}", muted);
+                        }
+                        VmResponse::Ok
+                    }
+                };
+                control_tube
+                    .send(resp)
+                    .await
+                    .map_err(Error::ControlTubeError)?;
+            }
+            Err(e) => {
+                error!("Failed to read the command: {}", e);
+                return Err(Error::ControlTubeError(e));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -947,5 +1007,86 @@ pub async fn handle_event_queue(
         // TODO(woodychow): Poll and forward events from cras asynchronously (API to be added)
         queue.add_used(desc_chain, 0);
         queue.trigger_interrupt();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use audio_streams::NoopStreamSourceGenerator;
+    use base::Tube;
+
+    use super::*;
+    use crate::virtio::snd::common_backend::notify_reset_signal;
+
+    #[test]
+    fn test_handle_ctrl_tube_reset_signal() {
+        let ex = Executor::new().expect("Failed to create an executor");
+        let result = ex.run_until(async {
+            let streams: Rc<AsyncRwLock<Vec<AsyncRwLock<StreamInfo>>>> = Default::default();
+            let (t0, _t1) = Tube::pair().expect("Failed to create tube pairs");
+            let t0 = AsyncTube::new(&ex, t0).expect("Failed to create async tube");
+            let reset_signal = (AsyncRwLock::new(false), Condvar::new());
+
+            let handle_future = handle_ctrl_tube(&streams, &t0, Some(&reset_signal));
+            let notify_future = notify_reset_signal(&reset_signal);
+            let (result, _) = futures::join!(handle_future, notify_future);
+
+            assert!(
+                result.is_ok(),
+                "handle_ctrl_tube returns an error after reset signal"
+            );
+        });
+
+        assert!(result.is_ok(), "ex.run_until returns an error");
+    }
+
+    fn new_stream() -> StreamInfo {
+        let card_index = 0;
+        StreamInfo::builder(
+            Arc::new(Box::new(NoopStreamSourceGenerator::new())),
+            card_index,
+        )
+        .build()
+    }
+
+    #[test]
+    fn test_handle_ctrl_tube_receive_mute_cmd() {
+        let ex = Executor::new().expect("Failed to create an executor");
+        let result = ex.run_until(async {
+            let streams: Vec<AsyncRwLock<StreamInfo>> = vec![AsyncRwLock::new(new_stream())];
+            let streams = Rc::new(AsyncRwLock::new(streams));
+
+            let (t0, t1) = Tube::pair().expect("Failed to create tube pairs");
+            let t0 = AsyncTube::new(&ex, t0).expect("Failed to create an async tube");
+            let t1 = AsyncTube::new(&ex, t1).expect("Failed to create an async tube");
+            let reset_signal = (AsyncRwLock::new(false), Condvar::new());
+
+            let handle_future = handle_ctrl_tube(&streams, &t0, Some(&reset_signal));
+            let tube_future = async {
+                let _ = t1.send(&SndControlCommand::MuteAll(true)).await;
+                let recv_result = t1.next::<VmResponse>().await;
+                notify_reset_signal(&reset_signal).await;
+                recv_result
+            };
+            let (handle_result, tube_result) = futures::join!(handle_future, tube_future);
+
+            assert!(
+                handle_result.is_ok(),
+                "handle_ctrl_tube returns an error after reset signal"
+            );
+            assert!(tube_result.is_ok(), "Failed to receive data from the tube");
+            assert!(
+                matches!(tube_result.unwrap(), VmResponse::Ok),
+                "tube_result is not Ok",
+            );
+
+            let streams = streams.read_lock().await;
+            let stream = streams.first().unwrap().lock().await;
+            assert!(stream.muted.load(Ordering::Relaxed), "Stream is not muted");
+        });
+
+        assert!(result.is_ok(), "ex.run_until returns an error");
     }
 }
