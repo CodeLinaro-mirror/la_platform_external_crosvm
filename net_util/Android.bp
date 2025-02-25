@@ -31,7 +31,7 @@ rust_library {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     apex_available: ["com.android.virt"],
@@ -62,7 +62,7 @@ rust_test {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }
@@ -93,7 +93,7 @@ rust_test {
         "libsmallvec",
         "libthiserror",
         "libvirtio_sys",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }
