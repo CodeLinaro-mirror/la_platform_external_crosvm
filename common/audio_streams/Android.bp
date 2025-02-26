@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "audio_streams_test_src_audio_streams",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "audio_streams",
     cargo_env_compat: true,

@@ -98,7 +98,7 @@ index 6308e792b..cc1bd610b 100644
 +
  rust_test {
      name: "rutabaga_gfx_test_src_lib",
-     defaults: ["crosvm_inner_defaults"],
+     defaults: ["crosvm_inner_test_defaults"],
 @@ -61,7 +128,6 @@ rust_test {
      edition: "2021",
      features: [

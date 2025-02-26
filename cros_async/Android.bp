@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "cros_async_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "cros_async",
     cargo_env_compat: true,
@@ -57,7 +57,7 @@ rust_test {
 
 rust_test {
     name: "cros_async_test_tests_executor",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "executor",
     cargo_env_compat: true,

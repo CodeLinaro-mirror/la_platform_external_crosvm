@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "ext2_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "ext2",
     cargo_env_compat: true,
@@ -41,7 +41,7 @@ rust_test {
 
 rust_test {
     name: "ext2_test_tests_tests",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "tests",
     cargo_env_compat: true,

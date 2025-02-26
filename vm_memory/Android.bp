@@ -43,7 +43,7 @@ rust_library {
 
 rust_test {
     name: "vm_memory_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_inner_test_defaults"],
     host_supported: true,
     crate_name: "vm_memory",
     cargo_env_compat: true,
