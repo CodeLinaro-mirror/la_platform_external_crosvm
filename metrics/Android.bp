@@ -31,11 +31,12 @@ rust_library {
         "libsync_rust",
     ],
     aliases: ["metrics_generic:metrics_product"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
     name: "metrics_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "metrics",
     cargo_env_compat: true,

@@ -28,4 +28,5 @@ rust_library {
         "libserde_json",
         "libzeroize",
     ],
+    apex_available: ["com.android.virt"],
 }

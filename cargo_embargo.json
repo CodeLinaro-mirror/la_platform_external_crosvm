@@ -64,7 +64,7 @@
     "win_util"
   ],
   "global_defaults": "crosvm_inner_defaults",
-  "apex_available": [],
+  "apex_available": ["com.android.virt"],
   "product_available": false,
   "vendor_available": false,
   "module_name_overrides": {

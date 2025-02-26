@@ -53,11 +53,12 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
     name: "vm_control_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "vm_control",
     cargo_env_compat: true,

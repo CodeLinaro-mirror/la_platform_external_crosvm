@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "base_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: false, // Can't seem to access syslog in TH host tests.
     crate_name: "base",
     cargo_env_compat: true,
@@ -70,7 +70,7 @@ rust_test {
 
 rust_test {
     name: "base_test_tests_linux_main",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: false, // Can't seem to access syslog in TH host tests.
     crate_name: "linux",
     cargo_env_compat: true,
@@ -108,7 +108,7 @@ rust_test {
 
 rust_test {
     name: "base_test_tests_syslog",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "syslog",
     cargo_env_compat: true,
@@ -146,7 +146,7 @@ rust_test {
 
 rust_test {
     name: "base_test_tests_tube",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "tube",
     cargo_env_compat: true,
@@ -230,6 +230,8 @@ rust_library {
         "libbase_event_token_derive",
         "libremain",
     ],
+    apex_available: ["com.android.virt"],
+    visibility: ["//vendor:__subpackages__"],
     target: {
         android: {
             rustlibs: ["libandroid_log_sys"],
@@ -249,5 +251,4 @@ rust_library {
         },
     },
     shared_libs: ["libcap"], // specified in src/linux/capabilities.rs
-    visibility: ["//vendor:__subpackages__"],
 }

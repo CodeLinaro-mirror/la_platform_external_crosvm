@@ -30,6 +30,7 @@ rust_library {
         "libprotobuf",
         "libregistered_events_proto",
     ],
+    apex_available: ["com.android.virt"],
 }
 
 rust_protobuf {

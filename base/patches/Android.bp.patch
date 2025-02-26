@@ -1,17 +1,17 @@
 diff --git a/base/Android.bp b/base/Android.bp
-index 734ab7c1..20f48f53 100644
+index 32859ea24..5d7e55e42 100644
 --- a/base/Android.bp
 +++ b/base/Android.bp
-@@ -13,7 +13,7 @@ package {
+@@ -15,7 +15,7 @@ package {
  rust_test {
      name: "base_test_src_lib",
-     defaults: ["crosvm_inner_test_defaults"],
+     defaults: ["crosvm_inner_defaults"],
 -    host_supported: true,
 +    host_supported: false, // Can't seem to access syslog in TH host tests.
      crate_name: "base",
      cargo_env_compat: true,
-     srcs: ["src/lib.rs"],
-@@ -44,6 +44,25 @@ rust_test {
+     cargo_pkg_version: "0.1.0",
+@@ -47,12 +47,31 @@ rust_test {
          "libbase_event_token_derive",
          "libremain",
      ],
@@ -37,16 +37,14 @@ index 734ab7c1..20f48f53 100644
  }
  
  rust_test {
-@@ -86,7 +106,7 @@ rust_test {
- rust_test {
      name: "base_test_tests_linux_main",
-     defaults: ["crosvm_inner_test_defaults"],
+     defaults: ["crosvm_inner_defaults"],
 -    host_supported: true,
 +    host_supported: false, // Can't seem to access syslog in TH host tests.
      crate_name: "linux",
      cargo_env_compat: true,
-     srcs: ["tests/linux/main.rs"],
-@@ -118,6 +138,25 @@ rust_test {
+     cargo_pkg_version: "0.1.0",
+@@ -161,6 +180,25 @@ rust_test {
          "libbase_event_token_derive",
          "libremain",
      ],
@@ -72,10 +70,10 @@ index 734ab7c1..20f48f53 100644
  }
  
  rust_library {
-@@ -153,4 +192,23 @@ rust_library {
-     apex_available: [
-         "//apex_available:platform",
+@@ -194,4 +232,23 @@ rust_library {
      ],
+     apex_available: ["com.android.virt"],
+     visibility: ["//vendor:__subpackages__"],
 +    target: {
 +        android: {
 +            rustlibs: ["libandroid_log_sys"],
@@ -95,5 +93,4 @@ index 734ab7c1..20f48f53 100644
 +        },
 +    },
 +    shared_libs: ["libcap"], // specified in src/linux/capabilities.rs
-     visibility: ["//vendor:__subpackages__"],
  }

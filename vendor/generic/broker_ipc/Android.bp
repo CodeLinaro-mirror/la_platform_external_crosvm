@@ -25,4 +25,5 @@ rust_library {
         "libanyhow",
         "libserde",
     ],
+    apex_available: ["com.android.virt"],
 }

@@ -123,6 +123,7 @@ rust_binary {
         "libenumn",
         "libremain",
     ],
+    apex_available: ["com.android.virt"],
     visibility: ["//visibility:public"],
     arch: {
         x86_64: {
@@ -177,7 +178,7 @@ rust_binary {
 
 rust_test {
     name: "crosvm_test_src_main",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "crosvm",
     cargo_env_compat: true,
@@ -306,7 +307,7 @@ rust_test {
 }
 
 rust_defaults {
-    name: "crosvm_common_defaults",
+    name: "crosvm_defaults",
     edition: "2018",
     enabled: false,
     target: {
@@ -339,22 +340,6 @@ rust_defaults {
     ],
 }
 
-rust_defaults {
-    name: "crosvm_defaults",
-    defaults: ["crosvm_common_defaults"],
-    apex_available: [
-        "com.android.virt",
-    ],
-}
-
-// crosvm_test_defaults is the same as crosvm_defaults but without
-// apex_available so that the tests are available to the platform
-// and can be packaged in test-mappings.zip, etc.
-rust_defaults {
-    name: "crosvm_test_defaults",
-    defaults: ["crosvm_common_defaults"],
-}
-
 // "crosvm_defaults" is being used outside of external/crosvm, so we need a
 // layer of indirection to add options that would break those users.
 //
@@ -362,13 +347,6 @@ rust_defaults {
 rust_defaults {
     name: "crosvm_inner_defaults",
     defaults: ["crosvm_defaults"],
-    defaults_visibility: ["//external/crosvm:__subpackages__"],
-    visibility: ["//external/crosvm:__subpackages__"],
-}
-
-rust_defaults {
-    name: "crosvm_inner_test_defaults",
-    defaults: ["crosvm_test_defaults"],
     defaults_visibility: ["//external/crosvm:__subpackages__"],
     visibility: ["//external/crosvm:__subpackages__"],
 }

@@ -27,4 +27,5 @@ rust_library {
         "libbase_rust",
         "libmetrics_events",
     ],
+    apex_available: ["com.android.virt"],
 }

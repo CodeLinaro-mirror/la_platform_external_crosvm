@@ -53,6 +53,7 @@ rust_library {
         "libzerocopy-0.7.35",
     ],
     proc_macros: ["libremain"],
+    apex_available: ["com.android.virt"],
     // Exclude arm family manually
     arch: {
         arm: {
@@ -67,7 +68,7 @@ rust_library {
 
 rust_test {
     name: "x86_64_test_src_lib",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "x86_64",
     cargo_env_compat: true,

@@ -26,4 +26,5 @@ rust_library {
         "libbase_rust",
         "libserde",
     ],
+    apex_available: ["com.android.virt"],
 }

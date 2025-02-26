@@ -22,4 +22,5 @@ rust_library {
         "libthiserror",
     ],
     proc_macros: ["libasync_trait"],
+    apex_available: ["com.android.virt"],
 }

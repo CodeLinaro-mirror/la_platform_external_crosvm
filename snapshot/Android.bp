@@ -24,4 +24,5 @@ rust_library {
         "libserde_json",
     ],
     aliases: ["crypto_generic:crypto"],
+    apex_available: ["com.android.virt"],
 }

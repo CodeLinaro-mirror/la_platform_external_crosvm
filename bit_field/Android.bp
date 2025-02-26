@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "bit_field_test_tests_test_enum",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "test_enum",
     cargo_env_compat: true,
@@ -32,7 +32,7 @@ rust_test {
 
 rust_test {
     name: "bit_field_test_tests_test_tuple_struct",
-    defaults: ["crosvm_inner_test_defaults"],
+    defaults: ["crosvm_inner_defaults"],
     host_supported: true,
     crate_name: "test_tuple_struct",
     cargo_env_compat: true,
@@ -58,4 +58,5 @@ rust_library {
     crate_root: "src/lib.rs",
     edition: "2021",
     proc_macros: ["libbit_field_derive"],
+    apex_available: ["com.android.virt"],
 }

@@ -25,4 +25,5 @@ rust_library {
         "libaudio_streams",
         "libserde",
     ],
+    apex_available: ["com.android.virt"],
 }

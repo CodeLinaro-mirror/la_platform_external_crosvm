@@ -21,5 +21,6 @@ rust_library {
     cargo_pkg_version: "0.1.99",
     crate_root: "src/lib.rs",
     edition: "2021",
+    apex_available: ["com.android.virt"],
     visibility: ["//vendor:__subpackages__"],
 }

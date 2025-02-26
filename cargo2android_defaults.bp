@@ -23,9 +23,6 @@ rust_defaults {
             enabled: false,
         },
     },
-    apex_available: [
-        "com.android.virt",
-    ],
     defaults_visibility: [
         "//external/crosvm:__subpackages__",
         "//packages/modules/Virtualization/guest/authfs",

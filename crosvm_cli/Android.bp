@@ -25,4 +25,5 @@ rust_library {
         "libanyhow",
         "libcfg_if",
     ],
+    apex_available: ["com.android.virt"],
 }
