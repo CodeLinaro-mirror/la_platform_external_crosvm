@@ -15,7 +15,7 @@ license {
 
 rust_library {
     name: "libvmm_vhost",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vmm_vhost",
     cargo_env_compat: true,
@@ -41,7 +41,7 @@ rust_library {
 
 rust_test {
     name: "vmm_vhost_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vmm_vhost",
     cargo_env_compat: true,

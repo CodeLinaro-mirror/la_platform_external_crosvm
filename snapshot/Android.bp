@@ -9,7 +9,7 @@ package {
 
 rust_library {
     name: "libsnapshot_crosvm",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "snapshot",
     cargo_env_compat: true,

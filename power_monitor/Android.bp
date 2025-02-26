@@ -21,7 +21,7 @@ genrule {
 
 rust_library {
     name: "libpower_monitor",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "power_monitor",
     cargo_env_compat: true,

@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "kernel_loader_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "kernel_loader",
     cargo_env_compat: true,
@@ -42,7 +42,7 @@ rust_test {
 
 rust_library {
     name: "libkernel_loader",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "kernel_loader",
     cargo_env_compat: true,

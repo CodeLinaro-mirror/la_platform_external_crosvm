@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libnet_util",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "net_util",
     cargo_env_compat: true,
@@ -39,7 +39,7 @@ rust_library {
 
 rust_test {
     name: "net_util_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "net_util",
     cargo_env_compat: true,
@@ -69,7 +69,7 @@ rust_test {
 
 rust_test {
     name: "net_util_test_tests_unix_tap",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "unix_tap",
     cargo_env_compat: true,

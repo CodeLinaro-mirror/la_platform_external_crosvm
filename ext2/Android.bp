@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "ext2_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "ext2",
     cargo_env_compat: true,
@@ -39,37 +39,9 @@ rust_test {
     proc_macros: ["libenumn"],
 }
 
-rust_test {
-    name: "ext2_test_tests_tests",
-    defaults: ["crosvm_inner_defaults"],
-    host_supported: true,
-    crate_name: "tests",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.0",
-    crate_root: "tests/tests.rs",
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    rustlibs: [
-        "libanyhow",
-        "libargh",
-        "libbase_rust",
-        "libext2",
-        "liblibc",
-        "libtempfile",
-        "libuuid",
-        "libwalkdir",
-        "libzerocopy-0.7.35",
-    ],
-    proc_macros: ["libenumn"],
-}
-
 rust_library {
     name: "libext2",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "ext2",
     cargo_env_compat: true,
