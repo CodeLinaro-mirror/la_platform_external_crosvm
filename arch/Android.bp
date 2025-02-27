@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "arch_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "arch",
     cargo_env_compat: true,
@@ -65,7 +65,7 @@ rust_test {
 
 rust_library {
     name: "libarch",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "arch",
     cargo_env_compat: true,
@@ -106,4 +106,5 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    apex_available: ["com.android.virt"],
 }

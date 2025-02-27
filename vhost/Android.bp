@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libvhost",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vhost",
     cargo_env_compat: true,
@@ -31,11 +31,12 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
     name: "vhost_test_tests_linux",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "linux",
     cargo_env_compat: true,

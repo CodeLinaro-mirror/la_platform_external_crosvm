@@ -9,7 +9,7 @@ package {
 
 rust_library {
     name: "libreadclock",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "readclock",
     cargo_env_compat: true,
@@ -22,11 +22,12 @@ rust_library {
         "libserde",
         "libserde_json",
     ],
+    apex_available: ["com.android.virt"],
 }
 
 rust_binary {
     name: "readclock",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "readclock",
     cargo_env_compat: true,
@@ -40,4 +41,5 @@ rust_binary {
         "libserde",
         "libserde_json",
     ],
+    apex_available: ["com.android.virt"],
 }
