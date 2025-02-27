@@ -29,7 +29,6 @@ rust_binary {
         "liblog_rust",
         "libnix",
         "libthiserror",
-        "libzerocopy-0.7.35",
         "libclap",
     ],
     shared_libs: [

@@ -89,18 +89,20 @@ use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 #[cfg(target_arch = "x86_64")]
-use zerocopy::AsBytes;
-#[cfg(target_arch = "x86_64")]
 use zerocopy::FromBytes;
 #[cfg(target_arch = "x86_64")]
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+#[cfg(target_arch = "x86_64")]
+use zerocopy::IntoBytes;
+#[cfg(target_arch = "x86_64")]
+use zerocopy::KnownLayout;
 
 pub use crate::cap::*;
 
 /// A structure with the same layout as `kvm_ioapic_state` but without the union, making it
 /// zerocopy-able.
 #[cfg(target_arch = "x86_64")]
-#[derive(Copy, Clone, Default, Debug, AsBytes, FromBytes, FromZeroes)]
+#[derive(Copy, Clone, Default, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
 #[repr(C)]
 pub struct IoapicState {
     pub base_address: u64,
@@ -671,7 +673,9 @@ impl Vm {
                 // SAFETY:
                 // Safe as we know that we are retrieving data related to the
                 // IOAPIC and not PIC.
-                unsafe { std::mem::transmute(irqchip_state.chip.ioapic) },
+                unsafe {
+                    std::mem::transmute::<kvm_ioapic_state, IoapicState>(irqchip_state.chip.ioapic)
+                },
             )
         } else {
             errno_result()
@@ -687,8 +691,9 @@ impl Vm {
             chip_id: 2,
             ..Default::default()
         };
-        // SAFETY: kvm_ioapic_state has the same representation as IoapicState.
-        irqchip_state.chip.ioapic = unsafe { std::mem::transmute(*state) };
+        irqchip_state.chip.ioapic =
+            // SAFETY: kvm_ioapic_state has the same representation as IoapicState.
+            unsafe { std::mem::transmute::<IoapicState, kvm_ioapic_state>(*state) };
         // SAFETY:
         // Safe because we know that our file is a VM fd, we know the kernel will only read
         // correct amount of memory from our pointer, and we verify the return result.

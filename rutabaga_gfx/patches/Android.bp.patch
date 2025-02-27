@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index e1c7614d8..178e68066 100644
+index 8c19dbfff..8220b1c5d 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,24 +10,24 @@ index e1c7614d8..178e68066 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -34,20 +33,87 @@ rust_library {
-         "libserde",
-         "libserde_json",
-         "libthiserror",
--        "libzerocopy-0.7.35",
-+        "libzerocopy",
+@@ -38,13 +37,80 @@ rust_library {
      ],
      proc_macros: ["libremain"],
--    static_libs: [
+     static_libs: [
 -        "libgbm",
--        "libvirglrenderer",
-+    cfgs: [
-+        "gfxstream_unstable",
++        "libepoxy",
++        "libgfxstream_backend",
+         "libvirglrenderer",
      ],
      shared_libs: [
 -        "libdrm",
+-        "libepoxy",
 +        "libc++",
 +        "libbase",
++    ],
++    apex_available: ["com.android.virt"],
++    cfgs: [
++        "gfxstream_unstable",
 +    ],
 +    target: {
 +        android: {
@@ -44,14 +44,8 @@ index e1c7614d8..178e68066 100644
 +            ],
 +        },
 +    },
-+    static_libs: [
-         "libepoxy",
-+        "libgfxstream_backend",
-+        "libvirglrenderer",
-     ],
-     apex_available: ["com.android.virt"],
- }
- 
++}
++
 +rust_library {
 +    name: "librutabaga_gfx_gfxstream",
 +    host_supported: true,
@@ -70,7 +64,7 @@ index e1c7614d8..178e68066 100644
 +        "libserde_json",
 +        "libthiserror",
 +        "libzerocopy",
-+    ],
+     ],
 +    proc_macros: ["libremain"],
 +    target: {
 +        host: {
@@ -97,12 +91,9 @@ index e1c7614d8..178e68066 100644
 +            ],
 +        },
 +    },
-+    apex_available: ["com.android.virt"],
-+}
-+
- rust_test {
-     name: "rutabaga_gfx_test_src_lib",
-     defaults: ["crosvm_defaults"],
+     apex_available: ["com.android.virt"],
+ }
+ 
 @@ -64,7 +130,6 @@ rust_test {
      edition: "2021",
      features: [
@@ -111,12 +102,8 @@ index e1c7614d8..178e68066 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -76,15 +141,12 @@ rust_test {
-         "libserde_json",
-         "libtempfile",
-         "libthiserror",
--        "libzerocopy-0.7.35",
-+        "libzerocopy",
+@@ -79,12 +144,9 @@ rust_test {
+         "libzerocopy",
      ],
      proc_macros: ["libremain"],
 -    static_libs: [
