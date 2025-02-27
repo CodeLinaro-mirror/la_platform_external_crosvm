@@ -30,8 +30,8 @@ use usb_util::Error as UsbUtilError;
 use usb_util::TransferBuffer;
 use usb_util::TransferStatus;
 use usb_util::UsbRequestSetup;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
+use zerocopy::IntoBytes;
 
 use crate::usb::backend::device::BackendDevice;
 use crate::usb::backend::device::DeviceState;
@@ -128,7 +128,7 @@ impl FidoPassthroughDevice {
                 }
                 // This is safe because we just checked the size of n is exactly U2FHID_PACKET_SIZE
                 device
-                    .recv_from_host(packet[..constants::U2FHID_PACKET_SIZE].try_into().unwrap())?;
+                    .recv_from_host(&packet[..constants::U2FHID_PACKET_SIZE].try_into().unwrap())?;
             }
             Err(e) => {
                 error!("U2F hidraw read error: {e:#}, resetting and detaching device",);
@@ -149,7 +149,9 @@ impl FidoPassthroughDevice {
         transfer.actual_length = 0;
         let request_setup = match &transfer.buffer {
             TransferBuffer::Vector(v) => {
-                UsbRequestSetup::read_from_prefix(v).ok_or_else(|| Error::InvalidDataBufferSize)?
+                UsbRequestSetup::read_from_prefix(v)
+                    .map_err(|_| Error::InvalidDataBufferSize)?
+                    .0
             }
             _ => {
                 return Err(Error::UnsupportedTransferBufferType);
@@ -230,7 +232,7 @@ impl FidoPassthroughDevice {
             return Err(Error::InvalidDataBufferSize);
         }
         packet.copy_from_slice(buffer);
-        let written = device.lock().recv_from_guest(packet)?;
+        let written = device.lock().recv_from_guest(&packet)?;
         transfer.actual_length = written;
         Ok(())
     }
