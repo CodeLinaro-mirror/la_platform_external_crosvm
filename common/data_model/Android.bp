@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "data_model_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "data_model",
     cargo_env_compat: true,
@@ -34,7 +34,7 @@ rust_test {
 
 rust_library {
     name: "libdata_model",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "data_model",
     cargo_env_compat: true,
@@ -45,4 +45,5 @@ rust_library {
         "libserde",
         "libzerocopy-0.7.35",
     ],
+    apex_available: ["com.android.virt"],
 }
