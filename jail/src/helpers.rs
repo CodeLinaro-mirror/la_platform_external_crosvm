@@ -23,7 +23,9 @@ use once_cell::sync::Lazy;
 #[cfg(feature = "seccomp_trace")]
 use static_assertions::const_assert;
 #[cfg(feature = "seccomp_trace")]
-use zerocopy::AsBytes;
+use zerocopy::Immutable;
+#[cfg(feature = "seccomp_trace")]
+use zerocopy::IntoBytes;
 
 use crate::config::JailConfig;
 
@@ -101,6 +103,16 @@ impl Drop for ScopedMinijail {
     }
 }
 
+/// Creates a default Minijail instance with no configuration.
+pub fn create_default_minijail() -> minijail::Result<Minijail> {
+    Minijail::new().map(|mut jail| {
+        // Temporarily disable multithreaded check due to a regression in linux 6.12.5
+        // TODO(b/395899741): Remove after kernel upstream is fixed.
+        jail.disable_multithreaded_check();
+        jail
+    })
+}
+
 /// Creates a [Minijail] instance which just changes the root using pivot_root(2) path and
 /// `max_open_files` using `RLIMIT_NOFILE`.
 ///
@@ -121,7 +133,7 @@ pub fn create_base_minijail(root: &Path, max_open_files: u64) -> Result<Minijail
         bail!("{:?} is not absolute path", root);
     }
 
-    let mut jail = Minijail::new().context("failed to jail device")?;
+    let mut jail = create_default_minijail().context("failed to jail device")?;
 
     // Only pivot_root if we are not re-using the current root directory.
     if root != Path::new("/") {
@@ -166,7 +178,7 @@ pub fn create_base_minijail_without_pivot_root(
         bail!("{:?} is not absolute path", root);
     }
 
-    let mut jail = Minijail::new().context("failed to jail device")?;
+    let mut jail = create_default_minijail().context("failed to jail device")?;
     jail.set_rlimit(libc::RLIMIT_NOFILE as i32, max_open_files, max_open_files)
         .context("error setting max open files")?;
 
@@ -252,7 +264,7 @@ pub fn create_sandbox_minijail(
     #[cfg(feature = "seccomp_trace")]
     {
         #[repr(C)]
-        #[derive(AsBytes)]
+        #[derive(Immutable, IntoBytes)]
         struct sock_filter {
             /* Filter block */
             code: u16, /* Actual filter code */
@@ -339,7 +351,7 @@ pub fn create_sandbox_minijail(
 /// Creates a basic [Minijail] if `jail_config` is present.
 ///
 /// Returns `None` if `jail_config` is none.
-pub fn simple_jail(jail_config: &Option<JailConfig>, policy: &str) -> Result<Option<Minijail>> {
+pub fn simple_jail(jail_config: Option<&JailConfig>, policy: &str) -> Result<Option<Minijail>> {
     if let Some(jail_config) = jail_config {
         let config = SandboxConfig::new(jail_config, policy);
         Ok(Some(create_sandbox_minijail(

@@ -431,7 +431,7 @@ pub struct PciBarIter<'a> {
     bar_num: PciBarIndex,
 }
 
-impl<'a> Iterator for PciBarIter<'a> {
+impl Iterator for PciBarIter<'_> {
     type Item = PciBarConfiguration;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1097,12 +1097,15 @@ impl PciCapMapping {
 
 #[cfg(test)]
 mod tests {
-    use zerocopy::AsBytes;
+    use zerocopy::FromBytes;
+    use zerocopy::Immutable;
+    use zerocopy::IntoBytes;
+    use zerocopy::KnownLayout;
 
     use super::*;
 
     #[repr(C, packed)]
-    #[derive(Clone, Copy, AsBytes)]
+    #[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
     #[allow(dead_code)]
     struct TestCap {
         _vndr: u8,

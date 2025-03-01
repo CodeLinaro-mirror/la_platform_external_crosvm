@@ -29,7 +29,7 @@ rust_library {
         "libsync_rust",
         "libthiserror",
         "libusb_sys",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     apex_available: ["com.android.virt"],
@@ -57,7 +57,7 @@ rust_test {
         "libsync_rust",
         "libthiserror",
         "libusb_sys",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }

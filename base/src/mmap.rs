@@ -18,8 +18,9 @@ use std::sync::OnceLock;
 use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
 
 use crate::descriptor::AsRawDescriptor;
 use crate::descriptor::SafeDescriptor;
@@ -252,7 +253,7 @@ impl MemoryMapping {
     ///     let res = mem_map.write_obj(55u64, 16);
     ///     assert!(res.is_ok());
     /// ```
-    pub fn write_obj<T: AsBytes>(&self, val: T, offset: usize) -> Result<()> {
+    pub fn write_obj<T: IntoBytes + Immutable>(&self, val: T, offset: usize) -> Result<()> {
         self.mapping.range_end(offset, size_of::<T>())?;
         // SAFETY:
         // This is safe because we checked the bounds above.
@@ -311,7 +312,11 @@ impl MemoryMapping {
     ///     let res = mem_map.write_obj_volatile(0xf00u32, 16);
     ///     assert!(res.is_ok());
     /// ```
-    pub fn write_obj_volatile<T: AsBytes>(&self, val: T, offset: usize) -> Result<()> {
+    pub fn write_obj_volatile<T: IntoBytes + Immutable>(
+        &self,
+        val: T,
+        offset: usize,
+    ) -> Result<()> {
         self.mapping.range_end(offset, size_of::<T>())?;
         // Make sure writes to memory have been committed before performing I/O that could
         // potentially depend on them.
@@ -457,7 +462,7 @@ impl<'a> MemoryMappingBuilder<'a> {
     /// Note: this is a forward looking interface to accomodate platforms that
     /// require special handling for file backed mappings.
     #[allow(clippy::wrong_self_convention, unused_mut)]
-    pub fn from_file(mut self, file: &'a File) -> MemoryMappingBuilder {
+    pub fn from_file(mut self, file: &'a File) -> MemoryMappingBuilder<'a> {
         // On Windows, files require special handling (next day shipping if possible).
         self.is_file_descriptor = true;
 
@@ -468,7 +473,7 @@ impl<'a> MemoryMappingBuilder<'a> {
     /// Build the memory mapping given the specified SharedMemory to mapped memory
     ///
     /// Default: Create a new memory mapping.
-    pub fn from_shared_memory(mut self, shm: &'a SharedMemory) -> MemoryMappingBuilder {
+    pub fn from_shared_memory(mut self, shm: &'a SharedMemory) -> MemoryMappingBuilder<'a> {
         self.descriptor = Some(shm as &dyn AsRawDescriptor);
         self
     }

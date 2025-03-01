@@ -10,9 +10,10 @@ use base::warn;
 use data_model::Be16;
 use data_model::Be32;
 use data_model::Be64;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
+use zerocopy::KnownLayout;
 
 use crate::virtio::scsi::constants::INQUIRY;
 use crate::virtio::scsi::constants::MAINTENANCE_IN;
@@ -83,19 +84,16 @@ impl Command {
     }
 
     fn parse_command<T: FromBytes>(cdb: &[u8]) -> Result<T, ExecuteError> {
-        let size = std::mem::size_of::<T>();
-        T::read_from(&cdb[..size]).ok_or(ExecuteError::ReadCommand)
+        let (command, _) = T::read_from_prefix(cdb).map_err(|_| ExecuteError::ReadCommand)?;
+        Ok(command)
     }
 
     fn parse_maintenance_in(cdb: &[u8]) -> Result<Self, ExecuteError> {
-        const MAINTENANCE_IN_SIZE: usize = 12;
         // Top three bits are reserved.
         let service_action = cdb[1] & 0x1f;
         match service_action {
             REPORT_SUPPORTED_TASK_MANAGEMENT_FUNCTIONS => {
-                let r = ReportSupportedTMFs::read_from(&cdb[..MAINTENANCE_IN_SIZE])
-                    .ok_or(ExecuteError::ReadCommand)?;
-                Ok(Self::ReportSupportedTMFs(r))
+                Ok(Self::ReportSupportedTMFs(Self::parse_command(cdb)?))
             }
             _ => {
                 warn!(
@@ -108,15 +106,10 @@ impl Command {
     }
 
     fn parse_service_action_in_16(cdb: &[u8]) -> Result<Self, ExecuteError> {
-        const SERVICE_ACTION_IN_16_SIZE: usize = 16;
         // Top three bits are reserved.
         let service_action = cdb[1] & 0x1f;
         match service_action {
-            READ_CAPACITY_16 => {
-                let r = ReadCapacity16::read_from(&cdb[..SERVICE_ACTION_IN_16_SIZE])
-                    .ok_or(ExecuteError::ReadCommand)?;
-                Ok(Self::ReadCapacity16(r))
-            }
+            READ_CAPACITY_16 => Ok(Self::ReadCapacity16(Self::parse_command(cdb)?)),
             _ => {
                 warn!(
                     "service action {:#x?} for SERVICE_ACTION_IN_16 is not implemented",
@@ -157,7 +150,9 @@ impl Command {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct TestUnitReady {
     opcode: u8,
@@ -198,7 +193,9 @@ async fn read_from_disk(
         })
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct Read6 {
     opcode: u8,
@@ -239,7 +236,9 @@ impl Read6 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct Inquiry {
     opcode: u8,
@@ -442,7 +441,9 @@ fn fill_mode_page(
 
 // According to the spec, devices that implement MODE SENSE(6) shall also implement MODE SELECT(6)
 // as well.
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct ModeSelect6 {
     opcode: u8,
@@ -459,7 +460,9 @@ impl ModeSelect6 {
     }
 
     fn emulate(&self, reader: &mut Reader, dev: &AsyncLogicalUnit) -> Result<(), ExecuteError> {
-        #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+        #[derive(
+            Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+        )]
         #[repr(C, packed)]
         struct BlockDescriptor {
             _density: u8,
@@ -511,14 +514,18 @@ impl ModeSelect6 {
     }
 
     fn handle_mode_page(reader: &mut Reader) -> Result<(), ExecuteError> {
-        #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+        #[derive(
+            Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+        )]
         #[repr(C, packed)]
         struct Page0Header {
             page_code: u8,
             page_len: u8,
         }
 
-        #[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+        #[derive(
+            Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+        )]
         #[repr(C, packed)]
         struct SubpageHeader {
             page_code: u8,
@@ -555,7 +562,9 @@ impl ModeSelect6 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct ModeSense6 {
     opcode: u8,
@@ -704,7 +713,9 @@ impl ModeSense6 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct ReadCapacity10 {
     opcode: u8,
@@ -727,7 +738,9 @@ impl ReadCapacity10 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct ReadCapacity16 {
     opcode: u8,
@@ -752,7 +765,9 @@ impl ReadCapacity16 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct Read10 {
     opcode: u8,
@@ -784,7 +799,9 @@ impl Read10 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct Write10 {
     opcode: u8,
@@ -839,7 +856,9 @@ async fn write_to_disk(
         })
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct SynchronizeCache10 {
     opcode: u8,
@@ -896,7 +915,9 @@ async fn write_same(
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct WriteSame10 {
     opcode: u8,
@@ -951,7 +972,9 @@ impl WriteSame10 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct Unmap {
     opcode: u8,
@@ -1017,7 +1040,9 @@ impl Unmap {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct WriteSame16 {
     opcode: u8,
@@ -1069,7 +1094,9 @@ impl WriteSame16 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct ReportLuns {
     opcode: u8,
@@ -1106,7 +1133,9 @@ impl ReportLuns {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
 #[repr(C, packed)]
 pub struct ReportSupportedTMFs {
     opcode: u8,

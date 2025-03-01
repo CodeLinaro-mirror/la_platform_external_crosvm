@@ -8,13 +8,15 @@ see the source. All addresses are in hexadecimal.
 | Name/source link             | Address       | End (exclusive) | Size      | Notes                                                                                    |
 | ---------------------------- | ------------- | --------------- | --------- | ---------------------------------------------------------------------------------------- |
 |                              | `0000`        | `A_0000`        | 640 KiB   | RAM (\<1M)                                                                               |
+| [`MULTIBOOT_INFO_OFFSET`]    | `6000`        | `7000`          | 4 KiB     | Multiboot info structure                                                                 |
 | [`ZERO_PAGE_OFFSET`]         | `7000`        |                 |           | Linux boot_params structure                                                              |
 | [`BOOT_STACK_POINTER`]       | `8000`        |                 |           | Boot SP value                                                                            |
 | [`boot_pml4_addr`]           | `9000`        | `A000`          | 4 KiB     | Boot page table                                                                          |
 | [`boot_pdpte_addr`]          | `A000`        | `B000`          | 4 KiB     | Boot page table                                                                          |
 | [`boot_pde_addr`]            | `B000`        | `F000`          | 16 KiB    | Boot page tables                                                                         |
 | [`CMDLINE_OFFSET`]           | `2_0000`      | `2_0800`        | 2 KiB     | Linux kernel command line                                                                |
-| [`SETUP_DATA_START`]         | `2_0800`      | `E_0000`        | 766 KiB   | Linux kernel `setup_data` linked list                                                    |
+| [`SETUP_DATA_START`]         | `2_0800`      | `9_FC00`        | 509 KiB   | Linux kernel `setup_data` linked list                                                    |
+| [`MPTABLE_START`]            | `9_FC00`      | `A_0000`        | 1 KiB     | MultiProcessor Specification Configuration Table                                         |
 | [`ACPI_HI_RSDP_WINDOW_BASE`] | `E_0000`      |                 |           | ACPI tables                                                                              |
 | [`mem_1m_to_4g`]             | `10_0000`     | `D000_0000`     | ~3.24 GiB | RAM (\<4G)                                                                               |
 | [`KERNEL_START_OFFSET`]      | `20_0000`     |                 |           | Linux kernel image load address                                                          |
@@ -28,6 +30,7 @@ see the source. All addresses are in hexadecimal.
 |                              | `1_0000_0000` |                 |           | RAM (>4G)                                                                                |
 |                              | (end of RAM)  |                 |           | High (>4G) MMIO allocation area                                                          |
 
+[`multiboot_info_offset`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=381?q=MULITBOOT_INFO_OFFSET
 [`zero_page_offset`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=368?q=ZERO_PAGE_OFFSET
 [`boot_stack_pointer`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=350?q=BOOT_STACK_POINTER
 [`boot_pml4_addr`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/regs.rs;l=297?q=boot_pml4_addr
@@ -35,6 +38,7 @@ see the source. All addresses are in hexadecimal.
 [`boot_pde_addr`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/regs.rs;l=299?q=boot_pde_addr
 [`cmdline_offset`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=373?q=CMDLINE_OFFSET
 [`setup_data_start`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=375?q=SETUP_DATA_START
+[`mptable_start`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/mptable.rs;l=72?q=MPTABLE_START
 [`acpi_hi_rsdp_window_base`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=388?q=ACPI_HI_RSDP_WINDOW_BASE
 [`kernel_start_offset`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=372?q=KERNEL_START_OFFSET
 [`initrd_start`]: https://crsrc.org/o/src/platform/crosvm/x86_64/src/lib.rs;l=1692?q=initrd_start

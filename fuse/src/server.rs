@@ -15,9 +15,9 @@ use std::time::Duration;
 use base::error;
 use base::pagesize;
 use base::Protection;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
 
 use crate::filesystem::Context;
 use crate::filesystem::DirEntry;
@@ -39,9 +39,9 @@ const SELINUX_XATTR_CSTR: &[u8] = b"security.selinux\0";
 
 /// A trait for reading from the underlying FUSE endpoint.
 pub trait Reader: io::Read {
-    fn read_struct<T: AsBytes + FromBytes + FromZeroes>(&mut self) -> Result<T> {
+    fn read_struct<T: IntoBytes + FromBytes>(&mut self) -> Result<T> {
         let mut out = T::new_zeroed();
-        self.read_exact(out.as_bytes_mut())
+        self.read_exact(out.as_mut_bytes())
             .map_err(Error::DecodeMessage)?;
         Ok(out)
     }
@@ -126,7 +126,7 @@ pub trait Mapper {
     fn unmap(&self, offset: u64, size: u64) -> io::Result<()>;
 }
 
-impl<'a, M: Mapper> Mapper for &'a M {
+impl<M: Mapper> Mapper for &M {
     fn map(
         &self,
         mem_offset: u64,
@@ -1813,7 +1813,7 @@ fn reply_readdir<W: Writer>(len: usize, unique: u64, mut w: W) -> Result<usize> 
     Ok(out.len as usize)
 }
 
-fn reply_ok<T: AsBytes, W: Writer>(
+fn reply_ok<T: IntoBytes + Immutable, W: Writer>(
     out: Option<T>,
     data: Option<&[u8]>,
     unique: u64,
@@ -1963,9 +1963,8 @@ fn parse_selinux_xattr(buf: &[u8]) -> Result<Option<&CStr>> {
     // Because the security context data block may have been preceded by variable-length strings,
     // `SecctxHeader` and the subsequent `Secctx` structs may not be correctly byte-aligned
     // within `buf`.
-    let secctx_header = SecctxHeader::read_from_prefix(buf).ok_or(Error::DecodeMessage(
-        io::Error::from_raw_os_error(libc::EINVAL),
-    ))?;
+    let (secctx_header, _) = SecctxHeader::read_from_prefix(buf)
+        .map_err(|_| Error::DecodeMessage(io::Error::from_raw_os_error(libc::EINVAL)))?;
 
     // FUSE 7.38 introduced a generic request extension with the same structure as  `SecctxHeader`.
     // A `nr_secctx` value above `MAX_NR_SECCTX` indicates that this data block does not contain
@@ -1986,9 +1985,8 @@ fn parse_selinux_xattr(buf: &[u8]) -> Result<Option<&CStr>> {
         }
 
         let secctx =
-            Secctx::read_from(&buf[cur_secctx_pos..(cur_secctx_pos + size_of::<Secctx>())]).ok_or(
-                Error::DecodeMessage(io::Error::from_raw_os_error(libc::EINVAL)),
-            )?;
+            Secctx::read_from_bytes(&buf[cur_secctx_pos..(cur_secctx_pos + size_of::<Secctx>())])
+                .map_err(|_| Error::DecodeMessage(io::Error::from_raw_os_error(libc::EINVAL)))?;
 
         cur_secctx_pos += size_of::<Secctx>();
 
@@ -2091,7 +2089,7 @@ mod tests {
 
     #[test]
     fn parse_selinux_xattr_basic() {
-        let sec_value = CStr::from_bytes_with_nul(b"user_u:object_r:security_type:s0\0").unwrap();
+        let sec_value = c"user_u:object_r:security_type:s0";
         let v = create_secctx(&[(SELINUX_XATTR_CSTR, sec_value.to_bytes_with_nul())], 0);
 
         let res = parse_selinux_xattr(&v);
@@ -2100,10 +2098,8 @@ mod tests {
 
     #[test]
     fn parse_selinux_xattr_find_attr() {
-        let foo_value: &CStr =
-            CStr::from_bytes_with_nul(b"user_foo:object_foo:foo_type:s0\0").unwrap();
-        let sec_value: &CStr =
-            CStr::from_bytes_with_nul(b"user_u:object_r:security_type:s0\0").unwrap();
+        let foo_value = c"user_foo:object_foo:foo_type:s0";
+        let sec_value = c"user_u:object_r:security_type:s0";
         let v = create_secctx(
             &[
                 (b"foo\0", foo_value.to_bytes_with_nul()),
@@ -2121,8 +2117,7 @@ mod tests {
         // Test with an xattr name that looks similar to security.selinux, but has extra
         // characters to ensure that `parse_selinux_xattr` will not return the associated
         // context value to the caller.
-        let invalid_selinux_value: &CStr =
-            CStr::from_bytes_with_nul(b"user_invalid:object_invalid:invalid_type:s0\0").unwrap();
+        let invalid_selinux_value = c"user_invalid:object_invalid:invalid_type:s0";
         let v = create_secctx(
             &[(
                 b"invalid.security.selinux\0",
@@ -2140,10 +2135,8 @@ mod tests {
         // Test that parse_selinux_xattr will return an `Error::InvalidHeaderLength` when
         // the total size in the `SecctxHeader` does not encompass the entirety of the
         // associated data.
-        let foo_value: &CStr =
-            CStr::from_bytes_with_nul(b"user_foo:object_foo:foo_type:s0\0").unwrap();
-        let sec_value: &CStr =
-            CStr::from_bytes_with_nul(b"user_u:object_r:security_type:s0\0").unwrap();
+        let foo_value = c"user_foo:object_foo:foo_type:s0";
+        let sec_value = c"user_u:object_r:security_type:s0";
         let v = create_secctx(
             &[
                 (b"foo\0", foo_value.to_bytes_with_nul()),

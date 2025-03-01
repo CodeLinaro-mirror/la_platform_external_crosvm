@@ -211,6 +211,13 @@ def sudo_is_passwordless():
     return ret == 0
 
 
+def rust_sysroot():
+    "Returns path to the rust sysroot (e.g. ~/.rustup/toolchains/$version)."
+    from .command import cmd
+
+    return Path(cmd("rustc --print=sysroot").stdout())
+
+
 SHORTHANDS = {
     "mingw64": "x86_64-pc-windows-gnu",
     "msvc64": "x86_64-pc-windows-msvc",
@@ -301,6 +308,15 @@ class Triple(NamedTuple):
         if str(self).endswith("-linux-android"):
             env["MINIJAIL_DO_NOT_BUILD"] = "true"
             env["MINIJAIL_BINDGEN_TARGET"] = f"{self.arch}-unknown-linux-gnu"
+        # Hack: Rust after 1.77 on windows will fail to find dlltool.exe when building proc-macros.
+        # The tool exists in the self contained gnu toolchain, but somehow the PATH is missing.
+        # TODO(b/396467061): Remove after fixed upstream
+        if str(self).endswith("windows-gnu"):
+            env["PATH"] = (
+                os.environ["PATH"]
+                + ";"
+                + f"{rust_sysroot()}/lib/rustlib/{str(self)}/bin/self-contained"
+            )
         return env
 
     def __str__(self):
@@ -345,7 +361,7 @@ def ensure_packages_exist(*packages: str):
     if missing_packages:
         debian_packages = [f"python3-{p}" for p in missing_packages]
         package_list = " ".join(debian_packages)
-        print("Missing python dependencies. Please re-run ./tools/install-deps")
+        print("Missing python dependencies. Please re-run ./tools/setup")
         print(f"Or `sudo apt install {package_list}`")
         sys.exit(1)
 
