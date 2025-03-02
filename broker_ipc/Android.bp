@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libbroker_ipc",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "broker_ipc",
     cargo_env_compat: true,
@@ -28,4 +28,5 @@ rust_library {
         "libmetrics",
         "libserde",
     ],
+    apex_available: ["com.android.virt"],
 }

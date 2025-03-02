@@ -10,7 +10,7 @@ index dc5db8549..18a04722e 100644
          "gfxstream",
      ],
      rustlibs: [
-@@ -43,7 +42,26 @@ rust_library {
+@@ -43,8 +42,27 @@ rust_library {
      ],
      proc_macros: ["libremain"],
      static_libs: ["libdisplay_wl"],
@@ -35,6 +35,7 @@ index dc5db8549..18a04722e 100644
 +            ],
 +        },
 +    },
+     apex_available: ["com.android.virt"],
  }
  
  cc_library_static {
