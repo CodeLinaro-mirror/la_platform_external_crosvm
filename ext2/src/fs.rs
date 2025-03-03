@@ -18,9 +18,10 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use base::info;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
+use zerocopy::KnownLayout;
 
 use crate::arena::Arena;
 use crate::arena::BlockId;
@@ -37,7 +38,7 @@ use crate::superblock::SuperBlock;
 use crate::xattr::InlineXattrs;
 
 #[repr(C)]
-#[derive(Copy, Clone, FromZeroes, FromBytes, AsBytes, Debug)]
+#[derive(Copy, Clone, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct DirEntryRaw {
     inode: u32,
     rec_len: u16,
@@ -50,7 +51,7 @@ struct DirEntryWithName<'a> {
     name: OsString,
 }
 
-impl<'a> std::fmt::Debug for DirEntryWithName<'a> {
+impl std::fmt::Debug for DirEntryWithName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DirEntry")
             .field("de", &self.de)

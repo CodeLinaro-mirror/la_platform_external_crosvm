@@ -76,8 +76,7 @@
     "libminijail": "libminijail_rust",
     "libsnapshot": "libsnapshot_crosvm",
     "libsync": "libsync_rust",
-    "libx86_64": "libx86_64_rust",
-    "libzerocopy": "libzerocopy-0.7.35"
+    "libx86_64": "libx86_64_rust"
   },
   "module_blocklist": [
     // TODO: These are all for workspace_excludes package. Maybe use the option to

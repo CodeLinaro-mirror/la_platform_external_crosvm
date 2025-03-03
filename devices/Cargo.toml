@@ -90,6 +90,7 @@ serde_json = "1"
 serde_keyvalue = { path = "../serde_keyvalue", features = ["argh_derive"] }
 smallvec = "1.6.1"
 snapshot = { workspace = true }
+static_assertions = "1.1"
 sync = { path = "../common/sync" }
 system_api = { path = "../system_api", optional = true }
 tempfile = "3"
@@ -101,7 +102,7 @@ virtio_sys = { path = "../virtio_sys" }
 virtio-media = { version = "0.0.7", optional = true }
 vm_control = { path = "../vm_control" }
 vm_memory = { path = "../vm_memory" }
-zerocopy = { version = "0.7", features = ["derive"] }
+zerocopy = { version = "0.8.13", features = ["derive"] }
 
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 android_audio = { path = "../android_audio" }

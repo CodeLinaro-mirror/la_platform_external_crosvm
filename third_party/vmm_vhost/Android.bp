@@ -30,7 +30,7 @@ rust_library {
         "libcfg_if",
         "liblibc",
         "libthiserror",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -62,7 +62,7 @@ rust_test {
         "liblibc",
         "libtempfile",
         "libthiserror",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",

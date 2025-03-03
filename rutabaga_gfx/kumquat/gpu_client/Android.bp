@@ -36,7 +36,6 @@ rust_ffi_shared {
         "liblog_rust",
         "libnix",
         "libthiserror",
-        "libzerocopy-0.7.35",
     ],
     target: {
         host: {
