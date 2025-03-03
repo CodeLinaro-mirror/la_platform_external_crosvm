@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index 6308e792b..cc1bd610b 100644
+index e1c7614d8..178e68066 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,7 +10,7 @@ index 6308e792b..cc1bd610b 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -34,18 +33,87 @@ rust_library {
+@@ -34,20 +33,87 @@ rust_library {
          "libserde",
          "libserde_json",
          "libthiserror",
@@ -18,9 +18,12 @@ index 6308e792b..cc1bd610b 100644
 +        "libzerocopy",
      ],
      proc_macros: ["libremain"],
+-    static_libs: [
+-        "libgbm",
+-        "libvirglrenderer",
 +    cfgs: [
 +        "gfxstream_unstable",
-+    ],
+     ],
      shared_libs: [
 -        "libdrm",
 +        "libc++",
@@ -43,9 +46,8 @@ index 6308e792b..cc1bd610b 100644
 +    },
 +    static_libs: [
          "libepoxy",
--        "libgbm",
 +        "libgfxstream_backend",
-         "libvirglrenderer",
++        "libvirglrenderer",
      ],
      apex_available: ["com.android.virt"],
  }
@@ -100,8 +102,8 @@ index 6308e792b..cc1bd610b 100644
 +
  rust_test {
      name: "rutabaga_gfx_test_src_lib",
-     defaults: ["crosvm_inner_test_defaults"],
-@@ -61,7 +128,6 @@ rust_test {
+     defaults: ["crosvm_defaults"],
+@@ -64,7 +130,6 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
@@ -109,8 +111,7 @@ index 6308e792b..cc1bd610b 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -72,13 +138,12 @@ rust_test {
-         "libserde",
+@@ -76,15 +141,12 @@ rust_test {
          "libserde_json",
          "libtempfile",
          "libthiserror",
@@ -118,11 +119,14 @@ index 6308e792b..cc1bd610b 100644
 +        "libzerocopy",
      ],
      proc_macros: ["libremain"],
+-    static_libs: [
+-        "libgbm",
+-        "libvirglrenderer",
+-    ],
      shared_libs: [
 -        "libdrm",
          "libepoxy",
--        "libgbm",
 +        "libgfxstream_backend",
-         "libvirglrenderer",
++        "libvirglrenderer",
      ],
  }
