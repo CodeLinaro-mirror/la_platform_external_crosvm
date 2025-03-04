@@ -36,18 +36,12 @@ rust_library {
         "libzerocopy",
     ],
     proc_macros: ["libremain"],
-    static_libs: [
-        "libepoxy",
-        "libgfxstream_backend",
-        "libvirglrenderer",
+    cfgs: [
+        "gfxstream_unstable",
     ],
     shared_libs: [
         "libc++",
         "libbase",
-    ],
-    apex_available: ["com.android.virt"],
-    cfgs: [
-        "gfxstream_unstable",
     ],
     target: {
         android: {
@@ -64,6 +58,12 @@ rust_library {
             ],
         },
     },
+    static_libs: [
+        "libepoxy",
+        "libgfxstream_backend",
+        "libvirglrenderer",
+    ],
+    apex_available: ["com.android.virt"],
 }
 
 rust_library {

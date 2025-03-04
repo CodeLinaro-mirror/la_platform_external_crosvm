@@ -22,7 +22,7 @@ use snapshot::AnySnapshot;
 use vhost::Vhost;
 use vhost::Vsock as VhostVsockHandle;
 use vm_memory::GuestMemory;
-use zerocopy::IntoBytes;
+use zerocopy::AsBytes;
 
 use super::worker::VringBase;
 use super::worker::Worker;

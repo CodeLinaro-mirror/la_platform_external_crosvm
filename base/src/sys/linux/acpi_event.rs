@@ -6,8 +6,7 @@ use std::str;
 
 use thiserror::Error;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use super::netlink::*;
 
@@ -41,10 +40,10 @@ enum GenmsghdrCmd {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, FromBytes, Immutable, KnownLayout)]
+#[derive(Copy, Clone, FromZeroes, FromBytes)]
 struct AcpiGenlEvent {
-    device_class: [u8; 20],
-    bus_id: [u8; 15],
+    device_class: [::std::os::raw::c_char; 20usize],
+    bus_id: [::std::os::raw::c_char; 15usize],
     _type: u32,
     data: u32,
 }
@@ -64,11 +63,12 @@ impl AcpiNotifyEvent {
             return Err(AcpiEventError::InvalidMsgLen(msg_len));
         }
 
-        let (genl_hdr, nl_attr) = GenlMsgHdr::read_from_prefix(netlink_message.data)
+        let genl_hdr = GenlMsgHdr::read_from(&netlink_message.data[..GENL_HDRLEN])
             .expect("unable to get GenlMsgHdr from slice");
 
-        let (nl_attr, body) =
-            NlAttr::read_from_prefix(nl_attr).expect("unable to get NlAttr from slice");
+        let nlattr_end = GENL_HDRLEN + NLA_HDRLEN;
+        let nl_attr = NlAttr::read_from(&netlink_message.data[GENL_HDRLEN..nlattr_end])
+            .expect("unable to get NlAttr from slice");
 
         // Sanity check that the headers have correct for acpi event `cmd` and `_type`
         if genl_hdr.cmd != GenmsghdrCmd::AcpiGenlCmdEvent as u8
@@ -77,12 +77,21 @@ impl AcpiNotifyEvent {
             return Err(AcpiEventError::TypeAttrMissmatch);
         }
 
-        let acpi_event =
-            AcpiGenlEvent::read_from_bytes(body).expect("unable to get AcpiGenlEvent from slice");
+        let acpi_event = AcpiGenlEvent::read_from(&netlink_message.data[nlattr_end..msg_len])
+            .expect("unable to get AcpiGenlEvent from slice");
+
+        // The raw::c_char is either i8 or u8 which is known portability issue:
+        // https://github.com/rust-lang/rust/issues/79089,
+        // before using device_class further cast it to u8.
+        let device_class: &[u8; 20usize] =
+            // SAFETY: trivially safe
+            unsafe { ::std::mem::transmute(&acpi_event.device_class) };
+        // SAFETY: trivially safe
+        let bus_id: &[u8; 15usize] = unsafe { ::std::mem::transmute(&acpi_event.bus_id) };
 
         Ok(AcpiNotifyEvent {
-            device_class: strip_padding(&acpi_event.device_class).to_owned(),
-            bus_id: strip_padding(&acpi_event.bus_id).to_owned(),
+            device_class: strip_padding(device_class).to_owned(),
+            bus_id: strip_padding(bus_id).to_owned(),
             _type: acpi_event._type,
             data: acpi_event.data,
         })

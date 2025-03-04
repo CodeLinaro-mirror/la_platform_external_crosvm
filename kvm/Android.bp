@@ -35,7 +35,7 @@ rust_test {
         "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -62,7 +62,7 @@ rust_test {
         "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -89,7 +89,7 @@ rust_test {
         "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -116,7 +116,7 @@ rust_test {
         "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
 }
 
@@ -137,7 +137,7 @@ rust_library {
         "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy",
+        "libzerocopy-0.7.35",
     ],
     apex_available: ["com.android.virt"],
 }

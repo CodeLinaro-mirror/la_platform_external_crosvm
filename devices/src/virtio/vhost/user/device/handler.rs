@@ -277,6 +277,33 @@ impl VhostUserRegularOps {
             .collect();
         Ok((guest_mem, vmm_maps))
     }
+
+    pub fn set_vring_kick(_index: u8, file: Option<File>) -> VhostResult<Event> {
+        let file = file.ok_or(VhostError::InvalidParam("missing file for set_vring_kick"))?;
+        // Remove O_NONBLOCK from kick_fd. Otherwise, uring_executor will fails when we read
+        // values via `next_val()` later.
+        // This is only required (and can only be done) on Unix platforms.
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        if let Err(e) = clear_fd_flags(file.as_raw_fd(), libc::O_NONBLOCK) {
+            error!("failed to remove O_NONBLOCK for kick fd: {}", e);
+            return Err(VhostError::InvalidParam(
+                "could not remove O_NONBLOCK from vring_kick",
+            ));
+        }
+        Ok(Event::from(SafeDescriptor::from(file)))
+    }
+
+    pub fn set_vring_call(
+        _index: u8,
+        file: Option<File>,
+        signal_config_change_fn: Box<dyn Fn() + Send + Sync>,
+    ) -> VhostResult<Interrupt> {
+        let file = file.ok_or(VhostError::InvalidParam("missing file for set_vring_call"))?;
+        Ok(Interrupt::new_vhost_user(
+            Event::from(SafeDescriptor::from(file)),
+            signal_config_change_fn,
+        ))
+    }
 }
 
 /// An adapter that implements `vmm_vhost::Backend` for any type implementing `VhostUserDevice`.
@@ -551,20 +578,7 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
             return Err(VhostError::InvalidOperation);
         }
 
-        let file = file.ok_or(VhostError::InvalidParam("missing file for set_vring_kick"))?;
-
-        // Remove O_NONBLOCK from kick_fd. Otherwise, uring_executor will fails when we read
-        // values via `next_val()` later.
-        // This is only required (and can only be done) on Unix platforms.
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        if let Err(e) = clear_fd_flags(file.as_raw_fd(), libc::O_NONBLOCK) {
-            error!("failed to remove O_NONBLOCK for kick fd: {}", e);
-            return Err(VhostError::InvalidParam(
-                "could not remove O_NONBLOCK from vring_kick",
-            ));
-        }
-
-        let kick_evt = Event::from(SafeDescriptor::from(file));
+        let kick_evt = VhostUserRegularOps::set_vring_kick(index, file)?;
 
         // Enable any virtqueue features that were negotiated (like VIRTIO_RING_F_EVENT_IDX).
         vring.queue.ack_features(self.acked_features);
@@ -614,11 +628,8 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
             }
         });
 
-        let file = file.ok_or(VhostError::InvalidParam("missing file for set_vring_call"))?;
-        self.vrings[index as usize].doorbell = Some(Interrupt::new_vhost_user(
-            Event::from(SafeDescriptor::from(file)),
-            signal_config_change_fn,
-        ));
+        let doorbell = VhostUserRegularOps::set_vring_call(index, file, signal_config_change_fn)?;
+        self.vrings[index as usize].doorbell = Some(doorbell);
         Ok(())
     }
 
@@ -981,18 +992,16 @@ mod tests {
     use base::Event;
     use vmm_vhost::BackendServer;
     use vmm_vhost::FrontendReq;
+    use zerocopy::AsBytes;
     use zerocopy::FromBytes;
-    use zerocopy::FromZeros;
-    use zerocopy::Immutable;
-    use zerocopy::IntoBytes;
-    use zerocopy::KnownLayout;
+    use zerocopy::FromZeroes;
 
     use super::*;
     use crate::virtio::vhost_user_frontend::VhostUserFrontend;
     use crate::virtio::DeviceType;
     use crate::virtio::VirtioDevice;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, Immutable, IntoBytes, KnownLayout)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, AsBytes, FromZeroes, FromBytes)]
     #[repr(C, packed(4))]
     struct FakeConfig {
         x: u32,
@@ -1137,9 +1146,10 @@ mod tests {
                     .unwrap();
 
             println!("read_config");
-            let mut config = FakeConfig::new_zeroed();
-            vmm_device.read_config(0, config.as_mut_bytes());
+            let mut buf = vec![0; std::mem::size_of::<FakeConfig>()];
+            vmm_device.read_config(0, &mut buf);
             // Check if the obtained config data is correct.
+            let config = FakeConfig::read_from(buf.as_bytes()).unwrap();
             assert_eq!(config, FAKE_CONFIG_DATA);
 
             let activate = |vmm_device: &mut VhostUserFrontend| {

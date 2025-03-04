@@ -2,13 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Clone, Copy, Default, FromZeroes, FromBytes, AsBytes)]
 pub struct RSDP {
     pub signature: [u8; 8],
     pub checksum: u8,
@@ -47,7 +46,7 @@ impl RSDP {
 
 #[cfg(test)]
 mod tests {
-    use zerocopy::IntoBytes;
+    use zerocopy::AsBytes;
 
     use super::RSDP;
 

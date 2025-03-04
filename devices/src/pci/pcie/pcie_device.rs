@@ -6,10 +6,7 @@ use std::sync::Arc;
 
 use resources::SystemAllocator;
 use sync::Mutex;
-use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::AsBytes;
 
 use crate::pci::pci_configuration::PciCapConfig;
 use crate::pci::pci_configuration::PciCapConfigWriteResult;
@@ -55,7 +52,7 @@ pub trait PcieDevice: Send {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Clone, Copy, AsBytes)]
 pub struct PcieCap {
     _cap_vndr: u8,
     _cap_next: u8,

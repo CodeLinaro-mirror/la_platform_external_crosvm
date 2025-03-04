@@ -36,10 +36,7 @@ use vm_memory::GuestMemory;
 use windows::Win32::System::Memory::VirtualLock;
 #[cfg(windows)]
 use windows::Win32::System::Memory::VirtualUnlock;
-use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::AsBytes;
 
 const FLAGS_IF_BIT: u64 = 0x200;
 
@@ -52,7 +49,7 @@ pub enum HypervisorType {
 }
 
 #[repr(C, packed)]
-#[derive(FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(AsBytes)]
 /// Define IDTR value used in real mode or 32bit protected mode.
 struct Idtr32 {
     // The lower 2 bytes are limit.
@@ -62,7 +59,7 @@ struct Idtr32 {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(AsBytes, Debug, Copy, Clone)]
 /// IDT entries for long mode.
 struct IdtEntry64 {
     address_low: u16,
@@ -506,7 +503,7 @@ impl ModeConfig {
         if long_mode && s == 0 {
             // 64 bit system segment descriptor.
             #[repr(C, packed)]
-            #[derive(FromBytes, Immutable, IntoBytes, KnownLayout)]
+            #[derive(AsBytes)]
             struct Descriptor {
                 limit_lo: u16,
                 base_lo: u16,
@@ -532,7 +529,7 @@ impl ModeConfig {
             .to_owned()
         } else {
             #[repr(C, packed)]
-            #[derive(FromBytes, Immutable, IntoBytes, KnownLayout)]
+            #[derive(AsBytes)]
             struct Descriptor {
                 limit_lo: u16,
                 base_lo: u16,

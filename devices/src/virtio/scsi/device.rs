@@ -49,10 +49,9 @@ use virtio_sys::virtio_scsi::VIRTIO_SCSI_T_TMF;
 use virtio_sys::virtio_scsi::VIRTIO_SCSI_T_TMF_I_T_NEXUS_RESET;
 use virtio_sys::virtio_scsi::VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use crate::virtio::async_utils;
 use crate::virtio::block::sys::get_seg_max;
@@ -99,7 +98,7 @@ const MAX_SECTORS: u32 = u32::MAX;
 const FIXED_FORMAT_SENSE_SIZE: u32 = 18;
 
 #[repr(C, packed)]
-#[derive(Debug, Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, Default, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 struct VirtioScsiCmdReqHeader {
     lun: [u8; 8usize],
     tag: u64,
@@ -109,7 +108,7 @@ struct VirtioScsiCmdReqHeader {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, Default, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 struct VirtioScsiCmdRespHeader {
     sense_len: u32,
     resid: u32,
@@ -612,11 +611,32 @@ impl VirtioDevice for Controller {
     }
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
-        let mut config = self.build_config_space();
-        copy_config(config.as_mut_bytes(), offset, data, 0);
-        // Only `sense_size` and `cdb_size` are modifiable by the driver.
-        self.sense_size = config.sense_size;
-        self.cdb_size = config.cdb_size;
+        let mut config = [0; std::mem::size_of::<virtio_scsi_config>()];
+        copy_config(&mut config, offset, data, 0);
+        let config = match virtio_scsi_config::read_from(&config) {
+            Some(cfg) => cfg,
+            None => {
+                warn!("failed to parse virtio_scsi_config");
+                return;
+            }
+        };
+
+        let mut updated = [0; std::mem::size_of::<virtio_scsi_config>()];
+        updated[offset as usize..offset as usize + data.len()].fill(1);
+        let updated = match virtio_scsi_config::read_from(&updated) {
+            Some(cfg) => cfg,
+            None => {
+                warn!("failed to parse virtio_scsi_config");
+                return;
+            }
+        };
+
+        if updated.sense_size != 0 {
+            self.sense_size = config.sense_size;
+        }
+        if updated.cdb_size != 0 {
+            self.cdb_size = config.cdb_size;
+        }
     }
 
     fn activate(

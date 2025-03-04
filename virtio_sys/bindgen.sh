@@ -35,16 +35,15 @@ bindgen_generate \
 
 VIRTIO_FS_EXTRA="// Added by virtio_sys/bindgen.sh
 use data_model::Le32;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;"
+use zerocopy::FromZeroes;"
 
 bindgen_generate \
     --raw-line "${VIRTIO_FS_EXTRA}" \
     --allowlist-var='VIRTIO_FS_.*' \
     --allowlist-type='virtio_fs_.*' \
-    --with-derive-custom "virtio_fs_config=FromBytes,Immutable,IntoBytes,KnownLayout" \
+    --with-derive-custom "virtio_fs_config=FromZeroes,FromBytes,AsBytes" \
     "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_fs.h" \
     -- \
     -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
@@ -75,18 +74,17 @@ bindgen_generate \
     > virtio_sys/src/virtio_ids.rs
 
 VIRTIO_NET_EXTRA="// Added by virtio_sys/bindgen.sh
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;"
+use zerocopy::FromZeroes;"
 
 bindgen_generate \
     --raw-line "${VIRTIO_NET_EXTRA}" \
     --allowlist-var='VIRTIO_NET_.*' \
     --allowlist-type='virtio_net_.*' \
     --blocklist-type='virtio_net_ctrl_mac' \
-    --with-derive-custom "virtio_net_hdr=FromBytes,Immutable,IntoBytes,KnownLayout" \
-    --with-derive-custom "virtio_net_hdr_mrg_rxbuf=FromBytes,Immutable,IntoBytes,KnownLayout" \
+    --with-derive-custom "virtio_net_hdr=FromZeroes,FromBytes,AsBytes" \
+    --with-derive-custom "virtio_net_hdr_mrg_rxbuf=FromZeroes,FromBytes,AsBytes" \
     "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_net.h" \
     -- \
     -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
@@ -116,16 +114,13 @@ VIRTIO_VSOCK_EXTRA="// Added by virtio_sys/bindgen.sh
 use data_model::Le16;
 use data_model::Le32;
 use data_model::Le64;
-use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;"
+use zerocopy::AsBytes;"
 
 bindgen_generate \
     --raw-line "${VIRTIO_VSOCK_EXTRA}" \
     --allowlist-var='VIRTIO_VSOCK_.*' \
     --allowlist-type='virtio_vsock_.*' \
-    --with-derive-custom "virtio_vsock_event=FromBytes,Immutable,IntoBytes,KnownLayout" \
+    --with-derive-custom "virtio_vsock_event=AsBytes" \
     "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_vsock.h" \
     -- \
     -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \
@@ -134,23 +129,22 @@ bindgen_generate \
     > virtio_sys/src/virtio_vsock.rs
 
 VIRTIO_SCSI_EXTRA="// Added by virtio_sys/bindgen.sh
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;"
+use zerocopy::FromZeroes;"
 
 bindgen_generate \
     --raw-line "${VIRTIO_SCSI_EXTRA}" \
     --allowlist-var='VIRTIO_SCSI_.*' \
     --allowlist-type='virtio_scsi_.*' \
     --blocklist-type='virtio_scsi_cmd_req_pi' \
-    --with-derive-custom "virtio_scsi_config=FromBytes,Immutable,IntoBytes,KnownLayout" \
-    --with-derive-custom "virtio_scsi_cmd_req=FromBytes,Immutable,IntoBytes,KnownLayout" \
-    --with-derive-custom "virtio_scsi_cmd_resp=FromBytes,Immutable,IntoBytes,KnownLayout" \
-    --with-derive-custom "virtio_scsi_ctrl_tmf_req=FromBytes,Immutable,IntoBytes,KnownLayout" \
-    --with-derive-custom "virtio_scsi_ctrl_an_req=FromBytes,Immutable,IntoBytes,KnownLayout" \
-    --with-derive-custom "virtio_scsi_ctrl_tmf_resp=FromBytes,Immutable,IntoBytes,KnownLayout" \
-    --with-derive-custom "virtio_scsi_ctrl_an_resp=FromBytes,Immutable,IntoBytes,KnownLayout" \
+    --with-derive-custom "virtio_scsi_config=FromZeroes,FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_cmd_req=FromZeroes,FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_cmd_resp=FromZeroes,FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_ctrl_tmf_req=FromZeroes,FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_ctrl_an_req=FromZeroes,FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_ctrl_tmf_resp=FromZeroes,FromBytes,AsBytes" \
+    --with-derive-custom "virtio_scsi_ctrl_an_resp=FromZeroes,FromBytes,AsBytes" \
     "${BINDGEN_LINUX_X86_HEADERS}/include/linux/virtio_scsi.h" \
     -- \
     -isystem "${BINDGEN_LINUX_X86_HEADERS}/include" \

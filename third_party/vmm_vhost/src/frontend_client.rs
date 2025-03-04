@@ -6,8 +6,7 @@ use std::string::ToString;
 
 use base::AsRawDescriptor;
 use base::RawDescriptor;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
+use zerocopy::AsBytes;
 
 use crate::message::*;
 use crate::BackendReq;
@@ -45,7 +44,7 @@ impl FrontendClient {
         fds: Option<&[RawDescriptor]>,
     ) -> HandlerResult<u64>
     where
-        T: IntoBytes + Immutable,
+        T: AsBytes,
     {
         let len = mem::size_of::<T>();
         let mut hdr = VhostUserMsgHeader::new(request, 0, len as u32);

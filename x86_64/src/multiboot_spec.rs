@@ -6,15 +6,14 @@
 //!
 //! <https://www.gnu.org/software/grub/manual/multiboot/multiboot.html>
 
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 /// Magic value stored in EAX to indicate bootloader is Multiboot compliant.
 pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BADB002;
 
-#[derive(Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, Default, AsBytes, FromBytes, FromZeroes)]
 #[repr(C, packed)]
 pub struct MultibootInfo {
     pub flags: u32,
@@ -78,7 +77,7 @@ impl MultibootInfo {
     pub const F_FRAMEBUFFER: u32 = 1 << 12;
 }
 
-#[derive(Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, Default, AsBytes, FromBytes, FromZeroes)]
 #[repr(C, packed)]
 pub struct MultibootMmapEntry {
     pub size: u32,

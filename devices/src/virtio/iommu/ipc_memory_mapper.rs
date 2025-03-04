@@ -23,10 +23,8 @@ use smallvec::SmallVec;
 use sync::Mutex;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeros;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
 
 use crate::virtio::memory_mapper::MemRegion;
 
@@ -279,23 +277,22 @@ impl ExportedRegion {
 
     /// Reads an object from the given iova. Fails if the specified iova range does
     /// not lie within this region, or if part of the region isn't readable.
-    pub fn read_obj_from_addr<T: IntoBytes + FromBytes + FromZeros>(
+    pub fn read_obj_from_addr<T: FromBytes>(
         &self,
         mem: &GuestMemory,
         iova: u64,
     ) -> anyhow::Result<T> {
-        let mut val = T::new_zeroed();
-        let buf = val.as_mut_bytes();
+        let mut buf = vec![0u8; std::mem::size_of::<T>()];
         self.do_copy(iova, buf.len(), Protection::read(), |offset, gpa, len| {
             mem.read_at_addr(&mut buf[offset..(offset + len)], gpa)
                 .context("failed to read from gpa")
         })?;
-        Ok(val)
+        T::read_from(buf.as_bytes()).context("failed to construct obj")
     }
 
     /// Writes an object at a given iova. Fails if the specified iova range does
     /// not lie within this region, or if part of the region isn't writable.
-    pub fn write_obj_at_addr<T: Immutable + IntoBytes>(
+    pub fn write_obj_at_addr<T: AsBytes>(
         &self,
         mem: &GuestMemory,
         val: T,

@@ -25,10 +25,9 @@ use disk::AsyncDisk;
 use smallvec::SmallVec;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use super::DescriptorChain;
 use crate::virtio::SplitDescriptorChain;
@@ -534,7 +533,7 @@ impl Writer {
     }
 
     /// Writes an object to the descriptor chain buffer.
-    pub fn write_obj<T: Immutable + IntoBytes>(&mut self, val: T) -> io::Result<()> {
+    pub fn write_obj<T: AsBytes>(&mut self, val: T) -> io::Result<()> {
         self.write_all(val.as_bytes())
     }
 
@@ -542,18 +541,12 @@ impl Writer {
     /// this doesn't require the values to be stored in an intermediate collection first. It also
     /// allows callers to choose which elements in a collection to write, for example by using the
     /// `filter` or `take` methods of the `Iterator` trait.
-    pub fn write_iter<T: Immutable + IntoBytes, I: Iterator<Item = T>>(
-        &mut self,
-        mut iter: I,
-    ) -> io::Result<()> {
+    pub fn write_iter<T: AsBytes, I: Iterator<Item = T>>(&mut self, mut iter: I) -> io::Result<()> {
         iter.try_for_each(|v| self.write_obj(v))
     }
 
     /// Writes a collection of objects into the descriptor chain buffer.
-    pub fn consume<T: Immutable + IntoBytes, C: IntoIterator<Item = T>>(
-        &mut self,
-        vals: C,
-    ) -> io::Result<()> {
+    pub fn consume<T: AsBytes, C: IntoIterator<Item = T>>(&mut self, vals: C) -> io::Result<()> {
         self.write_iter(vals.into_iter())
     }
 
@@ -773,7 +766,7 @@ pub enum DescriptorType {
     Writable,
 }
 
-#[derive(Copy, Clone, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 struct virtq_desc {
     addr: Le64,

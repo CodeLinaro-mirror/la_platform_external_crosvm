@@ -53,10 +53,9 @@ use vm_control::api::VmMemoryClient;
 use vm_control::RegisteredEventWithData;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use super::async_utils;
 use super::copy_config;
@@ -136,7 +135,7 @@ pub enum BalloonFeatures {
 }
 
 // virtio_balloon_config is the balloon device configuration space defined by the virtio spec.
-#[derive(Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
 #[repr(C)]
 struct virtio_balloon_config {
     num_pages: Le32,
@@ -176,7 +175,7 @@ const VIRTIO_BALLOON_S_NONSTANDARD_SHMEM: u16 = 65534;
 const VIRTIO_BALLOON_S_NONSTANDARD_UNEVICTABLE: u16 = 65535;
 
 // BalloonStat is used to deserialize stats from the stats_queue.
-#[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct BalloonStat {
     tag: Le16,
@@ -206,7 +205,7 @@ impl BalloonStat {
 
 // virtio_balloon_ws is used to deserialize from the ws data vq.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
 struct virtio_balloon_ws {
     tag: Le16,
     node_id: Le16,
@@ -238,7 +237,7 @@ const _VIRTIO_BALLOON_WS_OP_DISCARD: u16 = 3;
 
 // virtio_balloon_op is used to serialize to the ws cmd vq.
 #[repr(C, packed)]
-#[derive(Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Copy, Clone, Debug, Default, AsBytes, FromZeroes, FromBytes)]
 struct virtio_balloon_op {
     type_: Le16,
 }
@@ -1410,7 +1409,7 @@ impl VirtioDevice for Balloon {
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         let mut config = self.get_config();
-        copy_config(config.as_mut_bytes(), offset, data, 0);
+        copy_config(config.as_bytes_mut(), offset, data, 0);
         let mut state = block_on(self.state.lock());
         state.actual_pages = config.actual.to_native();
 

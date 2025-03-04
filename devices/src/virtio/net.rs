@@ -45,10 +45,9 @@ use virtio_sys::virtio_net::VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET;
 use virtio_sys::virtio_net::VIRTIO_NET_ERR;
 use virtio_sys::virtio_net::VIRTIO_NET_OK;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use super::copy_config;
 use super::DeviceType;
@@ -219,13 +218,13 @@ impl FromStr for NetParameters {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, Clone, Copy, AsBytes, FromZeroes, FromBytes)]
 pub struct virtio_net_ctrl_hdr {
     pub class: u8,
     pub cmd: u8,
 }
 
-#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, Clone, Copy, Default, AsBytes, FromZeroes, FromBytes)]
 #[repr(C)]
 pub struct VirtioNetConfig {
     mac: [u8; 6],

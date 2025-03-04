@@ -19,10 +19,9 @@ use thiserror::Error as ThisError;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use crate::virtio::resource_bridge;
 use crate::virtio::resource_bridge::ResourceBridgeError;
@@ -45,19 +44,27 @@ pub enum ResourceType {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Clone, Copy, AsBytes, FromZeroes, FromBytes)]
 /// A guest resource entry which type is not decided yet.
-pub struct UnresolvedResourceEntry([u8; 16]);
+pub union UnresolvedResourceEntry {
+    pub object: virtio_video_object_entry,
+    pub guest_mem: virtio_video_mem_entry,
+}
 
 impl fmt::Debug for UnresolvedResourceEntry {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "unresolved {:?}", self.0)
-    }
-}
-
-impl UnresolvedResourceEntry {
-    pub fn object(&self) -> virtio_video_object_entry {
-        virtio_video_object_entry::read_from_bytes(&self.0).unwrap()
+        write!(
+            f,
+            "unresolved {:?} or {:?}",
+            // SAFETY:
+            // Safe because `self.object` and `self.guest_mem` are the same size and both made of
+            // integers, making it safe to display them no matter their value.
+            unsafe { self.object },
+            // SAFETY:
+            // Safe because `self.object` and `self.guest_mem` are the same size and both made of
+            // integers, making it safe to display them no matter their value.
+            unsafe { self.guest_mem }
+        )
     }
 }
 

@@ -25,7 +25,7 @@ pub use sys::start_device as run_net_device;
 pub use sys::Options;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
-use zerocopy::IntoBytes;
+use zerocopy::AsBytes;
 
 use crate::virtio;
 use crate::virtio::net::build_config;

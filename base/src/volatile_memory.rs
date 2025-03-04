@@ -31,8 +31,9 @@ use std::slice;
 
 use remain::sorted;
 use thiserror::Error;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::IntoBytes;
+use zerocopy::Ref;
 
 use crate::IoBufMut;
 
@@ -230,7 +231,7 @@ impl<'a> VolatileSlice<'a> {
     /// ```
     pub fn copy_to<T>(&self, buf: &mut [T])
     where
-        T: FromBytes + IntoBytes + Copy,
+        T: FromBytes + AsBytes + Copy,
     {
         let mut addr = self.as_mut_ptr() as *const u8;
         for v in buf.iter_mut().take(self.size() / size_of::<T>()) {
@@ -295,13 +296,16 @@ impl<'a> VolatileSlice<'a> {
     /// ```
     pub fn copy_from<T>(&self, buf: &[T])
     where
-        T: IntoBytes + Copy,
+        T: FromBytes + AsBytes,
     {
         let mut addr = self.as_mut_ptr();
         for v in buf.iter().take(self.size() / size_of::<T>()) {
             // SAFETY: Safe because buf is valid, aligned to type `T` and is mutable.
             unsafe {
-                write_volatile(addr as *mut T, *v);
+                write_volatile(
+                    addr as *mut T,
+                    Ref::<_, T>::new(v.as_bytes()).unwrap().read(),
+                );
                 addr = addr.add(size_of::<T>());
             }
         }

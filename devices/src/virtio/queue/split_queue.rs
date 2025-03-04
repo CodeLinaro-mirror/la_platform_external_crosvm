@@ -18,10 +18,9 @@ use snapshot::AnySnapshot;
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use crate::virtio::DescriptorChain;
 use crate::virtio::Interrupt;
@@ -79,7 +78,7 @@ pub struct SplitQueueSnapshot {
 }
 
 #[repr(C)]
-#[derive(FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(AsBytes, FromZeroes, FromBytes)]
 struct virtq_used_elem {
     id: Le32,
     len: Le32,
@@ -573,10 +572,8 @@ mod tests {
     use data_model::Le16;
     use data_model::Le32;
     use data_model::Le64;
+    use zerocopy::AsBytes;
     use zerocopy::FromBytes;
-    use zerocopy::Immutable;
-    use zerocopy::IntoBytes;
-    use zerocopy::KnownLayout;
 
     use super::*;
     use crate::virtio::create_descriptor_chain;
@@ -592,7 +589,7 @@ mod tests {
     const BUFFER_OFFSET: u64 = 0x8000;
     const BUFFER_LEN: u32 = 0x400;
 
-    #[derive(Copy, Clone, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
+    #[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
     #[repr(C)]
     struct Avail {
         flags: Le16,
@@ -612,7 +609,7 @@ mod tests {
         }
     }
 
-    #[derive(Copy, Clone, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
+    #[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
     #[repr(C)]
     struct UsedElem {
         id: Le32,
@@ -628,7 +625,7 @@ mod tests {
         }
     }
 
-    #[derive(Copy, Clone, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
+    #[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
     #[repr(C, packed)]
     struct Used {
         flags: Le16,

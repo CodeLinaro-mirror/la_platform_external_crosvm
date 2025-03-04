@@ -10,14 +10,13 @@
 
 // Added by virtio_sys/bindgen.sh
 use data_model::Le32;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 pub const VIRTIO_FS_SHMCAP_ID_CACHE: u32 = 0;
 #[repr(C, packed)]
-#[derive(Debug, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 pub struct virtio_fs_config {
     pub tag: [u8; 36usize],
     pub num_request_queues: Le32,

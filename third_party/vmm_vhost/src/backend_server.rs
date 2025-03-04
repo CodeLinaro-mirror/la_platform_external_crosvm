@@ -7,9 +7,8 @@ use std::mem;
 use base::AsRawDescriptor;
 use base::RawDescriptor;
 use base::SafeDescriptor;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
 use zerocopy::Ref;
 
 use crate::into_single_file;
@@ -696,7 +695,7 @@ impl<S: Backend> BackendServer<S> {
         Ok(())
     }
 
-    fn send_reply_message<T: IntoBytes + Immutable>(
+    fn send_reply_message<T: Sized + AsBytes>(
         &mut self,
         req: &VhostUserMsgHeader<FrontendReq>,
         msg: &T,
@@ -706,7 +705,7 @@ impl<S: Backend> BackendServer<S> {
         Ok(())
     }
 
-    fn send_reply_with_payload<T: IntoBytes + Immutable>(
+    fn send_reply_with_payload<T: Sized + AsBytes>(
         &mut self,
         req: &VhostUserMsgHeader<FrontendReq>,
         msg: &T,
@@ -728,7 +727,7 @@ impl<S: Backend> BackendServer<S> {
         self.check_request_size(hdr, size, hdr.get_size() as usize)?;
 
         let (msg, regions) =
-            Ref::<_, VhostUserMemory>::from_prefix(buf).map_err(|_| Error::InvalidMessage)?;
+            Ref::<_, VhostUserMemory>::new_from_prefix(buf).ok_or(Error::InvalidMessage)?;
         if !msg.is_valid() {
             return Err(Error::InvalidMessage);
         }
@@ -738,11 +737,11 @@ impl<S: Backend> BackendServer<S> {
             return Err(Error::InvalidMessage);
         }
 
-        let (regions, excess) = Ref::<_, [VhostUserMemoryRegion]>::from_prefix_with_elems(
+        let (regions, excess) = Ref::<_, [VhostUserMemoryRegion]>::new_slice_from_prefix(
             regions,
             msg.num_regions as usize,
         )
-        .map_err(|_| Error::InvalidMessage)?;
+        .ok_or(Error::InvalidMessage)?;
         if !excess.is_empty() {
             return Err(Error::InvalidMessage);
         }
@@ -759,7 +758,7 @@ impl<S: Backend> BackendServer<S> {
 
     fn get_config(&mut self, hdr: &VhostUserMsgHeader<FrontendReq>, buf: &[u8]) -> Result<()> {
         let (msg, payload) =
-            Ref::<_, VhostUserConfig>::from_prefix(buf).map_err(|_| Error::InvalidMessage)?;
+            Ref::<_, VhostUserConfig>::new_from_prefix(buf).ok_or(Error::InvalidMessage)?;
         if !msg.is_valid() {
             return Err(Error::InvalidMessage);
         }
@@ -793,7 +792,7 @@ impl<S: Backend> BackendServer<S> {
 
     fn set_config(&mut self, buf: &[u8]) -> Result<()> {
         let (msg, payload) =
-            Ref::<_, VhostUserConfig>::from_prefix(buf).map_err(|_| Error::InvalidMessage)?;
+            Ref::<_, VhostUserConfig>::new_from_prefix(buf).ok_or(Error::InvalidMessage)?;
         if !msg.is_valid() {
             return Err(Error::InvalidMessage);
         }
@@ -823,7 +822,7 @@ impl<S: Backend> BackendServer<S> {
         buf: &[u8],
         files: Vec<File>,
     ) -> Result<(u8, Option<File>)> {
-        let (msg, _) = VhostUserU64::read_from_prefix(buf).map_err(|_| Error::InvalidMessage)?;
+        let msg = VhostUserU64::read_from_prefix(buf).ok_or(Error::InvalidMessage)?;
         if !msg.is_valid() {
             return Err(Error::InvalidMessage);
         }
@@ -890,12 +889,9 @@ impl<S: Backend> BackendServer<S> {
         buf: &[u8],
     ) -> Result<T> {
         self.check_request_size(hdr, size, mem::size_of::<T>())?;
-        let (body, _) = T::read_from_prefix(buf).map_err(|_| Error::InvalidMessage)?;
-        if body.is_valid() {
-            Ok(body)
-        } else {
-            Err(Error::InvalidMessage)
-        }
+        T::read_from_prefix(buf)
+            .filter(T::is_valid)
+            .ok_or(Error::InvalidMessage)
     }
 
     fn update_reply_ack_flag(&mut self) {

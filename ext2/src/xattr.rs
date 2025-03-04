@@ -12,10 +12,9 @@ use std::path::Path;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use crate::inode::Inode;
 
@@ -153,7 +152,7 @@ pub fn set_xattr(path: &Path, key: &str, value: &str) -> Result<()> {
 }
 
 #[repr(C)]
-#[derive(Default, Debug, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Debug, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 pub(crate) struct XattrEntry {
     name_len: u8,
     name_index: u8,

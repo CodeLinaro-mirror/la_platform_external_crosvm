@@ -15,10 +15,9 @@ use data_model::Le32;
 use data_model::Le64;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use crate::virtio::descriptor_chain::Descriptor;
 use crate::virtio::descriptor_chain::DescriptorAccess;
@@ -27,7 +26,7 @@ use crate::virtio::descriptor_chain::VIRTQ_DESC_F_NEXT;
 use crate::virtio::descriptor_chain::VIRTQ_DESC_F_WRITE;
 
 /// A single virtio split queue descriptor (`struct virtq_desc` in the spec).
-#[derive(Copy, Clone, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Copy, Clone, Debug, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 pub struct Desc {
     /// Guest address of memory described by this descriptor.

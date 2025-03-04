@@ -12,10 +12,9 @@ use thiserror::Error;
 use uuid::Uuid;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 #[sorted]
 #[derive(Error, Debug)]
@@ -82,7 +81,7 @@ fn compute_checksum<T: Copy>(v: &T) -> u8 {
 }
 
 #[repr(C, packed)]
-#[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct Smbios23Intermediate {
     pub signature: [u8; 5usize],
     pub checksum: u8,
@@ -93,7 +92,7 @@ pub struct Smbios23Intermediate {
 }
 
 #[repr(C, packed)]
-#[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct Smbios23Entrypoint {
     pub signature: [u8; 4usize],
     pub checksum: u8,
@@ -107,7 +106,7 @@ pub struct Smbios23Entrypoint {
 }
 
 #[repr(C, packed)]
-#[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct Smbios30Entrypoint {
     pub signature: [u8; 5usize],
     pub checksum: u8,
@@ -122,7 +121,7 @@ pub struct Smbios30Entrypoint {
 }
 
 #[repr(C, packed)]
-#[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct SmbiosBiosInfo {
     pub typ: u8,
     pub length: u8,
@@ -138,7 +137,7 @@ pub struct SmbiosBiosInfo {
 }
 
 #[repr(C, packed)]
-#[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct SmbiosSysInfo {
     pub typ: u8,
     pub length: u8,
@@ -154,7 +153,7 @@ pub struct SmbiosSysInfo {
 }
 
 #[repr(C, packed)]
-#[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct SmbiosOemStrings {
     pub typ: u8,
     pub length: u8,
@@ -163,14 +162,14 @@ pub struct SmbiosOemStrings {
 }
 
 #[repr(C, packed)]
-#[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Default, Clone, Copy, FromZeroes, FromBytes, AsBytes)]
 pub struct SmbiosEndOfTable {
     pub typ: u8,
     pub length: u8,
     pub handle: u16,
 }
 
-fn write_and_incr<T: Immutable + IntoBytes + FromBytes>(
+fn write_and_incr<T: AsBytes + FromBytes>(
     mem: &GuestMemory,
     val: T,
     mut curptr: GuestAddress,

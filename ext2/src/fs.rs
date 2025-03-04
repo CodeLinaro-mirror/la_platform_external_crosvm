@@ -18,10 +18,9 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use base::info;
+use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::Immutable;
-use zerocopy::IntoBytes;
-use zerocopy::KnownLayout;
+use zerocopy::FromZeroes;
 
 use crate::arena::Arena;
 use crate::arena::BlockId;
@@ -38,7 +37,7 @@ use crate::superblock::SuperBlock;
 use crate::xattr::InlineXattrs;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(Copy, Clone, FromZeroes, FromBytes, AsBytes, Debug)]
 struct DirEntryRaw {
     inode: u32,
     rec_len: u16,

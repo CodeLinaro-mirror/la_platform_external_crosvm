@@ -34,7 +34,7 @@ use futures::StreamExt;
 use thiserror::Error as ThisError;
 use vm_control::SndControlCommand;
 use vm_control::VmResponse;
-use zerocopy::IntoBytes;
+use zerocopy::AsBytes;
 
 use super::Error;
 use super::SndData;

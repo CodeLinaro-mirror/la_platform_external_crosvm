@@ -575,7 +575,7 @@ impl<D: DecoderBackend> Decoder<D> {
                     // Safe because we confirmed the correct type for the resource.
                     // unwrap() is also safe here because we just tested above that `entries` had
                     // exactly one element.
-                    entries.first().unwrap().object(),
+                    unsafe { entries.first().unwrap().object },
                     &self.resource_bridge,
                     params,
                 )

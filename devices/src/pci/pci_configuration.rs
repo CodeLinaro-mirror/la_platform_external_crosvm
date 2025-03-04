@@ -1097,15 +1097,12 @@ impl PciCapMapping {
 
 #[cfg(test)]
 mod tests {
-    use zerocopy::FromBytes;
-    use zerocopy::Immutable;
-    use zerocopy::IntoBytes;
-    use zerocopy::KnownLayout;
+    use zerocopy::AsBytes;
 
     use super::*;
 
     #[repr(C, packed)]
-    #[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
+    #[derive(Clone, Copy, AsBytes)]
     #[allow(dead_code)]
     struct TestCap {
         _vndr: u8,

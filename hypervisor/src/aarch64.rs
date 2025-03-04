@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fmt::Debug;
 
-use anyhow::Context;
 use base::Error;
 use base::Result;
 use cros_fdt::Fdt;
@@ -268,36 +267,22 @@ pub trait VcpuAArch64: Vcpu {
     fn snapshot(&self) -> anyhow::Result<VcpuSnapshot> {
         let mut snap = VcpuSnapshot {
             vcpu_id: self.id(),
-            sp: self
-                .get_one_reg(VcpuRegAArch64::Sp)
-                .context("Failed to get SP")?,
-            pc: self
-                .get_one_reg(VcpuRegAArch64::Pc)
-                .context("Failed to get PC")?,
-            pstate: self
-                .get_one_reg(VcpuRegAArch64::Pstate)
-                .context("Failed to get PState")?,
+            sp: self.get_one_reg(VcpuRegAArch64::Sp)?,
+            pc: self.get_one_reg(VcpuRegAArch64::Pc)?,
+            pstate: self.get_one_reg(VcpuRegAArch64::Pstate)?,
             x: Default::default(),
             v: Default::default(),
-            hypervisor_data: self
-                .hypervisor_specific_snapshot()
-                .context("Failed to get hyprevisor specific data")?,
-            sys: self
-                .get_system_regs()
-                .context("Failed to read system registers")?,
-            cache_arch_info: self.get_cache_info().context("Failed to get cache info")?,
+            hypervisor_data: self.hypervisor_specific_snapshot()?,
+            sys: self.get_system_regs()?,
+            cache_arch_info: self.get_cache_info()?,
         };
 
         for (n, xn) in snap.x.iter_mut().enumerate() {
-            *xn = self
-                .get_one_reg(VcpuRegAArch64::X(n as u8))
-                .with_context(|| format!("Failed to get X{}", n))?;
+            *xn = self.get_one_reg(VcpuRegAArch64::X(n as u8))?;
         }
 
         for (n, vn) in snap.v.iter_mut().enumerate() {
-            *vn = self
-                .get_vector_reg(n as u8)
-                .with_context(|| format!("Failed to get V{}", n))?;
+            *vn = self.get_vector_reg(n as u8)?;
         }
 
         Ok(snap)
@@ -305,29 +290,21 @@ pub trait VcpuAArch64: Vcpu {
 
     /// Restore VCPU
     fn restore(&self, snapshot: &VcpuSnapshot) -> anyhow::Result<()> {
-        self.set_one_reg(VcpuRegAArch64::Sp, snapshot.sp)
-            .context("Failed to restore SP register")?;
-        self.set_one_reg(VcpuRegAArch64::Pc, snapshot.pc)
-            .context("Failed to restore PC register")?;
-        self.set_one_reg(VcpuRegAArch64::Pstate, snapshot.pstate)
-            .context("Failed to restore PState register")?;
+        self.set_one_reg(VcpuRegAArch64::Sp, snapshot.sp)?;
+        self.set_one_reg(VcpuRegAArch64::Pc, snapshot.pc)?;
+        self.set_one_reg(VcpuRegAArch64::Pstate, snapshot.pstate)?;
 
         for (n, xn) in snapshot.x.iter().enumerate() {
-            self.set_one_reg(VcpuRegAArch64::X(n as u8), *xn)
-                .with_context(|| format!("Failed to restore X{}", n))?;
+            self.set_one_reg(VcpuRegAArch64::X(n as u8), *xn)?;
         }
         for (n, vn) in snapshot.v.iter().enumerate() {
-            self.set_vector_reg(n as u8, *vn)
-                .with_context(|| format!("Failed to restore V{}", n))?;
+            self.set_vector_reg(n as u8, *vn)?;
         }
         for (id, val) in &snapshot.sys {
-            self.set_one_reg(VcpuRegAArch64::System(*id), *val)
-                .with_context(|| format!("Failed to restore system register {:?}", id))?;
+            self.set_one_reg(VcpuRegAArch64::System(*id), *val)?;
         }
-        self.set_cache_info(snapshot.cache_arch_info.clone())
-            .context("Failed to restore cache info")?;
-        self.hypervisor_specific_restore(snapshot.hypervisor_data.clone())
-            .context("Failed to restore hypervisor specific data")?;
+        self.set_cache_info(snapshot.cache_arch_info.clone())?;
+        self.hypervisor_specific_restore(snapshot.hypervisor_data.clone())?;
         Ok(())
     }
 }
