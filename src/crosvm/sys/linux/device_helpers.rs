@@ -143,6 +143,8 @@ pub enum DeviceControlTube {
     // Sends `PvClockCommand`.
     #[cfg(feature = "pvclock")]
     PvClock(Tube),
+    #[cfg(feature = "audio")]
+    Snd(Tube),
 }
 
 /// Tubes that service requests from devices.
@@ -208,7 +210,7 @@ pub trait IntoUnixStream {
     fn into_unix_stream(self) -> Result<UnixStream>;
 }
 
-impl<'a> IntoUnixStream for &'a Path {
+impl IntoUnixStream for &Path {
     fn into_unix_stream(self) -> Result<UnixStream> {
         if let Some(fd) = safe_descriptor_from_path(self)
             .with_context(|| format!("failed to open event device '{}'", self.display()))?
@@ -221,7 +223,7 @@ impl<'a> IntoUnixStream for &'a Path {
     }
 }
 
-impl<'a> IntoUnixStream for &'a PathBuf {
+impl IntoUnixStream for &PathBuf {
     fn into_unix_stream(self) -> Result<UnixStream> {
         self.as_path().into_unix_stream()
     }
@@ -267,7 +269,7 @@ pub trait VirtioDeviceBuilder: Sized {
     /// base name of the device.
     fn create_jail(
         &self,
-        jail_config: &Option<JailConfig>,
+        jail_config: Option<&JailConfig>,
         virtio_transport: VirtioDeviceType,
     ) -> anyhow::Result<Option<Minijail>> {
         simple_jail(
@@ -283,7 +285,7 @@ pub trait VirtioDeviceBuilder: Sized {
     fn create_virtio_device_and_jail(
         self,
         protection_type: ProtectionType,
-        jail_config: &Option<JailConfig>,
+        jail_config: Option<&JailConfig>,
     ) -> DeviceResult {
         let jail = self.create_jail(jail_config, VirtioDeviceType::Regular)?;
         let dev = self.create_virtio_device(protection_type)?;
@@ -306,7 +308,7 @@ impl<'a> DiskConfig<'a> {
     }
 }
 
-impl<'a> VirtioDeviceBuilder for DiskConfig<'a> {
+impl VirtioDeviceBuilder for DiskConfig<'_> {
     const NAME: &'static str = "block";
 
     fn create_virtio_device(
@@ -504,7 +506,7 @@ pub fn create_vhost_user_fs_device(
 
 pub fn create_rng_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
 ) -> DeviceResult {
     let dev =
         virtio::Rng::new(virtio::base_features(protection_type)).context("failed to set up rng")?;
@@ -518,13 +520,15 @@ pub fn create_rng_device(
 #[cfg(feature = "audio")]
 pub fn create_virtio_snd_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     snd_params: SndParameters,
+    snd_device_tube: Tube,
 ) -> DeviceResult {
     let backend = snd_params.backend;
     let dev = virtio::snd::common_backend::VirtioSnd::new(
         virtio::base_features(protection_type),
         snd_params,
+        snd_device_tube,
     )
     .context("failed to create cras sound device")?;
 
@@ -570,7 +574,7 @@ pub fn create_virtio_snd_device(
 #[cfg(feature = "vtpm")]
 pub fn create_vtpm_proxy_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
 ) -> DeviceResult {
     let jail = if let Some(jail_config) = jail_config {
         let mut config = SandboxConfig::new(jail_config, "vtpm_proxy_device");
@@ -595,7 +599,7 @@ pub fn create_vtpm_proxy_device(
 
 pub fn create_single_touch_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     single_touch_socket: T,
     width: u32,
     height: u32,
@@ -623,7 +627,7 @@ pub fn create_single_touch_device<T: IntoUnixStream>(
 
 pub fn create_multi_touch_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     multi_touch_socket: T,
     width: u32,
     height: u32,
@@ -652,7 +656,7 @@ pub fn create_multi_touch_device<T: IntoUnixStream>(
 
 pub fn create_trackpad_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     trackpad_socket: T,
     width: u32,
     height: u32,
@@ -681,7 +685,7 @@ pub fn create_trackpad_device<T: IntoUnixStream>(
 
 pub fn create_multitouch_trackpad_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     trackpad_socket: T,
     width: u32,
     height: u32,
@@ -710,7 +714,7 @@ pub fn create_multitouch_trackpad_device<T: IntoUnixStream>(
 
 pub fn create_mouse_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     mouse_socket: T,
     idx: u32,
 ) -> DeviceResult {
@@ -729,7 +733,7 @@ pub fn create_mouse_device<T: IntoUnixStream>(
 
 pub fn create_keyboard_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     keyboard_socket: T,
     idx: u32,
 ) -> DeviceResult {
@@ -748,7 +752,7 @@ pub fn create_keyboard_device<T: IntoUnixStream>(
 
 pub fn create_switches_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     switches_socket: T,
     idx: u32,
 ) -> DeviceResult {
@@ -767,7 +771,7 @@ pub fn create_switches_device<T: IntoUnixStream>(
 
 pub fn create_rotary_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     rotary_socket: T,
     idx: u32,
 ) -> DeviceResult {
@@ -786,7 +790,7 @@ pub fn create_rotary_device<T: IntoUnixStream>(
 
 pub fn create_vinput_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     dev_path: &Path,
 ) -> DeviceResult {
     let dev_file = OpenOptions::new()
@@ -806,7 +810,7 @@ pub fn create_vinput_device(
 
 pub fn create_custom_device<T: IntoUnixStream>(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     custom_device_socket: T,
     idx: u32,
     input_config_path: PathBuf,
@@ -832,7 +836,7 @@ pub fn create_custom_device<T: IntoUnixStream>(
 #[cfg(feature = "balloon")]
 pub fn create_balloon_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     tube: Tube,
     inflate_tube: Option<Tube>,
     init_balloon_size: u64,
@@ -863,7 +867,7 @@ pub fn create_balloon_device(
 #[cfg(feature = "pvclock")]
 pub fn create_pvclock_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     tsc_frequency: u64,
     suspend_tube: Tube,
 ) -> DeviceResult {
@@ -922,7 +926,7 @@ impl VirtioDeviceBuilder for &NetParameters {
 
     fn create_jail(
         &self,
-        jail_config: &Option<JailConfig>,
+        jail_config: Option<&JailConfig>,
         virtio_transport: VirtioDeviceType,
     ) -> anyhow::Result<Option<Minijail>> {
         let policy = if self.vhost_net.is_some() {
@@ -992,7 +996,7 @@ fn create_tap_for_net_device(
 
 pub fn create_wayland_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     wayland_socket_paths: &BTreeMap<String, PathBuf>,
     resource_bridge: Option<Tube>,
 ) -> DeviceResult {
@@ -1094,7 +1098,7 @@ fn create_video_device_jail(
 pub fn create_video_device(
     backend: VideoBackendType,
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     typ: VideoDeviceType,
     resource_bridge: Tube,
 ) -> DeviceResult {
@@ -1121,7 +1125,7 @@ pub fn register_video_device(
     devs: &mut Vec<VirtioDeviceStub>,
     video_tube: Tube,
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     typ: VideoDeviceType,
 ) -> Result<()> {
     devs.push(create_video_device(
@@ -1161,7 +1165,7 @@ pub fn create_v4l2_device<P: AsRef<Path>>(
 #[cfg(all(feature = "media", feature = "video-decoder"))]
 pub fn create_virtio_media_adapter(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     tube: Tube,
     backend: VideoBackendType,
 ) -> DeviceResult {
@@ -1213,7 +1217,7 @@ impl VirtioDeviceBuilder for &VsockConfig {
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub fn create_vhost_scmi_device(
     protected_vm: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     vhost_scmi_dev_path: PathBuf,
 ) -> DeviceResult {
     let features = virtio::base_features(protected_vm);
@@ -1229,7 +1233,7 @@ pub fn create_vhost_scmi_device(
 
 pub fn create_fs_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     ugid: (Option<u32>, Option<u32>),
     uid_map: &str,
     gid_map: &str,
@@ -1272,7 +1276,7 @@ pub fn create_fs_device(
 
 pub fn create_9p_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     ugid: (Option<u32>, Option<u32>),
     uid_map: &str,
     gid_map: &str,
@@ -1318,7 +1322,7 @@ pub fn create_9p_device(
 
 pub fn create_pmem_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     vm: &mut impl Vm,
     resources: &mut SystemAllocator,
     pmem: &PmemOption,
@@ -1439,7 +1443,7 @@ pub fn create_pmem_device(
 
 pub fn create_pmem_ext2_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     resources: &mut SystemAllocator,
     opts: &PmemExt2Option,
     index: usize,
@@ -1537,7 +1541,7 @@ pub fn create_anonymous_file<P: AsRef<Path>>(path: P, size: u64) -> Result<File>
 
 pub fn create_iommu_device(
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     iova_max_addr: u64,
     endpoints: BTreeMap<u32, Arc<Mutex<Box<dyn MemoryMapperTrait>>>>,
     hp_endpoints_ranges: Vec<RangeInclusive<u32>>,
@@ -1604,7 +1608,7 @@ impl VirtioDeviceBuilder for &SerialParameters {
 
     fn create_jail(
         &self,
-        jail_config: &Option<JailConfig>,
+        jail_config: Option<&JailConfig>,
         virtio_transport: VirtioDeviceType,
     ) -> anyhow::Result<Option<Minijail>> {
         if let Some(jail_config) = jail_config {
@@ -1626,7 +1630,7 @@ impl VirtioDeviceBuilder for &SerialParameters {
 pub fn create_sound_device(
     path: &Path,
     protection_type: ProtectionType,
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
 ) -> DeviceResult {
     let dev = virtio::new_sound(path, virtio::base_features(protection_type))
         .context("failed to create sound device")?;
@@ -1644,7 +1648,7 @@ pub enum VfioDeviceVariant {
 }
 
 pub fn create_vfio_device(
-    jail_config: &Option<JailConfig>,
+    jail_config: Option<&JailConfig>,
     vm: &impl Vm,
     resources: &mut SystemAllocator,
     add_control_tube: &mut impl FnMut(AnyControlTube),

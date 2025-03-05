@@ -11,8 +11,8 @@ use cros_fdt::Fdt;
 use cros_fdt::FdtNode;
 use libc::ENOENT;
 use libc::ENOTSUP;
-use snapshot::AnySnapshot;
 use libc::ENOTTY;
+use snapshot::AnySnapshot;
 use vm_memory::GuestAddress;
 use vm_memory::MemoryRegionPurpose;
 
