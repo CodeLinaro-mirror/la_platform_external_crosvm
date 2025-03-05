@@ -43,7 +43,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -87,7 +87,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -131,7 +131,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -175,7 +175,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -219,7 +219,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -263,7 +263,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -307,7 +307,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -351,7 +351,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
@@ -395,7 +395,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libsync_rust",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libenumn",
