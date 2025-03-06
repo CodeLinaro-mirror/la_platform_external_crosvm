@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index 8c19dbfff..8220b1c5d 100644
+index 1617645a4..8220b1c5d 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,18 +10,19 @@ index 8c19dbfff..8220b1c5d 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -38,13 +37,80 @@ rust_library {
+@@ -37,12 +36,81 @@ rust_library {
+         "libzerocopy",
      ],
      proc_macros: ["libremain"],
-     static_libs: [
+-    shared_libs: [
+-        "libdrm",
++    static_libs: [
+         "libepoxy",
 -        "libgbm",
-+        "libepoxy",
 +        "libgfxstream_backend",
          "libvirglrenderer",
      ],
-     shared_libs: [
--        "libdrm",
--        "libepoxy",
++    shared_libs: [
 +        "libc++",
 +        "libbase",
 +    ],
@@ -64,7 +65,7 @@ index 8c19dbfff..8220b1c5d 100644
 +        "libserde_json",
 +        "libthiserror",
 +        "libzerocopy",
-     ],
++    ],
 +    proc_macros: ["libremain"],
 +    target: {
 +        host: {
@@ -94,7 +95,7 @@ index 8c19dbfff..8220b1c5d 100644
      apex_available: ["com.android.virt"],
  }
  
-@@ -64,7 +130,6 @@ rust_test {
+@@ -62,7 +130,6 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
@@ -102,18 +103,14 @@ index 8c19dbfff..8220b1c5d 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -79,12 +144,9 @@ rust_test {
-         "libzerocopy",
+@@ -78,9 +145,8 @@ rust_test {
      ],
      proc_macros: ["libremain"],
--    static_libs: [
--        "libgbm",
--        "libvirglrenderer",
--    ],
      shared_libs: [
 -        "libdrm",
          "libepoxy",
+-        "libgbm",
 +        "libgfxstream_backend",
-+        "libvirglrenderer",
+         "libvirglrenderer",
      ],
  }
