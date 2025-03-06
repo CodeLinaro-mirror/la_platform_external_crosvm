@@ -28,6 +28,7 @@
     "gpu",
     "gunyah",
     "libaaudio_stub",
+    "media",
     "net",
     "qcow",
     "usb",
