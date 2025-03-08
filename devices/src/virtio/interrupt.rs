@@ -12,6 +12,9 @@ use std::time::Instant;
 #[cfg(target_arch = "x86_64")]
 use base::error;
 use base::Event;
+use base::EventToken;
+use base::WaitContext;
+use base::WorkerThread;
 #[cfg(target_arch = "x86_64")]
 use metrics::log_metric;
 #[cfg(target_arch = "x86_64")]
@@ -25,7 +28,6 @@ use super::INTERRUPT_STATUS_USED_RING;
 use super::VIRTIO_MSI_NO_VECTOR;
 #[cfg(target_arch = "x86_64")]
 use crate::acpi::PmWakeupEvent;
-use crate::irq_event::IrqEdgeEvent;
 use crate::irq_event::IrqLevelEvent;
 use crate::pci::MsixConfig;
 
@@ -38,9 +40,6 @@ struct TransportPci {
 enum Transport {
     Pci {
         pci: TransportPci,
-    },
-    Mmio {
-        irq_evt_edge: IrqEdgeEvent,
     },
     VhostUser {
         call_evt: Event,
@@ -119,11 +118,6 @@ impl Interrupt {
                     pci.irq_evt_lvl.trigger().unwrap();
                 }
             }
-            Transport::Mmio { irq_evt_edge } => {
-                if self.inner.update_interrupt_status(interrupt_status_mask) {
-                    irq_evt_edge.trigger().unwrap();
-                }
-            }
             Transport::VhostUser { call_evt, .. } => {
                 // TODO(b/187487351): To avoid sending unnecessary events, we might want to support
                 // interrupt status. For this purpose, we need a mechanism to share interrupt status
@@ -144,9 +138,6 @@ impl Interrupt {
             Transport::Pci { pci } => {
                 self.signal(pci.config_msix_vector, INTERRUPT_STATUS_CONFIG_CHANGED)
             }
-            Transport::Mmio { .. } => {
-                self.signal(VIRTIO_MSI_NO_VECTOR, INTERRUPT_STATUS_CONFIG_CHANGED)
-            }
             Transport::VhostUser {
                 signal_config_changed_fn,
                 ..
@@ -155,21 +146,22 @@ impl Interrupt {
     }
 
     /// Get the event to signal resampling is needed if it exists.
-    pub fn get_resample_evt(&self) -> Option<&Event> {
+    fn get_resample_evt(&self) -> Option<&Event> {
         match &self.inner.as_ref().transport {
             Transport::Pci { pci } => Some(pci.irq_evt_lvl.get_resample()),
             _ => None,
         }
     }
 
-    /// Reads the status and writes to the interrupt event. Doesn't read the resample event, it
-    /// assumes the resample has been requested.
-    pub fn do_interrupt_resample(&self) {
-        if self.inner.interrupt_status.load(Ordering::SeqCst) != 0 {
-            match &self.inner.as_ref().transport {
-                Transport::Pci { pci } => pci.irq_evt_lvl.trigger().unwrap(),
-                _ => panic!("do_interrupt_resample() not supported"),
-            }
+    pub fn spawn_resample_thread(&self) -> Option<WorkerThread<()>> {
+        if self.get_resample_evt().is_some() {
+            let interrupt = self.clone();
+            // TODO(dverkamp): investigate using a smaller-than-default stack size for this thread
+            Some(WorkerThread::start("crosvm_resample", move |kill_evt| {
+                interrupt_resample_thread(kill_evt, interrupt)
+            }))
+        } else {
+            None
         }
     }
 }
@@ -224,20 +216,6 @@ impl Interrupt {
                 pm_state: PmState::new(
                     #[cfg(target_arch = "x86_64")]
                     wakeup_event,
-                ),
-            }),
-        }
-    }
-
-    pub fn new_mmio(irq_evt_edge: IrqEdgeEvent, async_intr_status: bool) -> Interrupt {
-        Interrupt {
-            inner: Arc::new(InterruptInner {
-                interrupt_status: AtomicUsize::new(0),
-                transport: Transport::Mmio { irq_evt_edge },
-                async_intr_status,
-                pm_state: PmState::new(
-                    #[cfg(target_arch = "x86_64")]
-                    None,
                 ),
             }),
         }
@@ -300,19 +278,7 @@ impl Interrupt {
     pub fn get_interrupt_evt(&self) -> &Event {
         match &self.inner.as_ref().transport {
             Transport::Pci { pci } => pci.irq_evt_lvl.get_trigger(),
-            Transport::Mmio { irq_evt_edge } => irq_evt_edge.get_trigger(),
             Transport::VhostUser { call_evt, .. } => call_evt,
-        }
-    }
-
-    /// Handle interrupt resampling event, reading the value from the event and doing the resample.
-    pub fn interrupt_resample(&self) {
-        match &self.inner.as_ref().transport {
-            Transport::Pci { pci } => {
-                pci.irq_evt_lvl.clear_resample();
-                self.do_interrupt_resample();
-            }
-            _ => panic!("interrupt_resample() not supported"),
         }
     }
 
@@ -459,6 +425,39 @@ impl PmState {
         } else if let Some(clear_evt) = wakeup_state.wakeup_clear_evt.take() {
             if let Err(e) = clear_evt.signal() {
                 error!("failed to signal clear event {}", e);
+            }
+        }
+    }
+}
+
+fn interrupt_resample_thread(kill_evt: Event, interrupt: Interrupt) {
+    #[derive(EventToken)]
+    enum Token {
+        Resample,
+        Kill,
+    }
+
+    let interrupt_status = &interrupt.inner.interrupt_status;
+    let interrupt_evt = interrupt.get_interrupt_evt();
+    let resample_evt = interrupt
+        .get_resample_evt()
+        .expect("must have resample evt in interrupt_resample_thread");
+
+    let wait_ctx =
+        WaitContext::build_with(&[(resample_evt, Token::Resample), (&kill_evt, Token::Kill)])
+            .expect("failed to create WaitContext");
+
+    loop {
+        let events = wait_ctx.wait().expect("WaitContext::wait() failed");
+        for event in events {
+            match event.token {
+                Token::Resample => {
+                    let _ = resample_evt.wait();
+                    if interrupt_status.load(Ordering::SeqCst) != 0 {
+                        interrupt_evt.signal().unwrap();
+                    }
+                }
+                Token::Kill => return,
             }
         }
     }
