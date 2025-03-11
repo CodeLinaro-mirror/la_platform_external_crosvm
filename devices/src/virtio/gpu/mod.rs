@@ -5,6 +5,7 @@
 mod edid;
 mod parameters;
 mod protocol;
+mod snapshot;
 mod virtio_gpu;
 
 use std::cell::RefCell;
@@ -17,6 +18,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 
+use ::snapshot::AnySnapshot;
 use anyhow::anyhow;
 use anyhow::Context;
 use base::custom_serde::deserialize_map_from_kv_vec;
@@ -257,6 +259,7 @@ fn build(
     #[cfg(windows)] wndproc_thread: &mut Option<WindowProcedureThread>,
     udmabuf: bool,
     #[cfg(windows)] gpu_display_wait_descriptor_ctrl_wr: SendTube,
+    snapshot_scratch_directory: Option<PathBuf>,
 ) -> Option<VirtioGpu> {
     let mut display_opt = None;
     for display_backend in display_backends {
@@ -293,6 +296,7 @@ fn build(
         external_blob,
         fixed_blob_mapping,
         udmabuf,
+        snapshot_scratch_directory,
     )
 }
 
@@ -948,6 +952,7 @@ impl Worker {
         #[cfg(windows)] mut wndproc_thread: Option<WindowProcedureThread>,
         #[cfg(windows)] gpu_display_wait_descriptor_ctrl_rd: RecvTube,
         #[cfg(windows)] gpu_display_wait_descriptor_ctrl_wr: SendTube,
+        snapshot_scratch_directory: Option<PathBuf>,
     ) -> anyhow::Result<Worker> {
         let fence_state = Arc::new(Mutex::new(Default::default()));
         let fence_handler_resources = Arc::new(Mutex::new(None));
@@ -967,6 +972,7 @@ impl Worker {
             udmabuf,
             #[cfg(windows)]
             gpu_display_wait_descriptor_ctrl_wr,
+            snapshot_scratch_directory,
         )
         .ok_or_else(|| anyhow!("failed to build virtio gpu"))?;
 
@@ -1415,6 +1421,7 @@ pub struct Gpu {
     capset_mask: u64,
     #[cfg(any(target_os = "android", target_os = "linux"))]
     gpu_cgroup_path: Option<PathBuf>,
+    snapshot_scratch_directory: Option<PathBuf>,
 }
 
 impl Gpu {
@@ -1523,6 +1530,7 @@ impl Gpu {
             capset_mask: gpu_parameters.capset_mask,
             #[cfg(any(target_os = "android", target_os = "linux"))]
             gpu_cgroup_path: gpu_cgroup_path.cloned(),
+            snapshot_scratch_directory: gpu_parameters.snapshot_scratch_path.clone(),
         }
     }
 
@@ -1560,6 +1568,7 @@ impl Gpu {
             self.gpu_display_wait_descriptor_ctrl_wr
                 .try_clone()
                 .expect("failed to clone wait context control channel"),
+            self.snapshot_scratch_directory.clone(),
         )?;
 
         for event_device in self.event_devices.take().expect("missing event_devices") {
@@ -1605,6 +1614,7 @@ impl Gpu {
         let external_blob = self.external_blob;
         let fixed_blob_mapping = self.fixed_blob_mapping;
         let udmabuf = self.udmabuf;
+        let snapshot_scratch_directory = self.snapshot_scratch_directory.clone();
 
         #[cfg(windows)]
         let mut wndproc_thread = self.wndproc_thread.take();
@@ -1667,6 +1677,7 @@ impl Gpu {
                 gpu_display_wait_descriptor_ctrl_rd,
                 #[cfg(windows)]
                 gpu_display_wait_descriptor_ctrl_wr,
+                snapshot_scratch_directory,
             )
             .expect("Failed to create virtio gpu worker thread");
 
@@ -2019,7 +2030,7 @@ impl VirtioDevice for Gpu {
         }
     }
 
-    fn virtio_snapshot(&mut self) -> anyhow::Result<serde_json::Value> {
+    fn virtio_snapshot(&mut self) -> anyhow::Result<AnySnapshot> {
         match self.worker_state {
             WorkerState::Error => {
                 return Err(anyhow!(
@@ -2051,7 +2062,7 @@ impl VirtioDevice for Gpu {
                 .inspect_err(|_| self.worker_state = WorkerState::Error)
                 .context("failed to receive response for virtio gpu worker suspend request")??
             {
-                WorkerResponse::Snapshot(snapshot) => Ok(serde_json::to_value(snapshot)?),
+                WorkerResponse::Snapshot(snapshot) => Ok(AnySnapshot::to_any(snapshot)?),
                 _ => {
                     panic!("unexpected response from virtio gpu worker sleep request");
                 }
@@ -2061,7 +2072,7 @@ impl VirtioDevice for Gpu {
         }
     }
 
-    fn virtio_restore(&mut self, data: serde_json::Value) -> anyhow::Result<()> {
+    fn virtio_restore(&mut self, data: AnySnapshot) -> anyhow::Result<()> {
         match self.worker_state {
             WorkerState::Error => {
                 return Err(anyhow!(
@@ -2076,7 +2087,7 @@ impl VirtioDevice for Gpu {
             _ => (),
         };
 
-        let snapshot: WorkerSnapshot = serde_json::from_value(data)?;
+        let snapshot: WorkerSnapshot = AnySnapshot::from_any(data)?;
 
         if let (Some(worker_request_sender), Some(worker_response_receiver)) =
             (&self.worker_request_sender, &self.worker_response_receiver)
