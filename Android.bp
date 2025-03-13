@@ -326,6 +326,9 @@ rust_defaults {
             enabled: false,
         },
     },
+    apex_available: [
+        "//apex_available:platform",
+    ],
     defaults_visibility: [
         "//external/crosvm:__subpackages__",
         // For QCOM's crosvm fork.

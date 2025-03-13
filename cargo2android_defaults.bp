@@ -22,6 +22,9 @@ rust_defaults {
             enabled: false,
         },
     },
+    apex_available: [
+        "//apex_available:platform",
+    ],
     defaults_visibility: ["//external/crosvm:__subpackages__"],
     visibility: ["//external/crosvm:__subpackages__"],
 }
