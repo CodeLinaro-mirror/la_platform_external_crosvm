@@ -31,7 +31,7 @@ rust_test {
         "libdata_model",
         "libkvm_sys",
         "liblibc",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
 }
 
@@ -48,7 +48,7 @@ rust_library {
         "libbase_rust",
         "libdata_model",
         "liblibc",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     apex_available: ["com.android.virt"],
 }
