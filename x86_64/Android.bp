@@ -50,7 +50,7 @@ rust_library {
         "libuuid",
         "libvm_control",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     apex_available: ["com.android.virt"],
@@ -109,7 +109,7 @@ rust_test {
         "libuuid",
         "libvm_control",
         "libvm_memory",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     // Exclude arm family manually

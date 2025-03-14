@@ -23,7 +23,7 @@ rust_library {
     edition: "2021",
     rustlibs: [
         "libbase_rust",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     apex_available: ["com.android.virt"],
 }
