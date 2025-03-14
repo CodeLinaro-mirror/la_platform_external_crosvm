@@ -35,7 +35,7 @@ rust_library {
         "libserde_keyvalue",
         "libsnapshot_crosvm",
         "libthiserror",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
     visibility: [
@@ -73,7 +73,7 @@ rust_test {
         "libsnapshot_crosvm",
         "libtempfile",
         "libthiserror",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libremain"],
 }

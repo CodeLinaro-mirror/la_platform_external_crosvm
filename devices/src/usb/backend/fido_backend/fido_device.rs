@@ -16,7 +16,6 @@ use base::EventType;
 use base::RawDescriptor;
 use sync::Mutex;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
 
 use crate::usb::backend::fido_backend::constants;
 use crate::usb::backend::fido_backend::error::Error;
@@ -27,10 +26,10 @@ use crate::usb::backend::fido_backend::hid_utils::verify_is_fido_device;
 use crate::usb::backend::fido_backend::poll_thread::PollTimer;
 use crate::utils::EventLoop;
 
-#[derive(FromZeroes, FromBytes, Debug)]
+#[derive(FromBytes, Debug)]
 #[repr(C)]
 pub struct InitPacket {
-    cid: u32,
+    cid: [u8; constants::CID_SIZE],
     cmd: u8,
     bcnth: u8,
     bcntl: u8,
@@ -38,22 +37,21 @@ pub struct InitPacket {
 }
 
 impl InitPacket {
-    pub fn extract_cid(bytes: [u8; constants::U2FHID_PACKET_SIZE]) -> Result<u32> {
-        // cid is the first 4 bytes so we don't need to worry about anything else in the bytes
-        // buffer, we can just read from prefix.
-        FromBytes::read_from_prefix(&bytes[..]).ok_or_else(|| Error::CannotExtractCidFromBytes)
+    pub fn extract_cid(bytes: &[u8; constants::U2FHID_PACKET_SIZE]) -> [u8; constants::CID_SIZE] {
+        // cid is the first 4 bytes. `U2FHID_PACKET_SIZE` > 4, so this cannot fail.
+        bytes[0..constants::CID_SIZE].try_into().unwrap()
     }
 
-    fn is_valid(bytes: [u8; constants::U2FHID_PACKET_SIZE]) -> bool {
+    fn is_valid(bytes: &[u8; constants::U2FHID_PACKET_SIZE]) -> bool {
         (bytes[4] & constants::PACKET_INIT_VALID_CMD) != 0
     }
 
-    pub fn from_bytes(bytes: [u8; constants::U2FHID_PACKET_SIZE]) -> Result<InitPacket> {
+    pub fn from_bytes(bytes: &[u8; constants::U2FHID_PACKET_SIZE]) -> Result<InitPacket> {
         if !InitPacket::is_valid(bytes) {
             return Err(Error::InvalidInitPacket);
         }
 
-        InitPacket::read_from(&bytes[..]).ok_or_else(|| Error::CannotConvertInitPacketFromBytes)
+        InitPacket::read_from_bytes(bytes).map_err(|_| Error::CannotConvertInitPacketFromBytes)
     }
 
     pub fn bcnt(&self) -> u16 {
@@ -155,8 +153,8 @@ impl FidoDevice {
 
     /// Receives a low-level request from the host device. It means we read data from the actual
     /// key on the host.
-    pub fn recv_from_host(&mut self, packet: [u8; constants::U2FHID_PACKET_SIZE]) -> Result<()> {
-        let cid = InitPacket::extract_cid(packet)?;
+    pub fn recv_from_host(&mut self, packet: &[u8; constants::U2FHID_PACKET_SIZE]) -> Result<()> {
+        let cid = InitPacket::extract_cid(packet);
         let transaction_opt = if cid == constants::BROADCAST_CID {
             match InitPacket::from_bytes(packet) {
                 Ok(packet) => {
@@ -236,7 +234,7 @@ impl FidoDevice {
             Some(t) => t,
             None => {
                 error!(
-                    "We lost a transaction on the way. This is a bug. (cid: {})",
+                    "We lost a transaction on the way. This is a bug. (cid: {:?})",
                     cid
                 );
                 return Ok(());
@@ -265,7 +263,7 @@ impl FidoDevice {
                 );
             }
         }
-        guest_key.pending_in_packets.push_back(packet);
+        guest_key.pending_in_packets.push_back(*packet);
 
         Ok(())
     }
@@ -273,7 +271,7 @@ impl FidoDevice {
     /// Receives a request from the guest device to write into the actual device on the host.
     pub fn recv_from_guest(
         &mut self,
-        packet: [u8; constants::U2FHID_PACKET_SIZE],
+        packet: &[u8; constants::U2FHID_PACKET_SIZE],
     ) -> Result<usize> {
         // The first byte in the host packet request is the HID report request ID as required by
         // the Linux kernel. The real request data starts from the second byte, so we need to
@@ -294,7 +292,7 @@ impl FidoDevice {
             }
         }
 
-        host_packet[1..].copy_from_slice(&packet);
+        host_packet[1..].copy_from_slice(packet.as_slice());
 
         let written = self
             .fd
