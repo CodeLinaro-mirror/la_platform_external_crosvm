@@ -28,7 +28,7 @@ rust_test {
     edition: "2021",
     rustlibs: [
         "libtempfile",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
 }
 
@@ -41,6 +41,6 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
     edition: "2021",
-    rustlibs: ["libzerocopy-0.7.35"],
+    rustlibs: ["libzerocopy"],
     apex_available: ["com.android.virt"],
 }

@@ -34,7 +34,7 @@ rust_test {
         "libtempfile",
         "libuuid",
         "libwalkdir",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libenumn"],
 }
@@ -53,7 +53,7 @@ rust_library {
         "libbase_rust",
         "liblibc",
         "libuuid",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: ["libenumn"],
     apex_available: ["com.android.virt"],
