@@ -14,7 +14,7 @@ package {
 
 rust_test {
     name: "kvm_test_tests_dirty_log",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "dirty_log",
     cargo_env_compat: true,
@@ -32,14 +32,16 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
 rust_test {
     name: "kvm_test_tests_kvm_tests",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "kvm_tests",
     cargo_env_compat: true,
@@ -57,14 +59,16 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
 rust_test {
     name: "kvm_test_tests_read_only_memory",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "read_only_memory",
     cargo_env_compat: true,
@@ -82,14 +86,16 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
 rust_test {
     name: "kvm_test_tests_real_run_adder",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "real_run_adder",
     cargo_env_compat: true,
@@ -107,14 +113,16 @@ rust_test {
         "libkvm",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
 }
 
 rust_library {
     name: "libkvm",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "kvm",
     cargo_env_compat: true,
@@ -126,7 +134,10 @@ rust_library {
         "libdata_model",
         "libkvm_sys",
         "liblibc",
+        "libstatic_assertions",
         "libsync_rust",
         "libvm_memory",
+        "libzerocopy-0.7.35",
     ],
+    apex_available: ["com.android.virt"],
 }

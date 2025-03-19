@@ -14,7 +14,7 @@ package {
 
 rust_library {
     name: "libvm_control",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vm_control",
     cargo_env_compat: true,
@@ -22,6 +22,7 @@ rust_library {
     crate_root: "src/lib.rs",
     edition: "2021",
     features: [
+        "audio",
         "balloon",
         "gdb",
         "gdbstub",
@@ -53,11 +54,12 @@ rust_library {
         "libvm_memory",
     ],
     proc_macros: ["libremain"],
+    apex_available: ["com.android.virt"],
 }
 
 rust_test {
     name: "vm_control_test_src_lib",
-    defaults: ["crosvm_inner_defaults"],
+    defaults: ["crosvm_defaults"],
     host_supported: true,
     crate_name: "vm_control",
     cargo_env_compat: true,
@@ -70,6 +72,7 @@ rust_test {
     },
     edition: "2021",
     features: [
+        "audio",
         "balloon",
         "gdb",
         "gdbstub",

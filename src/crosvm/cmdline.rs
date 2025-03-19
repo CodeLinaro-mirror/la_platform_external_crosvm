@@ -151,6 +151,8 @@ pub enum CrossPlatformCommands {
     Disk(DiskCommand),
     #[cfg(feature = "gpu")]
     Gpu(GpuCommand),
+    #[cfg(feature = "audio")]
+    Snd(SndCommand),
     MakeRT(MakeRTCommand),
     Resume(ResumeCommand),
     Run(RunCommand),
@@ -444,6 +446,35 @@ pub struct UsbCommand {
 pub struct GpuCommand {
     #[argh(subcommand)]
     pub command: GpuSubCommand,
+}
+
+#[cfg(feature = "audio")]
+#[derive(FromArgs)]
+/// Mute or unmute all snd devices.
+#[argh(subcommand, name = "mute-all")]
+pub struct MuteAllCommand {
+    #[argh(positional)]
+    /// muted state. true for mute, and false for unmute
+    pub muted: bool,
+    #[argh(positional, arg_name = "VM_SOCKET")]
+    /// VM Socket path
+    pub socket_path: String,
+}
+
+#[cfg(feature = "audio")]
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum SndSubCommand {
+    MuteAll(MuteAllCommand),
+}
+
+#[cfg(feature = "audio")]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "snd")]
+/// Manage virtio-snd device.
+pub struct SndCommand {
+    #[argh(subcommand)]
+    pub command: SndSubCommand,
 }
 
 #[derive(FromArgs)]
@@ -2174,8 +2205,7 @@ pub struct RunCommand {
     ///        Platform-specific options:
     ///        On Unix: 'unix' (datagram) and 'unix-stream' (stream)
     ///        On Windows: 'namedpipe'
-    ///     hardware=(serial,virtio-console,debugcon,
-    ///               legacy-virtio-console) - Which type of
+    ///     hardware=(serial,virtio-console,debugcon) - Which type of
     ///        serial hardware to emulate. Defaults to 8250 UART
     ///        (serial).
     ///     name=NAME - Console Port Name, used for virtio-console

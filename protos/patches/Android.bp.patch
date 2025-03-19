@@ -2,9 +2,9 @@ diff --git a/protos/Android.bp b/protos/Android.bp
 index eed6fd361..929925ac3 100644
 --- a/protos/Android.bp
 +++ b/protos/Android.bp
-@@ -19,7 +19,15 @@ rust_library {
+@@ -20,8 +20,16 @@ rust_library {
      cargo_pkg_version: "0.1.0",
-     srcs: ["src/lib.rs"],
+     crate_root: "src/lib.rs",
      edition: "2021",
 -    rustlibs: ["libprotobuf"],
 +    features: [
@@ -16,6 +16,7 @@ index eed6fd361..929925ac3 100644
 +        "libprotobuf",
 +        "libregistered_events_proto",
 +    ],
+     apex_available: ["com.android.virt"],
  }
  
  rust_protobuf {

@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use fixture::utils::retry;
+use fixture::utils::retry_with_delay;
 use fixture::utils::ChildExt;
 use fixture::utils::CommandExt;
 use fixture::vhost_user::CmdType;
@@ -28,7 +29,8 @@ const ANY_CID: &str = "4294967295"; // -1U
 const HOST_CID: u64 = 2;
 
 const SERVER_TIMEOUT: Duration = Duration::from_secs(3);
-const NCAT_RETRIES: usize = 10;
+const NCAT_RETRIES: usize = 15;
+const NCAT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 const MESSAGE_TO_HOST: &str = "Connection from the host is successfully established";
 const MESSAGE_TO_GUEST: &str = "Connection from the guest is successfully established";
@@ -44,7 +46,6 @@ fn generate_vhost_port() -> u32 {
 }
 
 #[test]
-#[ignore = "Test failing in latest version of debian. b/346365355"]
 fn host_to_guest() {
     let guest_port = generate_vhost_port();
     let guest_cid = generate_guest_cid();
@@ -54,7 +55,6 @@ fn host_to_guest() {
 }
 
 #[test]
-#[ignore = "Test failing in latest version of debian. b/346365355"]
 fn host_to_guest_disable_sandbox() {
     let guest_port = generate_vhost_port();
     let guest_cid = generate_guest_cid();
@@ -66,62 +66,52 @@ fn host_to_guest_disable_sandbox() {
 }
 
 #[test]
-#[ignore = "Test failing in latest version of debian. b/346365355"]
 fn host_to_guest_snapshot_restore() {
     let guest_port = generate_vhost_port();
     let guest_cid = generate_guest_cid();
-    let config = Config::new()
-        .extra_args(vec![
-            "--cid".to_string(),
-            guest_cid.to_string(),
-            "--no-usb".to_string(),
-        ])
-        .with_stdout_hardware("legacy-virtio-console");
+    let config = Config::new().extra_args(vec![
+        "--cid".to_string(),
+        guest_cid.to_string(),
+        "--no-usb".to_string(),
+    ]);
     let mut vm = TestVm::new(config).unwrap();
     host_to_guest_connection(&mut vm, guest_cid, guest_port);
     let dir = tempdir().unwrap();
     let snap = dir.path().join("snapshot.bkp");
     vm.snapshot(&snap).unwrap();
-    let config = Config::new()
-        .extra_args(vec![
-            "--cid".to_string(),
-            guest_cid.to_string(),
-            "--restore".to_string(),
-            snap.to_str().unwrap().to_string(),
-            "--no-usb".to_string(),
-        ])
-        .with_stdout_hardware("legacy-virtio-console");
+    let config = Config::new().extra_args(vec![
+        "--cid".to_string(),
+        guest_cid.to_string(),
+        "--restore".to_string(),
+        snap.to_str().unwrap().to_string(),
+        "--no-usb".to_string(),
+    ]);
     drop(vm);
     vm = TestVm::new_restore(config).unwrap();
     host_to_guest_connection(&mut vm, guest_cid, guest_port);
 }
 
 #[test]
-#[ignore = "Test failing in latest version of debian. b/346365355"]
 fn host_to_guest_disable_sandbox_snapshot_restore() {
     let guest_port = generate_vhost_port();
     let guest_cid = generate_guest_cid();
-    let config = Config::new()
-        .extra_args(vec![
-            "--cid".to_string(),
-            guest_cid.to_string(),
-            "--no-usb".to_string(),
-        ])
-        .with_stdout_hardware("legacy-virtio-console");
+    let config = Config::new().extra_args(vec![
+        "--cid".to_string(),
+        guest_cid.to_string(),
+        "--no-usb".to_string(),
+    ]);
     let mut vm = TestVm::new(config.disable_sandbox()).unwrap();
     host_to_guest_connection(&mut vm, guest_cid, guest_port);
     let dir = tempdir().unwrap();
     let snap = dir.path().join("snapshot.bkp");
     vm.snapshot(&snap).unwrap();
-    let config = Config::new()
-        .extra_args(vec![
-            "--cid".to_string(),
-            guest_cid.to_string(),
-            "--restore".to_string(),
-            snap.to_str().unwrap().to_string(),
-            "--no-usb".to_string(),
-        ])
-        .with_stdout_hardware("legacy-virtio-console");
+    let config = Config::new().extra_args(vec![
+        "--cid".to_string(),
+        guest_cid.to_string(),
+        "--restore".to_string(),
+        snap.to_str().unwrap().to_string(),
+        "--no-usb".to_string(),
+    ]);
     drop(vm);
     vm = TestVm::new_restore(config.disable_sandbox()).unwrap();
     host_to_guest_connection(&mut vm, guest_cid, guest_port);
@@ -130,14 +120,17 @@ fn host_to_guest_disable_sandbox_snapshot_restore() {
 fn host_to_guest_connection(vm: &mut TestVm, guest_cid: u32, guest_port: u32) {
     let guest_cmd = vm
         .exec_in_guest_async(&format!(
-            "echo {MESSAGE_TO_HOST} | ncat -l --vsock --send-only {ANY_CID} {guest_port}"
+            "echo {MESSAGE_TO_HOST} | ncat -v -l --vsock --send-only {ANY_CID} {guest_port}"
         ))
         .unwrap();
 
-    let output = retry(
+    let output = retry_with_delay(
         || {
+            // This will instantly fail if the guest isn't listening on the port yet, so we need to
+            // retry with a delay.
             Command::new("ncat")
                 .args([
+                    "-v",
                     "--recv-only",
                     "--vsock",
                     &guest_cid.to_string(),
@@ -148,6 +141,7 @@ fn host_to_guest_connection(vm: &mut TestVm, guest_cid: u32, guest_port: u32) {
                 .output_checked()
         },
         NCAT_RETRIES,
+        NCAT_RETRY_DELAY,
     )
     .unwrap();
 
@@ -181,27 +175,23 @@ fn guest_to_host_disable_sandbox() {
 fn guest_to_host_snapshot_restore() {
     let host_port = generate_vhost_port();
     let guest_cid = generate_guest_cid();
-    let config = Config::new()
-        .extra_args(vec![
-            "--cid".to_string(),
-            guest_cid.to_string(),
-            "--no-usb".to_string(),
-        ])
-        .with_stdout_hardware("legacy-virtio-console");
+    let config = Config::new().extra_args(vec![
+        "--cid".to_string(),
+        guest_cid.to_string(),
+        "--no-usb".to_string(),
+    ]);
     let mut vm = TestVm::new(config).unwrap();
     guest_to_host_connection(&mut vm, host_port);
     let dir = tempdir().unwrap();
     let snap = dir.path().join("snapshot.bkp");
     vm.snapshot(&snap).unwrap();
-    let config = Config::new()
-        .extra_args(vec![
-            "--cid".to_string(),
-            guest_cid.to_string(),
-            "--no-usb".to_string(),
-            "--restore".to_string(),
-            snap.to_str().unwrap().to_string(),
-        ])
-        .with_stdout_hardware("legacy-virtio-console");
+    let config = Config::new().extra_args(vec![
+        "--cid".to_string(),
+        guest_cid.to_string(),
+        "--no-usb".to_string(),
+        "--restore".to_string(),
+        snap.to_str().unwrap().to_string(),
+    ]);
     drop(vm);
     vm = TestVm::new_restore(config).unwrap();
     guest_to_host_connection(&mut vm, host_port);
@@ -217,22 +207,19 @@ fn guest_to_host_disable_sandbox_snapshot_restore() {
             guest_cid.to_string(),
             "--no-usb".to_string(),
         ])
-        .with_stdout_hardware("legacy-virtio-console")
         .disable_sandbox();
     let mut vm = TestVm::new(config).unwrap();
     guest_to_host_connection(&mut vm, host_port);
     let dir = tempdir().unwrap();
     let snap = dir.path().join("snapshot.bkp");
     vm.snapshot(&snap).unwrap();
-    let config = Config::new()
-        .extra_args(vec![
-            "--cid".to_string(),
-            guest_cid.to_string(),
-            "--no-usb".to_string(),
-            "--restore".to_string(),
-            snap.to_str().unwrap().to_string(),
-        ])
-        .with_stdout_hardware("legacy-virtio-console");
+    let config = Config::new().extra_args(vec![
+        "--cid".to_string(),
+        guest_cid.to_string(),
+        "--no-usb".to_string(),
+        "--restore".to_string(),
+        snap.to_str().unwrap().to_string(),
+    ]);
     drop(vm);
     vm = TestVm::new_restore(config.disable_sandbox()).unwrap();
     guest_to_host_connection(&mut vm, host_port);
@@ -281,7 +268,6 @@ fn create_vu_config(cmd_type: CmdType, socket: &Path, cid: u32) -> VuConfig {
 }
 
 #[test]
-#[ignore = "b/333090069 test is flaky"]
 fn vhost_user_host_to_guest() {
     let guest_port = generate_vhost_port();
     let guest_cid = generate_guest_cid();
@@ -300,7 +286,6 @@ fn vhost_user_host_to_guest() {
 }
 
 #[test]
-#[ignore = "b/333090069 test is flaky"]
 fn vhost_user_host_to_guest_with_devices() {
     let guest_port = generate_vhost_port();
     let guest_cid = generate_guest_cid();
