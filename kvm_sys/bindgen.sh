@@ -20,6 +20,8 @@ use zerocopy::KnownLayout;
 // The original index (236) used in the ChromeOS v6.6 kernel was reused upstream for another
 // capability, so this may return incorrect information on some kernels.
 pub const KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA_CROS: u32 = 236;
+pub const KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA: u32 = 239;
+pub const KVM_MEM_NON_COHERENT_DMA: u32 = 8;
 
 // TODO(qwandor): Update this once the pKVM patches are merged upstream with a stable capability ID.
 pub const KVM_CAP_ARM_PROTECTED_VM: u32 = 0xffbadab1;
@@ -105,6 +107,7 @@ bindgen_generate \
     --blocklist-item='__BITS_PER_.*' \
     --blocklist-item='__FD_SETSIZE' \
     --blocklist-item='_?IOC.*' \
+    --with-derive-custom "kvm_regs=FromBytes,Immutable,IntoBytes,KnownLayout" \
     "${BINDGEN_LINUX_RISCV_HEADERS}/include/linux/kvm.h" \
     -- \
     -isystem "${BINDGEN_LINUX_RISCV_HEADERS}/include" \

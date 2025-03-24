@@ -56,6 +56,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::ptr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 pub use acpi_event::*;
@@ -87,7 +88,6 @@ pub(in crate::sys) use net::sockaddr_un;
 pub(in crate::sys) use net::sockaddrv4_to_lib_c;
 pub(in crate::sys) use net::sockaddrv6_to_lib_c;
 pub use netlink::*;
-use once_cell::sync::OnceCell;
 pub use poll::EventContext;
 pub use priority::*;
 pub use sched::*;
@@ -665,20 +665,20 @@ fn parse_sysfs_cpu_info(cpu_id: usize, property: &str) -> Result<u32> {
 
 /// Returns the capacity (measure of performance) of a given logical core.
 pub fn logical_core_capacity(cpu_id: usize) -> Result<u32> {
-    static CPU_MAX_FREQS: OnceCell<Vec<u32>> = OnceCell::new();
+    static CPU_MAX_FREQS: OnceLock<Option<Vec<u32>>> = OnceLock::new();
 
     let cpu_capacity = parse_sysfs_cpu_info(cpu_id, "cpu_capacity")?;
 
     // Collect and cache the maximum frequencies of all cores. We need to know
     // the largest maximum frequency between all cores to reverse normalization,
     // so collect all the values once on the first call to this function.
-    let cpu_max_freqs = CPU_MAX_FREQS.get_or_try_init(|| {
-        (0..number_of_logical_cores()?)
-            .map(logical_core_max_freq_khz)
+    let cpu_max_freqs = CPU_MAX_FREQS.get_or_init(|| {
+        (0..number_of_logical_cores().ok()?)
+            .map(|cpu_id| logical_core_max_freq_khz(cpu_id).ok())
             .collect()
     });
 
-    if let Ok(cpu_max_freqs) = cpu_max_freqs {
+    if let Some(cpu_max_freqs) = cpu_max_freqs {
         let largest_max_freq = *cpu_max_freqs.iter().max().ok_or(Error::new(EINVAL))?;
         let cpu_max_freq = *cpu_max_freqs.get(cpu_id).ok_or(Error::new(EINVAL))?;
         let normalized_cpu_capacity = (u64::from(cpu_capacity) * u64::from(largest_max_freq))
@@ -721,8 +721,8 @@ pub struct sched_attr {
     pub sched_util_max: u32,
 }
 
-impl sched_attr {
-    pub fn default() -> Self {
+impl Default for sched_attr {
+    fn default() -> Self {
         Self {
             size: std::mem::size_of::<sched_attr>() as u32,
             sched_policy: 0,

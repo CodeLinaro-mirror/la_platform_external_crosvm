@@ -189,8 +189,7 @@ fn map_cma_region(
     }
     if lend {
         flags |= GUNYAH_MEM_FORCE_LEND;
-    }
-    else {
+    } else {
         flags |= GUNYAH_MEM_FORCE_SHARE;
     }
     let region = gunyah_map_cma_mem_args {
@@ -236,7 +235,13 @@ impl AsRawDescriptor for GunyahVm {
 }
 
 impl GunyahVm {
-    pub fn new(gh: &Gunyah, vm_id: Option<u16>, pas_id: Option<u32>, guest_mem: GuestMemory, cfg: Config) -> Result<GunyahVm> {
+    pub fn new(
+        gh: &Gunyah,
+        vm_id: Option<u16>,
+        pas_id: Option<u32>,
+        guest_mem: GuestMemory,
+        cfg: Config,
+    ) -> Result<GunyahVm> {
         // SAFETY:
         // Safe because we know gunyah is a real gunyah fd as this module is the only one that can
         // make Gunyah objects.
@@ -262,16 +267,16 @@ impl GunyahVm {
             } else {
                 false
             };
-            if region.options.file_backed.is_some() {
+            if let Some(file_backed) = &region.options.file_backed {
                 map_cma_region(
-                        &vm_descriptor,
-                        region.index as MemSlot,
-                        lend,
-                        !region.options.file_backed.unwrap().writable,
-                        region.guest_addr.offset(),
-                        region.shm.as_raw_descriptor().try_into().unwrap(),
-                        region.size.try_into().unwrap(),
-                        region.shm_offset,
+                    &vm_descriptor,
+                    region.index as MemSlot,
+                    lend,
+                    !file_backed.writable,
+                    region.guest_addr.offset(),
+                    region.shm.as_raw_descriptor().try_into().unwrap(),
+                    region.size.try_into().unwrap(),
+                    region.shm_offset,
                 )?;
             } else if lend {
                 // SAFETY:
@@ -315,11 +320,16 @@ impl GunyahVm {
         })
     }
 
-    pub fn set_vm_auth_type_to_qcom_trusted_vm(&self, payload_start: GuestAddress, payload_size: u64) -> Result<()> {
+    pub fn set_vm_auth_type_to_qcom_trusted_vm(
+        &self,
+        payload_start: GuestAddress,
+        payload_size: u64,
+    ) -> Result<()> {
         let gunyah_qtvm_auth_arg = gunyah_qtvm_auth_arg {
             vm_id: self.vm_id.expect("VM ID not specified for a QTVM"),
             pas_id: self.pas_id.expect("PAS ID not specified for a QTVM"),
-            // QTVMs have the metadata needed for authentication at the start of the guest addrspace.
+            // QTVMs have the metadata needed for authentication at the start of the guest
+            // addrspace.
             guest_phys_addr: payload_start.offset(),
             size: payload_size,
         };
@@ -818,7 +828,7 @@ impl Vm for GunyahVm {
     fn handle_balloon_event(&mut self, event: BalloonEvent) -> Result<()> {
         match event {
             BalloonEvent::Inflate(m) => self.handle_inflate(m.guest_address, m.size),
-            BalloonEvent::Deflate(m) => Ok(()),
+            BalloonEvent::Deflate(_) => Ok(()),
             BalloonEvent::BalloonTargetReached(_) => Ok(()),
         }
     }

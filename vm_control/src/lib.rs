@@ -344,13 +344,8 @@ pub enum SnapshotCommand {
 pub enum DeviceControlCommand {
     SleepDevices,
     WakeDevices,
-    SnapshotDevices {
-        snapshot_writer: SnapshotWriter,
-        compress_memory: bool,
-    },
-    RestoreDevices {
-        snapshot_reader: SnapshotReader,
-    },
+    SnapshotDevices { snapshot_writer: SnapshotWriter },
+    RestoreDevices { snapshot_reader: SnapshotReader },
     GetDevicesState,
     Exit,
 }
@@ -2285,18 +2280,18 @@ fn do_snapshot(
     let _vcpu_guard = VcpuSuspendGuard::new(&kick_vcpus, vcpu_size)?;
     let _device_guard = DeviceSleepGuard::new(device_control_tube)?;
 
-    // We want to flush all pending IRQs to the LAPICs. There are two cases:
+    // We want to flush all pending IRQs to the interrupt controller. There are two cases:
     //
-    // MSIs: these are directly delivered to the LAPIC. We must verify the handler
-    // thread cycles once to deliver these interrupts.
+    // MSIs: these are directly delivered to the interrupt controller.
+    // We must verify the handler thread cycles once to deliver these interrupts.
     //
     // Legacy interrupts: in the case of a split IRQ chip, these interrupts may
     // flow through the userspace IOAPIC. If the hypervisor does not support
     // irqfds (e.g. WHPX), a single iteration will only flush the IRQ to the
     // IOAPIC. The underlying MSI will be asserted at this point, but if the
     // IRQ handler doesn't run another iteration, it won't be delivered to the
-    // LAPIC. This is why we cycle the handler thread twice (doing so ensures we
-    // process the underlying MSI).
+    // interrupt controller. This is why we cycle the handler thread twice (doing so
+    // ensures we process the underlying MSI).
     //
     // We can handle both of these cases by iterating until there are no tokens
     // serviced on the requested iteration. Note that in the legacy case, this
@@ -2305,29 +2300,34 @@ fn do_snapshot(
     // Note: within CrosVM, *all* interrupts are eventually converted into the
     // same mechanicism that MSIs use. This is why we say "underlying" MSI for
     // a legacy IRQ.
-    let mut flush_attempts = 0;
-    loop {
-        irq_handler_control
-            .send(&IrqHandlerRequest::WakeAndNotifyIteration)
-            .context("failed to send flush command to IRQ handler thread")?;
-        let resp = irq_handler_control
-            .recv()
-            .context("failed to recv flush response from IRQ handler thread")?;
-        match resp {
-            IrqHandlerResponse::HandlerIterationComplete(tokens_serviced) => {
-                if tokens_serviced == 0 {
-                    break;
+    {
+        let mut flush_attempts = 0;
+        loop {
+            irq_handler_control
+                .send(&IrqHandlerRequest::WakeAndNotifyIteration)
+                .context("failed to send flush command to IRQ handler thread")?;
+            let resp = irq_handler_control
+                .recv()
+                .context("failed to recv flush response from IRQ handler thread")?;
+            match resp {
+                IrqHandlerResponse::HandlerIterationComplete(tokens_serviced) => {
+                    if tokens_serviced == 0 {
+                        break;
+                    }
                 }
+                _ => bail!("received unexpected reply from IRQ handler: {:?}", resp),
             }
-            _ => bail!("received unexpected reply from IRQ handler: {:?}", resp),
+            flush_attempts += 1;
+            if flush_attempts > EXPECTED_MAX_IRQ_FLUSH_ITERATIONS {
+                warn!(
+                    "flushing IRQs for snapshot may be stalled after iteration {}, expected <= {}
+                      iterations",
+                    flush_attempts, EXPECTED_MAX_IRQ_FLUSH_ITERATIONS
+                );
+            }
         }
-        flush_attempts += 1;
-        if flush_attempts > EXPECTED_MAX_IRQ_FLUSH_ITERATIONS {
-            warn!("flushing IRQs for snapshot may be stalled after iteration {}, expected <= {} iterations", flush_attempts, EXPECTED_MAX_IRQ_FLUSH_ITERATIONS);
-        }
+        info!("flushed IRQs in {} iterations", flush_attempts);
     }
-    info!("flushed IRQs in {} iterations", flush_attempts);
-
     let snapshot_writer = SnapshotWriter::new(snapshot_path, encrypt)?;
 
     // Snapshot hypervisor's paravirtualized clock.
@@ -2357,13 +2357,42 @@ fn do_snapshot(
         .context("Failed to write irqchip state")?;
     info!("Snapshotted irqchip.");
 
+    // Snapshot memory
+    {
+        let mem_snap_start = Instant::now();
+        // Use 64MB chunks when writing the memory snapshot (if encryption is used).
+        const MEMORY_SNAP_ENCRYPTED_CHUNK_SIZE_BYTES: usize = 1024 * 1024 * 64;
+        // SAFETY:
+        // VM & devices are stopped.
+        let guest_memory_metadata = unsafe {
+            vm.get_memory()
+                .snapshot(
+                    &mut snapshot_writer.raw_fragment_with_chunk_size(
+                        "mem",
+                        MEMORY_SNAP_ENCRYPTED_CHUNK_SIZE_BYTES,
+                    )?,
+                    compress_memory,
+                )
+                .context("failed to snapshot memory")?
+        };
+        snapshot_writer.write_fragment("mem_metadata", &guest_memory_metadata)?;
+
+        let mem_snap_duration_ms = mem_snap_start.elapsed().as_millis();
+        info!(
+            "snapshot: memory snapshotted {}MB in {}ms",
+            vm.get_memory().memory_size() / 1024 / 1024,
+            mem_snap_duration_ms
+        );
+        metrics::log_metric_with_details(
+            metrics::MetricEventType::SnapshotSaveMemoryLatency,
+            mem_snap_duration_ms as i64,
+            &metrics_events::RecordDetails {},
+        );
+    }
     // Snapshot devices
     info!("Devices snapshotting...");
     device_control_tube
-        .send(&DeviceControlCommand::SnapshotDevices {
-            snapshot_writer,
-            compress_memory,
-        })
+        .send(&DeviceControlCommand::SnapshotDevices { snapshot_writer })
         .context("send command to devices control socket")?;
     let resp: VmResponse = device_control_tube
         .recv()
@@ -2409,8 +2438,42 @@ pub fn do_restore(
 
     let snapshot_reader = SnapshotReader::new(restore_path, require_encrypted)?;
 
-    // Restore hypervisor's paravirtualized clock.
-    *suspended_pvclock_state = snapshot_reader.read_fragment("pvclock")?;
+    // Restore Memory
+    {
+        let mem_restore_start = Instant::now();
+        let guest_memory_metadata = snapshot_reader.read_fragment("mem_metadata")?;
+        // SAFETY:
+        // VM & devices are stopped.
+        unsafe {
+            vm.get_memory().restore(
+                guest_memory_metadata,
+                &mut snapshot_reader.raw_fragment("mem")?,
+            )?
+        };
+        let mem_restore_duration_ms = mem_restore_start.elapsed().as_millis();
+        info!(
+            "snapshot: memory restored {}MB in {}ms",
+            vm.get_memory().memory_size() / 1024 / 1024,
+            mem_restore_duration_ms
+        );
+        metrics::log_metric_with_details(
+            metrics::MetricEventType::SnapshotRestoreMemoryLatency,
+            mem_restore_duration_ms as i64,
+            &metrics_events::RecordDetails {},
+        );
+    }
+    // Restore devices
+    device_control_tube
+        .send(&DeviceControlCommand::RestoreDevices {
+            snapshot_reader: snapshot_reader.clone(),
+        })
+        .context("send restore devices command to devices control socket")?;
+    let resp: VmResponse = device_control_tube
+        .recv()
+        .context("receive from devices control socket")?;
+    if !matches!(resp, VmResponse::Ok) {
+        bail!("unexpected RestoreDevices response: {resp}");
+    }
 
     // Restore IrqChip
     let irq_snapshot: AnySnapshot = snapshot_reader.read_fragment("irqchip")?;
@@ -2450,29 +2513,24 @@ pub fn do_restore(
             .context("Failed to restore vcpu")?;
     }
 
-    // Restore devices
-    device_control_tube
-        .send(&DeviceControlCommand::RestoreDevices { snapshot_reader })
-        .context("send command to devices control socket")?;
-    let resp: VmResponse = device_control_tube
-        .recv()
-        .context("receive from devices control socket")?;
-    if !matches!(resp, VmResponse::Ok) {
-        bail!("unexpected RestoreDevices response: {resp}");
+    // refresh the IRQ tokens.
+    {
+        irq_handler_control
+            .send(&IrqHandlerRequest::RefreshIrqEventTokens)
+            .context("failed to send refresh irq event token command to IRQ handler thread")?;
+        let resp: IrqHandlerResponse = irq_handler_control
+            .recv()
+            .context("failed to recv refresh response from IRQ handler thread")?;
+        if !matches!(resp, IrqHandlerResponse::IrqEventTokenRefreshComplete) {
+            bail!(
+                "received unexpected reply from IRQ handler thread: {:?}",
+                resp
+            );
+        }
     }
 
-    irq_handler_control
-        .send(&IrqHandlerRequest::RefreshIrqEventTokens)
-        .context("failed to send refresh irq event token command to IRQ handler thread")?;
-    let resp: IrqHandlerResponse = irq_handler_control
-        .recv()
-        .context("failed to recv refresh response from IRQ handler thread")?;
-    if !matches!(resp, IrqHandlerResponse::IrqEventTokenRefreshComplete) {
-        bail!(
-            "received unexpected reply from IRQ handler thread: {:?}",
-            resp
-        );
-    }
+    // Restore hypervisor's paravirtualized clock.
+    *suspended_pvclock_state = snapshot_reader.read_fragment("pvclock")?;
 
     let restore_duration_ms = restore_start.elapsed().as_millis();
     info!(
@@ -2480,6 +2538,7 @@ pub fn do_restore(
         restore_duration_ms,
         vm.get_memory().memory_size(),
     );
+
     metrics::log_metric_with_details(
         metrics::MetricEventType::SnapshotRestoreOverallLatency,
         restore_duration_ms as i64,

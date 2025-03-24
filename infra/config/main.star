@@ -307,9 +307,7 @@ verify_linux_builder("x86_64")
 verify_linux_builder("aarch64")
 verify_linux_builder("armhf")
 verify_linux_builder("mingw64")
-
-# Disabled due to b/304875018
-# verify_linux_builder("riscv64")
+verify_linux_builder("riscv64")
 
 verify_builder(
     name = "chromeos_hatch",
@@ -324,17 +322,18 @@ verify_builder(
     presubmit = False,
 )
 
-verify_builder(
-    name = "windows",
-    dimensions = {
-        "os": "Windows",
-        "cpu": "x86-64",
-    },
-    executable = luci.recipe(
-        name = "build_windows",
-    ),
-    category = "windows",
-)
+# Disabled due to b/396467061
+#verify_builder(
+#    name = "windows",
+#    dimensions = {
+#        "os": "Windows",
+#        "cpu": "x86-64",
+#    },
+#    executable = luci.recipe(
+#        name = "build_windows",
+#    ),
+#    category = "windows",
+#)
 
 verify_builder(
     name = "health_check",
@@ -404,6 +403,15 @@ infra_builder(
     executable = luci.recipe(
         name = "build_baguette_image",
     ),
-    schedule = "0,0 0 * * 3",  # Run every Wednesday
-    postsubmit = False
+    schedule = "0 0 * * *",  # Run everyday during active devlopment
+    postsubmit = False,
+)
+
+infra_builder(
+    name = "baguette_uprev",
+    executable = luci.recipe(
+        name = "uprev_baguette_image",
+    ),
+    schedule = "0 12 * * *",  # Check for uprevs daily
+    postsubmit = False,
 )
