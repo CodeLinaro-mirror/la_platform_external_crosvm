@@ -643,7 +643,6 @@ fn run(
     iommu_device_tube: Tube,
     mut queues: BTreeMap<usize, Queue>,
     kill_evt: Event,
-    interrupt: Interrupt,
     translate_response_senders: Option<BTreeMap<u32, Tube>>,
     translate_request_rx: Option<Tube>,
 ) -> Result<()> {
@@ -657,7 +656,6 @@ fn run(
         .expect("Failed to clone queue event");
     let req_evt = EventAsync::new(req_evt, &ex).expect("Failed to create async event for queue");
 
-    let f_resample = async_utils::handle_irq_resample(&ex, interrupt);
     let f_kill = async_utils::await_and_exit(&ex, kill_evt);
 
     let request_tube = translate_request_rx
@@ -684,7 +682,6 @@ fn run(
     let done = async {
         select! {
             res = f_request.fuse() => res.context("error in handling request queue"),
-            res = f_resample.fuse() => res.context("error in handle_irq_resample"),
             res = f_kill.fuse() => res.context("error in await_and_exit"),
             res = f_handle_translate_request.fuse() => {
                 res.context("error in handle_translate_request")
@@ -820,7 +817,7 @@ impl VirtioDevice for Iommu {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        _interrupt: Interrupt,
         queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
@@ -860,7 +857,6 @@ impl VirtioDevice for Iommu {
                 iommu_device_tube,
                 queues,
                 kill_evt,
-                interrupt,
                 translate_response_senders,
                 translate_request_rx,
             );
@@ -872,11 +868,7 @@ impl VirtioDevice for Iommu {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn generate_acpi(
-        &mut self,
-        pci_address: &Option<PciAddress>,
-        mut sdts: Vec<SDT>,
-    ) -> Option<Vec<SDT>> {
+    fn generate_acpi(&mut self, pci_address: PciAddress, sdts: &mut Vec<SDT>) {
         const OEM_REVISION: u32 = 1;
         const VIOT_REVISION: u8 = 0;
 
@@ -884,7 +876,7 @@ impl VirtioDevice for Iommu {
             // there should only be one VIOT table
             if sdt.is_signature(b"VIOT") {
                 warn!("vIOMMU: duplicate VIOT table detected");
-                return None;
+                return;
             }
         }
 
@@ -903,12 +895,7 @@ impl VirtioDevice for Iommu {
             ..Default::default()
         });
 
-        let bdf = pci_address
-            .or_else(|| {
-                error!("vIOMMU device has no PCI address");
-                None
-            })?
-            .to_u32() as u16;
+        let bdf = pci_address.to_u32() as u16;
         let iommu_offset = viot.len();
 
         viot.append(VirtioIommuViotVirtioPciNode {
@@ -944,6 +931,5 @@ impl VirtioDevice for Iommu {
         }
 
         sdts.push(viot);
-        Some(sdts)
     }
 }

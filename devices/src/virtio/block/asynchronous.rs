@@ -198,10 +198,10 @@ impl ExecuteError {
 #[sorted]
 #[derive(ThisError, Debug)]
 enum ControlError {
+    #[error("failed to fdatasync the disk: {0}")]
+    FdatasyncDisk(disk::Error),
     #[error("couldn't get a value from a timer for flushing: {0}")]
     FlushTimer(AsyncError),
-    #[error("failed to fsync the disk: {0}")]
-    FsyncDisk(disk::Error),
 }
 
 /// Maximum length of the virtio-block ID string field.
@@ -427,17 +427,17 @@ async fn flush_disk(
             continue;
         }
 
-        // Reset armed before calling fsync to guarantee that IO requests that started after we call
-        // fsync will be committed eventually.
+        // Reset armed before calling fdatasync to guarantee that IO requests that started after we
+        // call fdatasync will be committed eventually.
         *armed.borrow_mut() = false;
 
         disk_state
             .read_lock()
             .await
             .disk_image
-            .fsync()
+            .fdatasync()
             .await
-            .map_err(ControlError::FsyncDisk)?;
+            .map_err(ControlError::FdatasyncDisk)?;
     }
 }
 
@@ -501,12 +501,6 @@ async fn run_worker(
     let kill = async_utils::await_and_exit(ex, kill_evt).fuse();
     pin_mut!(kill);
 
-    // Process any requests to resample the irq value.
-    let resample_future = std::future::pending::<anyhow::Result<()>>()
-        .fuse()
-        .left_future();
-    pin_mut!(resample_future);
-
     // Running queue handlers.
     let mut queue_handlers = FuturesUnordered::new();
     // Async stop functions for queue handlers, by queue index.
@@ -517,19 +511,11 @@ async fn run_worker(
             _ = queue_handlers.next() => continue,
             r = disk_flush => return r.context("failed to flush a disk"),
             r = control => return r.context("failed to handle a control request"),
-            r = resample_future => return r.context("failed to resample an irq value"),
             r = kill => return r.context("failed to wait on the kill event"),
             worker_cmd = worker_rx.next() => {
                 match worker_cmd {
                     None => anyhow::bail!("worker control channel unexpectedly closed"),
                     Some(WorkerCmd::StartQueue{index, queue}) => {
-                        if matches!(&*resample_future, futures::future::Either::Left(_)) {
-                            resample_future.set(
-                                async_utils::handle_irq_resample(ex, queue.interrupt().clone())
-                                    .fuse()
-                                    .right_future(),
-                            );
-                        }
                         if control_interrupt.borrow().is_none() {
                             *control_interrupt.borrow_mut() = Some(queue.interrupt().clone());
                         }
@@ -590,7 +576,6 @@ async fn run_worker(
                                 // that, when queues are started up again, we'll use the new
                                 // interrupt passed with the first queue.
                                 if queue_handlers.is_empty() {
-                                    resample_future.set(std::future::pending().fuse().left_future());
                                     *control_interrupt.borrow_mut() = None;
                                 }
 
@@ -604,7 +589,6 @@ async fn run_worker(
                         queue_handlers.clear();
                         queue_handler_stop_fns.clear();
 
-                        resample_future.set(std::future::pending().fuse().left_future());
                         *control_interrupt.borrow_mut() = None;
 
                         let _ = response_tx.send(());
