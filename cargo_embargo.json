@@ -28,6 +28,7 @@
     "gpu",
     "gunyah",
     "libaaudio_stub",
+    "media",
     "net",
     "qcow",
     "usb",
@@ -186,6 +187,7 @@
       "patch": "protos/patches/Android.bp.patch"
     },
     "rutabaga_gfx": {
+      "add_toplevel_block": "rutabaga_gfx/Android.bp.extra",
       "patch": "rutabaga_gfx/patches/Android.bp.patch",
       "dep_blocklist": [
         "libEGL",
@@ -194,6 +196,8 @@
         "libXau",
         "libXdmcp",
         "libdl",
+        "libdrm",
+        "libgbm",
         "libm",
         "libpthread",
         "libxcb"
