@@ -55,7 +55,7 @@ rustup update
 if [ "$sync" = "sync" ]
 then
   repo sync -c -j96
-  git fetch aosp upstream-main
+  git fetch goog upstream-main
 fi
 
 source $ANDROID_BUILD_TOP/build/envsetup.sh
@@ -66,7 +66,7 @@ if [ ! "$branch" = "branch" ];
     repo start merge;
 fi
 
-git merge --log aosp/upstream-main --no-edit
+git merge --log goog/upstream-main --no-edit
 OLD_MSG=$(git log --format=%B -n1)
 git commit --amend -m "$OLD_MSG
 Bug: $bug_number
