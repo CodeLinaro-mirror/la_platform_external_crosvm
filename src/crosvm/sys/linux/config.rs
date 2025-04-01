@@ -653,7 +653,11 @@ mod tests {
     fn hypervisor_gunyah_device_with_qtvm_ids() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
-            &["--hypervisor", "gunyah[device=/not/default,qcom_trusted_vm_id=0,qcom_trusted_vm_pas_id=0]", "/dev/null"],
+            &[
+                "--hypervisor",
+                "gunyah[device=/not/default,qcom_trusted_vm_id=0,qcom_trusted_vm_pas_id=0]",
+                "/dev/null",
+            ],
         )
         .unwrap()
         .try_into()

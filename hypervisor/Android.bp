@@ -37,7 +37,6 @@ rust_test {
         "libfnv",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -49,6 +48,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -81,7 +86,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -93,6 +97,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -125,7 +135,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -137,6 +146,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -169,7 +184,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -181,6 +195,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -213,7 +233,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -225,6 +244,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -257,7 +282,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -269,6 +293,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -301,7 +331,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -313,6 +342,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -345,7 +380,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -357,6 +391,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -389,7 +429,6 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -401,6 +440,12 @@ rust_test {
         "libenumn",
         "libhypervisor_test_macro",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_library {
@@ -427,7 +472,6 @@ rust_library {
         "libfnv",
         "libkvm_sys",
         "liblibc",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -436,4 +480,10 @@ rust_library {
     ],
     proc_macros: ["libenumn"],
     apex_available: ["com.android.virt"],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }

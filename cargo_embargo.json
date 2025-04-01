@@ -151,6 +151,7 @@
     },
     "devices": {
       "no_presubmit": true,
+      "add_module_block": "devices/Android.bp.extra",
       "dep_blocklist": [
         // See the comment for base's "dep_blocklist" above (in this case
         // "devices_test_tests_passthroughfs_main" is the culprit).
@@ -165,7 +166,8 @@
       "patch": "gpu_display/patches/Android.bp.patch"
     },
     "hypervisor": {
-      "no_presubmit": true
+      "no_presubmit": true,
+      "add_module_block": "hypervisor/Android.bp.extra"
     },
     "io_uring": {
       "no_presubmit": true

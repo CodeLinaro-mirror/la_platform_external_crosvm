@@ -59,6 +59,7 @@ rust_test {
         "libbytes",
         "libcfg_if",
         "libchrono",
+        "libciborium",
         "libcrc32fast",
         "libcros_async",
         "libcros_tracing",
@@ -81,7 +82,6 @@ rust_test {
         "libnet_sys",
         "libnet_util",
         "libnum_traits",
-        "libonce_cell",
         "libp9",
         "libpower_monitor",
         "librand",
@@ -112,6 +112,12 @@ rust_test {
         "libenumn",
         "libremain",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_test {
@@ -161,6 +167,7 @@ rust_test {
         "libbytes",
         "libcfg_if",
         "libchrono",
+        "libciborium",
         "libcrc32fast",
         "libcros_async",
         "libcros_tracing",
@@ -184,7 +191,6 @@ rust_test {
         "libnet_sys",
         "libnet_util",
         "libnum_traits",
-        "libonce_cell",
         "libp9",
         "libpower_monitor",
         "librand",
@@ -215,6 +221,12 @@ rust_test {
         "libenumn",
         "libremain",
     ],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
 
 rust_library {
@@ -258,6 +270,7 @@ rust_library {
         "libbit_field_crosvm",
         "libcfg_if",
         "libchrono",
+        "libciborium",
         "libcros_async",
         "libcros_tracing",
         "libcrosvm_cli",
@@ -278,7 +291,6 @@ rust_library {
         "libnet_sys",
         "libnet_util",
         "libnum_traits",
-        "libonce_cell",
         "libp9",
         "libpower_monitor",
         "librand",
@@ -310,4 +322,10 @@ rust_library {
         "libremain",
     ],
     apex_available: ["com.android.virt"],
+    arch: {
+        arm64: {
+            rustlibs: ["libaarch64_sys_reg"],
+        },
+    },
+
 }
