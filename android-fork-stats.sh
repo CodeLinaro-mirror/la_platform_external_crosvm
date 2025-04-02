@@ -4,7 +4,7 @@
 function infocho() { printf "\033[100m$@\033[0m\n"; }
 infocho "============================"
 infocho "OUR VERSION OF CROSVM IS THIS MUCH FORKED:"
-UPSTREAM_COMMIT=$(git merge-base HEAD aosp/upstream-main)
+UPSTREAM_COMMIT=$(git merge-base HEAD goog/upstream-main)
 
 git diff HEAD..$UPSTREAM_COMMIT --stat -- $(find . -name "*.rs" -o -name "*.toml")
 
