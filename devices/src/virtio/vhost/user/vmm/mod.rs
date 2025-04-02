@@ -26,6 +26,7 @@ mod glink_cma;
 mod i2c;
 mod frpc;
 mod ssr;
+mod eavb;
 
 pub use self::block::*;
 pub use self::console::*;
@@ -45,6 +46,7 @@ pub use self::glink_cma::*;
 pub use self::i2c::*;
 pub use self::frpc::*;
 pub use self::ssr::*;
+pub use self::eavb::*;
 
 use remain::sorted;
 use thiserror::Error as ThisError;
@@ -54,9 +56,6 @@ use vmm_vhost::Error as VhostError;
 #[sorted]
 #[derive(ThisError, Debug)]
 pub enum Error {
-    /// Failed to copy config to a buffer.
-    #[error("failed to copy config to a buffer: {0}")]
-    CopyConfig(std::io::Error),
     /// Failed to create `base::Event`.
     #[error("failed to create Event: {0}")]
     CreateEvent(base::Error),
@@ -78,13 +77,12 @@ pub enum Error {
     /// Failed to get vring base offset.
     #[error("failed to get vring base offset: {0}")]
     GetVringBase(VhostError),
+    /// Invalid config length is given.
+    #[error("invalid config length is given: {0}")]
+    InvalidConfigLen(usize),
     /// Invalid config offset is given.
-    #[error("invalid config offset is given: {data_len} + {offset} > {config_len}")]
-    InvalidConfigOffset {
-        data_len: u64,
-        offset: u64,
-        config_len: u64,
-    },
+    #[error("invalid config offset is given: {0}")]
+    InvalidConfigOffset(u64),
     /// MSI-X config is unavailable.
     #[error("MSI-X config is unavailable")]
     MsixConfigUnavailable,

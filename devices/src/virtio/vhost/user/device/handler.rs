@@ -993,7 +993,7 @@ mod tests {
 
             println!("read_config");
             let mut buf = vec![0; std::mem::size_of::<FakeConfig>()];
-            vmm_handler.read_config::<FakeConfig>(0, &mut buf).unwrap();
+            vmm_handler.read_config(0, &mut buf).unwrap();
             // Check if the obtained config data is correct.
             let config = FakeConfig::from_slice(&buf).unwrap();
             assert_eq!(*config, FAKE_CONFIG_DATA);
