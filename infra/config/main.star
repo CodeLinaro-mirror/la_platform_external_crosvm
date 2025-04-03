@@ -149,14 +149,14 @@ luci.notifier(
     notify_emails = [
         "crosvm-uprev@grotations.appspotmail.com",
         "crosvm-uprev-apac@grotations.appspotmail.com",
-        "denniskempin@google.com",
     ],
 )
 luci.notifier(
     name = "infra-failures",
     on_status_change = True,
     notify_emails = [
-        "denniskempin@google.com",
+        "crosvm-uprev@grotations.appspotmail.com",
+        "crosvm-uprev-apac@grotations.appspotmail.com",
         "keiichiw@google.com",
     ],
 )
@@ -412,6 +412,10 @@ infra_builder(
     executable = luci.recipe(
         name = "uprev_baguette_image",
     ),
+    properties = {
+        "push": True,
+        "bot": False,
+    },
     schedule = "0 12 * * *",  # Check for uprevs daily
     postsubmit = False,
 )
