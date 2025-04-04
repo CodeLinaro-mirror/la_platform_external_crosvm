@@ -11,7 +11,7 @@ use base::{error, Event, RawDescriptor};
 use vm_memory::GuestMemory;
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
-use crate::virtio::console::{virtio_console_config, QUEUE_SIZE};
+use crate::virtio::console::QUEUE_SIZE;
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
 use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_CONSOLE};
 
@@ -72,11 +72,7 @@ impl VirtioDevice for Console {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self
-            .handler
-            .borrow_mut()
-            .read_config::<virtio_console_config>(offset, data)
-        {
+        if let Err(e) = self.handler.borrow_mut().read_config(offset, data) {
             error!("failed to read config: {}", e);
         }
     }

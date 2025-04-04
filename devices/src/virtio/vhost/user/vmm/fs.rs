@@ -98,12 +98,7 @@ impl VirtioDevice for Fs {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        let config_len = std::mem::size_of::<virtio_fs_config>() as u64;
-        match self
-            .handler
-            .borrow_mut()
-            .read_config::<virtio_fs_config>(offset, &mut data[0 as usize .. config_len as usize])
-        {
+        match self.handler.borrow_mut().read_config(offset, data) {
             Ok(()) => {}
             // copy local config when VhostUserProtocolFeatures::CONFIG is not supported by the
             // device

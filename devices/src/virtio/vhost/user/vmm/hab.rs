@@ -7,7 +7,6 @@
 
 use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
-use data_model::Le64;
 use std::path::Path;
 use std::thread;
 use std::u32;
@@ -105,7 +104,7 @@ impl VirtioDevice for Hab {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self.handler.borrow_mut().read_config::<Le64>(offset, data) {
+        if let Err(e) = self.handler.borrow_mut().read_config(offset, data) {
             error!("failed to read config: {}", e);
         }
     }
