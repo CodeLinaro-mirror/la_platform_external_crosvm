@@ -14,7 +14,8 @@ use base::EventToken;
 use base::WaitContext;
 use data_model::Le32;
 use sync::Mutex;
-use zerocopy::AsBytes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
 
 use super::super::constants::*;
 use super::super::layout::*;
@@ -23,12 +24,10 @@ use super::Result;
 use super::SoundError;
 use super::*;
 use crate::virtio::DescriptorChain;
-use crate::virtio::Interrupt;
 use crate::virtio::Queue;
 
 pub struct Worker {
     // Lock order: Must never hold more than one queue lock at the same time.
-    interrupt: Interrupt,
     pub control_queue: Arc<Mutex<Queue>>,
     pub event_queue: Option<Queue>,
     vios_client: Arc<Mutex<VioSClient>>,
@@ -47,7 +46,6 @@ impl Worker {
     /// Creates a new virtio-snd worker.
     pub fn try_new(
         vios_client: Arc<Mutex<VioSClient>>,
-        interrupt: Interrupt,
         control_queue: Arc<Mutex<Queue>>,
         event_queue: Queue,
         tx_queue: Arc<Mutex<Queue>>,
@@ -91,7 +89,6 @@ impl Worker {
             })
             .map_err(SoundError::CreateThread)?;
         Ok(Worker {
-            interrupt,
             control_queue,
             event_queue: Some(event_queue),
             vios_client,
@@ -116,7 +113,6 @@ impl Worker {
         enum Token {
             ControlQAvailable,
             EventQAvailable,
-            InterruptResample,
             EventTriggered,
             Kill,
         }
@@ -131,11 +127,6 @@ impl Worker {
         ])
         .map_err(SoundError::WaitCtx)?;
 
-        if let Some(resample_evt) = self.interrupt.get_resample_evt() {
-            wait_ctx
-                .add(resample_evt, Token::InterruptResample)
-                .map_err(SoundError::WaitCtx)?;
-        }
         let mut event_queue = self.event_queue.take().expect("event_queue missing");
         'wait: loop {
             let wait_events = wait_ctx.wait().map_err(SoundError::WaitCtx)?;
@@ -159,9 +150,6 @@ impl Worker {
                     Token::EventTriggered => {
                         event_notifier.wait().map_err(SoundError::QueueEvt)?;
                         self.process_event_triggered(&mut event_queue)?;
-                    }
-                    Token::InterruptResample => {
-                        self.interrupt.interrupt_resample();
                     }
                     Token::Kill => {
                         let _ = kill_evt.wait();
@@ -206,7 +194,7 @@ impl Worker {
         while let Some(mut avail_desc) = lock_pop_unlock(&self.control_queue) {
             let reader = &mut avail_desc.reader;
             let available_bytes = reader.available_bytes();
-            if available_bytes < std::mem::size_of::<virtio_snd_hdr>() {
+            let Ok(hdr) = reader.peek_obj::<virtio_snd_hdr>() else {
                 error!(
                     "virtio-snd: Message received on control queue is too small: {}",
                     available_bytes
@@ -216,16 +204,12 @@ impl Worker {
                     avail_desc,
                     &self.control_queue,
                 );
-            }
+            };
             let mut read_buf = vec![0u8; available_bytes];
             reader
                 .read_exact(&mut read_buf)
                 .map_err(SoundError::QueueIO)?;
-            let mut code: Le32 = Default::default();
-            // need to copy because the buffer may not be properly aligned
-            code.as_bytes_mut()
-                .copy_from_slice(&read_buf[..std::mem::size_of::<Le32>()]);
-            let request_type = code.to_native();
+            let request_type = hdr.code.to_native();
             match request_type {
                 VIRTIO_SND_R_JACK_INFO => {
                     let (code, info_vec) = {
@@ -266,7 +250,7 @@ impl Worker {
                         VIRTIO_SND_S_BAD_MSG
                     } else {
                         let mut request: virtio_snd_jack_remap = Default::default();
-                        request.as_bytes_mut().copy_from_slice(&read_buf);
+                        request.as_mut_bytes().copy_from_slice(&read_buf);
                         let jack_id = request.hdr.jack_id.to_native();
                         let association = request.association.to_native();
                         let sequence = request.sequence.to_native();
@@ -408,7 +392,7 @@ impl Worker {
             return None;
         }
         let mut query: virtio_snd_query_info = Default::default();
-        query.as_bytes_mut().copy_from_slice(read_buf);
+        query.as_mut_bytes().copy_from_slice(read_buf);
         let start_id = query.start_id.to_native();
         let count = query.count.to_native();
         Some((start_id, count))
@@ -424,7 +408,7 @@ impl Worker {
             return reply_control_op_status(VIRTIO_SND_S_BAD_MSG, desc, &self.control_queue);
         }
         let mut params: virtio_snd_pcm_set_params = Default::default();
-        params.as_bytes_mut().copy_from_slice(read_buf);
+        params.as_mut_bytes().copy_from_slice(read_buf);
         let stream_id = params.hdr.stream_id.to_native();
         if stream_id < self.vios_client.lock().num_streams() {
             self.streams[stream_id as usize].send(StreamMsg::SetParams(desc, params))
@@ -457,7 +441,7 @@ impl Worker {
             );
         }
         let mut pcm_hdr: virtio_snd_pcm_hdr = Default::default();
-        pcm_hdr.as_bytes_mut().copy_from_slice(read_buf);
+        pcm_hdr.as_mut_bytes().copy_from_slice(read_buf);
         let stream_id = pcm_hdr.stream_id.to_native();
         if stream_id < self.vios_client.lock().num_streams() {
             self.streams[stream_id as usize].send(msg)
@@ -480,7 +464,7 @@ impl Worker {
         }
     }
 
-    fn send_info_reply<T: AsBytes>(
+    fn send_info_reply<T: Immutable + IntoBytes>(
         &mut self,
         mut desc: DescriptorChain,
         code: u32,

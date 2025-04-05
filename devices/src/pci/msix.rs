@@ -21,9 +21,10 @@ use snapshot::AnySnapshot;
 use thiserror::Error;
 use vm_control::VmIrqRequest;
 use vm_control::VmIrqResponse;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
+use zerocopy::KnownLayout;
 
 use crate::pci::pci_configuration::PciCapConfig;
 use crate::pci::pci_configuration::PciCapConfigWriteResult;
@@ -444,6 +445,11 @@ impl MsixConfig {
         let index: usize = (offset / MSIX_TABLE_ENTRIES_MODULO) as usize;
         let modulo_offset = offset % MSIX_TABLE_ENTRIES_MODULO;
 
+        if index >= self.table_entries.len() {
+            error!("invalid MSI-X table index {}", index);
+            return;
+        }
+
         match data.len() {
             4 => {
                 let value = match modulo_offset {
@@ -494,6 +500,11 @@ impl MsixConfig {
     pub fn write_msix_table(&mut self, offset: u64, data: &[u8]) -> MsixStatus {
         let index: usize = (offset / MSIX_TABLE_ENTRIES_MODULO) as usize;
         let modulo_offset = offset % MSIX_TABLE_ENTRIES_MODULO;
+
+        if index >= self.table_entries.len() {
+            error!("invalid MSI-X table index {}", index);
+            return MsixStatus::NothingToDo;
+        }
 
         // Store the value of the entry before modification
         let old_entry = self.table_entries[index].clone();
@@ -587,6 +598,11 @@ impl MsixConfig {
     pub fn read_pba_entries(&self, offset: u64, data: &mut [u8]) {
         let index: usize = (offset / MSIX_PBA_ENTRIES_MODULO) as usize;
         let modulo_offset = offset % MSIX_PBA_ENTRIES_MODULO;
+
+        if index >= self.pba_entries.len() {
+            error!("invalid PBA index {}", index);
+            return;
+        }
 
         match data.len() {
             4 => {
@@ -755,7 +771,7 @@ impl AsRawDescriptor for MsixConfig {
 //   15:    Enable. Enable all MSI-X when set.
 // See <https://wiki.osdev.org/PCI#Enabling_MSI-X> for the details.
 #[bitfield]
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct MsixCtrl {
     table_size: B10,
     reserved: B4,
@@ -765,7 +781,7 @@ pub struct MsixCtrl {
 
 #[allow(dead_code)]
 #[repr(C)]
-#[derive(Clone, Copy, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Clone, Copy, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 /// MSI-X Capability Structure
 pub struct MsixCap {
     // To make add_capability() happy

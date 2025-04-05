@@ -55,9 +55,9 @@ use serde::Serialize;
 use snapshot::AnySnapshot;
 use thiserror::Error as ThisError;
 use vm_memory::GuestMemory;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::FromZeros;
+use zerocopy::IntoBytes;
 
 use crate::virtio::async_utils;
 use crate::virtio::copy_config;
@@ -200,7 +200,6 @@ impl Vsock {
     fn start_worker(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
         mut queues: VsockQueues,
         existing_connections: Option<VsockConnectionMap>,
     ) -> anyhow::Result<()> {
@@ -217,7 +216,6 @@ impl Vsock {
             move |kill_evt| {
                 let mut worker = Worker::new(
                     mem,
-                    interrupt,
                     host_guid,
                     guest_cid,
                     existing_connections,
@@ -269,7 +267,7 @@ impl VirtioDevice for Vsock {
     fn activate(
         &mut self,
         mem: GuestMemory,
-        interrupt: Interrupt,
+        _interrupt: Interrupt,
         mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
@@ -286,7 +284,7 @@ impl VirtioDevice for Vsock {
             event: queues.remove(&2).unwrap(),
         };
 
-        self.start_worker(mem, interrupt, vsock_queues, None)
+        self.start_worker(mem, vsock_queues, None)
     }
 
     fn virtio_sleep(&mut self) -> anyhow::Result<Option<BTreeMap<usize, Queue>>> {
@@ -310,11 +308,10 @@ impl VirtioDevice for Vsock {
         &mut self,
         queues_state: Option<(GuestMemory, Interrupt, BTreeMap<usize, Queue>)>,
     ) -> anyhow::Result<()> {
-        if let Some((mem, interrupt, queues)) = queues_state {
+        if let Some((mem, _interrupt, queues)) = queues_state {
             let connections = self.sleeping_connections.take();
             self.start_worker(
                 mem,
-                interrupt,
                 queues
                     .try_into()
                     .expect("Failed to convert queue BTreeMap to VsockQueues"),
@@ -421,7 +418,6 @@ struct VsockConnection {
 
 struct Worker {
     mem: GuestMemory,
-    interrupt: Interrupt,
     host_guid: Option<String>,
     guest_cid: u64,
     // Map of host port to a VsockConnection.
@@ -435,7 +431,6 @@ struct Worker {
 impl Worker {
     fn new(
         mem: GuestMemory,
-        interrupt: Interrupt,
         host_guid: Option<String>,
         guest_cid: u64,
         existing_connections: Option<VsockConnectionMap>,
@@ -450,7 +445,6 @@ impl Worker {
 
         Worker {
             mem,
-            interrupt,
             host_guid,
             guest_cid,
             connections: existing_connections.unwrap_or_default(),
@@ -610,7 +604,7 @@ impl Worker {
                     src_port: Le32::from(port.host),
                     dst_port: guest_port,
                     len: Le32::from(data_size as u32),
-                    r#type: TYPE_STREAM_SOCKET.into(),
+                    type_: TYPE_STREAM_SOCKET.into(),
                     op: vsock_op::VIRTIO_VSOCK_OP_RW.into(),
                     buf_alloc: Le32::from(connection.buf_alloc as u32),
                     fwd_cnt: Le32::from(connection.recv_cnt as u32),
@@ -1104,7 +1098,7 @@ impl Worker {
                     src_port: { header.dst_port },
                     dst_port: { header.src_port },
                     len: 0.into(),
-                    r#type: TYPE_STREAM_SOCKET.into(),
+                    type_: TYPE_STREAM_SOCKET.into(),
                     op: resp_op.into(),
                     buf_alloc: Le32::from(buf_alloc),
                     fwd_cnt: Le32::from(fwd_cnt),
@@ -1148,7 +1142,7 @@ impl Worker {
                         src_port: { header.dst_port },
                         dst_port: { header.src_port },
                         len: 0.into(),
-                        r#type: TYPE_STREAM_SOCKET.into(),
+                        type_: TYPE_STREAM_SOCKET.into(),
                         op: vsock_op::VIRTIO_VSOCK_OP_RST.into(),
                         // There is no buffer on a closed connection
                         buf_alloc: 0.into(),
@@ -1161,7 +1155,7 @@ impl Worker {
                     self.write_bytes_to_queue(
                         &mut *send_queue.lock().await,
                         rx_queue_evt,
-                        response.as_bytes_mut(),
+                        response.as_mut_bytes(),
                     )
                     .await
                     .expect("vsock: failed to write to queue");
@@ -1261,7 +1255,7 @@ impl Worker {
                 src_port: { header.dst_port },
                 dst_port: { header.src_port },
                 len: 0.into(),
-                r#type: TYPE_STREAM_SOCKET.into(),
+                type_: TYPE_STREAM_SOCKET.into(),
                 op: vsock_op::VIRTIO_VSOCK_OP_CREDIT_UPDATE.into(),
                 buf_alloc: Le32::from(connection.buf_alloc as u32),
                 fwd_cnt: Le32::from(connection.recv_cnt as u32),
@@ -1275,7 +1269,7 @@ impl Worker {
             self.write_bytes_to_queue(
                 &mut *send_queue.lock().await,
                 rx_queue_evt,
-                response.as_bytes_mut(),
+                response.as_mut_bytes(),
             )
             .await
             .unwrap_or_else(|_| panic!("vsock: port {}: failed to write to queue", port));
@@ -1302,7 +1296,7 @@ impl Worker {
                 src_port: { header.dst_port },
                 dst_port: { header.src_port },
                 len: 0.into(),
-                r#type: TYPE_STREAM_SOCKET.into(),
+                type_: TYPE_STREAM_SOCKET.into(),
                 op: vsock_op::VIRTIO_VSOCK_OP_RST.into(),
                 buf_alloc: Le32::from(connection.buf_alloc as u32),
                 fwd_cnt: Le32::from(connection.recv_cnt as u32),
@@ -1314,7 +1308,7 @@ impl Worker {
             self.write_bytes_to_queue(
                 &mut *send_queue.lock().await,
                 rx_queue_evt,
-                response.as_bytes_mut(),
+                response.as_mut_bytes(),
             )
             .await
             .expect("failed to write to queue");
@@ -1503,11 +1497,6 @@ impl Worker {
             let event_handler = event_handler.fuse();
             pin_mut!(event_handler);
 
-            // Process any requests to resample the irq value.
-            let resample_handler = async_utils::handle_irq_resample(&ex, self.interrupt.clone());
-            let resample_handler = resample_handler.fuse();
-            pin_mut!(resample_handler);
-
             let kill_evt = EventAsync::new(kill_evt, &ex).expect("Failed to set up the kill event");
             let kill_handler = kill_evt.next_val();
             pin_mut!(kill_handler);
@@ -1529,7 +1518,6 @@ impl Worker {
                     _ = tx_handler => return Err(anyhow!("tx_handler stop unexpectedly.")),
                     _ = packet_handler => return Err(anyhow!("packet_handler stop unexpectedly.")),
                     _ = event_handler => return Err(anyhow!("event_handler stop unexpectedly.")),
-                    _ = resample_handler => return Err(anyhow!("resample_handler stop unexpectedly.")),
                 }
                 // kill_evt has fired
 

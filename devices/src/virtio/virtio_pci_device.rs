@@ -20,6 +20,7 @@ use base::RawDescriptor;
 use base::Result;
 use base::SharedMemory;
 use base::Tube;
+use base::WorkerThread;
 use data_model::Le32;
 use hypervisor::Datamatch;
 use hypervisor::MemCacheType;
@@ -46,9 +47,10 @@ use vm_control::VmMemoryDestination;
 use vm_control::VmMemoryRegionId;
 use vm_control::VmMemorySource;
 use vm_memory::GuestMemory;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
+use zerocopy::KnownLayout;
 
 use self::virtio_pci_common_config::VirtioPciCommonConfig;
 use super::*;
@@ -110,7 +112,7 @@ pub enum PciCapabilityType {
 
 #[allow(dead_code)]
 #[repr(C)]
-#[derive(Clone, Copy, FromZeroes, FromBytes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VirtioPciCap {
     // cap_vndr and cap_next are autofilled based on id() in pci configuration
     pub cap_vndr: u8, // Generic PCI field: PCI_CAP_ID_VNDR
@@ -160,7 +162,7 @@ impl VirtioPciCap {
 
 #[allow(dead_code)]
 #[repr(C)]
-#[derive(Clone, Copy, AsBytes, FromZeroes, FromBytes)]
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VirtioPciNotifyCap {
     cap: VirtioPciCap,
     notify_off_multiplier: Le32,
@@ -206,7 +208,7 @@ impl VirtioPciNotifyCap {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, AsBytes, FromZeroes, FromBytes)]
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VirtioPciShmCap {
     cap: VirtioPciCap,
     offset_hi: Le32, // Most sig 32 bits of offset
@@ -296,6 +298,8 @@ pub struct VirtioPciDevice {
 
     interrupt: Option<Interrupt>,
     interrupt_evt: Option<IrqLevelEvent>,
+    interrupt_resample_worker: Option<WorkerThread<()>>,
+
     queues: Vec<QueueConfig>,
     queue_evts: Vec<QueueEvent>,
     mem: GuestMemory,
@@ -500,6 +504,7 @@ impl VirtioPciDevice {
             disable_intx,
             interrupt: None,
             interrupt_evt: None,
+            interrupt_resample_worker: None,
             queues,
             queue_evts,
             mem,
@@ -631,6 +636,7 @@ impl VirtioPciDevice {
             )),
         );
         self.interrupt = Some(interrupt.clone());
+        self.interrupt_resample_worker = interrupt.spawn_resample_thread();
 
         let bar0 = self.config_regs.get_bar_addr(self.settings_bar);
         let notify_base = bar0 + NOTIFICATION_BAR_OFFSET;
@@ -980,6 +986,9 @@ impl PciDevice for VirtioPciDevice {
                 if let Err(e) = self.unregister_ioevents() {
                     error!("failed to unregister ioevents: {:#}", e);
                 }
+                if let Some(interrupt_resample_worker) = self.interrupt_resample_worker.take() {
+                    interrupt_resample_worker.stop();
+                }
             }
         }
     }
@@ -1313,7 +1322,7 @@ impl Suspendable for VirtioPciDevice {
         // Restore the interrupt. This must be done after restoring the MSI-X configuration, but
         // before restoring the queues.
         if let Some(deser_interrupt) = deser.interrupt {
-            self.interrupt = Some(Interrupt::new_from_snapshot(
+            let interrupt = Interrupt::new_from_snapshot(
                 self.interrupt_evt
                     .as_ref()
                     .ok_or_else(|| anyhow!("{} interrupt_evt is none", self.debug_label()))?
@@ -1331,7 +1340,9 @@ impl Suspendable for VirtioPciDevice {
                         virtio_id: self.device.device_type() as u32,
                     },
                 )),
-            ));
+            );
+            self.interrupt_resample_worker = interrupt.spawn_resample_thread();
+            self.interrupt = Some(interrupt);
         }
 
         assert_eq!(

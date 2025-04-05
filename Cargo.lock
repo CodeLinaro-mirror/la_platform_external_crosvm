@@ -34,7 +34,7 @@ name = "acpi_tables"
 version = "0.1.0"
 dependencies = [
  "tempfile",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -198,13 +198,13 @@ checksum = "7a40729d2133846d9ed0ea60a8b9541bccddab49cd30f0715a1da672fe9a2524"
 
 [[package]]
 name = "async-trait"
-version = "0.1.56"
+version = "0.1.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96cf8829f67d2eab0b2dfa42c5d0ef737e0724e4a82b01b3e292456202b19716"
+checksum = "3f934833b4b7233644e5848f235df3f57ed8c80f1528a26c3dfa13d2147fa056"
 dependencies = [
  "proc-macro2",
  "quote 1.0.36",
- "syn 1.0.103",
+ "syn 2.0.77",
 ]
 
 [[package]]
@@ -297,7 +297,6 @@ dependencies = [
  "log",
  "once_cell",
  "protobuf",
- "protos",
  "rand",
  "remain",
  "serde",
@@ -309,7 +308,7 @@ dependencies = [
  "uuid",
  "win_util",
  "winapi",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -547,6 +546,12 @@ name = "cfg_aliases"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
@@ -895,7 +900,7 @@ dependencies = [
  "win_util",
  "winapi",
  "x86_64",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -989,7 +994,7 @@ name = "data_model"
 version = "0.1.1-alpha.1"
 dependencies = [
  "serde",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1083,6 +1088,7 @@ dependencies = [
  "serde_keyvalue",
  "smallvec",
  "snapshot",
+ "static_assertions",
  "swap",
  "sync",
  "system_api",
@@ -1100,7 +1106,7 @@ dependencies = [
  "win_audio",
  "win_util",
  "winapi",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1126,7 +1132,7 @@ dependencies = [
  "uuid",
  "vm_memory",
  "winapi",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
  "zstd",
 ]
 
@@ -1237,7 +1243,7 @@ dependencies = [
  "tempfile",
  "uuid",
  "walkdir",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1324,7 +1330,7 @@ dependencies = [
  "libc",
  "remain",
  "thiserror",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1493,7 +1499,7 @@ dependencies = [
  "which",
  "win_util",
  "winapi",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1566,7 +1572,7 @@ dependencies = [
  "win_util",
  "winapi",
  "windows",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1693,7 +1699,7 @@ dependencies = [
  "serde_keyvalue",
  "static_assertions",
  "which",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1727,7 +1733,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "vm_memory",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1741,7 +1747,7 @@ dependencies = [
  "static_assertions",
  "sync",
  "vm_memory",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1751,7 +1757,7 @@ dependencies = [
  "base",
  "data_model",
  "libc",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1852,7 +1858,7 @@ dependencies = [
  "base",
  "data_model",
  "libc",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -2076,7 +2082,7 @@ dependencies = [
  "thiserror",
  "virtio_sys",
  "winapi",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -2110,7 +2116,19 @@ checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
 dependencies = [
  "bitflags 2.4.0",
  "cfg-if",
- "cfg_aliases",
+ "cfg_aliases 0.1.1",
+ "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.4.0",
+ "cfg-if",
+ "cfg_aliases 0.2.1",
  "libc",
  "memoffset 0.9.0",
 ]
@@ -2299,7 +2317,7 @@ dependencies = [
  "protobuf",
  "serde",
  "sync",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -2316,9 +2334,9 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pkg-config"
-version = "0.3.26"
+version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ac9a59f73473f1b8d852421e59e64809f025994837ef743615c6d0c5b305160"
+checksum = "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2"
 
 [[package]]
 name = "power_monitor"
@@ -2660,7 +2678,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "log",
- "nix 0.28.0",
+ "nix 0.29.0",
  "pkg-config",
  "remain",
  "serde",
@@ -3140,7 +3158,7 @@ dependencies = [
  "sync",
  "thiserror",
  "usb_sys",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -3210,7 +3228,7 @@ name = "vfio_sys"
 version = "0.1.0"
 dependencies = [
  "base",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -3249,7 +3267,7 @@ version = "0.1.0"
 dependencies = [
  "base",
  "data_model",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -3318,7 +3336,7 @@ dependencies = [
  "snapshot",
  "tempfile",
  "thiserror",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -3337,7 +3355,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tube_transporter",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -3743,7 +3761,7 @@ dependencies = [
  "uuid",
  "vm_control",
  "vm_memory",
- "zerocopy 0.7.32",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -3758,7 +3776,6 @@ version = "0.7.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74d4d3961e53fa4c9a25a8637fc2bfaf2595b3d3ae34875568a5cf64787716be"
 dependencies = [
- "byteorder",
  "zerocopy-derive 0.7.32",
 ]
 

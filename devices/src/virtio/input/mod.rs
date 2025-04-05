@@ -38,9 +38,10 @@ use serde::Serialize;
 use snapshot::AnySnapshot;
 use thiserror::Error;
 use vm_memory::GuestMemory;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
+use zerocopy::KnownLayout;
 
 use self::event_source::EvdevEventSource;
 use self::event_source::EventSource;
@@ -105,7 +106,18 @@ pub enum InputError {
 
 pub type Result<T> = std::result::Result<T, InputError>;
 
-#[derive(Copy, Clone, Default, Debug, AsBytes, FromZeroes, FromBytes, Serialize, Deserialize)]
+#[derive(
+    Copy,
+    Clone,
+    Default,
+    Debug,
+    FromBytes,
+    Immutable,
+    IntoBytes,
+    KnownLayout,
+    Serialize,
+    Deserialize,
+)]
 #[repr(C)]
 pub struct virtio_input_device_ids {
     bustype: Le16,
@@ -126,7 +138,17 @@ impl virtio_input_device_ids {
 }
 
 #[derive(
-    Copy, Clone, Default, Debug, AsBytes, FromZeroes, FromBytes, PartialEq, Serialize, Deserialize,
+    Copy,
+    Clone,
+    Default,
+    Debug,
+    FromBytes,
+    Immutable,
+    IntoBytes,
+    KnownLayout,
+    PartialEq,
+    Serialize,
+    Deserialize,
 )]
 #[repr(C)]
 pub struct virtio_input_absinfo {
@@ -147,7 +169,7 @@ impl virtio_input_absinfo {
     }
 }
 
-#[derive(Copy, Clone, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
 #[repr(C)]
 struct virtio_input_config {
     select: u8,
@@ -352,14 +374,13 @@ impl VirtioInputConfig {
 
     fn write(&mut self, offset: usize, data: &[u8]) {
         let mut config = self.build_config_memory();
-        copy_config(config.as_bytes_mut(), offset as u64, data, 0);
+        copy_config(config.as_mut_bytes(), offset as u64, data, 0);
         self.select = config.select;
         self.subsel = config.subsel;
     }
 }
 
 struct Worker<T: EventSource> {
-    interrupt: Interrupt,
     event_source: T,
     event_queue: Queue,
     status_queue: Queue,
@@ -461,7 +482,6 @@ impl<T: EventSource> Worker<T> {
             EventQAvailable,
             StatusQAvailable,
             InputEventsAvailable,
-            InterruptResample,
             Kill,
         }
         let wait_ctx: WaitContext<Token> = match WaitContext::build_with(&[
@@ -476,15 +496,6 @@ impl<T: EventSource> Worker<T> {
                 return;
             }
         };
-        if let Some(resample_evt) = self.interrupt.get_resample_evt() {
-            if wait_ctx
-                .add(resample_evt, Token::InterruptResample)
-                .is_err()
-            {
-                error!("failed adding resample event to WaitContext.");
-                return;
-            }
-        }
 
         'wait: loop {
             let wait_events = match wait_ctx.wait() {
@@ -520,9 +531,6 @@ impl<T: EventSource> Worker<T> {
                         Err(e) => error!("error receiving events: {}", e),
                         Ok(_cnt) => eventq_needs_interrupt |= self.send_events(),
                     },
-                    Token::InterruptResample => {
-                        self.interrupt.interrupt_resample();
-                    }
                     Token::Kill => {
                         let _ = kill_evt.wait();
                         break 'wait;
@@ -601,7 +609,7 @@ where
     fn activate(
         &mut self,
         _mem: GuestMemory,
-        interrupt: Interrupt,
+        _interrupt: Interrupt,
         mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != 2 {
@@ -617,7 +625,6 @@ where
             .context("tried to activate device without a source for events")?;
         self.worker_thread = Some(WorkerThread::start("v_input", move |kill_evt| {
             let mut worker = Worker {
-                interrupt,
                 event_source: source,
                 event_queue,
                 status_queue,

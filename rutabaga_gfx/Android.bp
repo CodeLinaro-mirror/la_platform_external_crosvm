@@ -36,12 +36,18 @@ rust_library {
         "libzerocopy",
     ],
     proc_macros: ["libremain"],
-    cfgs: [
-        "gfxstream_unstable",
+    static_libs: [
+        "libepoxy",
+        "libvirglrenderer",
     ],
     shared_libs: [
         "libc++",
         "libbase",
+        "libgfxstream_backend",
+    ],
+    apex_available: ["com.android.virt"],
+    cfgs: [
+        "gfxstream_unstable",
     ],
     target: {
         android: {
@@ -58,14 +64,47 @@ rust_library {
             ],
         },
     },
-    static_libs: [
+}
+
+rust_test {
+    name: "rutabaga_gfx_test_src_lib",
+    defaults: ["crosvm_defaults"],
+    host_supported: true,
+    crate_name: "rutabaga_gfx",
+    cargo_env_compat: true,
+    cargo_pkg_version: "0.1.3",
+    crate_root: "src/lib.rs",
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
+    edition: "2021",
+    features: [
+        "gfxstream",
+        "virgl_renderer",
+    ],
+    rustlibs: [
+        "libcfg_if",
+        "liblibc",
+        "liblog_rust",
+        "libnix",
+        "libserde",
+        "libserde_json",
+        "libtempfile",
+        "libthiserror",
+        "libzerocopy",
+    ],
+    proc_macros: ["libremain"],
+    shared_libs: [
         "libepoxy",
         "libgfxstream_backend",
         "libvirglrenderer",
     ],
-    apex_available: ["com.android.virt"],
 }
 
+// Manually written variant of librutabaga_gfx.
+// See https://r.android.com/2965726
 rust_library {
     name: "librutabaga_gfx_gfxstream",
     host_supported: true,
@@ -112,41 +151,4 @@ rust_library {
         },
     },
     apex_available: ["com.android.virt"],
-}
-
-rust_test {
-    name: "rutabaga_gfx_test_src_lib",
-    defaults: ["crosvm_defaults"],
-    host_supported: true,
-    crate_name: "rutabaga_gfx",
-    cargo_env_compat: true,
-    cargo_pkg_version: "0.1.3",
-    crate_root: "src/lib.rs",
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    test_options: {
-        unit_test: true,
-    },
-    edition: "2021",
-    features: [
-        "gfxstream",
-        "virgl_renderer",
-    ],
-    rustlibs: [
-        "libcfg_if",
-        "liblibc",
-        "liblog_rust",
-        "libnix",
-        "libserde",
-        "libserde_json",
-        "libtempfile",
-        "libthiserror",
-        "libzerocopy",
-    ],
-    proc_macros: ["libremain"],
-    shared_libs: [
-        "libepoxy",
-        "libgfxstream_backend",
-        "libvirglrenderer",
-    ],
 }

@@ -28,6 +28,7 @@
     "gpu",
     "gunyah",
     "libaaudio_stub",
+    "media",
     "net",
     "qcow",
     "usb",
@@ -76,8 +77,7 @@
     "libminijail": "libminijail_rust",
     "libsnapshot": "libsnapshot_crosvm",
     "libsync": "libsync_rust",
-    "libx86_64": "libx86_64_rust",
-    "libzerocopy": "libzerocopy-0.7.35"
+    "libx86_64": "libx86_64_rust"
   },
   "module_blocklist": [
     // TODO: These are all for workspace_excludes package. Maybe use the option to
@@ -187,6 +187,7 @@
       "patch": "protos/patches/Android.bp.patch"
     },
     "rutabaga_gfx": {
+      "add_toplevel_block": "rutabaga_gfx/Android.bp.extra",
       "patch": "rutabaga_gfx/patches/Android.bp.patch",
       "dep_blocklist": [
         "libEGL",
@@ -195,6 +196,8 @@
         "libXau",
         "libXdmcp",
         "libdl",
+        "libdrm",
+        "libgbm",
         "libm",
         "libpthread",
         "libxcb"

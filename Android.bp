@@ -62,6 +62,7 @@ rust_binary {
         "gpu_display",
         "gunyah",
         "libaaudio_stub",
+        "media",
         "net",
         "qcow",
         "usb",
@@ -116,7 +117,7 @@ rust_binary {
         "libvm_control",
         "libvm_memory",
         "libvmm_vhost",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libargh_helpers",
@@ -204,6 +205,7 @@ rust_test {
         "gpu_display",
         "gunyah",
         "libaaudio_stub",
+        "media",
         "net",
         "qcow",
         "usb",
@@ -260,7 +262,7 @@ rust_test {
         "libvm_control",
         "libvm_memory",
         "libvmm_vhost",
-        "libzerocopy-0.7.35",
+        "libzerocopy",
     ],
     proc_macros: [
         "libargh_helpers",

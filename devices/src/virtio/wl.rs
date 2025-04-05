@@ -125,13 +125,15 @@ use rutabaga_gfx::RUTABAGA_MAP_CACHE_CACHED;
 #[cfg(feature = "minigbm")]
 use rutabaga_gfx::RUTABAGA_MAP_CACHE_MASK;
 use snapshot::AnySnapshot;
+use static_assertions::const_assert_eq;
 use thiserror::Error as ThisError;
 use vm_control::VmMemorySource;
 use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryError;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
-use zerocopy::FromZeroes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
+use zerocopy::KnownLayout;
 
 #[cfg(feature = "gpu")]
 use super::resource_bridge::get_resource_info;
@@ -621,14 +623,14 @@ impl VmRequester {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlHeader {
     type_: Le32,
     flags: Le32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, FromZeroes, FromBytes, AsBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlVfdNew {
     hdr: CtrlHeader,
     id: Le32,
@@ -639,7 +641,7 @@ struct CtrlVfdNew {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlVfdNewCtxNamed {
     hdr: CtrlHeader,
     id: Le32,
@@ -647,10 +649,12 @@ struct CtrlVfdNewCtxNamed {
     pfn: Le64,   // Ignored.
     size: Le32,  // Ignored.
     name: [u8; 32],
+    _pad: u32,
 }
+const_assert_eq!(size_of::<CtrlVfdNewCtxNamed>(), 64);
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 #[cfg(feature = "minigbm")]
 struct CtrlVfdNewDmabuf {
     hdr: CtrlHeader,
@@ -671,7 +675,7 @@ struct CtrlVfdNewDmabuf {
 
 #[cfg(feature = "minigbm")]
 #[repr(C)]
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlVfdDmabufSync {
     hdr: CtrlHeader,
     id: Le32,
@@ -679,7 +683,7 @@ struct CtrlVfdDmabufSync {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlVfdRecv {
     hdr: CtrlHeader,
     id: Le32,
@@ -687,14 +691,14 @@ struct CtrlVfdRecv {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlVfd {
     hdr: CtrlHeader,
     id: Le32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlVfdSend {
     hdr: CtrlHeader,
     id: Le32,
@@ -703,21 +707,21 @@ struct CtrlVfdSend {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, AsBytes, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct CtrlVfdSendVfd {
     kind: Le32,
     id: Le32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, FromBytes, Immutable, KnownLayout)]
 union CtrlVfdSendVfdV2Payload {
     id: Le32,
     seqno: Le64,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, FromZeroes, FromBytes)]
+#[derive(Copy, Clone, FromBytes, Immutable, KnownLayout)]
 struct CtrlVfdSendVfdV2 {
     kind: Le32,
     payload: CtrlVfdSendVfdV2Payload,
@@ -1840,7 +1844,6 @@ pub fn process_out_queue(out_queue: &mut Queue, state: &mut WlState) {
 }
 
 struct Worker {
-    interrupt: Interrupt,
     in_queue: Queue,
     out_queue: Queue,
     state: WlState,
@@ -1848,7 +1851,6 @@ struct Worker {
 
 impl Worker {
     fn new(
-        interrupt: Interrupt,
         in_queue: Queue,
         out_queue: Queue,
         wayland_paths: BTreeMap<String, PathBuf>,
@@ -1860,7 +1862,6 @@ impl Worker {
         address_offset: Option<u64>,
     ) -> Worker {
         Worker {
-            interrupt,
             in_queue,
             out_queue,
             state: WlState::new(
@@ -1883,7 +1884,6 @@ impl Worker {
             OutQueue,
             Kill,
             State,
-            InterruptResample,
         }
 
         let wait_ctx: WaitContext<Token> = WaitContext::build_with(&[
@@ -1893,12 +1893,6 @@ impl Worker {
             (&self.state.wait_ctx, Token::State),
         ])
         .context("failed creating WaitContext")?;
-
-        if let Some(resample_evt) = self.interrupt.get_resample_evt() {
-            wait_ctx
-                .add(resample_evt, Token::InterruptResample)
-                .context("failed adding resample event to WaitContext.")?;
-        }
 
         let mut watching_state_ctx = true;
         'wait: loop {
@@ -1944,9 +1938,6 @@ impl Worker {
                             }
                             watching_state_ctx = false;
                         }
-                    }
-                    Token::InterruptResample => {
-                        self.interrupt.interrupt_resample();
                     }
                 }
             }
@@ -2040,7 +2031,7 @@ impl VirtioDevice for Wl {
     fn activate(
         &mut self,
         _mem: GuestMemory,
-        interrupt: Interrupt,
+        _interrupt: Interrupt,
         mut queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != QUEUE_SIZES.len() {
@@ -2071,7 +2062,6 @@ impl VirtioDevice for Wl {
 
         self.worker_thread = Some(WorkerThread::start("v_wl", move |kill_evt| {
             Worker::new(
-                interrupt,
                 queues.pop_first().unwrap().1,
                 queues.pop_first().unwrap().1,
                 wayland_paths,

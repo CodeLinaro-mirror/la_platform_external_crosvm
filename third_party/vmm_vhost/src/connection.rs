@@ -9,8 +9,9 @@ use std::mem;
 
 use base::AsRawDescriptor;
 use base::RawDescriptor;
-use zerocopy::AsBytes;
 use zerocopy::FromBytes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
 
 use crate::connection::Req;
 use crate::message::FrontendReq;
@@ -69,24 +70,25 @@ impl<R: Req> Connection<R> {
         hdr: &VhostUserMsgHeader<R>,
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
-        self.0.send_message(hdr.as_bytes(), &[], &[], fds)
+        self.0
+            .send_message(hdr.into_raw().as_bytes(), &[], &[], fds)
     }
 
     /// Send a message with header and body. Optional file descriptors may be attached to
     /// the message.
-    pub fn send_message<T: AsBytes>(
+    pub fn send_message<T: IntoBytes + Immutable>(
         &self,
         hdr: &VhostUserMsgHeader<R>,
         body: &T,
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
         self.0
-            .send_message(hdr.as_bytes(), body.as_bytes(), &[], fds)
+            .send_message(hdr.into_raw().as_bytes(), body.as_bytes(), &[], fds)
     }
 
     /// Send a message with header and body. `payload` is appended to the end of the body. Optional
     /// file descriptors may also be attached to the message.
-    pub fn send_message_with_payload<T: Sized + AsBytes>(
+    pub fn send_message_with_payload<T: IntoBytes + Immutable>(
         &self,
         hdr: &VhostUserMsgHeader<R>,
         body: &T,
@@ -94,7 +96,7 @@ impl<R: Req> Connection<R> {
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
         self.0
-            .send_message(hdr.as_bytes(), body.as_bytes(), payload, fds)
+            .send_message(hdr.into_raw().as_bytes(), body.as_bytes(), payload, fds)
     }
 
     /// Reads all bytes into the given scatter/gather vectors with optional attached files. Will
@@ -146,8 +148,9 @@ impl<R: Req> Connection<R> {
     /// Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be accepted and all
     /// other file descriptor will be discard silently.
     pub fn recv_header(&self) -> Result<(VhostUserMsgHeader<R>, Vec<File>)> {
-        let mut hdr = VhostUserMsgHeader::default();
-        let files = self.recv_into_bufs_all(&mut [hdr.as_bytes_mut()])?;
+        let mut hdr_raw = [0u32; 3];
+        let files = self.recv_into_bufs_all(&mut [hdr_raw.as_mut_bytes()])?;
+        let hdr = VhostUserMsgHeader::from_raw(hdr_raw);
         if !hdr.is_valid() {
             return Err(Error::InvalidMessage);
         }
@@ -172,14 +175,15 @@ impl<R: Req> Connection<R> {
     ///
     /// Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be
     /// accepted and all other file descriptor will be discard silently.
-    pub fn recv_message<T: AsBytes + FromBytes + VhostUserMsgValidator>(
+    pub fn recv_message<T: IntoBytes + FromBytes + VhostUserMsgValidator>(
         &self,
     ) -> Result<(VhostUserMsgHeader<R>, T, Vec<File>)> {
-        let mut hdr = VhostUserMsgHeader::default();
+        let mut hdr_raw = [0u32; 3];
         let mut body = T::new_zeroed();
-        let mut slices = [hdr.as_bytes_mut(), body.as_bytes_mut()];
+        let mut slices = [hdr_raw.as_mut_bytes(), body.as_mut_bytes()];
         let files = self.recv_into_bufs_all(&mut slices)?;
 
+        let hdr = VhostUserMsgHeader::from_raw(hdr_raw);
         if !hdr.is_valid() || !body.is_valid() {
             return Err(Error::InvalidMessage);
         }
@@ -194,7 +198,7 @@ impl<R: Req> Connection<R> {
     ///
     /// Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be accepted and all
     /// other file descriptor will be discard silently.
-    pub fn recv_message_with_payload<T: AsBytes + FromBytes + VhostUserMsgValidator>(
+    pub fn recv_message_with_payload<T: IntoBytes + FromBytes + VhostUserMsgValidator>(
         &self,
     ) -> Result<(VhostUserMsgHeader<R>, T, Vec<u8>, Vec<File>)> {
         let (hdr, files) = self.recv_header()?;
@@ -202,7 +206,7 @@ impl<R: Req> Connection<R> {
         let mut body = T::new_zeroed();
         let payload_size = hdr.get_size() as usize - mem::size_of::<T>();
         let mut buf: Vec<u8> = vec![0; payload_size];
-        let mut slices = [body.as_bytes_mut(), buf.as_bytes_mut()];
+        let mut slices = [body.as_mut_bytes(), buf.as_mut_bytes()];
         let more_files = self.recv_into_bufs_all(&mut slices)?;
         if !body.is_valid() || !more_files.is_empty() {
             return Err(Error::InvalidMessage);

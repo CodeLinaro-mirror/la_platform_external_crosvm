@@ -65,7 +65,7 @@ pub use vm_control::gpu::DEFAULT_REFRESH_RATE;
 use vm_control::ModifyWaitContext;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 pub use self::protocol::virtio_gpu_config;
 pub use self::protocol::VIRTIO_GPU_F_CONTEXT_INIT;
@@ -445,6 +445,7 @@ impl Frontend {
                 self.virtio_gpu.unref_resource(info.resource_id.to_native())
             }
             GpuCommand::SetScanout(info) => self.virtio_gpu.set_scanout(
+                info.r,
                 info.scanout_id.to_native(),
                 info.resource_id.to_native(),
                 None,
@@ -683,7 +684,7 @@ impl Frontend {
                 };
 
                 self.virtio_gpu
-                    .set_scanout(scanout_id, resource_id, Some(scanout))
+                    .set_scanout(info.r, scanout_id, resource_id, Some(scanout))
             }
             GpuCommand::ResourceMapBlob(info) => {
                 let resource_id = info.resource_id.to_native();
@@ -815,7 +816,6 @@ enum WorkerToken {
     CursorQueue,
     Display,
     GpuControl,
-    InterruptResample,
     Sleep,
     Kill,
     ResourceBridge {
@@ -1158,12 +1158,6 @@ impl Worker {
         ])
         .context("failed creating gpu worker WaitContext")?;
 
-        if let Some(resample_evt) = activation_resources.interrupt.get_resample_evt() {
-            event_manager
-                .add(resample_evt, WorkerToken::InterruptResample)
-                .context("failed adding interrupt resample event to WaitContext")?;
-        }
-
         let poll_desc: SafeDescriptor;
         if let Some(desc) = self.state.virtio_gpu.poll_descriptor() {
             poll_desc = desc;
@@ -1267,9 +1261,6 @@ impl Worker {
                     }
                     WorkerToken::ResourceBridge { index } => {
                         self.resource_bridges.set_should_process(index);
-                    }
-                    WorkerToken::InterruptResample => {
-                        activation_resources.interrupt.interrupt_resample();
                     }
                     WorkerToken::VirtioGpuPoll => {
                         self.state.event_poll();
@@ -1842,7 +1833,7 @@ impl VirtioDevice for Gpu {
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         let mut cfg = self.get_config();
-        copy_config(cfg.as_bytes_mut(), offset, data, 0);
+        copy_config(cfg.as_mut_bytes(), offset, data, 0);
         if (cfg.events_clear.to_native() & VIRTIO_GPU_EVENT_DISPLAY) != 0 {
             self.display_event.store(false, Ordering::Relaxed);
         }

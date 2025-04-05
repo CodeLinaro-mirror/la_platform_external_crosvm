@@ -24,7 +24,7 @@ use virtio_sys::virtio_fs::virtio_fs_config;
 use vm_memory::GuestMemory;
 use vmm_vhost::message::VhostUserProtocolFeatures;
 use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 use crate::virtio;
 use crate::virtio::copy_config;
@@ -132,14 +132,13 @@ impl VhostUserDevice for FsBackend {
         let tube = Arc::new(Mutex::new(fs_device_tube));
 
         let server = self.server.clone();
-        let irq = queue.interrupt().clone();
 
         // Slot is always going to be 0 because we do not support DAX
         let slot: u32 = 0;
 
         let worker = WorkerThread::start(format!("v_fs:{}:{}", self.tag, idx), move |kill_evt| {
-            let mut worker = Worker::new(queue, server, irq, tube, slot);
-            worker.run(kill_evt, false)?;
+            let mut worker = Worker::new(queue, server, tube, slot);
+            worker.run(kill_evt)?;
             Ok(worker.queue)
         });
         self.workers.insert(idx, worker);

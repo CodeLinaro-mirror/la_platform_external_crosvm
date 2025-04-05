@@ -24,7 +24,7 @@ use virtio_sys::virtio_fs::VIRTIO_FS_SHMCAP_ID_CACHE;
 use vm_control::FsMappingRequest;
 use vm_control::VmResponse;
 use vm_memory::GuestMemory;
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 use crate::pci::PciAddress;
 use crate::pci::PciBarConfiguration;
@@ -216,7 +216,7 @@ impl VirtioDevice for Fs {
     fn activate(
         &mut self,
         _guest_mem: GuestMemory,
-        interrupt: Interrupt,
+        _interrupt: Interrupt,
         queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
         if queues.len() != self.queue_sizes.len() {
@@ -251,26 +251,17 @@ impl VirtioDevice for Fs {
         }
 
         let socket = Arc::new(Mutex::new(socket));
-        let mut watch_resample_event = true;
 
         self.workers = queues
             .into_iter()
             .map(|(idx, queue)| {
                 let server = server.clone();
-                let irq = interrupt.clone();
                 let socket = Arc::clone(&socket);
 
-                let worker =
-                    WorkerThread::start(format!("v_fs:{}:{}", self.tag, idx), move |kill_evt| {
-                        let mut worker = Worker::new(queue, server, irq, socket, slot);
-                        worker.run(kill_evt, watch_resample_event)
-                    });
-
-                if watch_resample_event {
-                    watch_resample_event = false;
-                }
-
-                worker
+                WorkerThread::start(format!("v_fs:{}:{}", self.tag, idx), move |kill_evt| {
+                    let mut worker = Worker::new(queue, server, socket, slot);
+                    worker.run(kill_evt)
+                })
             })
             .collect();
         Ok(())
