@@ -1,8 +1,8 @@
 # Architecture: Snapshotting
 
-Snapshotting is a **highly experimental** `x86_64` only feature currently under development. It is
-100% **not supported** and only supports a very limited set of devices. This page roughly summarizes
-how the system works, and how device authors should think about it when writing new devices.
+Snapshotting is a **highly experimental** feature currently under development. It is 100% **not
+supported** and only supports a very limited set of devices. This page roughly summarizes how the
+system works, and how device authors should think about it when writing new devices.
 
 ## The snapshot & restore sequence
 
@@ -11,6 +11,28 @@ devices running on the host. To take an accurate snapshot, we need a point in ti
 there is no way to fetch this state atomically, we have to freeze the guest (VCPUs) and the device
 backends. Similarly, on restore we must freeze in the same way to prevent partially restored state
 from being modified.
+
+## Snapshot format
+
+The snapshot format is not stable. Currently, the output is a directory, where most VM components
+are snapshotted to separate files using CBOR encoding.
+
+When debugging snapshots, you may want to inspect the CBOR files. One tool available is
+[cbor-cli](https://docs.rs/crate/cbor-cli/latest). You can run `cargo install cbor-cli`, then use it
+to view a file as JSON, e.g.
+
+```
+$ cbor export --format=json /tmp/crosvm-snapshot/irqchip | jq
+{
+  "mp_state": [
+    "Halted",
+    "Halted",
+    "Halted",
+    "Halted"
+  ],
+  "pit_state": {
+...
+```
 
 ## Snapshotting a running VM
 

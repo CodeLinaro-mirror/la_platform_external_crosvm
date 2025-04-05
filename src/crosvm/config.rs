@@ -202,15 +202,6 @@ pub struct PmemOption {
 
 #[derive(Serialize, Deserialize, FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct VhostUserOption {
-    pub socket: PathBuf,
-
-    /// Maximum number of entries per queue (default: 32768)
-    pub max_queue_size: Option<u16>,
-}
-
-#[derive(Serialize, Deserialize, FromKeyValues)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct VhostUserFrontendOption {
     /// Device type
     #[serde(rename = "type")]
@@ -224,57 +215,6 @@ pub struct VhostUserFrontendOption {
 
     /// Preferred PCI address
     pub pci_address: Option<PciAddress>,
-}
-
-#[derive(Serialize, Deserialize, FromKeyValues)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct VhostUserFsOption {
-    #[serde(alias = "socket")]
-    pub socket_path: Option<PathBuf>,
-    /// File descriptor of connected socket
-    pub socket_fd: Option<u32>,
-    pub tag: Option<String>,
-
-    /// Maximum number of entries per queue (default: 32768)
-    pub max_queue_size: Option<u16>,
-}
-
-pub fn parse_vhost_user_fs_option(param: &str) -> Result<VhostUserFsOption, String> {
-    // Allow the previous `--vhost-user-fs /path/to/socket:fs-tag` format for compatibility.
-    // This will unfortunately prevent parsing of valid comma-separated FromKeyValues options that
-    // contain a ":" character (e.g. in a socket filename), but those were not supported in the old
-    // format either, so we can live with it until the deprecated format is removed.
-    // TODO(b/218223240): Remove support for the deprecated format (and use `FromKeyValues`
-    // directly instead of `from_str_fn`) once enough time has passed.
-    if param.contains(':') {
-        // (socket:tag)
-        let mut components = param.split(':');
-        let socket = PathBuf::from(
-            components
-                .next()
-                .ok_or("missing socket path for `vhost-user-fs`")?,
-        );
-        let tag = components
-            .next()
-            .ok_or("missing tag for `vhost-user-fs`")?
-            .to_owned();
-
-        log::warn!(
-            "`--vhost-user-fs` with colon-separated options is deprecated; \
-            please use `--vhost-user-fs {},tag={}` instead",
-            socket.display(),
-            tag,
-        );
-
-        Ok(VhostUserFsOption {
-            socket_path: Some(socket),
-            tag: Some(tag),
-            max_queue_size: None,
-            socket_fd: None,
-        })
-    } else {
-        from_key_values::<VhostUserFsOption>(param)
-    }
 }
 
 pub const DEFAULT_TOUCH_DEVICE_HEIGHT: u32 = 1024;
@@ -400,9 +340,9 @@ fn parse_hex_or_decimal(maybe_hex_string: &str) -> Result<u64, String> {
 }
 
 pub fn parse_mmio_address_range(s: &str) -> Result<Vec<AddressRange>, String> {
-    s.split(",")
+    s.split(',')
         .map(|s| {
-            let r: Vec<&str> = s.split("-").collect();
+            let r: Vec<&str> = s.split('-').collect();
             if r.len() != 2 {
                 return Err(invalid_value_err(s, "invalid range"));
             }
@@ -827,7 +767,6 @@ pub struct Config {
     pub vhost_scmi_device: PathBuf,
     pub vhost_user: Vec<VhostUserFrontendOption>,
     pub vhost_user_connect_timeout_ms: Option<u64>,
-    pub vhost_user_fs: Vec<VhostUserFsOption>,
     #[cfg(feature = "video-decoder")]
     pub video_dec: Vec<VideoDeviceConfig>,
     #[cfg(feature = "video-encoder")]
@@ -1060,7 +999,6 @@ impl Default for Config {
             vhost_scmi_device: PathBuf::from(VHOST_SCMI_PATH),
             vhost_user: Vec::new(),
             vhost_user_connect_timeout_ms: None,
-            vhost_user_fs: Vec::new(),
             vsock: None,
             #[cfg(feature = "video-decoder")]
             video_dec: Vec::new(),
@@ -1957,17 +1895,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_vhost_user_option() {
-        let opt: VhostUserOption = from_key_values("/10mm").unwrap();
-        assert_eq!(opt.socket.to_str(), Some("/10mm"));
-        assert_eq!(opt.max_queue_size, None);
-
-        let opt: VhostUserOption = from_key_values("/10mm,max-queue-size=256").unwrap();
-        assert_eq!(opt.socket.to_str(), Some("/10mm"));
-        assert_eq!(opt.max_queue_size, Some(256));
-    }
-
-    #[test]
     fn parse_vhost_user_option_all_device_types() {
         fn test_device_type(type_string: &str, type_: DeviceType) {
             let vhost_user_arg = format!("{},socket=sock", type_string);
@@ -2007,133 +1934,6 @@ mod tests {
         test_device_type("wl", DeviceType::Wl);
         test_device_type("tpm", DeviceType::Tpm);
         test_device_type("pvclock", DeviceType::Pvclock);
-    }
-
-    #[test]
-    fn parse_vhost_user_fs_deprecated() {
-        let cfg = TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(
-                &[],
-                &["--vhost-user-fs", "my_socket:my_tag", "/dev/null"],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(cfg.vhost_user_fs.len(), 1);
-        let fs = &cfg.vhost_user_fs[0];
-        let socket = fs.socket_path.as_ref().unwrap();
-        assert_eq!(socket.to_str(), Some("my_socket"));
-        assert_eq!(fs.tag, Some("my_tag".to_string()));
-        assert_eq!(fs.max_queue_size, None);
-        assert_eq!(fs.socket_fd, None);
-    }
-
-    #[test]
-    fn parse_vhost_user_fs() {
-        let cfg = TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(
-                &[],
-                &["--vhost-user-fs", "my_socket,tag=my_tag", "/dev/null"],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(cfg.vhost_user_fs.len(), 1);
-        let fs = &cfg.vhost_user_fs[0];
-        let socket = fs.socket_path.as_ref().unwrap();
-        assert_eq!(socket.to_str(), Some("my_socket"));
-        assert_eq!(fs.tag, Some("my_tag".to_string()));
-        assert_eq!(fs.max_queue_size, None);
-    }
-
-    #[test]
-    fn parse_vhost_user_fs_explict_socket() {
-        let cfg = TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(
-                &[],
-                &[
-                    "--vhost-user-fs",
-                    "socket=my_socket,tag=my_tag",
-                    "/dev/null",
-                ],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(cfg.vhost_user_fs.len(), 1);
-        let fs = &cfg.vhost_user_fs[0];
-        let socket = fs.socket_path.as_ref().unwrap();
-        assert_eq!(socket.to_str(), Some("my_socket"));
-        assert_eq!(fs.tag, Some("my_tag".to_string()));
-        assert_eq!(fs.max_queue_size, None);
-    }
-
-    #[test]
-    fn parse_vhost_user_fs_max_queue_size() {
-        let cfg = TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(
-                &[],
-                &[
-                    "--vhost-user-fs",
-                    "my_socket,tag=my_tag,max-queue-size=256",
-                    "/dev/null",
-                ],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(cfg.vhost_user_fs.len(), 1);
-        let fs = &cfg.vhost_user_fs[0];
-        let socket = fs.socket_path.as_ref().unwrap();
-        assert_eq!(socket.to_str(), Some("my_socket"));
-        assert_eq!(fs.tag, Some("my_tag".to_string()));
-        assert_eq!(fs.max_queue_size, Some(256));
-    }
-
-    #[test]
-    fn parse_vhost_user_fs_no_tag() {
-        let cfg = TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(
-                &[],
-                &["--vhost-user-fs", "my_socket", "/dev/null"],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(cfg.vhost_user_fs.len(), 1);
-        let fs = &cfg.vhost_user_fs[0];
-        let socket = fs.socket_path.as_ref().unwrap();
-        assert_eq!(socket.to_str(), Some("my_socket"));
-        assert_eq!(fs.tag, None);
-        assert_eq!(fs.max_queue_size, None);
-    }
-
-    #[test]
-    fn parse_vhost_user_fs_socket_fd() {
-        let cfg = TryInto::<Config>::try_into(
-            crate::crosvm::cmdline::RunCommand::from_args(
-                &[],
-                &[
-                    "--vhost-user-fs",
-                    "tag=my_tag,max-queue-size=256,socket-fd=1234",
-                    "/dev/null",
-                ],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(cfg.vhost_user_fs.len(), 1);
-        let fs = &cfg.vhost_user_fs[0];
-        assert!(fs.socket_path.is_none());
-        assert_eq!(fs.tag, Some("my_tag".to_string()));
-        assert_eq!(fs.max_queue_size, Some(256));
-        assert_eq!(fs.socket_fd.unwrap(), 1234_u32);
     }
 
     #[cfg(target_arch = "x86_64")]

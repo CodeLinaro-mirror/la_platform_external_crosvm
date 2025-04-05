@@ -30,7 +30,6 @@ rust_library {
         "liblibc",
         "libmetrics",
         "libnum_cpus",
-        "libonce_cell",
         "libserde",
         "libserde_json",
         "libsync_rust",
