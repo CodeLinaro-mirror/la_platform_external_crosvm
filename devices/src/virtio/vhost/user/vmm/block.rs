@@ -14,7 +14,7 @@ use vm_memory::GuestMemory;
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
-use crate::virtio::{block::common::virtio_blk_config, Interrupt, Queue, VirtioDevice, TYPE_BLOCK};
+use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_BLOCK};
 
 const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
 const VIRTIO_BLK_F_RO: u32 = 5;
@@ -105,11 +105,7 @@ impl VirtioDevice for Block {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self
-            .handler
-            .borrow_mut()
-            .read_config::<virtio_blk_config>(offset, data)
-        {
+        if let Err(e) = self.handler.borrow_mut().read_config(offset, data) {
             error!("failed to read config: {}", e);
         }
     }

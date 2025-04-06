@@ -51,13 +51,7 @@ const VIRTIO_FASTRPC_F_DOMAIN_NUM: u32 = 6;
 const VIRTIO_FASTRPC_F_VQUEUE_SETTING: u32  = 7;
 /* indicates fastrpc_mmap/fastrpc_munmap is supported */
 const VIRTIO_FASTRPC_F_HYBRID: u32 = 9;
-
-/*version should be 0x00010000*/
-const VUFRPC_VERSION : u32 = 0x0001_0000;
-/*domain_num should be 0x00000005*/
-const VUFRPC_DOMAIN_NUM : u32 = 0x0000_0005;
-/*max_buf_size should be 0x00001000(4K) for test as bounce buffer only have 16M*/
-const VUFRPC_MAX_BUF_SZ : u32 = 0x0002_0000;
+const VIRTIO_FASTRPC_F_DEVICE_DISCOVERY: u32 = 11;
 
 pub struct Frpc {
     kill_evt: Option<Event>,
@@ -66,48 +60,14 @@ pub struct Frpc {
     queue_sizes: Vec<u16>,
 }
 
-#[repr(C)]
-struct vufrpc_config_data {
-   version: u32,
-   domain_num: u32,
-   max_buff_size: u32
-}
-
-impl vufrpc_config_data {
-    fn copy_cfg_space_at_offset(&self, target: &mut [u8], offset: u64) {
-        let size_cdata = std::mem::size_of::<vufrpc_config_data>() as u64;
-      // Ensure that the target slice has enough capacity
-        assert!(offset + size_cdata <= target.len() as u64);
-
-      let mut loffset: usize = offset.try_into().expect(&format!("{}:{}", file!(), line!()));
-
-      // Serialize the struct fields into the target slice
-        let version_bytes = self.version.to_le_bytes();
-      let len = version_bytes.len();
-        target[loffset as usize..loffset as usize + len].copy_from_slice(&version_bytes);
-      loffset = loffset + len;
-
-        let domain_bytes = self.domain_num.to_le_bytes();
-      let len2 = domain_bytes.len();
-        target[loffset as usize..loffset as usize + len2].copy_from_slice(&domain_bytes);
-      loffset = loffset + len2;
-
-      let max_buff_size = self.max_buff_size.to_le_bytes();
-      let len3 = max_buff_size.len();
-        target[loffset as usize..loffset as usize + len3].copy_from_slice(&max_buff_size);
-      loffset = loffset + len3;
-
-        // Add serialization for other fields as needed
-    }
-}
-
 impl Frpc {
     pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P) -> Result<Frpc> {
         let socket = UnixStream::connect(&socket_path).map_err(Error::SocketConnect)?;
 
       //Enable transport specific flags in VirtIO feature set defined by vhost-user
         let init_features = base_features | 1 << VIRTIO_FASTRPC_F_HYBRID | 1 << VIRTIO_FASTRPC_F_VERSION
-      | 1 << VIRTIO_FASTRPC_F_DOMAIN_NUM | 1 << VIRTIO_FASTRPC_F_VQUEUE_SETTING | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+      | 1 << VIRTIO_FASTRPC_F_DOMAIN_NUM | 1 << VIRTIO_FASTRPC_F_VQUEUE_SETTING |1 << VIRTIO_FASTRPC_F_DEVICE_DISCOVERY
+      |VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
         let allow_features = init_features
             | 1u64 << crate::virtio::VIRTIO_F_VERSION_1
@@ -170,15 +130,9 @@ impl VirtioDevice for Frpc {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-      let mut vufrpc_cspace = vufrpc_config_data {
-      version: VUFRPC_VERSION,
-      domain_num: VUFRPC_DOMAIN_NUM,
-      max_buff_size: VUFRPC_MAX_BUF_SZ,
-      };
-
-      // Copy the struct data to the byte array at a specific offset (e.g., at 256 offset)
-      vufrpc_cspace.copy_cfg_space_at_offset(data, offset);
-
+        if let Err(e) = self.handler.borrow_mut().read_config(offset, data) {
+            error!("failed to read config: {}", e);
+        }
     }
 
    fn activate(
