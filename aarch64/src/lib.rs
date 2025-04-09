@@ -548,6 +548,27 @@ impl arch::LinuxArch for AArch64 {
 
         let main_memory_size = main_memory_size(&components, vm.get_hypervisor());
 
+        // Load pvmfw early because it tells the hypervisor this is a pVM which affects
+        // the behavior of calls like Hypervisor::check_capability
+        if components.hv_cfg.protection_type.needs_firmware_loaded() {
+            arch::load_image(
+                &mem,
+                &mut components
+                    .pvm_fw
+                    .expect("pvmfw must be available if ProtectionType loads it"),
+                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
+                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+            )
+            .map_err(Error::CustomPvmFwLoadFailure)?;
+        } else if components.hv_cfg.protection_type.runs_firmware() {
+            // Tell the hypervisor to load the pVM firmware.
+            vm.load_protected_vm_firmware(
+                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
+                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
+            )
+            .map_err(Error::PvmFwLoadFailure)?;
+        }
+
         let fdt_position = fdt_position.unwrap_or(if has_bios {
             FdtPosition::Start
         } else {
@@ -623,9 +644,7 @@ impl arch::LinuxArch for AArch64 {
                 .expect("Not enough memory for FDT"),
         };
 
-        let mut use_pmu = vm
-            .get_hypervisor()
-            .check_capability(HypervisorCap::ArmPmuV3);
+        let mut use_pmu = vm.check_capability(VmCap::ArmPmuV3);
         use_pmu &= !no_pmu;
         let vcpu_count = components.vcpu_count;
         let mut has_pvtime = true;
@@ -683,25 +702,6 @@ impl arch::LinuxArch for AArch64 {
                 MemCacheType::CacheCoherent,
             )
             .map_err(Error::MapPvtimeError)?;
-        }
-
-        if components.hv_cfg.protection_type.needs_firmware_loaded() {
-            arch::load_image(
-                &mem,
-                &mut components
-                    .pvm_fw
-                    .expect("pvmfw must be available if ProtectionType loads it"),
-                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
-                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
-            )
-            .map_err(Error::CustomPvmFwLoadFailure)?;
-        } else if components.hv_cfg.protection_type.runs_firmware() {
-            // Tell the hypervisor to load the pVM firmware.
-            vm.load_protected_vm_firmware(
-                GuestAddress(AARCH64_PROTECTED_VM_FW_START),
-                AARCH64_PROTECTED_VM_FW_MAX_SIZE,
-            )
-            .map_err(Error::PvmFwLoadFailure)?;
         }
 
         for (vcpu_id, vcpu) in vcpus.iter().enumerate() {
@@ -1477,6 +1477,7 @@ mod tests {
             address_range: AddressRange::from_start_and_size(0x8080_0000, 0x1000).unwrap(),
             size: 0x1000,
             entry: GuestAddress(0x8080_0000),
+            class: kernel_loader::ElfClass::ElfClass64,
         });
         assert_eq!(
             payload.address_range(),
@@ -1528,6 +1529,7 @@ mod tests {
             address_range: AddressRange::from_start_and_size(0x8080_0000, 0x1000).unwrap(),
             size: 0x1000,
             entry: GuestAddress(0x8080_0000),
+            class: kernel_loader::ElfClass::ElfClass64,
         });
         assert_eq!(
             payload.address_range(),
