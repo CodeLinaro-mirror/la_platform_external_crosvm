@@ -190,6 +190,7 @@
     },
     "rutabaga_gfx": {
       "add_toplevel_block": "rutabaga_gfx/Android.bp.extra",
+      "no_presubmit": true,
       "patch": "rutabaga_gfx/patches/Android.bp.patch",
       "dep_blocklist": [
         "libEGL",
