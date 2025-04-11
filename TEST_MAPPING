@@ -52,7 +52,7 @@
     // {"name": "net_util_test_tests_unix_tap"},
     {"name": "p9_test_src_lib"},
     {"name": "resources_test_src_lib"},
-    // {"name": "rutabaga_gfx_test_src_lib"},
+    {"name": "rutabaga_gfx_test_src_lib"},
     {"name": "serde_keyvalue_test_src_lib"},
     {"name": "usb_util_test_src_lib"},
     // {"name": "vhost_test_tests_linux"},
