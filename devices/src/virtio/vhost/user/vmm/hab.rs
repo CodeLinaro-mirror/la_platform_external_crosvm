@@ -10,6 +10,10 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 use std::u32;
+use std::thread::sleep;
+use std::time::Duration;
+use std::fs;
+use std::io;
 
 use base::{info, error, Event, RawDescriptor};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
@@ -27,6 +31,8 @@ use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker,
 use crate::virtio::{ Interrupt, Queue, VirtioDevice};
 
 const QUEUE_SIZE: u16 = 1024;
+const RETRY_LIMIT: u16 = 20;
+const RETRY_DELAY_MS: u64 = 100;
 
 pub struct Hab {
     kill_evt: Option<Event>,
@@ -39,7 +45,35 @@ pub struct Hab {
 
 impl Hab {
     pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P , device_id : u32,  numOfQueue : u32) -> Result<Hab>  {
-         let socket = UnixStream::connect(&socket_path).map_err(Error::SocketConnect)?;
+        let max_retries = RETRY_LIMIT;
+        let mut retries = 0;
+        let mut socket;
+
+        loop {
+            if fs::metadata(&socket_path).is_ok() {
+                match UnixStream::connect(&socket_path) {
+                    Ok(s) => {
+                        socket = s;
+                        break;
+                    }
+                    Err(e) => {
+                        retries += 1;
+                        if retries >= max_retries {
+                            return Err(Error::SocketConnect(e));
+                        }
+                        sleep(Duration::from_millis(RETRY_DELAY_MS));
+                    }
+                }
+            } else {
+                retries += 1;
+                if retries >= max_retries {
+                    return Err(Error::SocketConnect(io::Error::new(io::ErrorKind::NotFound, "Socket path not found")));
+                }
+                sleep(Duration::from_millis(RETRY_DELAY_MS));
+            }
+        }
+
+        info!("socket {} connected after retries {}", socket_path.as_ref().display(), retries);
         let sock_copy = socket.try_clone().expect("Couldn't clone socket");
          let allow_features = 1u64 << crate::virtio::VIRTIO_F_VERSION_1
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()  ;
