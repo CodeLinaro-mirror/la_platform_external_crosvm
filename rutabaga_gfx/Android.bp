@@ -77,7 +77,7 @@ rust_test {
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
-        unit_test: true,
+        unit_test: false,
     },
     edition: "2021",
     features: [
