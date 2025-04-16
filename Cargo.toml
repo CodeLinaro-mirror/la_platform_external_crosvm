@@ -38,6 +38,7 @@ codegen-units = 1
 # by dependencies.
 members = [
     "aarch64",
+    "aarch64_sys_reg",
     "acpi_tables",
     "android_audio",
     "arch",
@@ -117,6 +118,7 @@ exclude = [
 ]
 
 [workspace.dependencies]
+ciborium = "0.2.2"
 tokio = { version = "1.29.1", features = ["net", "rt-multi-thread", "time", "sync", "macros"] }
 snapshot = { path = "snapshot" }
 
@@ -425,6 +427,7 @@ all-aarch64 = [
 ## All features that are compiled and tested for riscv64
 all-riscv64 = [
     "gdb",
+    "default",
 ]
 
 ## All features that are compiled and tested for x86_64
@@ -493,6 +496,7 @@ anyhow = "1"
 arch = { path = "arch" }
 argh = "0.1.10"
 argh_helpers = { path = "argh_helpers" }
+aarch64_sys_reg = { path = "aarch64_sys_reg" }
 audio_streams = "*"
 base = { path = "base" }
 bit_field = { path = "bit_field" }
@@ -525,7 +529,6 @@ merge = "0.1.0"
 metrics = { path = "metrics" }
 metrics_events = { path = "metrics_events" }
 net_util = { path = "net_util" }
-once_cell = "1.7"
 protobuf = { version = "3.2", optional = true }
 protos = { path = "protos", optional = true }
 remain = "0.2"

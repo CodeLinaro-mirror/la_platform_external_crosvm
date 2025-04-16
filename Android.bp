@@ -69,6 +69,7 @@ rust_binary {
         "virgl_renderer",
     ],
     rustlibs: [
+        "libaarch64_sys_reg",
         "libacpi_tables",
         "libandroid_audio",
         "libanyhow",
@@ -99,7 +100,6 @@ rust_binary {
         "libmetrics_events",
         "libminijail_rust",
         "libnet_util",
-        "libonce_cell",
         "libp9",
         "libresources",
         "librutabaga_gfx",
@@ -212,6 +212,7 @@ rust_test {
         "virgl_renderer",
     ],
     rustlibs: [
+        "libaarch64_sys_reg",
         "libacpi_tables",
         "libandroid_audio",
         "libanyhow",
@@ -242,7 +243,6 @@ rust_test {
         "libmetrics_events",
         "libminijail_rust",
         "libnet_util",
-        "libonce_cell",
         "libp9",
         "librand",
         "libresources",

@@ -14,6 +14,8 @@ use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use std::sync::Arc;
 
+#[cfg(feature = "gdb")]
+use aarch64_sys_reg::AArch64SysRegId;
 use arch::get_serial_cmdline;
 use arch::CpuSet;
 use arch::DtbOverlay;
@@ -48,14 +50,13 @@ use devices::Serial;
 use devices::VirtCpufreq;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::VirtCpufreqV2;
+use fdt::PciAddressSpace;
 #[cfg(feature = "gdb")]
 use gdbstub::arch::Arch;
 #[cfg(feature = "gdb")]
 use gdbstub_arch::aarch64::reg::id::AArch64RegId;
 #[cfg(feature = "gdb")]
 use gdbstub_arch::aarch64::AArch64 as GdbArch;
-#[cfg(feature = "gdb")]
-use hypervisor::AArch64SysRegId;
 use hypervisor::CpuConfigAArch64;
 use hypervisor::DeviceKind;
 use hypervisor::Hypervisor;
@@ -299,7 +300,7 @@ pub enum Error {
     #[error("initrd could not be loaded: {0}")]
     InitrdLoadFailure(arch::LoadImageError),
     #[error("failed to initialize virtual machine {0}")]
-    InitVmError(base::Error),
+    InitVmError(anyhow::Error),
     #[error("kernel could not be loaded: {0}")]
     KernelLoadFailure(kernel_loader::Error),
     #[error("error loading Kernel from Elf image: {0}")]
@@ -908,18 +909,27 @@ impl arch::LinuxArch for AArch64 {
 
         let mut pci_ranges: Vec<fdt::PciRange> = Vec::new();
 
-        let mut add_pci_ranges = |alloc: &AddressAllocator, prefetchable: bool| {
-            pci_ranges.extend(alloc.pools().iter().map(|range| fdt::PciRange {
-                space: fdt::PciAddressSpace::Memory64,
-                bus_address: range.start,
-                cpu_physical_address: range.start,
-                size: range.len().unwrap(),
-                prefetchable,
-            }));
-        };
+        let mut add_pci_ranges =
+            |alloc: &AddressAllocator, space: PciAddressSpace, prefetchable: bool| {
+                pci_ranges.extend(alloc.pools().iter().map(|range| fdt::PciRange {
+                    space,
+                    bus_address: range.start,
+                    cpu_physical_address: range.start,
+                    size: range.len().unwrap(),
+                    prefetchable,
+                }));
+            };
 
-        add_pci_ranges(system_allocator.mmio_allocator(MmioType::Low), false);
-        add_pci_ranges(system_allocator.mmio_allocator(MmioType::High), true);
+        add_pci_ranges(
+            system_allocator.mmio_allocator(MmioType::Low),
+            PciAddressSpace::Memory,
+            false, // prefetchable
+        );
+        add_pci_ranges(
+            system_allocator.mmio_allocator(MmioType::High),
+            PciAddressSpace::Memory64,
+            true, // prefetchable
+        );
 
         let (bat_control, bat_mmio_base_and_irq) = match bat_type {
             Some(BatteryType::Goldfish) => {
@@ -1164,10 +1174,10 @@ impl<T: VcpuAArch64> arch::GdbOps<T> for AArch64 {
             *reg = vcpu.get_vector_reg(n).map_err(Error::ReadReg)?;
         }
         regs.fpcr = vcpu
-            .get_one_reg(VcpuRegAArch64::System(AArch64SysRegId::FPCR))
+            .get_one_reg(VcpuRegAArch64::System(aarch64_sys_reg::FPCR))
             .map_err(Error::ReadReg)? as u32;
         regs.fpsr = vcpu
-            .get_one_reg(VcpuRegAArch64::System(AArch64SysRegId::FPSR))
+            .get_one_reg(VcpuRegAArch64::System(aarch64_sys_reg::FPSR))
             .map_err(Error::ReadReg)? as u32;
 
         Ok(regs)
@@ -1199,12 +1209,12 @@ impl<T: VcpuAArch64> arch::GdbOps<T> for AArch64 {
             vcpu.set_vector_reg(n, *reg).map_err(Error::WriteReg)?;
         }
         vcpu.set_one_reg(
-            VcpuRegAArch64::System(AArch64SysRegId::FPCR),
+            VcpuRegAArch64::System(aarch64_sys_reg::FPCR),
             u64::from(regs.fpcr),
         )
         .map_err(Error::WriteReg)?;
         vcpu.set_one_reg(
-            VcpuRegAArch64::System(AArch64SysRegId::FPSR),
+            VcpuRegAArch64::System(aarch64_sys_reg::FPSR),
             u64::from(regs.fpsr),
         )
         .map_err(Error::WriteReg)?;
