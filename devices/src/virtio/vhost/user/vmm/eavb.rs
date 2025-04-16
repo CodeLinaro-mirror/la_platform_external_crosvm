@@ -44,7 +44,7 @@ use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
 use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_QCOM_EAVB};
 /* set queues_num to 2 for eavb*/
-const QUEUE_SIZE: u16 = 16;
+const QUEUE_SIZE: u16 = 1024;
 const VIRTIO_EAVB_F_VERSION: u32 = 5;
 /* indicates domain num is available in config space */
 const VIRTIO_EAVB_F_DOMAIN_NUM: u32 = 6;
