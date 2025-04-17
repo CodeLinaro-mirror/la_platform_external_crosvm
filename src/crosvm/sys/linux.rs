@@ -1887,7 +1887,14 @@ fn run_gunyah(
         None
     };
 
-    let vm = GunyahVm::new(&gunyah, qcom_trusted_vm_id, qcom_trusted_vm_pas_id, guest_mem, components.hv_cfg).context("failed to create vm")?;
+    let vm = GunyahVm::new(
+        &gunyah,
+        qcom_trusted_vm_id,
+        qcom_trusted_vm_pas_id,
+        guest_mem,
+        components.hv_cfg,
+    )
+    .context("failed to create vm")?;
 
     // Check that the VM was actually created in protected mode as expected.
     if cfg.protection_type.isolates_memory() && !vm.check_capability(VmCap::Protected) {
@@ -1968,14 +1975,17 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
             any(target_arch = "arm", target_arch = "aarch64"),
             feature = "gunyah"
         ))]
-        HypervisorKind::Gunyah { device,
-                                 qcom_trusted_vm_id,
-                                 qcom_trusted_vm_pas_id
-                               } => run_gunyah(
-                                        device.as_deref(),
-                                        qcom_trusted_vm_id,
-                                        qcom_trusted_vm_pas_id,
-                                        cfg, components),
+        HypervisorKind::Gunyah {
+            device,
+            qcom_trusted_vm_id,
+            qcom_trusted_vm_pas_id,
+        } => run_gunyah(
+            device.as_deref(),
+            qcom_trusted_vm_id,
+            qcom_trusted_vm_pas_id,
+            cfg,
+            components,
+        ),
     }
 }
 
@@ -2276,7 +2286,9 @@ where
         .iter_mut()
         .filter_map(|(dev, _)| dev.as_pci_device_mut())
     {
-        device.generate_acpi(&mut components.acpi_sdts);
+        device
+            .generate_acpi(&mut components.acpi_sdts)
+            .with_context(|| format!("generate_acpi failed for {}", device.debug_label()))?;
     }
 
     // KVM_CREATE_VCPU uses apic id for x86 and uses cpu id for others.
@@ -3654,7 +3666,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
     let (device_ctrl_tube, device_ctrl_resp) = Tube::pair().context("failed to create tube")?;
     // Create devices thread, and restore if a restore file exists.
     linux.devices_thread = match create_devices_worker_thread(
-        linux.vm.get_memory().clone(),
         linux.io_bus.clone(),
         linux.mmio_bus.clone(),
         device_ctrl_resp,

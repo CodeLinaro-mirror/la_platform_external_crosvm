@@ -27,6 +27,7 @@ rust_library {
         "gdbstub_arch",
     ],
     rustlibs: [
+        "libaarch64_sys_reg",
         "libanyhow",
         "libarch",
         "libbase_rust",

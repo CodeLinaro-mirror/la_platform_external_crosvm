@@ -19,6 +19,7 @@ rust_library {
     rustlibs: [
         "libanyhow",
         "libbase_rust",
+        "libciborium",
         "libcrypto_generic",
         "libserde",
         "libserde_json",

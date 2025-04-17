@@ -4,12 +4,14 @@
 
 use std::collections::BTreeMap;
 
+use aarch64_sys_reg::AArch64SysRegId;
+use anyhow::bail;
+use anyhow::Context;
 use base::error;
 use base::Error;
 use base::Result;
 use cros_fdt::Fdt;
 use cros_fdt::FdtNode;
-use libc::ENOENT;
 use libc::ENOTSUP;
 use libc::ENOTTY;
 use snapshot::AnySnapshot;
@@ -18,7 +20,6 @@ use vm_memory::MemoryRegionPurpose;
 
 use super::GunyahVcpu;
 use super::GunyahVm;
-use crate::AArch64SysRegId;
 use crate::Hypervisor;
 use crate::PsciVersion;
 use crate::VcpuAArch64;
@@ -157,7 +158,7 @@ impl VmAArch64 for GunyahVm {
         payload_entry_address: GuestAddress,
         fdt_address: GuestAddress,
         fdt_size: usize,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // The payload entry is the memory address where the kernel starts.
         // This memory region contains both the DTB and the kernel image,
         // so ensure they are located together.
@@ -165,14 +166,35 @@ impl VmAArch64 for GunyahVm {
         let (dtb_mapping, _, dtb_obj_offset) = self
             .guest_mem
             .find_region(fdt_address)
-            .map_err(|_| Error::new(ENOENT))?;
+            .context("Failed to find FDT region")?;
         let (payload_mapping, payload_offset, payload_obj_offset) = self
             .guest_mem
             .find_region(payload_entry_address)
-            .map_err(|_| Error::new(ENOENT))?;
+            .context("Failed to find payload region")?;
 
         if !std::ptr::eq(dtb_mapping, payload_mapping) || dtb_obj_offset != payload_obj_offset {
-            panic!("DTB and payload are not part of same memory region.");
+            bail!("DTB and payload are not part of same memory region.");
+        }
+
+        if self.vm_id.is_some() && self.pas_id.is_some() {
+            // Gunyah will find the metadata about the Qualcomm Trusted VM in the
+            // first few pages (decided at build time) of the primary payload region.
+            // This metadata consists of the elf header which tells Gunyah where
+            // the different elf segments (kernel/DTB/ramdisk) are. As we send the entire
+            // primary payload as a single memory parcel to Gunyah, with the offsets from
+            // the elf header, Gunyah can find the VM DTBOs.
+            // Pass on the primary payload region start address and its size for Qualcomm
+            // Trusted VMs.
+            let payload_region = self
+                .guest_mem
+                .regions()
+                .find(|region| region.guest_addr == payload_entry_address)
+                .context("Failed to find payload region")?;
+            self.set_vm_auth_type_to_qcom_trusted_vm(
+                payload_entry_address,
+                payload_region.size.try_into().unwrap(),
+            )
+            .context("Failed to set VM authentication type")?;
         }
 
         if self.vm_id.is_some() && self.pas_id.is_some() {
@@ -186,7 +208,10 @@ impl VmAArch64 for GunyahVm {
             // Trusted VMs.
             for region in self.guest_mem.regions() {
                 if region.guest_addr.offset() == payload_entry_address.offset() {
-                    self.set_vm_auth_type_to_qcom_trusted_vm(payload_entry_address, region.size.try_into().unwrap());
+                    self.set_vm_auth_type_to_qcom_trusted_vm(
+                        payload_entry_address,
+                        region.size.try_into().unwrap(),
+                    );
                     break;
                 }
             }
@@ -196,9 +221,11 @@ impl VmAArch64 for GunyahVm {
 
         // Gunyah sets the PC to the payload entry point for protected VMs without firmware.
         // It needs to be 0 as Gunyah assumes it to be kernel start.
-        if self.hv_cfg.protection_type.isolates_memory() &&
-           !self.hv_cfg.protection_type.runs_firmware() && payload_offset != 0 {
-            panic!("Payload offset must be zero");
+        if self.hv_cfg.protection_type.isolates_memory()
+            && !self.hv_cfg.protection_type.runs_firmware()
+            && payload_offset != 0
+        {
+            bail!("Payload offset must be zero");
         }
 
         if let Err(e) = self.set_boot_pc(payload_entry_address.offset()) {
@@ -206,10 +233,10 @@ impl VmAArch64 for GunyahVm {
                 // GH_VM_SET_BOOT_CONTEXT ioctl is not supported, but returning success
                 // for backward compatibility when the offset is zero.
                 if payload_offset != 0 {
-                    panic!("Payload offset must be zero");
+                    bail!("Payload offset must be zero");
                 }
             } else {
-                return Err(e);
+                return Err(e).context("set_boot_pc failed");
             }
         }
 
