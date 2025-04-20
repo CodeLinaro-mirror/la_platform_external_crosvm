@@ -5,10 +5,7 @@
 /// An enumeration of different hypervisor capabilities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HypervisorCap {
-    ArmPmuV3,
     ImmediateExit,
-    S390UserSigp,
-    TscDeadlineTimer,
     UserMemory,
     #[cfg(target_arch = "x86_64")]
     Xcrs,
@@ -41,6 +38,8 @@ pub enum HypervisorCap {
 /// A capability the `Vm` can possibly expose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmCap {
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    ArmPmuV3,
     /// Track dirty pages
     DirtyLog,
     /// Paravirtualized clock device
@@ -52,6 +51,8 @@ pub enum VmCap {
     /// VM can detect the bus lock
     #[cfg(target_arch = "x86_64")]
     BusLockDetect,
+    #[cfg(target_arch = "x86_64")]
+    TscDeadlineTimer,
     /// Supports read-only memory regions.
     ReadOnlyMemoryRegion,
     /// VM can set guest memory cache noncoherent DMA flag

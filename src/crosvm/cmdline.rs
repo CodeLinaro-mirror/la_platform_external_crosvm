@@ -42,7 +42,6 @@ use devices::virtio::scsi::ScsiOption;
 use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vhost::user::device;
 use devices::virtio::vsock::VsockConfig;
-use devices::virtio::DeviceType;
 #[cfg(feature = "gpu")]
 use devices::virtio::GpuDisplayParameters;
 #[cfg(feature = "gpu")]
@@ -93,7 +92,6 @@ use crate::crosvm::config::parse_mmio_address_range;
 use crate::crosvm::config::parse_pflash_parameters;
 use crate::crosvm::config::parse_serial_options;
 use crate::crosvm::config::parse_touch_device_option;
-use crate::crosvm::config::parse_vhost_user_fs_option;
 use crate::crosvm::config::BatteryConfig;
 use crate::crosvm::config::CpuOptions;
 use crate::crosvm::config::DtboOption;
@@ -104,8 +102,6 @@ use crate::crosvm::config::IrqChipKind;
 use crate::crosvm::config::MemOptions;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFrontendOption;
-use crate::crosvm::config::VhostUserFsOption;
-use crate::crosvm::config::VhostUserOption;
 #[cfg(feature = "plugin")]
 use crate::crosvm::plugin::parse_plugin_mount_option;
 #[cfg(feature = "plugin")]
@@ -1245,9 +1241,9 @@ pub struct RunCommand {
     ///       freq_domains=[[0,2],[1,3],[4-7,12]] - creates one freq_domain
     ///         for cores 0 and 2, another one for cores 1 and 3,
     ///         and one last for cores 4, 5, 6, 7 and 12.
-    ///     sve=[enabled=bool] - SVE Config. (aarch64 only)
+    ///     sve=[enable=bool] - SVE Config. (aarch64 only)
     ///         Examples:
-    ///         sve=[enabled=true] - Enables SVE on device. Will fail is SVE unsupported.
+    ///         sve=[enable=true] - Enables SVE on device. Will fail is SVE unsupported.
     ///         default value = false.
     pub cpus: Option<CpuOptions>,
 
@@ -2232,6 +2228,8 @@ pub struct RunCommand {
     ///        Can only be given once. Will default to first serial
     ///        port if not provided.
     ///     pci-address - Preferred PCI address, e.g. "00:01.0".
+    ///     max-queue-sizes=[uint,uint] - Max size of each virtio
+    ///        queue. Only applicable when hardware=virtio-console.
     pub serial: Vec<SerialParameters>,
 
     #[cfg(windows)]
@@ -2584,76 +2582,12 @@ pub struct RunCommand {
     ///     pci-address=ADDR - Preferred PCI address, e.g. "00:01.0".
     pub vhost_user: Vec<VhostUserFrontendOption>,
 
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// path to a socket for vhost-user block
-    pub vhost_user_blk: Vec<VhostUserOption>,
-
     #[argh(option)]
     #[serde(skip)]
     #[merge(strategy = overwrite_option)]
     /// number of milliseconds to retry if the socket path is missing or has no listener. Defaults
     /// to no retries.
     pub vhost_user_connect_timeout_ms: Option<u64>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// path to a socket for vhost-user console
-    pub vhost_user_console: Vec<VhostUserOption>,
-
-    #[argh(
-        option,
-        arg_name = "[socket=]SOCKET_PATH,tag=TAG[,max-queue-size=NUM]",
-        from_str_fn(parse_vhost_user_fs_option)
-    )]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// path to a socket path for vhost-user fs, and tag for the shared dir
-    pub vhost_user_fs: Vec<VhostUserFsOption>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// paths to a vhost-user socket for gpu
-    pub vhost_user_gpu: Vec<VhostUserOption>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = overwrite_option)]
-    /// path to a socket for vhost-user mac80211_hwsim
-    pub vhost_user_mac80211_hwsim: Option<VhostUserOption>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// path to a socket for vhost-user net
-    pub vhost_user_net: Vec<VhostUserOption>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// path to a socket for vhost-user snd
-    pub vhost_user_snd: Vec<VhostUserOption>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// path to a socket for vhost-user video decoder
-    pub vhost_user_video_decoder: Vec<VhostUserOption>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = append)]
-    /// path to a socket for vhost-user vsock
-    pub vhost_user_vsock: Vec<VhostUserOption>,
-
-    #[argh(option, arg_name = "SOCKET_PATH")]
-    #[serde(skip)] // Deprecated - use `vhost-user` instead.
-    #[merge(strategy = overwrite_option)]
-    /// path to a vhost-user socket for wayland
-    pub vhost_user_wl: Option<VhostUserOption>,
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[argh(option, arg_name = "SOCKET_PATH")]
@@ -2746,6 +2680,8 @@ pub struct RunCommand {
     ///     cid=CID - CID to use for the device.
     ///     device=VHOST_DEVICE - path to the vhost-vsock device to
     ///         use (Linux only). Defaults to /dev/vhost-vsock.
+    ///     max-queue-sizes=[uint,uint,uint] - Max size of each
+    ///         virtio queue.
     pub vsock: Option<VsockConfig>,
 
     #[cfg(feature = "vtpm")]
@@ -3551,13 +3487,6 @@ impl TryFrom<RunCommand> for super::config::Config {
                     None => return Err("`mac` missing from network config".to_string()),
                 };
 
-                if !cmd.vhost_user_net.is_empty() {
-                    return Err(
-                        "vhost-user-net cannot be used with any of --host-ip, --netmask or --mac"
-                            .to_string(),
-                    );
-                }
-
                 log::warn!(
                     "`--host-ip`, `--netmask`, and `--mac` are deprecated; please use \
                     `--net host-ip={host_ip},netmask={netmask},mac={mac}{vhost_net_msg}{vq_pairs_msg}`"
@@ -3711,41 +3640,6 @@ impl TryFrom<RunCommand> for super::config::Config {
         cfg.vhost_user = cmd.vhost_user;
 
         cfg.vhost_user_connect_timeout_ms = cmd.vhost_user_connect_timeout_ms;
-
-        // Convert an option from `VhostUserOption` to `VhostUserFrontendOption` with the given
-        // device type.
-        fn vu(
-            opt: impl IntoIterator<Item = VhostUserOption>,
-            type_: DeviceType,
-        ) -> impl Iterator<Item = VhostUserFrontendOption> {
-            opt.into_iter().map(move |o| {
-                log::warn!(
-                    "`--vhost-user-*` is deprecated; use `--vhost-user {},socket={}` instead",
-                    type_,
-                    o.socket.display(),
-                );
-                VhostUserFrontendOption {
-                    type_,
-                    socket: o.socket,
-                    max_queue_size: o.max_queue_size,
-                    pci_address: None,
-                }
-            })
-        }
-
-        cfg.vhost_user.extend(
-            vu(cmd.vhost_user_blk, DeviceType::Block)
-                .chain(vu(cmd.vhost_user_console, DeviceType::Console))
-                .chain(vu(cmd.vhost_user_gpu, DeviceType::Gpu))
-                .chain(vu(cmd.vhost_user_mac80211_hwsim, DeviceType::Mac80211HwSim))
-                .chain(vu(cmd.vhost_user_net, DeviceType::Net))
-                .chain(vu(cmd.vhost_user_snd, DeviceType::Sound))
-                .chain(vu(cmd.vhost_user_video_decoder, DeviceType::VideoDecoder))
-                .chain(vu(cmd.vhost_user_vsock, DeviceType::Vsock))
-                .chain(vu(cmd.vhost_user_wl, DeviceType::Wl)),
-        );
-
-        cfg.vhost_user_fs = cmd.vhost_user_fs;
 
         cfg.disable_virtio_intx = cmd.disable_virtio_intx.unwrap_or_default();
 
