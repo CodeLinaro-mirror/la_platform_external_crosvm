@@ -96,11 +96,24 @@ rust_test {
         "libzerocopy",
     ],
     proc_macros: ["libremain"],
-    shared_libs: [
+    static_libs: [
         "libepoxy",
         "libgfxstream_backend",
         "libvirglrenderer",
     ],
+    shared_libs: [
+        "libc++",
+        "libbase",
+    ],
+    target: {
+        android: {
+            shared_libs: [
+                "libnativewindow",
+                "libcutils",
+                "liblog",
+            ],
+        },
+    },
 }
 
 // Manually written variant of librutabaga_gfx.
