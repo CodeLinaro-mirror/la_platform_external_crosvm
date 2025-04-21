@@ -45,7 +45,7 @@ index c61b60a1a..48a369225 100644
 +        },
 +    },
  }
- 
+
  rust_test {
 @@ -58,7 +82,6 @@ rust_test {
      edition: "2021",
@@ -55,17 +55,30 @@ index c61b60a1a..48a369225 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -73,8 +96,11 @@ rust_test {
+@@ -73,8 +96,24 @@ rust_test {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
 -    static_libs: ["libvirglrenderer"],
 -    shared_libs: ["libepoxy"],
-+    shared_libs: [
++    static_libs: [
 +        "libepoxy",
 +        "libgfxstream_backend",
 +        "libvirglrenderer",
 +    ],
++    shared_libs: [
++        "libc++",
++        "libbase",
++    ],
++    target: {
++        android: {
++            shared_libs: [
++                "libnativewindow",
++                "libcutils",
++                "liblog",
++            ],
++        },
++    },
  }
- 
+
  // Manually written variant of librutabaga_gfx.
