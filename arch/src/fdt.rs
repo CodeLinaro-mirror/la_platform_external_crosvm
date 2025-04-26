@@ -15,6 +15,10 @@ use cros_fdt::Path;
 use cros_fdt::Result;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::IommuDevType;
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
+use vm_memory::MemoryRegionInformation;
+use vm_memory::MemoryRegionPurpose;
 
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use crate::sys::linux::PlatformBusResources;
@@ -162,4 +166,89 @@ pub fn apply_device_tree_overlays(
             devices.iter().map(|r| &r.dt_symbol).collect::<Vec<_>>()
         )))
     }
+}
+
+/// Create a "/memory" node describing all guest memory regions.
+pub fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> {
+    let mut mem_reg_prop = Vec::new();
+    let mut previous_memory_region_end = None;
+    let mut regions: Vec<MemoryRegionInformation> = guest_mem
+        .regions()
+        .filter(|region| match region.options.purpose {
+            MemoryRegionPurpose::Bios => false,
+            MemoryRegionPurpose::GuestMemoryRegion => true,
+            MemoryRegionPurpose::ProtectedFirmwareRegion => false,
+            MemoryRegionPurpose::ReservedMemory => false,
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            MemoryRegionPurpose::StaticSwiotlbRegion => true,
+        })
+        .collect();
+    regions.sort_by(|a, b| a.guest_addr.cmp(&b.guest_addr));
+    for region in regions {
+        // Merge with the previous region if possible.
+        if let Some(previous_end) = previous_memory_region_end {
+            if region.guest_addr == previous_end {
+                *mem_reg_prop.last_mut().unwrap() += region.size as u64;
+                previous_memory_region_end =
+                    Some(previous_end.checked_add(region.size as u64).unwrap());
+                continue;
+            }
+            assert!(region.guest_addr > previous_end, "Memory regions overlap");
+        }
+
+        mem_reg_prop.push(region.guest_addr.offset());
+        mem_reg_prop.push(region.size as u64);
+        previous_memory_region_end =
+            Some(region.guest_addr.checked_add(region.size as u64).unwrap());
+    }
+
+    let memory_node = fdt.root_mut().subnode_mut("memory")?;
+    memory_node.set_prop("device_type", "memory")?;
+    memory_node.set_prop("reg", mem_reg_prop)?;
+    Ok(())
+}
+
+pub struct ReservedMemoryRegion<'a> {
+    pub name: &'a str,
+    pub address: Option<GuestAddress>,
+    pub size: u64,
+    pub phandle: Option<u32>,
+    pub compatible: Option<&'a str>,
+    pub alignment: Option<u64>,
+}
+
+/// Create a "/reserved-memory" node with child nodes for `reserved_regions`.
+pub fn create_reserved_memory_node(
+    fdt: &mut Fdt,
+    reserved_regions: &[ReservedMemoryRegion],
+) -> Result<()> {
+    let resv_memory_node = fdt.root_mut().subnode_mut("reserved-memory")?;
+    resv_memory_node.set_prop("#address-cells", 0x2u32)?;
+    resv_memory_node.set_prop("#size-cells", 0x2u32)?;
+    resv_memory_node.set_prop("ranges", ())?;
+
+    for region in reserved_regions {
+        let child_node = if let Some(resv_addr) = region.address {
+            let node =
+                resv_memory_node.subnode_mut(&format!("{}@{:x}", region.name, resv_addr.0))?;
+            node.set_prop("reg", &[resv_addr.0, region.size])?;
+            node
+        } else {
+            let node = resv_memory_node.subnode_mut(region.name)?;
+            node.set_prop("size", region.size)?;
+            node
+        };
+
+        if let Some(phandle) = region.phandle {
+            child_node.set_prop("phandle", phandle)?;
+        }
+        if let Some(compatible) = region.compatible {
+            child_node.set_prop("compatible", compatible)?;
+        }
+        if let Some(alignment) = region.alignment {
+            child_node.set_prop("alignment", alignment)?;
+        }
+    }
+
+    Ok(())
 }
