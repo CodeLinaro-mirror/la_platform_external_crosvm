@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use arch::apply_device_tree_overlays;
+use arch::fdt::create_memory_node;
 use arch::DtbOverlay;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use arch::PlatformBusResources;
@@ -32,34 +33,6 @@ const PHANDLE_CPU0: u32 = 0x100;
 const PHANDLE_AIA_APLIC: u32 = 2;
 const PHANDLE_AIA_IMSIC: u32 = 3;
 const PHANDLE_CPU_INTC_BASE: u32 = 4;
-
-fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> {
-    let mut mem_reg_prop = Vec::new();
-    let mut previous_memory_region_end = None;
-    let mut regions = guest_mem.guest_memory_regions();
-    regions.sort();
-    for region in regions {
-        // Merge with the previous region if possible.
-        if let Some(previous_end) = previous_memory_region_end {
-            if region.0 == previous_end {
-                *mem_reg_prop.last_mut().unwrap() += region.1 as u64;
-                previous_memory_region_end =
-                    Some(previous_end.checked_add(region.1 as u64).unwrap());
-                continue;
-            }
-            assert!(region.0 > previous_end, "Memory regions overlap");
-        }
-
-        mem_reg_prop.push(region.0.offset());
-        mem_reg_prop.push(region.1 as u64);
-        previous_memory_region_end = Some(region.0.checked_add(region.1 as u64).unwrap());
-    }
-
-    let memory_node = fdt.root_mut().subnode_mut("memory")?;
-    memory_node.set_prop("device_type", "memory")?;
-    memory_node.set_prop("reg", mem_reg_prop)?;
-    Ok(())
-}
 
 fn create_cpu_nodes(fdt: &mut Fdt, num_cpus: u32, timebase_frequency: u32) -> Result<()> {
     let cpus_node = fdt.root_mut().subnode_mut("cpus")?;
@@ -240,7 +213,6 @@ fn create_pci_nodes(
 
     const IRQ_TYPE_LEVEL_HIGH: u32 = 0x00000004;
     let mut interrupts: Vec<u32> = Vec::new();
-    let mut masks: Vec<u32> = Vec::new();
 
     for (address, irq_num, irq_pin) in pci_irqs.iter() {
         // PCI_DEVICE(3)
@@ -255,15 +227,15 @@ fn create_pci_nodes(
         interrupts.push(PHANDLE_AIA_APLIC);
         interrupts.push(*irq_num);
         interrupts.push(IRQ_TYPE_LEVEL_HIGH);
-
-        // PCI_DEVICE(3)
-        masks.push(0xf800); // bits 11..15 (device)
-        masks.push(0);
-        masks.push(0);
-
-        // INT#(1)
-        masks.push(0x7); // allow INTA#-INTD# (1 | 2 | 3 | 4)
     }
+
+    let mask: &[u32] = &[
+        // PCI_DEVICE(3)
+        0xf800, // bits 11..15 (device)
+        0, 0, // mask off other unit address cells
+        // INT#(1)
+        0x7, // allow INTA#-INTD# (1 | 2 | 3 | 4)
+    ];
 
     let pci_node = fdt.root_mut().subnode_mut("pci")?;
     pci_node.set_prop("compatible", "pci-host-cam-generic")?;
@@ -275,7 +247,7 @@ fn create_pci_nodes(
     pci_node.set_prop("reg", &reg)?;
     pci_node.set_prop("#interrupt-cells", 1u32)?;
     pci_node.set_prop("interrupt-map", interrupts)?;
-    pci_node.set_prop("interrupt-map-mask", masks)?;
+    pci_node.set_prop("interrupt-map-mask", mask)?;
     pci_node.set_prop("msi-parent", PHANDLE_AIA_IMSIC)?;
     pci_node.set_prop("dma-coherent", ())?;
     Ok(())

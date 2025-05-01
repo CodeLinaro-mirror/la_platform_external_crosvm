@@ -10,6 +10,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use arch::apply_device_tree_overlays;
+use arch::fdt::create_memory_node;
+use arch::fdt::create_reserved_memory_node;
+use arch::fdt::ReservedMemoryRegion;
 use arch::serial::SerialDeviceInfo;
 use arch::CpuSet;
 use arch::DtbOverlay;
@@ -42,7 +45,6 @@ use crate::AARCH64_GIC_DIST_BASE;
 use crate::AARCH64_GIC_DIST_SIZE;
 use crate::AARCH64_GIC_REDIST_SIZE;
 use crate::AARCH64_PMU_IRQ;
-use crate::AARCH64_PROTECTED_VM_FW_START;
 // These are RTC related constants
 use crate::AARCH64_RTC_ADDR;
 use crate::AARCH64_RTC_IRQ;
@@ -77,64 +79,6 @@ const GIC_FDT_IRQ_PPI_CPU_MASK: u32 = 0xff << GIC_FDT_IRQ_PPI_CPU_SHIFT;
 const IRQ_TYPE_EDGE_RISING: u32 = 0x00000001;
 const IRQ_TYPE_LEVEL_HIGH: u32 = 0x00000004;
 const IRQ_TYPE_LEVEL_LOW: u32 = 0x00000008;
-
-fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> {
-    let mut mem_reg_prop = Vec::new();
-    let mut previous_memory_region_end = None;
-    let mut regions = guest_mem.guest_memory_regions();
-    regions.sort();
-    for region in regions {
-        if region.0.offset() == AARCH64_PROTECTED_VM_FW_START {
-            continue;
-        }
-        // Merge with the previous region if possible.
-        if let Some(previous_end) = previous_memory_region_end {
-            if region.0 == previous_end {
-                *mem_reg_prop.last_mut().unwrap() += region.1 as u64;
-                previous_memory_region_end =
-                    Some(previous_end.checked_add(region.1 as u64).unwrap());
-                continue;
-            }
-            assert!(region.0 > previous_end, "Memory regions overlap");
-        }
-
-        mem_reg_prop.push(region.0.offset());
-        mem_reg_prop.push(region.1 as u64);
-        previous_memory_region_end = Some(region.0.checked_add(region.1 as u64).unwrap());
-    }
-
-    let memory_node = fdt.root_mut().subnode_mut("memory")?;
-    memory_node.set_prop("device_type", "memory")?;
-    memory_node.set_prop("reg", mem_reg_prop)?;
-    Ok(())
-}
-
-fn create_resv_memory_node(
-    fdt: &mut Fdt,
-    resv_addr_and_size: (Option<GuestAddress>, u64),
-) -> Result<u32> {
-    let (resv_addr, resv_size) = resv_addr_and_size;
-
-    let resv_memory_node = fdt.root_mut().subnode_mut("reserved-memory")?;
-    resv_memory_node.set_prop("#address-cells", 0x2u32)?;
-    resv_memory_node.set_prop("#size-cells", 0x2u32)?;
-    resv_memory_node.set_prop("ranges", ())?;
-
-    let restricted_dma_pool_node = if let Some(resv_addr) = resv_addr {
-        let node =
-            resv_memory_node.subnode_mut(&format!("restricted_dma_reserved@{:x}", resv_addr.0))?;
-        node.set_prop("reg", &[resv_addr.0, resv_size])?;
-        node
-    } else {
-        let node = resv_memory_node.subnode_mut("restricted_dma_reserved")?;
-        node.set_prop("size", resv_size)?;
-        node
-    };
-    restricted_dma_pool_node.set_prop("phandle", PHANDLE_RESTRICTED_DMA_POOL)?;
-    restricted_dma_pool_node.set_prop("compatible", "restricted-dma-pool")?;
-    restricted_dma_pool_node.set_prop("alignment", base::pagesize() as u64)?;
-    Ok(PHANDLE_RESTRICTED_DMA_POOL)
-}
 
 fn create_cpu_nodes(
     fdt: &mut Fdt,
@@ -502,7 +446,6 @@ fn create_pci_nodes(
     let reg = [cfg.base, cfg.size];
 
     let mut interrupts: Vec<u32> = Vec::new();
-    let mut masks: Vec<u32> = Vec::new();
 
     for (address, irq_num, irq_pin) in pci_irqs.iter() {
         // PCI_DEVICE(3)
@@ -522,15 +465,15 @@ fn create_pci_nodes(
         interrupts.push(GIC_FDT_IRQ_TYPE_SPI);
         interrupts.push(*irq_num);
         interrupts.push(IRQ_TYPE_LEVEL_HIGH);
-
-        // PCI_DEVICE(3)
-        masks.push(0xf800); // bits 11..15 (device)
-        masks.push(0);
-        masks.push(0);
-
-        // INT#(1)
-        masks.push(0x7); // allow INTA#-INTD# (1 | 2 | 3 | 4)
     }
+
+    let mask: &[u32] = &[
+        // PCI_DEVICE(3)
+        0xf800, // bits 11..15 (device)
+        0, 0, // mask off other unit address cells
+        // INT#(1)
+        0x7, // allow INTA#-INTD# (1 | 2 | 3 | 4)
+    ];
 
     let pci_node = fdt.root_mut().subnode_mut("pci")?;
     pci_node.set_prop("compatible", "pci-host-cam-generic")?;
@@ -542,7 +485,7 @@ fn create_pci_nodes(
     pci_node.set_prop("reg", &reg)?;
     pci_node.set_prop("#interrupt-cells", 1u32)?;
     pci_node.set_prop("interrupt-map", interrupts)?;
-    pci_node.set_prop("interrupt-map-mask", masks)?;
+    pci_node.set_prop("interrupt-map-mask", mask)?;
     pci_node.set_prop("dma-coherent", ())?;
     if let Some(dma_pool_phandle) = dma_pool_phandle {
         pci_node.set_prop("memory-region", dma_pool_phandle)?;
@@ -686,6 +629,7 @@ pub fn create_fdt(
     let mut fdt = Fdt::new(&[]);
     let mut phandles_key_cache = Vec::new();
     let mut phandles = BTreeMap::new();
+    let mut reserved_memory_regions = Vec::new();
 
     // The whole thing is put into one giant node with some top level properties
     let root_node = fdt.root_mut();
@@ -703,14 +647,27 @@ pub fn create_fdt(
     create_chosen_node(&mut fdt, cmdline, initrd, stdout_path.as_deref())?;
     create_config_node(&mut fdt, kernel_region)?;
     create_memory_node(&mut fdt, guest_mem)?;
-    let dma_pool_phandle = match swiotlb {
-        Some(x) => {
-            let phandle = create_resv_memory_node(&mut fdt, x)?;
-            phandles.insert("restricted_dma_reserved", phandle);
-            Some(phandle)
-        }
-        None => None,
+
+    let dma_pool_phandle = if let Some((swiotlb_addr, swiotlb_size)) = swiotlb {
+        let phandle = PHANDLE_RESTRICTED_DMA_POOL;
+        reserved_memory_regions.push(ReservedMemoryRegion {
+            address: swiotlb_addr,
+            size: swiotlb_size,
+            phandle: Some(phandle),
+            name: "restricted_dma_reserved",
+            compatible: Some("restricted-dma-pool"),
+            alignment: Some(base::pagesize() as u64),
+        });
+        phandles.insert("restricted_dma_reserved", phandle);
+        Some(phandle)
+    } else {
+        None
     };
+
+    if !reserved_memory_regions.is_empty() {
+        create_reserved_memory_node(&mut fdt, &reserved_memory_regions)?;
+    }
+
     create_cpu_nodes(
         &mut fdt,
         num_cpus,
