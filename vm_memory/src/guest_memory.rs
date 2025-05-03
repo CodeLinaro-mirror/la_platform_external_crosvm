@@ -73,6 +73,8 @@ pub enum Error {
     MemoryRegionOverlap,
     #[error("memory region size {0} is too large")]
     MemoryRegionTooLarge(u128),
+    #[error("punch hole failed {0}")]
+    PunchHole(#[source] base::Error),
     #[error("incomplete read of {completed} instead of {expected} bytes")]
     ShortRead { expected: usize, completed: usize },
     #[error("incomplete write of {completed} instead of {expected} bytes")]

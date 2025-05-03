@@ -63,6 +63,22 @@ impl GuestMemory {
             .map_err(|e| Error::MemoryAccess(addr, e))
     }
 
+    /// Punch a hole in the backing file that is associated with the given guest range.
+    pub fn punch_hole_range(&self, addr: GuestAddress, count: u64) -> Result<()> {
+        let region = self
+            .regions
+            .iter()
+            .find(|region| region.contains(addr))
+            .ok_or(Error::InvalidGuestAddress(addr))?;
+        base::sys::linux::fallocate(
+            &region.shared_obj,
+            base::sys::linux::FallocateMode::PunchHole,
+            region.obj_offset + addr.offset_from(region.guest_base),
+            count,
+        )
+        .map_err(Error::PunchHole)
+    }
+
     /// Handles guest memory policy hints/advices.
     pub fn set_memory_policy(&mut self, mem_policy: MemoryPolicy) {
         if mem_policy.is_empty() {
