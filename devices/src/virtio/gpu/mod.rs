@@ -212,7 +212,9 @@ impl QueueReader for LocalQueueReader {
     }
 
     fn add_used(&self, desc_chain: DescriptorChain, len: u32) {
-        self.queue.borrow_mut().add_used(desc_chain, len)
+        self.queue
+            .borrow_mut()
+            .add_used_with_bytes_written(desc_chain, len);
     }
 
     fn signal_used(&self) {
@@ -239,7 +241,9 @@ impl QueueReader for SharedQueueReader {
     }
 
     fn add_used(&self, desc_chain: DescriptorChain, len: u32) {
-        self.queue.lock().add_used(desc_chain, len)
+        self.queue
+            .lock()
+            .add_used_with_bytes_written(desc_chain, len);
     }
 
     fn signal_used(&self) {
@@ -689,7 +693,25 @@ impl Frontend {
             GpuCommand::ResourceMapBlob(info) => {
                 let resource_id = info.resource_id.to_native();
                 let offset = info.offset.to_native();
-                self.virtio_gpu.resource_map_blob(resource_id, offset)
+                self.virtio_gpu
+                    .resource_map_blob(resource_id, offset)
+                    .inspect_err(|e| {
+                        // Log the details for triage.
+                        error!(
+                            "Failed to map blob, resource id {}, offset {}, error: {:#}",
+                            resource_id, offset, e
+                        );
+                    })
+                    .map_err(|e| match e.downcast::<GpuResponse>() {
+                        Ok(response) => response,
+                        Err(e) => {
+                            warn!(
+                                "No GPU response specified for {:?}, default to ErrUnspec",
+                                e
+                            );
+                            GpuResponse::ErrUnspec
+                        }
+                    })
             }
             GpuCommand::ResourceUnmapBlob(info) => {
                 let resource_id = info.resource_id.to_native();

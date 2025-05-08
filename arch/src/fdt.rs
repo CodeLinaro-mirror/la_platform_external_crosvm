@@ -178,7 +178,7 @@ pub fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> 
             MemoryRegionPurpose::Bios => false,
             MemoryRegionPurpose::GuestMemoryRegion => true,
             MemoryRegionPurpose::ProtectedFirmwareRegion => false,
-            MemoryRegionPurpose::ReservedMemory => false,
+            MemoryRegionPurpose::ReservedMemory => true,
             #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
             MemoryRegionPurpose::StaticSwiotlbRegion => true,
         })
@@ -215,6 +215,7 @@ pub struct ReservedMemoryRegion<'a> {
     pub phandle: Option<u32>,
     pub compatible: Option<&'a str>,
     pub alignment: Option<u64>,
+    pub no_map: bool,
 }
 
 /// Create a "/reserved-memory" node with child nodes for `reserved_regions`.
@@ -222,6 +223,10 @@ pub fn create_reserved_memory_node(
     fdt: &mut Fdt,
     reserved_regions: &[ReservedMemoryRegion],
 ) -> Result<()> {
+    if reserved_regions.is_empty() {
+        return Ok(());
+    }
+
     let resv_memory_node = fdt.root_mut().subnode_mut("reserved-memory")?;
     resv_memory_node.set_prop("#address-cells", 0x2u32)?;
     resv_memory_node.set_prop("#size-cells", 0x2u32)?;
@@ -248,7 +253,30 @@ pub fn create_reserved_memory_node(
         if let Some(alignment) = region.alignment {
             child_node.set_prop("alignment", alignment)?;
         }
+        if region.no_map {
+            child_node.set_prop("no-map", ())?;
+        }
     }
 
     Ok(())
+}
+
+/// Collect a list of `ReservedMemoryRegion`s for any `MemoryRegionPurpose::ReservedMemory` regions
+/// in `GuestMemory`.
+pub fn reserved_memory_regions_from_guest_mem(
+    guest_mem: &GuestMemory,
+) -> Vec<ReservedMemoryRegion> {
+    guest_mem
+        .regions()
+        .filter(|region| region.options.purpose == MemoryRegionPurpose::ReservedMemory)
+        .map(|region| ReservedMemoryRegion {
+            address: Some(region.guest_addr),
+            size: region.size.try_into().unwrap(),
+            name: "reserved",
+            phandle: None,
+            compatible: None,
+            alignment: None,
+            no_map: true,
+        })
+        .collect()
 }

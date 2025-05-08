@@ -26,6 +26,7 @@ rust_library {
         "virgl_renderer",
     ],
     rustlibs: [
+        "libanyhow",
         "libcfg_if",
         "liblibc",
         "liblog_rust",
@@ -85,6 +86,7 @@ rust_test {
         "virgl_renderer",
     ],
     rustlibs: [
+        "libanyhow",
         "libcfg_if",
         "liblibc",
         "liblog_rust",
@@ -128,6 +130,7 @@ rust_library {
     srcs: ["src/lib.rs"],
     edition: "2021",
     rustlibs: [
+        "libanyhow",
         "libcfg_if",
         "liblibc",
         "liblog_rust",
