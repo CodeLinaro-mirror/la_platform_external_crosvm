@@ -11,12 +11,16 @@ use std::path::PathBuf;
 
 use arch::android::create_android_fdt;
 use arch::apply_device_tree_overlays;
+use arch::fdt::create_memory_node;
+use arch::fdt::create_reserved_memory_node;
+use arch::fdt::reserved_memory_regions_from_guest_mem;
 use arch::DtbOverlay;
 use base::open_file_or_duplicate;
 use cros_fdt::Error;
 use cros_fdt::Fdt;
 use resources::AddressRange;
 use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
 
 fn create_config_node(fdt: &mut Fdt, kernel_region: AddressRange) -> cros_fdt::Result<()> {
     let addr: u32 = kernel_region
@@ -58,6 +62,7 @@ fn create_chosen_node(
 ///
 /// * `android_fstab` - the File object for the android fstab
 pub fn create_fdt(
+    guest_mem: &GuestMemory,
     android_fstab: Option<File>,
     dump_device_tree_blob: Option<PathBuf>,
     device_tree_overlays: Vec<DtbOverlay>,
@@ -65,13 +70,21 @@ pub fn create_fdt(
     initrd: Option<(GuestAddress, usize)>,
 ) -> Result<Vec<u8>, Error> {
     let mut fdt = Fdt::new(&[]);
+    let reserved_memory_regions = reserved_memory_regions_from_guest_mem(guest_mem);
+
     // The whole thing is put into one giant node with some top level properties
+    let root_node = fdt.root_mut();
+    root_node.set_prop("#address-cells", 0x2u32)?;
+    root_node.set_prop("#size-cells", 0x2u32)?;
+
     if let Some(android_fstab) = android_fstab {
         create_android_fdt(&mut fdt, android_fstab)?;
     }
 
     create_config_node(&mut fdt, kernel_region)?;
     create_chosen_node(&mut fdt, initrd)?;
+    create_memory_node(&mut fdt, guest_mem)?;
+    create_reserved_memory_node(&mut fdt, &reserved_memory_regions)?;
 
     // Done writing base FDT, now apply DT overlays
     apply_device_tree_overlays(

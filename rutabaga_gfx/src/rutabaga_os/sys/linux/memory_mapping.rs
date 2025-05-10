@@ -13,7 +13,7 @@ use nix::sys::mman::MapFlags;
 use nix::sys::mman::ProtFlags;
 
 use crate::rutabaga_os::OwnedDescriptor;
-use crate::rutabaga_utils::RutabagaError;
+use crate::rutabaga_utils::RutabagaErrorKind;
 use crate::rutabaga_utils::RutabagaResult;
 use crate::rutabaga_utils::RUTABAGA_MAP_ACCESS_MASK;
 use crate::rutabaga_utils::RUTABAGA_MAP_ACCESS_READ;
@@ -50,7 +50,11 @@ impl MemoryMapping {
             RUTABAGA_MAP_ACCESS_READ => ProtFlags::PROT_READ,
             RUTABAGA_MAP_ACCESS_WRITE => ProtFlags::PROT_WRITE,
             RUTABAGA_MAP_ACCESS_RW => ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-            _ => return Err(RutabagaError::SpecViolation("incorrect access flags")),
+            _ => {
+                return Err(anyhow::anyhow!("incorrect access flags")
+                    .context(RutabagaErrorKind::SpecViolation)
+                    .into())
+            }
         };
 
         if let Some(non_zero_size) = non_zero_opt {
@@ -68,7 +72,9 @@ impl MemoryMapping {
             };
             Ok(MemoryMapping { addr, size })
         } else {
-            Err(RutabagaError::SpecViolation("zero size mapping"))
+            Err(anyhow::anyhow!("zero size mapping")
+                .context(RutabagaErrorKind::SpecViolation)
+                .into())
         }
     }
 }
