@@ -87,6 +87,7 @@ impl VmAArch64 for GunyahVm {
                     if !base_set {
                         base_set = true;
                         memory_node.set_prop("base-address", region.guest_addr.offset())?;
+                        memory_node.set_prop("size-max", 0x780000000u64)?;
                     }
                 }
                 MemoryRegionPurpose::ProtectedFirmwareRegion => {
