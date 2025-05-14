@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Changes from Qualcomm Innovation Center are provided under the following license:
-// Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+// Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 
 //! Implements virtio devices, queues, and transport mechanisms.
@@ -26,12 +26,12 @@ mod virtio_pci_common_config;
 mod virtio_pci_device;
 pub mod wl;
 
+pub mod input;
 pub mod block;
 pub mod console;
 pub mod fs;
 #[cfg(feature = "gpu")]
 pub mod gpu;
-pub mod input;
 pub mod net;
 pub mod resource_bridge;
 #[cfg(feature = "audio")]
@@ -99,13 +99,17 @@ const TYPE_MAC80211_HWSIM: u32 = 29;
 const TYPE_VIDEO_ENC: u32 = 30;
 const TYPE_VIDEO_DEC: u32 = 31;
 const TYPE_SCMI: u32 = 32;
+const TYPE_I2C_ADAPTER: u32 = 34;
 // Additional types invented by crosvm
 const MAX_VIRTIO_DEVICE_ID: u32 = 63;
 const TYPE_WL: u32 = MAX_VIRTIO_DEVICE_ID;
 const TYPE_TPM: u32 = MAX_VIRTIO_DEVICE_ID - 1;
 // TODO(abhishekbh): Fix this after this device is accepted upstream.
 const TYPE_VHOST_USER: u32 = MAX_VIRTIO_DEVICE_ID - 2;
-
+const VIRTIO_DT_QCOM_BASE: u32 = 0xc000;
+const TYPE_QCOM_GLINK: u32 = VIRTIO_DT_QCOM_BASE + 10;
+const TYPE_QCOM_FRPC: u32 = VIRTIO_DT_QCOM_BASE + 0x0b;
+const TYPE_QCOM_SSR: u32 = VIRTIO_DT_QCOM_BASE + 0x0e;
 pub const VIRTIO_F_VERSION_1: u32 = 32;
 pub const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
 
@@ -144,6 +148,7 @@ pub fn type_to_str(type_: u32) -> Option<&'static str> {
         TYPE_TPM => "tpm",
         TYPE_VIDEO_DEC => "video-decoder",
         TYPE_VIDEO_ENC => "video-encoder",
+        TYPE_FRPC => "fastrpc",
         _ => return None,
     })
 }

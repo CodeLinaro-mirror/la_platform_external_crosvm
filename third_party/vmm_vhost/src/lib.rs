@@ -43,6 +43,7 @@ mod backend;
 pub use backend::*;
 
 pub mod message;
+pub use message::VHOST_USER_F_PROTOCOL_FEATURES;
 
 pub mod connection;
 

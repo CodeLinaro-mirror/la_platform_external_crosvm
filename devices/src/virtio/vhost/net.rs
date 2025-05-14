@@ -77,8 +77,10 @@ where
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO6
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_UFO
             | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO6
             | 1 << virtio_net::VIRTIO_NET_F_HOST_UFO
             | 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF
             | 1 << virtio_sys::vhost::VIRTIO_RING_F_INDIRECT_DESC
@@ -140,8 +142,10 @@ where
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO6
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_UFO
             | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO6
             | 1 << virtio_net::VIRTIO_NET_F_HOST_UFO
             | 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF
             | 1 << virtio_sys::vhost::VIRTIO_RING_F_INDIRECT_DESC

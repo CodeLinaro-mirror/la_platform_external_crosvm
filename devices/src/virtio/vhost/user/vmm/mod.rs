@@ -2,6 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//Changes from Qualcomm Innovation Center, Inc. are provided under the following license:
+
+//Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+//SPDX-License-Identifier: BSD-3-Clause-Clear
+
 mod block;
 mod console;
 mod fs;
@@ -16,6 +21,11 @@ mod vsock;
 mod wl;
 mod worker;
 mod hab;
+mod scmi;
+mod glink_cma;
+mod i2c;
+mod frpc;
+mod ssr;
 
 pub use self::block::*;
 pub use self::console::*;
@@ -30,6 +40,11 @@ pub use self::snd::*;
 pub use self::vsock::*;
 pub use self::wl::*;
 pub use self::hab::*;
+pub use self::scmi::*;
+pub use self::glink_cma::*;
+pub use self::i2c::*;
+pub use self::frpc::*;
+pub use self::ssr::*;
 
 use remain::sorted;
 use thiserror::Error as ThisError;

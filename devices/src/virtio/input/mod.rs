@@ -125,68 +125,6 @@ impl virtio_input_absinfo {
 
 #[derive(Copy, Clone)]
 #[repr(C)]
-struct virtio_input_flat_config {
-    sum_size: u32,
-    size: [u8; VIRTIO_INPUT_FLAT_CFG_MAX],
-    offset: [u16; VIRTIO_INPUT_FLAT_CFG_MAX],
-    payload: [u8; VIRTIO_INPUT_CFG_UNIT_SIZE * VIRTIO_INPUT_FLAT_CFG_MAX],
-}
-
-// Safe because it only has data and has no implicit padding.
-unsafe impl DataInit for virtio_input_flat_config {}
-
-impl virtio_input_flat_config {
-    fn new() -> virtio_input_flat_config {
-        virtio_input_flat_config {
-            sum_size: 0,
-            size: [0u8; VIRTIO_INPUT_FLAT_CFG_MAX],
-            offset: [0u16; VIRTIO_INPUT_FLAT_CFG_MAX],
-            payload: [0u8; 128 * VIRTIO_INPUT_FLAT_CFG_MAX],
-        }
-    }
-
-    fn set_size_to_zero(&mut self, index: usize) {
-        self.size[index] = 0;
-        self.offset[index] = 0;
-    }
-
-    fn set_payload_slice(&mut self, slice: &[u8], offset: usize, index: usize) -> usize {
-        let bytes_written = match (&mut self.payload[offset..]).write(slice) {
-            Ok(x) => x,
-            Err(_) => {
-                // This won't happen because write is guaranteed to succeed with slices
-                unreachable!();
-            }
-        };
-
-        self.size[index] = bytes_written as u8;
-        self.sum_size += bytes_written as u32;
-        self.offset[index] = offset as u16;
-
-        if bytes_written < slice.len() {
-            // This shouldn't happen since everywhere this function is called the size is guaranteed
-            // to be at most 128 bytes (the size of the payload)
-            warn!("Slice is too long to fit in payload");
-        }
-        self.size[index] as usize
-    }
-
-    fn set_payload_bitmap(&mut self, bitmap: &virtio_input_bitmap, offset: usize, index: usize) -> usize {
-        // self.size = bitmap.min_size() as u8;
-        self.set_payload_slice(bitmap.bitmap.as_slice(), offset, index)
-    }
-
-    fn set_absinfo(&mut self, absinfo: &virtio_input_absinfo, offset: usize, index: usize) -> usize {
-        self.set_payload_slice(absinfo.as_slice(), offset, index)
-    }
-
-    fn set_device_ids(&mut self, device_ids: &virtio_input_device_ids, offset: usize, index: usize) -> usize {
-        self.set_payload_slice(device_ids.as_slice(), offset, index)
-    }
-}
-
-#[derive(Copy, Clone)]
-#[repr(C)]
 struct virtio_input_config {
     select: u8,
     subsel: u8,
@@ -325,44 +263,6 @@ impl VirtioInputConfig {
         ))
     }
 
-    fn build_flat_config_memory(&self) -> virtio_input_flat_config {
-        let mut cfg = virtio_input_flat_config::new();
-        let mut offset: usize = 0;
-        let mut index: usize = 0;
-
-        offset += cfg.set_payload_slice(&self.name, offset, VIRTIO_INPUT_FLAT_CFG_ID_NAME);
-        offset += cfg.set_payload_slice(&self.serial_name, offset, VIRTIO_INPUT_FLAT_CFG_ID_SERIAL);
-        offset += cfg.set_device_ids(&self.device_ids, offset, VIRTIO_INPUT_FLAT_CFG_ID_DEVIDS);
-        offset += cfg.set_payload_bitmap(&self.properties, offset, VIRTIO_INPUT_FLAT_CFG_PROP_BITS);
-
-        index = VIRTIO_INPUT_FLAT_CFG_EV;
-        for i in 0..EV_MAX {
-            let ev_type = i;
-            // zero is a special case: return all supported event types (just like EVIOCGBIT)
-            if ev_type == 0 {
-                let events_bm = virtio_input_bitmap::from_bits(
-                    &self.supported_events.keys().cloned().collect::<Vec<u16>>(),
-                );
-                offset += cfg.set_payload_bitmap(&events_bm, offset, index);
-            } else if let Some(supported_codes) = self.supported_events.get(&ev_type) {
-                offset += cfg.set_payload_bitmap(supported_codes, offset, index);
-            } else {
-                cfg.set_size_to_zero(index);
-            }
-            index += 1;
-        }
-
-        index = VIRTIO_INPUT_FLAT_CFG_ABS;
-        for i in 0..ABS_MAX {
-            let abs_axis = i;
-            if let Some(absinfo) = self.axis_info.get(&abs_axis) {
-                offset += cfg.set_absinfo(absinfo, offset, index);
-            } // else all zeroes in the payload
-            index += 1;
-        }
-        cfg
-    }
-
     fn build_config_memory(&self) -> virtio_input_config {
         let mut cfg = virtio_input_config::new();
         cfg.select = self.select;
@@ -411,26 +311,20 @@ impl VirtioInputConfig {
         cfg
     }
 
-    fn read(&self, offset: usize, data: &mut [u8], features: u64) {
-        if (features & (1 << VIRTIO_INPUT_F_FLAT_CFG as u64)) != 0 {
-            let config = self.build_flat_config_memory();
-            copy_config(data, 0, config.as_slice(), offset as u64);
-        } else {
-            let config = self.build_config_memory();
-            copy_config(data, 0, config.as_slice(), offset as u64);
-        }
+    fn read(&self, offset: usize, data: &mut [u8]) {
+        copy_config(
+            data,
+            0,
+            self.build_config_memory().as_slice(),
+            offset as u64,
+        );
     }
 
-    fn write(&mut self, offset: usize, data: &[u8], features: u64) {
-        if (features & (1 << VIRTIO_INPUT_F_FLAT_CFG as u64)) != 0 {
-            let mut config = self.build_flat_config_memory();
-            copy_config(config.as_mut_slice(), offset as u64, data, 0);
-        } else {
-            let mut config = self.build_config_memory();
-            copy_config(config.as_mut_slice(), offset as u64, data, 0);
-            self.select = config.select;
-            self.subsel = config.subsel;
-        }
+    fn write(&mut self, offset: usize, data: &[u8]) {
+        let mut config = self.build_config_memory();
+        copy_config(config.as_mut_slice(), offset as u64, data, 0);
+        self.select = config.select;
+        self.subsel = config.subsel;
     }
 }
 
@@ -674,11 +568,11 @@ where
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        self.config.read(offset as usize, data, self.virtio_features);
+        self.config.read(offset as usize, data);
     }
 
-    fn write_config(&mut self, offset: u64, data: &[u8],) {
-        self.config.write(offset as usize, data, self.virtio_features);
+    fn write_config(&mut self, offset: u64, data: &[u8]) {
+        self.config.write(offset as usize, data);
     }
 
     fn features(&self) -> u64 {

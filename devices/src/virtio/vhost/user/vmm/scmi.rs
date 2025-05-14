@@ -1,74 +1,87 @@
-// Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
-// SPDX-License-Identifier: BSD-3-Clause-Clear
+//Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+//SPDX-License-Identifier: BSD-3-Clause-Clear
 
-// Copyright 2021 The ChromiumOS Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+//Copyright 2021 The Chromium OS Authors. All rights reserved.
+
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//    * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//    * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//    * Neither the name of Google Inc. nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
-use data_model::Le64;
 use std::path::Path;
 use std::thread;
 use std::u32;
+use data_model::Le64;
 
-use base::{info, error, Event, RawDescriptor};
+use base::{error, Event, RawDescriptor};
 use virtio_sys::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::GuestMemory;
-use vmm_vhost::message::{MasterReq, VhostUserProtocolFeatures, VhostUserVirtioFeatures};
+use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
-use vmm_vhost::{
-    connection::socket::Endpoint as SocketEndpoint, Master, VhostBackend, VhostUserMaster,
-    VhostUserMemoryRegionInfo, VringConfigData, VHOST_USER_F_PROTOCOL_FEATURES,
-};
-
-type SocketMaster = Master<SocketEndpoint<MasterReq>>;
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
+use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_SCMI};
 
-use crate::virtio::{ Interrupt, Queue, VirtioDevice};
+const QUEUE_SIZE: u16 = 256;
 
-const QUEUE_SIZE: u16 = 1024;
-
-pub struct Hab {
+pub struct Scmi {
     kill_evt: Option<Event>,
     worker_thread: Option<thread::JoinHandle<Worker>>,
     handler: RefCell<VhostUserHandler>,
     queue_sizes: Vec<u16>,
-    dev_id : u32,
-    vu : SocketMaster,
 }
 
-impl Hab {
-    pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P , device_id : u32,  numOfQueue : u32) -> Result<Hab>  {
-         let socket = UnixStream::connect(&socket_path).map_err(Error::SocketConnect)?;
-        let sock_copy = socket.try_clone().expect("Couldn't clone socket");
-         let allow_features = 1u64 << crate::virtio::VIRTIO_F_VERSION_1
-            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()  ;
+impl Scmi {
+    pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P) -> Result<Scmi> {
+        let socket = UnixStream::connect(&socket_path).map_err(Error::SocketConnect)?;
 
         let init_features = base_features | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
-        let allow_protocol_features = VhostUserProtocolFeatures::CONFIG
-            | VhostUserProtocolFeatures::MQ;
+        let allow_features = init_features
+            | 1u64 << crate::virtio::VIRTIO_F_VERSION_1
+            | 1 << VIRTIO_RING_F_EVENT_IDX;
+        let allow_protocol_features = VhostUserProtocolFeatures::CONFIG;
+
         let mut handler = VhostUserHandler::new_from_stream(
             socket,
-            // TODO(b/181753022): Support multiple queues.
-            numOfQueue.into(), /* queues_num */
+            1, /* queues_num */
             allow_features,
             init_features,
             allow_protocol_features,
         )?;
-        let queue_sizes = handler.queue_sizes(QUEUE_SIZE, numOfQueue.try_into().unwrap())?;
-         Ok(Hab {
+        let queue_sizes = handler.queue_sizes(QUEUE_SIZE, 1)?;
+
+        Ok(Scmi {
             kill_evt: None,
             worker_thread: None,
             handler: RefCell::new(handler),
             queue_sizes,
-             dev_id: device_id,
-             vu: SocketMaster::from_stream(sock_copy, numOfQueue.into()),
         })
     }
 }
 
-impl Drop for Hab {
+impl Drop for Scmi {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
@@ -81,14 +94,13 @@ impl Drop for Hab {
     }
 }
 
-impl VirtioDevice for Hab {
+impl VirtioDevice for Scmi {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
         Vec::new()
     }
 
     fn features(&self) -> u64 {
         self.handler.borrow().avail_features
-
     }
 
     fn ack_features(&mut self, features: u64) {
@@ -97,15 +109,20 @@ impl VirtioDevice for Hab {
         }
     }
 
-    fn device_type(&self,) -> u32 {
-        self.dev_id }
+    fn device_type(&self) -> u32 {
+        TYPE_SCMI
+    }
 
     fn queue_max_sizes(&self) -> &[u16] {
         self.queue_sizes.as_slice()
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        if let Err(e) = self.handler.borrow_mut().read_config::<Le64>(offset, data) {
+        if let Err(e) = self
+            .handler
+            .borrow_mut()
+            .read_config::<Le64>(offset, data)
+        {
             error!("failed to read config: {}", e);
         }
     }
@@ -117,7 +134,7 @@ impl VirtioDevice for Hab {
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
-        if let Err(e) =  self
+        if let Err(e) = self
             .handler
             .borrow_mut()
             .activate(&mem, &interrupt, &queues, &queue_evts)
@@ -136,7 +153,7 @@ impl VirtioDevice for Hab {
         self.kill_evt = Some(self_kill_evt);
 
         let worker_result = thread::Builder::new()
-            .name("vhost_user_hab".to_string())
+            .name("vhost_user_scmi".to_string())
             .spawn(move || {
                 let mut worker = Worker {
                     queues,
@@ -161,9 +178,8 @@ impl VirtioDevice for Hab {
     }
 
     fn reset(&mut self) -> bool {
-
-        if let Err(e) = self.vu.reset_owner().map_err(Error::ResetOwner) {
-            error!("Failed to reset HAB device: {}", e);
+        if let Err(e) = self.handler.borrow_mut().reset(self.queue_sizes.len()) {
+            error!("Failed to reset scmi device: {}", e);
             false
         } else {
             true
