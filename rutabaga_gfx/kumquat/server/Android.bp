@@ -24,6 +24,7 @@ rust_binary {
         "gfxstream",
     ],
     rustlibs: [
+        "libanyhow",
         "librutabaga_gfx_gfxstream",
         "liblibc",
         "liblog_rust",
