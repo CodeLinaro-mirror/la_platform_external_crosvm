@@ -31,6 +31,7 @@ rust_ffi_shared {
     vendor_available: true,
     srcs: ["src/lib.rs"],
     rustlibs: [
+        "libanyhow",
         "librutabaga_gfx_gfxstream",
         "liblibc",
         "liblog_rust",
