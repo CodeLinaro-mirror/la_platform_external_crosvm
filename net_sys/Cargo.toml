@@ -5,5 +5,5 @@ authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [dependencies]
-base = { path = "../base" }
-libc = "0.2"
+base = { workspace = true }
+libc = { workspace = true }
