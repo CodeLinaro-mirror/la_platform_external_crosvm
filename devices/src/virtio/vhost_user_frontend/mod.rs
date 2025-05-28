@@ -57,6 +57,7 @@ pub struct VhostUserFrontend {
     backend_client: Arc<Mutex<BackendClient>>,
     avail_features: u64,
     acked_features: u64,
+    sent_set_features: bool,
     protocol_features: VhostUserProtocolFeatures,
     // `backend_req_handler` is only present if the backend supports BACKEND_REQ. `worker_thread`
     // takes ownership of `backend_req_handler` when it starts. The worker thread will always
@@ -145,10 +146,13 @@ impl VhostUserFrontend {
 
         let mut protocol_features = VhostUserProtocolFeatures::empty();
         if avail_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0 {
-            // The vhost-user backend supports VHOST_USER_F_PROTOCOL_FEATURES; enable it.
-            backend_client
-                .set_features(1 << VHOST_USER_F_PROTOCOL_FEATURES)
-                .map_err(Error::SetFeatures)?;
+            // The vhost-user backend supports VHOST_USER_F_PROTOCOL_FEATURES.
+            // Per the vhost-user protocol, the backend must support
+            // `VHOST_USER_GET_PROTOCOL_FEATURES` and `VHOST_USER_SET_PROTOCOL_FEATURES` even
+            // before acknowledging the feature, so we don't need to call `set_features()` yet
+            // (and doing so before driver feature negotiation may confuse some backends),
+            // but add it to `acked_features` so it will be included in any future
+            // `set_features()` calls.
             acked_features |= 1 << VHOST_USER_F_PROTOCOL_FEATURES;
 
             let avail_protocol_features = backend_client
@@ -212,6 +216,7 @@ impl VhostUserFrontend {
             backend_client: Arc::new(Mutex::new(backend_client)),
             avail_features,
             acked_features,
+            sent_set_features: false,
             protocol_features,
             backend_req_handler,
             shmem_region: RefCell::new(None),
@@ -382,6 +387,7 @@ impl VirtioDevice for VhostUserFrontend {
             return;
         }
         self.acked_features = features;
+        self.sent_set_features = true;
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -432,6 +438,11 @@ impl VirtioDevice for VhostUserFrontend {
         interrupt: Interrupt,
         queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
+        // Ensure at least one `VHOST_USER_SET_FEATURES` is sent before activation.
+        if !self.sent_set_features {
+            self.ack_features(self.acked_features);
+        }
+
         self.set_mem_table(&mem)?;
 
         let msix_config_opt = interrupt
@@ -468,6 +479,8 @@ impl VirtioDevice for VhostUserFrontend {
         if let Some(w) = self.worker_thread.take() {
             self.backend_req_handler = w.stop();
         }
+
+        self.sent_set_features = false;
 
         Ok(())
     }
@@ -614,6 +627,11 @@ impl VirtioDevice for VhostUserFrontend {
     }
 
     fn virtio_restore(&mut self, data: AnySnapshot) -> anyhow::Result<()> {
+        // Ensure features are negotiated before restoring.
+        if !self.sent_set_features {
+            self.ack_features(self.acked_features);
+        }
+
         if !self
             .protocol_features
             .contains(VhostUserProtocolFeatures::DEVICE_STATE)

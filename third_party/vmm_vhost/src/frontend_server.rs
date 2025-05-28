@@ -5,6 +5,7 @@ use std::fs::File;
 use std::mem;
 
 use base::AsRawDescriptor;
+use zerocopy::FromBytes;
 
 use crate::message::*;
 use crate::BackendReq;
@@ -105,39 +106,44 @@ impl<S: Frontend> FrontendServer<S> {
         //   message header
         // . validate message body and optional payload
         let (hdr, files) = self.sub_sock.recv_header()?;
+        if !hdr.is_valid() || hdr.is_reply() {
+            return Err(Error::InvalidMessage);
+        }
         self.check_attached_files(&hdr, &files)?;
-        let buf = self.sub_sock.recv_body_bytes(&hdr)?;
-        let size = buf.len();
+        let (buf, extra_files) = self.sub_sock.recv_body_bytes(&hdr)?;
+        if !extra_files.is_empty() {
+            return Err(Error::InvalidMessage);
+        }
 
         let res = match hdr.get_code() {
             Ok(BackendReq::CONFIG_CHANGE_MSG) => {
-                self.check_msg_size(&hdr, size, 0)?;
+                self.check_msg_size(&hdr, 0)?;
                 self.frontend
                     .handle_config_change()
                     .map_err(Error::ReqHandlerError)
             }
             Ok(BackendReq::SHMEM_MAP) => {
-                let msg = self.extract_msg_body::<VhostUserShmemMapMsg>(&hdr, size, &buf)?;
+                let msg = self.extract_msg_body::<VhostUserShmemMapMsg>(&hdr, &buf)?;
                 // check_attached_files() has validated files
                 self.frontend
                     .shmem_map(&msg, &files[0])
                     .map_err(Error::ReqHandlerError)
             }
             Ok(BackendReq::SHMEM_UNMAP) => {
-                let msg = self.extract_msg_body::<VhostUserShmemUnmapMsg>(&hdr, size, &buf)?;
+                let msg = self.extract_msg_body::<VhostUserShmemUnmapMsg>(&hdr, &buf)?;
                 self.frontend
                     .shmem_unmap(&msg)
                     .map_err(Error::ReqHandlerError)
             }
             Ok(BackendReq::GPU_MAP) => {
-                let msg = self.extract_msg_body::<VhostUserGpuMapMsg>(&hdr, size, &buf)?;
+                let msg = self.extract_msg_body::<VhostUserGpuMapMsg>(&hdr, &buf)?;
                 // check_attached_files() has validated files
                 self.frontend
                     .gpu_map(&msg, &files[0])
                     .map_err(Error::ReqHandlerError)
             }
             Ok(BackendReq::EXTERNAL_MAP) => {
-                let msg = self.extract_msg_body::<VhostUserExternalMapMsg>(&hdr, size, &buf)?;
+                let msg = self.extract_msg_body::<VhostUserExternalMapMsg>(&hdr, &buf)?;
                 self.frontend
                     .external_map(&msg)
                     .map_err(Error::ReqHandlerError)
@@ -150,17 +156,8 @@ impl<S: Frontend> FrontendServer<S> {
         res
     }
 
-    fn check_msg_size(
-        &self,
-        hdr: &VhostUserMsgHeader<BackendReq>,
-        size: usize,
-        expected: usize,
-    ) -> Result<()> {
-        if hdr.get_size() as usize != expected
-            || hdr.is_reply()
-            || hdr.get_version() != 0x1
-            || size != expected
-        {
+    fn check_msg_size(&self, hdr: &VhostUserMsgHeader<BackendReq>, expected: usize) -> Result<()> {
+        if hdr.get_size() as usize != expected {
             return Err(Error::InvalidMessage);
         }
         Ok(())
@@ -184,15 +181,13 @@ impl<S: Frontend> FrontendServer<S> {
         }
     }
 
-    fn extract_msg_body<T: Sized + VhostUserMsgValidator>(
+    fn extract_msg_body<T: FromBytes + VhostUserMsgValidator>(
         &self,
         hdr: &VhostUserMsgHeader<BackendReq>,
-        size: usize,
         buf: &[u8],
     ) -> Result<T> {
-        self.check_msg_size(hdr, size, mem::size_of::<T>())?;
-        // SAFETY: above check ensures that buf is `T` sized.
-        let msg = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const T) };
+        self.check_msg_size(hdr, mem::size_of::<T>())?;
+        let msg = T::read_from_bytes(buf).map_err(|_| Error::InvalidMessage)?;
         if !msg.is_valid() {
             return Err(Error::InvalidMessage);
         }

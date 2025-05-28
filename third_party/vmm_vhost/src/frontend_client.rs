@@ -23,9 +23,6 @@ pub struct FrontendClient {
 
     // Protocol feature VHOST_USER_PROTOCOL_F_REPLY_ACK has been negotiated.
     reply_ack_negotiated: bool,
-
-    // whether the connection has encountered any failure
-    error: Option<i32>,
 }
 
 impl FrontendClient {
@@ -34,7 +31,6 @@ impl FrontendClient {
         FrontendClient {
             sock: ep,
             reply_ack_negotiated: false,
-            error: None,
         }
     }
 
@@ -72,7 +68,7 @@ impl FrontendClient {
         }
 
         let (reply, body, rfds) = self.sock.recv_message::<VhostUserU64>()?;
-        if !reply.is_reply_for(hdr) || !rfds.is_empty() || !body.is_valid() {
+        if !reply.is_valid() || !reply.is_reply_for(hdr) || !rfds.is_empty() || !body.is_valid() {
             return Err(Error::InvalidMessage);
         }
         if body.value != 0 {
@@ -89,11 +85,6 @@ impl FrontendClient {
     /// message.
     pub fn set_reply_ack_flag(&mut self, enable: bool) {
         self.reply_ack_negotiated = enable;
-    }
-
-    /// Mark connection as failed with specified error code.
-    pub fn set_failed(&mut self, error: i32) {
-        self.error = Some(error);
     }
 }
 
@@ -133,20 +124,5 @@ impl Frontend for FrontendClient {
     /// Handle external memory region mapping requests.
     fn external_map(&mut self, req: &VhostUserExternalMapMsg) -> HandlerResult<u64> {
         self.send_message(BackendReq::EXTERNAL_MAP, req, None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_backend_req_set_failed() {
-        let (p1, _p2) = Connection::pair().unwrap();
-        let mut frontend_client = FrontendClient::new(p1);
-
-        assert!(frontend_client.error.is_none());
-        frontend_client.set_failed(libc::EAGAIN);
-        assert_eq!(frontend_client.error, Some(libc::EAGAIN));
     }
 }
