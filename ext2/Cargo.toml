@@ -5,10 +5,10 @@ authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [dependencies]
-anyhow = "1"
-base = { path = "../base/" }
-enumn = "0.1"
-libc = "0.2"
+anyhow = { workspace = true }
+base = { workspace = true }
+enumn = { workspace = true }
+libc = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 zerocopy = { version = "0.8.13", features = ["derive"] }
 
@@ -16,6 +16,6 @@ zerocopy = { version = "0.8.13", features = ["derive"] }
 name = "mkfs"
 
 [dev-dependencies]
-argh = "0.1"
+argh = { workspace = true }
 tempfile = "3"
 walkdir = "2.3"

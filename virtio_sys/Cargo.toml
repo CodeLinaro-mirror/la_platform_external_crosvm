@@ -5,6 +5,6 @@ authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [dependencies]
-base = { path = "../base" }
-data_model = { path = "../common/data_model" }
+base = { workspace = true }
+data_model = { workspace = true }
 zerocopy = { version = "0.8.13", features = ["derive"] }
