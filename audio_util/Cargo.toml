@@ -5,7 +5,7 @@ authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [dependencies]
-audio_streams = { path = "../common/audio_streams" }
+audio_streams = { workspace = true }
 async-trait = "0.1.36"
-base = { path = "../base" }
-thiserror = "1.0.20"
+base = { workspace = true }
+thiserror = { workspace = true }

@@ -5,11 +5,11 @@ authors = ["The ChromiumOS Authors"]
 edition = "2021"
 
 [dependencies]
-libc = "0.2.93"
-remain = "0.2"
-sync = { path = "../common/sync" }
-base = { path = "../base" }
-thiserror = "1"
+libc = { workspace = true }
+remain = { workspace = true }
+sync = { workspace = true }
+base = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
