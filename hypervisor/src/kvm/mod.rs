@@ -30,7 +30,6 @@ use std::sync::Arc;
 
 use base::errno_result;
 use base::error;
-use base::info;
 use base::ioctl;
 use base::ioctl_with_mut_ref;
 use base::ioctl_with_ref;
@@ -1044,11 +1043,6 @@ impl Vcpu for KvmVcpu {
         // override the default handling.
         if let Some(vcpu_exit) = self.handle_vm_exit_arch(run) {
             return Ok(vcpu_exit);
-        }
-
-        // MMIO is expected to generate multiple exits. Skip it to avoid spamming logs
-        if run.exit_reason != KVM_EXIT_MMIO {
-            info!("Vcpu run returned exit reason: {:?}", run.exit_reason);
         }
 
         match run.exit_reason {
