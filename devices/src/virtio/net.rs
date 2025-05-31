@@ -68,10 +68,12 @@ const QUEUE_SIZE: u16 = 256;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub static VHOST_NET_DEFAULT_PATH: &str = "/dev/vhost-net";
 
+pub(crate) use sys::process_mrg_rx;
 pub(crate) use sys::process_rx;
 pub(crate) use sys::process_tx;
 pub(crate) use sys::validate_and_configure_tap;
 pub(crate) use sys::virtio_features_to_tap_offload;
+pub(crate) use sys::PendingBuffer;
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -209,6 +211,8 @@ pub struct NetParameters {
     #[serde(default)]
     pub packed_queue: bool,
     pub pci_address: Option<PciAddress>,
+    #[serde(default)]
+    pub mrg_rxbuf: bool,
 }
 
 impl FromStr for NetParameters {
@@ -392,13 +396,14 @@ where
         }
 
         let mut tap_polling_enabled = true;
+        let mut pending_buffer_for_mrg_rx = PendingBuffer::new();
         'wait: loop {
             let events = wait_ctx.wait().map_err(NetError::WaitError)?;
             for event in events.iter().filter(|e| e.is_readable) {
                 match event.token {
                     Token::RxTap => {
                         let _trace = cros_tracing::trace_event!(VirtioNet, "handle RxTap event");
-                        self.handle_rx_token(&wait_ctx)?;
+                        self.handle_rx_token(&wait_ctx, &mut pending_buffer_for_mrg_rx)?;
                         tap_polling_enabled = false;
                     }
                     Token::RxQueue => {
@@ -489,6 +494,7 @@ where
         mac_addr: Option<MacAddress>,
         use_packed_queue: bool,
         pci_address: Option<PciAddress>,
+        mrg_rxbuf: bool,
     ) -> Result<Net<T>, NetError> {
         let taps = tap.into_mq_taps(vq_pairs).map_err(NetError::TapOpen)?;
 
@@ -528,6 +534,10 @@ where
 
         if mac_addr.is_some() {
             avail_features |= 1 << virtio_net::VIRTIO_NET_F_MAC;
+        }
+
+        if mrg_rxbuf {
+            avail_features |= 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF;
         }
 
         Self::new_internal(
@@ -842,6 +852,24 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
+            }
+        );
+
+        let params = from_net_arg("tap-name=tap,mrg-rxbuf=true").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                #[cfg(any(target_os = "android", target_os = "linux"))]
+                vhost_net: None,
+                vq_pairs: None,
+                mode: NetParametersMode::TapName {
+                    tap_name: "tap".to_string(),
+                    mac: None
+                },
+                packed_queue: false,
+                pci_address: None,
+                mrg_rxbuf: true,
             }
         );
 
@@ -858,6 +886,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -874,6 +903,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -890,6 +920,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -910,6 +941,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -930,6 +962,7 @@ mod tests {
                     dev: 1,
                     func: 1,
                 }),
+                mrg_rxbuf: false,
             }
         );
 
@@ -967,6 +1000,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -982,6 +1016,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -997,6 +1032,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -1013,6 +1049,7 @@ mod tests {
                 },
                 packed_queue: false,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -1029,6 +1066,7 @@ mod tests {
                 },
                 packed_queue: true,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -1045,6 +1083,7 @@ mod tests {
                 },
                 packed_queue: true,
                 pci_address: None,
+                mrg_rxbuf: false,
             }
         );
 
@@ -1064,6 +1103,39 @@ mod tests {
                     dev: 1,
                     func: 1,
                 }),
+                mrg_rxbuf: false,
+            }
+        );
+
+        let params = from_net_arg("vhost-net,tap-name=crosvm_tap,mrg-rxbuf=true").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vhost_net: Some(Default::default()),
+                vq_pairs: None,
+                mode: NetParametersMode::TapName {
+                    tap_name: "crosvm_tap".to_owned(),
+                    mac: None,
+                },
+                packed_queue: false,
+                pci_address: None,
+                mrg_rxbuf: true,
+            }
+        );
+
+        let params = from_net_arg("vhost-net,tap-name=crosvm_tap,mrg-rxbuf").unwrap();
+        assert_eq!(
+            params,
+            NetParameters {
+                vhost_net: Some(Default::default()),
+                vq_pairs: None,
+                mode: NetParametersMode::TapName {
+                    tap_name: "crosvm_tap".to_owned(),
+                    mac: None,
+                },
+                packed_queue: false,
+                pci_address: None,
+                mrg_rxbuf: true,
             }
         );
 

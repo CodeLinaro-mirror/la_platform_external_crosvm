@@ -2745,6 +2745,7 @@ fn handle_hotplug_net_add<V: VmArch, Vcpu: VcpuArch>(
         vq_pairs: None,
         packed_queue: false,
         pci_address: None,
+        mrg_rxbuf: false,
     };
     let ret = add_hotplug_net(
         linux,
@@ -5063,13 +5064,11 @@ pub fn start_devices(opts: DevicesCommand) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let ex = Executor::new()?;
     if let Some(control_server_socket) = control_server_socket {
         // Start the control server in the parent process.
-        ex.spawn_blocking(move || {
+        std::thread::spawn(move || {
             start_vhost_user_control_server(control_server_socket, disk_host_tubes)
-        })
-        .detach();
+        });
     }
 
     // Now wait for all device processes to return.
