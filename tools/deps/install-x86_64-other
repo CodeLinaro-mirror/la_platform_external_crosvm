@@ -6,7 +6,8 @@ set -ex
 
 # mdformat is not available as a debian package. Install via pipx instead.
 pipx install mdformat
-pipx inject mdformat mdformat-gfm mdformat-footnote
+pipx inject mdformat mdformat-gfm mdformat-footnote \
+    || echo "b/295234319: ignoring failure may be errors if mdformat is not installed"
 pipx ensurepath
 
 # Install rustup if not available yet
