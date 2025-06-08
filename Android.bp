@@ -242,7 +242,7 @@ rust_test {
         "libminijail_rust",
         "libnet_util",
         "libp9",
-        "librand",
+        "librand-0.8",
         "libresources",
         "librutabaga_gfx",
         "libserde",

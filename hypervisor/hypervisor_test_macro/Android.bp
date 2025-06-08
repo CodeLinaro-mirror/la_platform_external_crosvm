@@ -19,7 +19,7 @@ rust_proc_macro {
     rustlibs: [
         "libproc_macro2",
         "libquote",
-        "librand",
+        "librand-0.8",
         "libsyn",
     ],
     apex_available: ["com.android.virt"],
