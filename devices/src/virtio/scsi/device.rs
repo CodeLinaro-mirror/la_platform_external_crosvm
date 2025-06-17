@@ -57,7 +57,7 @@ use zerocopy::KnownLayout;
 use crate::virtio::async_utils;
 use crate::virtio::block::sys::get_seg_max;
 use crate::virtio::copy_config;
-use crate::virtio::scsi::commands::Command;
+use crate::virtio::scsi::commands::execute_cdb;
 use crate::virtio::scsi::constants::CHECK_CONDITION;
 use crate::virtio::scsi::constants::GOOD;
 use crate::virtio::scsi::constants::ILLEGAL_REQUEST;
@@ -138,11 +138,11 @@ pub enum ExecuteError {
     InvalidField,
     #[error("invalid parameter length")]
     InvalidParamLen,
-    #[error("{length} bytes from sector {sector} exceeds end of this device {max_lba}")]
+    #[error("{xfer_blocks} blocks from LBA {lba} exceeds end of this device {last_lba}")]
     LbaOutOfRange {
-        length: usize,
-        sector: u64,
-        max_lba: u64,
+        lba: u64,
+        xfer_blocks: usize,
+        last_lba: u64,
     },
     #[error("failed to read message: {0}")]
     Read(io::Error),
@@ -299,8 +299,8 @@ impl Sense {
 
 /// Describes each SCSI logical unit.
 struct LogicalUnit {
-    /// The maximum logical block address of the target device.
-    max_lba: u64,
+    /// The logical block address of the last logical block on the target device.
+    last_lba: u64,
     /// Block size of the target device.
     block_size: u32,
     read_only: bool,
@@ -315,7 +315,7 @@ impl LogicalUnit {
             .to_async_disk(ex)
             .context("Failed to create async disk")?;
         Ok(AsyncLogicalUnit {
-            max_lba: self.max_lba,
+            last_lba: self.last_lba,
             block_size: self.block_size,
             read_only: self.read_only,
             disk_image,
@@ -325,7 +325,7 @@ impl LogicalUnit {
 
 /// A logical unit with an AsyncDisk as the disk.
 pub struct AsyncLogicalUnit {
-    pub max_lba: u64,
+    pub last_lba: u64,
     pub block_size: u32,
     pub read_only: bool,
     // Represents the async image on disk.
@@ -346,7 +346,7 @@ impl Targets {
                     *id,
                     LogicalUnit {
                         disk_image,
-                        max_lba: logical_unit.max_lba,
+                        last_lba: logical_unit.last_lba,
                         block_size: logical_unit.block_size,
                         read_only: logical_unit.read_only,
                     },
@@ -405,13 +405,16 @@ impl Controller {
             .into_iter()
             .enumerate()
             .map(|(i, disk)| {
-                let max_lba = disk
+                let num_blocks = disk
                     .file
                     .get_len()
                     .context("Failed to get the length of the disk image")?
                     / disk.block_size as u64;
+                let last_lba = num_blocks
+                    .checked_sub(1)
+                    .context("Invalid zero-length SCSI LUN")?;
                 let target = LogicalUnit {
-                    max_lba,
+                    last_lba,
                     block_size: disk.block_size,
                     read_only: disk.read_only,
                     disk_image: disk.file,
@@ -529,8 +532,7 @@ impl Controller {
             Some(target) => {
                 let mut cdb = vec![0; cdb_size as usize];
                 reader.read_exact(&mut cdb).map_err(ExecuteError::Read)?;
-                let command = Command::new(&cdb)?;
-                match command.execute(reader, data_writer, target).await {
+                match execute_cdb(&cdb, reader, data_writer, target).await {
                     Ok(()) => {
                         let hdr = VirtioScsiCmdRespHeader {
                             sense_len: 0,
@@ -935,7 +937,7 @@ mod tests {
                 let file = file.try_clone().unwrap();
                 let disk_image = Box::new(SingleFileDisk::new(file, ex).unwrap());
                 let logical_unit = AsyncLogicalUnit {
-                    max_lba: 0x1000,
+                    last_lba: 0xFFF,
                     block_size,
                     read_only: false,
                     disk_image,

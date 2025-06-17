@@ -10,7 +10,6 @@ use anyhow::Context;
 use base::error;
 use base::warn;
 use base::AsRawDescriptor;
-use base::Event;
 use base::RawDescriptor;
 use base::WorkerThread;
 use vhost::Scmi as VhostScmiHandle;
@@ -34,7 +33,6 @@ const VIRTIO_SCMI_F_P2A_CHANNELS: u32 = 0;
 pub struct Scmi {
     worker_thread: Option<WorkerThread<()>>,
     vhost_handle: Option<VhostScmiHandle>,
-    interrupts: Option<Vec<Event>>,
     avail_features: u64,
     acked_features: u64,
 }
@@ -46,15 +44,9 @@ impl Scmi {
 
         let avail_features = base_features | 1 << VIRTIO_SCMI_F_P2A_CHANNELS;
 
-        let mut interrupts = Vec::new();
-        for _ in 0..NUM_QUEUES {
-            interrupts.push(Event::new().map_err(Error::VhostIrqCreate)?);
-        }
-
         Ok(Scmi {
             worker_thread: None,
             vhost_handle: Some(handle),
-            interrupts: Some(interrupts),
             avail_features,
             acked_features: 0,
         })
@@ -71,12 +63,6 @@ impl VirtioDevice for Scmi {
 
         if let Some(handle) = &self.vhost_handle {
             keep_rds.push(handle.as_raw_descriptor());
-        }
-
-        if let Some(interrupt) = &self.interrupts {
-            for vhost_int in interrupt.iter() {
-                keep_rds.push(vhost_int.as_raw_descriptor());
-            }
         }
 
         keep_rds
@@ -122,25 +108,21 @@ impl VirtioDevice for Scmi {
             ));
         }
         let vhost_handle = self.vhost_handle.take().context("missing vhost_handle")?;
-        let interrupts = self.interrupts.take().context("missing interrupts")?;
         let acked_features = self.acked_features;
         let mut worker = Worker::new(
+            "vhost-scmi",
             queues,
             vhost_handle,
-            interrupts,
             interrupt,
             acked_features,
             None,
-        );
-        let activate_vqs = |_handle: &VhostScmiHandle| -> Result<()> { Ok(()) };
-
-        worker
-            .init(mem, QUEUE_SIZES, activate_vqs, None)
-            .context("vhost worker init exited with error")?;
+            mem,
+            None,
+        )
+        .context("vhost worker init exited with error")?;
 
         self.worker_thread = Some(WorkerThread::start("vhost_scmi", move |kill_evt| {
-            let cleanup_vqs = |_handle: &VhostScmiHandle| -> Result<()> { Ok(()) };
-            let result = worker.run(cleanup_vqs, kill_evt);
+            let result = worker.run(kill_evt);
             if let Err(e) = result {
                 error!("vhost_scmi worker thread exited with error: {:?}", e);
             }
