@@ -17,8 +17,8 @@ zeroize = "1.5.7"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["everything", "std", "impl-default"] }
 
-[dependencies.windows]
-version = "0.39.0"
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
 features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -30,8 +30,8 @@ features = [
     "Win32_System_Com",
 ]
 
-[build-dependencies.windows]
-version = "0.39.0"
+[target.'cfg(windows)'.build-dependencies.windows]
+workspace = true
 features = [
     "Win32_Foundation",
     "Win32_Globalization",
