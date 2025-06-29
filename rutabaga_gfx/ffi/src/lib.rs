@@ -10,6 +10,8 @@ use std::cell::RefCell;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::ffi::CString;
+#[cfg(goldfish)]
+use std::io::IoSlice;
 use std::io::IoSliceMut;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
@@ -42,6 +44,7 @@ use rutabaga_gfx::RutabagaHandle;
 use rutabaga_gfx::RutabagaImportData;
 use rutabaga_gfx::RutabagaIntoRawDescriptor;
 use rutabaga_gfx::RutabagaIovec;
+use rutabaga_gfx::RutabagaRawDescriptor;
 use rutabaga_gfx::RutabagaResult;
 use rutabaga_gfx::RutabagaWsi;
 use rutabaga_gfx::Transfer3D;
@@ -431,7 +434,7 @@ pub unsafe extern "C" fn rutabaga_resource_import(
     catch_unwind(AssertUnwindSafe(|| {
         let internal_handle = RutabagaHandle {
             os_handle: RutabagaDescriptor::from_raw_descriptor(
-                import_handle.os_handle.try_into().unwrap(),
+                import_handle.os_handle as RutabagaRawDescriptor,
             ),
             handle_type: import_handle.handle_type,
         };
@@ -513,7 +516,31 @@ pub extern "C" fn rutabaga_resource_transfer_write(
     transfer: &rutabaga_transfer,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.transfer_write(ctx_id, resource_id, *transfer);
+        let result = ptr.transfer_write(ctx_id, resource_id, *transfer, None);
+        return_result(result)
+    }))
+    .unwrap_or(-ESRCH)
+}
+
+#[cfg(goldfish)]
+#[no_mangle]
+pub unsafe extern "C" fn rutabaga_resource_transfer_write_goldfish(
+    ptr: &mut rutabaga,
+    ctx_id: u32,
+    resource_id: u32,
+    transfer: &rutabaga_transfer,
+    buf: Option<&iovec>,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let slice = match buf {
+            Some(iov) => Some(IoSlice::new(std::slice::from_raw_parts(
+                iov.iov_base as *mut u8,
+                iov.iov_len,
+            ))),
+            None => None,
+        };
+
+        let result = ptr.transfer_write(ctx_id, resource_id, *transfer, slice);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
@@ -557,11 +584,10 @@ pub unsafe extern "C" fn rutabaga_resource_create_blob(
 
         // Only needed on Unix, since there is no way to create a handle from guest memory on
         // Windows.
-        #[cfg(unix)]
         if let Some(hnd) = handle {
             handle_opt = Some(RutabagaHandle {
                 os_handle: RutabagaDescriptor::from_raw_descriptor(
-                    hnd.os_handle.try_into().unwrap(),
+                    hnd.os_handle as RutabagaRawDescriptor,
                 ),
                 handle_type: hnd.handle_type,
             });

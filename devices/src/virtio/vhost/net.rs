@@ -11,7 +11,6 @@ use anyhow::Context;
 use base::error;
 use base::warn;
 use base::AsRawDescriptor;
-use base::Event;
 use base::RawDescriptor;
 use base::Tube;
 use base::WorkerThread;
@@ -45,7 +44,6 @@ pub struct Net<T: TapT + 'static, U: VhostNetT<T> + 'static> {
     tap: Option<T>,
     guest_mac: Option<[u8; 6]>,
     vhost_net_handle: Option<U>,
-    vhost_interrupt: Option<Vec<Event>>,
     avail_features: u64,
     acked_features: u64,
     request_tube: Tube,
@@ -103,11 +101,6 @@ where
             avail_features |= 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF;
         }
 
-        let mut vhost_interrupt = Vec::new();
-        for _ in 0..NUM_QUEUES {
-            vhost_interrupt.push(Event::new().map_err(Error::VhostIrqCreate)?);
-        }
-
         let (request_tube, response_tube) = Tube::pair().map_err(Error::CreateTube)?;
 
         Ok(Net {
@@ -115,7 +108,6 @@ where
             tap: Some(tap),
             guest_mac: mac_addr.map(|mac| mac.octets()),
             vhost_net_handle: Some(vhost_net_handle),
-            vhost_interrupt: Some(vhost_interrupt),
             avail_features,
             acked_features: 0u64,
             request_tube,
@@ -139,12 +131,6 @@ where
 
         if let Some(vhost_net_handle) = &self.vhost_net_handle {
             keep_rds.push(vhost_net_handle.as_raw_descriptor());
-        }
-
-        if let Some(vhost_interrupt) = &self.vhost_interrupt {
-            for vhost_int in vhost_interrupt.iter() {
-                keep_rds.push(vhost_int.as_raw_descriptor());
-            }
         }
 
         keep_rds.push(self.request_tube.as_raw_descriptor());
@@ -208,10 +194,6 @@ where
             .take()
             .context("missing vhost_net_handle")?;
         let tap = self.tap.take().context("missing tap")?;
-        let vhost_interrupt = self
-            .vhost_interrupt
-            .take()
-            .context("missing vhost_interrupt")?;
         let acked_features = self.acked_features;
         let socket = if self.response_tube.is_some() {
             self.response_tube.take()
@@ -222,34 +204,28 @@ where
             "vhost-net",
             queues,
             vhost_net_handle,
-            vhost_interrupt,
             interrupt,
             acked_features,
             socket,
-        )?;
-        let activate_vqs = |handle: &U| -> Result<()> {
-            for idx in 0..NUM_QUEUES {
-                handle
-                    .set_backend(idx, Some(&tap))
-                    .map_err(Error::VhostNetSetBackend)?;
-            }
-            Ok(())
-        };
-        worker
-            .init(mem, QUEUE_SIZES, activate_vqs, None)
-            .context("net worker init exited with error")?;
+            mem,
+            None,
+        )
+        .context("net worker init exited with error")?;
+        for idx in 0..NUM_QUEUES {
+            worker
+                .vhost_handle
+                .set_backend(idx, Some(&tap))
+                .map_err(Error::VhostNetSetBackend)?;
+        }
         self.worker_thread = Some(WorkerThread::start("vhost_net", move |kill_evt| {
-            let cleanup_vqs = |handle: &U| -> Result<()> {
-                for idx in 0..NUM_QUEUES {
-                    handle
-                        .set_backend(idx, None)
-                        .map_err(Error::VhostNetSetBackend)?;
-                }
-                Ok(())
-            };
-            let result = worker.run(cleanup_vqs, kill_evt);
+            let result = worker.run(kill_evt);
             if let Err(e) = result {
                 error!("net worker thread exited with error: {}", e);
+            }
+            for idx in 0..NUM_QUEUES {
+                if let Err(e) = worker.vhost_handle.set_backend(idx, None) {
+                    error!("net worker thread failed to clear backend: {:#}", e);
+                }
             }
             (worker, tap)
         }));
@@ -326,7 +302,6 @@ where
             let (worker, tap) = worker_thread.stop();
             self.vhost_net_handle = Some(worker.vhost_handle);
             self.tap = Some(tap);
-            self.vhost_interrupt = Some(worker.vhost_interrupt);
             self.response_tube = worker.response_tube;
         }
         Ok(())
@@ -340,6 +315,7 @@ pub mod tests {
     use std::result;
 
     use base::pagesize;
+    use base::Event;
     use hypervisor::ProtectionType;
     use net_util::sys::linux::fakes::FakeTap;
     use net_util::TapTCommon;
