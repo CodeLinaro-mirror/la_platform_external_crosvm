@@ -13,10 +13,10 @@ package {
 }
 
 rust_library {
-    name: "libbroker_ipc",
+    name: "libproc_init",
     defaults: ["crosvm_defaults"],
     host_supported: true,
-    crate_name: "broker_ipc",
+    crate_name: "proc_init",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
@@ -24,8 +24,8 @@ rust_library {
     rustlibs: [
         "libanyhow",
         "libbase_rust",
-        "libbroker_ipc_product",
         "libmetrics",
+        "libproc_init_product",
         "libserde",
     ],
     apex_available: ["com.android.virt"],

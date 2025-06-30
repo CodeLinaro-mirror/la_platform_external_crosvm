@@ -13,10 +13,10 @@ package {
 }
 
 rust_library {
-    name: "libbroker_ipc_product",
+    name: "libproc_init_product",
     defaults: ["crosvm_defaults"],
     host_supported: true,
-    crate_name: "broker_ipc_product",
+    crate_name: "proc_init_product",
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
