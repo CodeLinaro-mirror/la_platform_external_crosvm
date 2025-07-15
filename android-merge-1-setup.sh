@@ -54,8 +54,8 @@ rustup update
 # want to fetch upstream. Should we have independent options?
 if [ "$sync" = "sync" ]
 then
-  repo sync -c -j96
   git fetch goog upstream-main
+  repo sync -c -j96
 fi
 
 source $ANDROID_BUILD_TOP/build/envsetup.sh
