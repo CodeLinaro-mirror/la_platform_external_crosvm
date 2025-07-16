@@ -83,4 +83,4 @@ git commit --amend -a --no-edit
 # TODO: add more automated local tests/run host tests?
 m crosvm
 
-repo upload . $(cat OWNERS.android | grep @google | sed 's/^/--re=/')
+repo upload . $(cat OWNERS.android | grep @google | sed 's/^/--re=/') --cbr
