@@ -54,8 +54,8 @@ rustup update
 # want to fetch upstream. Should we have independent options?
 if [ "$sync" = "sync" ]
 then
-  repo sync -c -j96
   git fetch goog upstream-main
+  repo sync -c -j96
 fi
 
 source $ANDROID_BUILD_TOP/build/envsetup.sh
@@ -83,4 +83,4 @@ git commit --amend -a --no-edit
 # TODO: add more automated local tests/run host tests?
 m crosvm
 
-repo upload . $(cat OWNERS.android | grep @google | sed 's/^/--re=/')
+repo upload . $(cat OWNERS.android | grep @google | sed 's/^/--re=/') --cbr
