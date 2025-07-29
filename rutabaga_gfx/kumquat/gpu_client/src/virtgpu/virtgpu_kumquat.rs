@@ -327,7 +327,7 @@ impl VirtGpuKumquat {
         } else {
             let clone = resource.handle.try_clone()?;
             let mapping = RutabagaMemoryMapping::from_safe_descriptor(
-                clone.os_handle,
+                clone.os_handle.try_as_descriptor()?,
                 resource.size,
                 RUTABAGA_MAP_CACHE_CACHED | RUTABAGA_MAP_ACCESS_RW,
             )?;
@@ -512,6 +512,7 @@ impl VirtGpuKumquat {
                 .context("no fence found")
                 .context(RutabagaErrorKind::SpecViolation)?
                 .os_handle
+                .try_as_descriptor()?
                 .into_raw_descriptor();
         }
 
@@ -566,7 +567,7 @@ impl VirtGpuKumquat {
 
             // Opaque to users of this API, shared memory internally
             Ok(RutabagaHandle {
-                os_handle: descriptor,
+                os_handle: rutabaga_gfx::HandleType::Descriptor(descriptor),
                 handle_type: RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_FD,
             })
         } else {
@@ -584,7 +585,7 @@ impl VirtGpuKumquat {
     ) -> RutabagaResult<()> {
         let clone = handle.try_clone()?;
         let mapping = RutabagaMemoryMapping::from_safe_descriptor(
-            clone.os_handle,
+            clone.os_handle.try_as_descriptor()?,
             VIRTGPU_KUMQUAT_PAGE_SIZE,
             RUTABAGA_MAP_CACHE_CACHED | RUTABAGA_MAP_ACCESS_RW,
         )?;

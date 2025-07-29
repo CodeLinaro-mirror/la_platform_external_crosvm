@@ -51,7 +51,9 @@ impl VulkanoGralloc {
                 _ => return Err(RutabagaErrorKind::InvalidRutabagaHandle.into()),
             },
             // Safe because we own the handle.
-            file: File::from_raw_descriptor(handle.os_handle.into_raw_descriptor()),
+            file: File::from_raw_descriptor(
+                handle.os_handle.try_as_descriptor()?.into_raw_descriptor(),
+            ),
         };
 
         Ok(DeviceMemory::import(device, allocate_info, import_info)?)
