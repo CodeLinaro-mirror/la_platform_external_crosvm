@@ -62,7 +62,6 @@ rust_library {
                 "libc++",
                 "libbinder_ndk",
                 "libnativewindow",
-                "libandroid",
             ],
         },
     },
