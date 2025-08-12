@@ -4,13 +4,13 @@
 
 use std::os::raw::c_ulonglong;
 
-use base::{error, Error as SysError, Event, PollToken, Tube, WaitContext};
+use base::{error, info, Error as SysError, Event, PollToken, Tube, WaitContext};
 use vhost::Vhost;
 use vm_memory::GuestMemory;
 
 use super::control_socket::{VhostDevRequest, VhostDevResponse};
 use super::{Error, Result};
-use crate::virtio::{Interrupt, Queue, SignalableInterrupt};
+use crate::virtio::{Interrupt, Queue, SignalableInterrupt, VIRTIO_MSI_NO_VECTOR};
 use libc::EIO;
 
 /// Worker that takes care of running the vhost device.
@@ -225,6 +225,12 @@ impl<T: Vhost> Worker<T> {
                             .set_vring_call(queue_index, &self.vhost_interrupt[queue_index])
                             .map_err(Error::VhostSetVringCall)?;
                     }
+                    return Ok(());
+                } else if vector as u16 == VIRTIO_MSI_NO_VECTOR {
+                    info!("Take MMIO irq fd if msix is masked and vector is VIRTIO_MSI_NO_VECTOR");
+                    self.vhost_handle
+                        .set_vring_call(queue_index, &self.interrupt.get_interrupt_evt())
+                        .map_err(Error::VhostSetVringCall)?;
                     return Ok(());
                 }
             }
