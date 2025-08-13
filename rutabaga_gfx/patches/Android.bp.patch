@@ -1,5 +1,5 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index 4c2823c2e..bff147ff5 100644
+index 4c2823c2eb..29b565c666 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
 @@ -23,7 +23,6 @@ rust_library {
@@ -10,7 +10,7 @@ index 4c2823c2e..bff147ff5 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -38,9 +37,37 @@ rust_library {
+@@ -38,9 +37,41 @@ rust_library {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
@@ -36,6 +36,10 @@ index 4c2823c2e..bff147ff5 100644
 +            static_libs: [
 +                "libgfxstream_backend",
 +            ],
++            rustlibs: [
++                "libnativewindow_bindgen",
++                "libnativewindow_rs",
++            ],
 +        },
 +        host: {
 +            features: ["vulkano"],
@@ -48,9 +52,9 @@ index 4c2823c2e..bff147ff5 100644
 +        },
 +    },
  }
-
+ 
  rust_test {
-@@ -59,7 +86,6 @@ rust_test {
+@@ -59,7 +90,6 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
@@ -58,7 +62,7 @@ index 4c2823c2e..bff147ff5 100644
          "virgl_renderer",
      ],
      rustlibs: [
-@@ -75,8 +101,24 @@ rust_test {
+@@ -75,8 +105,28 @@ rust_test {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
@@ -80,8 +84,23 @@ index 4c2823c2e..bff147ff5 100644
 +                "libcutils",
 +                "liblog",
 +            ],
++            rustlibs: [
++                "libnativewindow_bindgen",
++                "libnativewindow_rs",
++            ],
 +        },
 +    },
  }
-
+ 
  // Manually written variant of librutabaga_gfx.
+@@ -125,6 +175,10 @@ rust_library {
+                 "fence_passing_option1",
+                 "gfxstream_unstable",
+             ],
++            rustlibs: [
++                "libnativewindow_bindgen",
++                "libnativewindow_rs",
++            ],
+         },
+     },
+     apex_available: ["com.android.virt"],

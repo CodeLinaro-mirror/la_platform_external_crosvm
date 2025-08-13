@@ -57,6 +57,10 @@ rust_library {
             static_libs: [
                 "libgfxstream_backend",
             ],
+            rustlibs: [
+                "libnativewindow_bindgen",
+                "libnativewindow_rs",
+            ],
         },
         host: {
             features: ["vulkano"],
@@ -117,6 +121,10 @@ rust_test {
                 "libcutils",
                 "liblog",
             ],
+            rustlibs: [
+                "libnativewindow_bindgen",
+                "libnativewindow_rs",
+            ],
         },
     },
 }
@@ -166,6 +174,10 @@ rust_library {
             cfgs: [
                 "fence_passing_option1",
                 "gfxstream_unstable",
+            ],
+            rustlibs: [
+                "libnativewindow_bindgen",
+                "libnativewindow_rs",
             ],
         },
     },
