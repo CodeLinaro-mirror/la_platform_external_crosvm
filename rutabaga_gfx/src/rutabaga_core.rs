@@ -942,7 +942,7 @@ impl Rutabaga {
 
                     // Creating the mapping closes the cloned descriptor.
                     let mapping = MemoryMapping::from_safe_descriptor(
-                        clone.os_handle,
+                        clone.os_handle.try_as_descriptor()?,
                         resource_size,
                         map_info,
                     )?;

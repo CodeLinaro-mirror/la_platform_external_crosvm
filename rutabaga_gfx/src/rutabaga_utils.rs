@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::str::Utf8Error;
 use std::sync::Arc;
 
+#[cfg(target_os = "android")]
+use nativewindow::HardwareBuffer;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use nix::Error as NixError;
 use remain::sorted;
@@ -25,7 +27,6 @@ use zerocopy::Immutable;
 use zerocopy::IntoBytes;
 
 use crate::rutabaga_os::OwnedDescriptor;
-
 /// Represents a buffer.  `base` contains the address of a buffer, while `len` contains the length
 /// of the buffer.
 #[repr(C)]
@@ -792,6 +793,7 @@ pub const RUTABAGA_HANDLE_TYPE_MEM_DMABUF: u32 = 0x0002;
 pub const RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_WIN32: u32 = 0x0003;
 pub const RUTABAGA_HANDLE_TYPE_MEM_SHM: u32 = 0x0004;
 pub const RUTABAGA_HANDLE_TYPE_MEM_ZIRCON: u32 = 0x0005;
+pub const RUTABAGA_HANDLE_TYPE_MEM_AHB: u32 = 0x0006;
 
 pub const RUTABAGA_HANDLE_TYPE_SIGNAL_OPAQUE_FD: u32 = 0x0010;
 pub const RUTABAGA_HANDLE_TYPE_SIGNAL_SYNC_FD: u32 = 0x0020;
@@ -802,9 +804,30 @@ pub const RUTABAGA_HANDLE_TYPE_SIGNAL_EVENT_FD: u32 = 0x0050;
 pub const RUTABAGA_HANDLE_TYPE_PLATFORM_SCREEN_BUFFER_QNX: u32 = 0x01000000;
 pub const RUTABAGA_HANDLE_TYPE_PLATFORM_EGL_NATIVE_PIXMAP: u32 = 0x02000000;
 
+pub enum HandleType {
+    Descriptor(OwnedDescriptor),
+    #[cfg(target_os = "android")]
+    AHardwareBuffer(HardwareBuffer),
+}
+
+impl HandleType {
+    pub fn try_as_descriptor(&self) -> RutabagaResult<OwnedDescriptor> {
+        match self {
+            Self::Descriptor(value) => value.try_clone().map_err(|e| RutabagaError {
+                kind: RutabagaErrorKind::InvalidRutabagaHandle,
+                context: Some(anyhow::Error::new(e)),
+            }),
+            _ => Err(RutabagaError {
+                kind: RutabagaErrorKind::InvalidRutabagaHandle,
+                context: None,
+            }),
+        }
+    }
+}
+
 /// Handle to OS-specific memory or synchronization objects.
 pub struct RutabagaHandle {
-    pub os_handle: OwnedDescriptor,
+    pub os_handle: HandleType,
     pub handle_type: u32,
 }
 
@@ -817,14 +840,23 @@ impl fmt::Debug for RutabagaHandle {
 impl RutabagaHandle {
     /// Clones an existing rutabaga handle, by using OS specific mechanisms.
     pub fn try_clone(&self) -> RutabagaResult<RutabagaHandle> {
-        let clone = self.os_handle.try_clone().map_err(|e| RutabagaError {
-            kind: RutabagaErrorKind::InvalidRutabagaHandle,
-            context: Some(anyhow::Error::new(e)),
-        })?;
-        Ok(RutabagaHandle {
-            os_handle: clone,
-            handle_type: self.handle_type,
-        })
+        match &self.os_handle {
+            HandleType::Descriptor(os_handle) => {
+                let clone = os_handle.try_clone().map_err(|e| RutabagaError {
+                    kind: RutabagaErrorKind::InvalidRutabagaHandle,
+                    context: Some(anyhow::Error::new(e)),
+                })?;
+                Ok(RutabagaHandle {
+                    os_handle: HandleType::Descriptor(clone),
+                    handle_type: self.handle_type,
+                })
+            }
+            #[cfg(target_os = "android")]
+            HandleType::AHardwareBuffer(os_handle) => Ok(RutabagaHandle {
+                os_handle: HandleType::AHardwareBuffer(os_handle.clone()),
+                handle_type: self.handle_type,
+            }),
+        }
     }
 }
 

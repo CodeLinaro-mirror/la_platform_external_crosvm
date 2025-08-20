@@ -21,9 +21,15 @@ use std::panic::catch_unwind;
 use std::process::abort;
 use std::ptr::null;
 use std::ptr::null_mut;
+#[cfg(target_os = "android")]
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use anyhow::Context;
+#[cfg(target_os = "android")]
+use nativewindow::HardwareBuffer;
+#[cfg(target_os = "android")]
+use nativewindow_bindgen as ffi;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -43,7 +49,6 @@ use crate::rutabaga_utils::*;
 use crate::snapshot::RutabagaSnapshotReader;
 #[cfg(gfxstream_unstable)]
 use crate::snapshot::RutabagaSnapshotWriter;
-
 // See `virtgpu-gfxstream-renderer.h` for definitions
 const STREAM_RENDERER_PARAM_USER_DATA: u64 = 1;
 const STREAM_RENDERER_PARAM_RENDERER_FLAGS: u64 = 2;
@@ -266,7 +271,8 @@ impl GfxstreamContext {
         // SAFETY:
         // Safe because the handle was just returned by a successful gfxstream call so it must
         // be valid and owned by us.
-        let handle = unsafe { OwnedDescriptor::from_raw_descriptor(raw_descriptor) };
+        let handle =
+            HandleType::Descriptor(unsafe { OwnedDescriptor::from_raw_descriptor(raw_descriptor) });
 
         Ok(RutabagaHandle {
             os_handle: handle,
@@ -504,12 +510,30 @@ impl Gfxstream {
         #[allow(clippy::undocumented_unsafe_blocks)]
         let ret = unsafe { stream_renderer_export_blob(resource_id, &mut stream_handle) };
         ret_to_res(ret)?;
+        #[cfg(target_os = "android")]
+        if stream_handle.handle_type == RUTABAGA_HANDLE_TYPE_MEM_AHB {
+            let raw_ptr = stream_handle.os_handle as *mut ffi::AHardwareBuffer;
+            if let Some(non_null_ptr) = NonNull::new(raw_ptr) {
+                // SAFETY:
+                // Safe because the ptr was just returned by a successful gfxstream call so it must
+                // be valid and owned by us.
+                return Ok(Arc::new(RutabagaHandle {
+                    os_handle: HandleType::AHardwareBuffer(unsafe {
+                        HardwareBuffer::clone_from_raw(non_null_ptr)
+                    }),
+                    handle_type: stream_handle.handle_type,
+                }));
+            } else {
+                return Err(RutabagaErrorKind::InvalidRutabagaHandle.into());
+            }
+        }
 
         let raw_descriptor = stream_handle.os_handle as RawDescriptor;
         // SAFETY:
         // Safe because the handle was just returned by a successful gfxstream call so it must be
         // valid and owned by us.
-        let handle = unsafe { OwnedDescriptor::from_raw_descriptor(raw_descriptor) };
+        let handle =
+            HandleType::Descriptor(unsafe { OwnedDescriptor::from_raw_descriptor(raw_descriptor) });
 
         Ok(Arc::new(RutabagaHandle {
             os_handle: handle,
@@ -610,7 +634,11 @@ impl RutabagaComponent for Gfxstream {
         import_data: RutabagaImportData,
     ) -> RutabagaResult<Option<RutabagaResource>> {
         let stream_handle = stream_renderer_handle {
-            os_handle: import_handle.os_handle.into_raw_descriptor() as i64,
+            os_handle: match import_handle.os_handle {
+                HandleType::Descriptor(desc) => desc.into_raw_descriptor() as i64,
+                #[cfg(target_os = "android")]
+                HandleType::AHardwareBuffer(handle) => handle.as_raw().as_ptr() as i64,
+            },
             handle_type: import_handle.handle_type,
         };
 
@@ -833,7 +861,11 @@ impl RutabagaComponent for Gfxstream {
         let mut stream_handle: stream_renderer_handle = Default::default();
         if let Some(handle) = handle_opt {
             stream_handle.handle_type = handle.handle_type;
-            stream_handle.os_handle = handle.os_handle.into_raw_descriptor() as i64;
+            stream_handle.os_handle = match handle.os_handle {
+                HandleType::Descriptor(desc) => desc.into_raw_descriptor() as i64,
+                #[cfg(target_os = "android")]
+                HandleType::AHardwareBuffer(handle) => handle.as_raw().as_ptr() as i64,
+            };
             handle_ptr = &stream_handle;
         }
 
