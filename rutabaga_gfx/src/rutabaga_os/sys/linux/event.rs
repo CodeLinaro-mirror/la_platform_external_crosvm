@@ -14,7 +14,6 @@ use nix::unistd::write;
 use crate::rutabaga_os::AsBorrowedDescriptor;
 use crate::rutabaga_os::AsRawDescriptor;
 use crate::rutabaga_os::OwnedDescriptor;
-use crate::rutabaga_utils::HandleType;
 use crate::rutabaga_utils::RutabagaError;
 use crate::rutabaga_utils::RutabagaErrorKind;
 use crate::rutabaga_utils::RutabagaHandle;
@@ -57,10 +56,7 @@ impl TryFrom<RutabagaHandle> for Event {
         }
 
         Ok(Event {
-            descriptor: handle
-                .os_handle
-                .try_as_descriptor()
-                .expect("should be a valid descriptor"),
+            descriptor: handle.os_handle,
         })
     }
 }
@@ -68,7 +64,7 @@ impl TryFrom<RutabagaHandle> for Event {
 impl From<Event> for RutabagaHandle {
     fn from(evt: Event) -> Self {
         RutabagaHandle {
-            os_handle: HandleType::Descriptor(evt.descriptor),
+            os_handle: evt.descriptor,
             handle_type: RUTABAGA_HANDLE_TYPE_SIGNAL_EVENT_FD,
         }
     }

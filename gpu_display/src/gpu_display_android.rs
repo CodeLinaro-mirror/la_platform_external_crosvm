@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::collections::HashMap;
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -11,29 +10,19 @@ use std::process::abort;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::slice;
-use std::sync::Arc;
-use std::sync::RwLock;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use base::error;
 use base::AsRawDescriptor;
 use base::Event;
 use base::RawDescriptor;
 use base::VolatileSlice;
-#[cfg(target_os = "android")]
-use nativewindow::HardwareBuffer;
-use sync::Waitable;
 use vm_control::gpu::DisplayParameters;
 
-use crate::DisplayExternalResourceImport;
 use crate::DisplayT;
-use crate::FlipToExtraInfo;
 use crate::GpuDisplayError;
 use crate::GpuDisplayFramebuffer;
 use crate::GpuDisplayResult;
 use crate::GpuDisplaySurface;
-use crate::SemaphoreTimepoint;
 use crate::SurfaceType;
 use crate::SysDisplayT;
 
@@ -121,12 +110,6 @@ extern "C" {
         ctx: *mut AndroidDisplayContext,
         surface: *mut AndroidDisplaySurface,
     );
-
-    fn android_display_flip_to(
-        ctx: *mut AndroidDisplayContext,
-        _surface: *mut AndroidDisplaySurface,
-        ahb_addr: usize,
-    );
 }
 
 unsafe extern "C" fn error_callback(message: *const c_char) {
@@ -176,16 +159,10 @@ impl From<ANativeWindow_Buffer> for GpuDisplayFramebuffer<'_> {
         Self::new(VolatileSlice::new(buffer), stride_bytes, BYTES_PER_PIXEL)
     }
 }
-type SurfaceId = u32;
-type ImportId = u32;
-#[cfg(target_os = "android")]
-type AHardwareBufferImportMap = HashMap<ImportId, HardwareBuffer>;
 
 struct AndroidSurface {
     context: Rc<AndroidDisplayContextWrapper>,
     surface: NonNull<AndroidDisplaySurface>,
-    #[cfg(target_os = "android")]
-    ahbs: Arc<RwLock<AHardwareBufferImportMap>>,
 }
 
 impl GpuDisplaySurface for AndroidSurface {
@@ -216,44 +193,12 @@ impl GpuDisplaySurface for AndroidSurface {
         // SAFETY: context is an opaque handle.
         unsafe { set_android_surface_position(self.context.0.as_ptr(), x, y) };
     }
-
-    #[cfg(target_os = "android")]
-    fn flip_to(
-        &mut self,
-        import_id: u32,
-        _acquire_timepoint: Option<SemaphoreTimepoint>,
-        _release_timepoint: Option<SemaphoreTimepoint>,
-        _extra_info: Option<FlipToExtraInfo>,
-    ) -> anyhow::Result<Waitable> {
-        {
-            let ahbs = self
-                .ahbs
-                .read()
-                .map_err(|e| anyhow!("cannot get AHardwareBuffer imports map: {}", e))?;
-            let ahb = ahbs
-                .get(&import_id)
-                .ok_or(GpuDisplayError::InvalidImportId)?;
-
-            // SAFETY:
-            // Safe because only a valid surface is used.
-            unsafe {
-                android_display_flip_to(
-                    self.context.0.as_ptr(),
-                    self.surface.as_ptr(),
-                    ahb.as_raw().as_ptr() as usize,
-                )
-            };
-        }
-        Ok(Waitable::signaled())
-    }
 }
 
 pub struct DisplayAndroid {
     context: Rc<AndroidDisplayContextWrapper>,
     /// This event is never triggered and is used solely to fulfill AsRawDescriptor.
     event: Event,
-    #[cfg(target_os = "android")]
-    ahbs: HashMap<SurfaceId, Arc<RwLock<AHardwareBufferImportMap>>>,
 }
 
 impl DisplayAndroid {
@@ -269,8 +214,6 @@ impl DisplayAndroid {
         Ok(DisplayAndroid {
             context: context.into(),
             event,
-            #[cfg(target_os = "android")]
-            ahbs: HashMap::new(),
         })
     }
 }
@@ -279,7 +222,7 @@ impl DisplayT for DisplayAndroid {
     fn create_surface(
         &mut self,
         parent_surface_id: Option<u32>,
-        surface_id: u32,
+        _surface_id: u32,
         _scanout_id: Option<u32>,
         display_params: &DisplayParameters,
         _surf_type: SurfaceType,
@@ -295,58 +238,11 @@ impl DisplayT for DisplayAndroid {
             )
         })
         .ok_or(GpuDisplayError::CreateSurface)?;
-        #[cfg(target_os = "android")]
-        let ahbs = self.ahbs.entry(surface_id).or_default();
 
         Ok(Box::new(AndroidSurface {
             context: self.context.clone(),
             surface,
-            #[cfg(target_os = "android")]
-            ahbs: Arc::clone(&ahbs),
         }))
-    }
-
-    #[cfg(target_os = "android")]
-    fn release_surface(&mut self, surface_id: u32) {
-        self.ahbs.remove(&surface_id);
-    }
-
-    #[cfg(target_os = "android")]
-    fn import_resource(
-        &mut self,
-        import_id: u32,
-        surface_id: u32,
-        external_display_resource: DisplayExternalResourceImport,
-    ) -> anyhow::Result<()> {
-        if let DisplayExternalResourceImport::AHardwareBuffer { handle } = external_display_resource
-        {
-            {
-                let mut ahbs = self
-                    .ahbs
-                    .entry(surface_id)
-                    .or_default()
-                    .write()
-                    .map_err(|e| anyhow!("cannot get AHardwareBuffer imports map: {}", e))?;
-                ahbs.insert(import_id, handle);
-            }
-            Ok(())
-        } else {
-            bail!("gpu_display_android only supports AHardwareBuffer imports");
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    fn release_import(&mut self, surface_id: u32, import_id: u32) -> anyhow::Result<()> {
-        {
-            let mut ahbs = self
-                .ahbs
-                .entry(surface_id)
-                .or_default()
-                .write()
-                .map_err(|e| anyhow!("cannot get AHardwareBuffer imports map: {}", e))?;
-            ahbs.remove(&import_id);
-        }
-        Ok(())
     }
 }
 

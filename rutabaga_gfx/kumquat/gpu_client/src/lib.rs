@@ -347,9 +347,9 @@ pub extern "C" fn virtgpu_kumquat_resource_export(
             .unwrap()
             .resource_export(cmd.bo_handle, cmd.flags);
         let hnd = return_on_error!(result);
+
         (*cmd).handle_type = hnd.handle_type;
-        (*cmd).os_handle =
-            return_on_error!(hnd.os_handle.try_as_descriptor()).into_raw_descriptor() as i64;
+        (*cmd).os_handle = hnd.os_handle.into_raw_descriptor() as i64;
         NO_ERROR
     }))
     .unwrap_or(-ESRCH)
@@ -362,8 +362,8 @@ pub unsafe extern "C" fn virtgpu_kumquat_resource_import(
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let handle = RutabagaHandle {
-            os_handle: rutabaga_gfx::HandleType::Descriptor(
-                RutabagaDescriptor::from_raw_descriptor((*cmd).os_handle.into_raw_descriptor()),
+            os_handle: RutabagaDescriptor::from_raw_descriptor(
+                (*cmd).os_handle.into_raw_descriptor(),
             ),
             handle_type: (*cmd).handle_type,
         };

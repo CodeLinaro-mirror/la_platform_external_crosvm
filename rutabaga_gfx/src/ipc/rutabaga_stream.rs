@@ -18,7 +18,6 @@ use crate::rutabaga_os::OwnedDescriptor;
 use crate::rutabaga_os::RawDescriptor;
 use crate::rutabaga_os::Tube;
 use crate::rutabaga_os::DEFAULT_RAW_DESCRIPTOR;
-use crate::rutabaga_utils::HandleType;
 use crate::rutabaga_utils::RutabagaErrorKind;
 use crate::rutabaga_utils::RutabagaHandle;
 use crate::rutabaga_utils::RutabagaResult;
@@ -59,7 +58,7 @@ impl RutabagaStream {
             KumquatGpuProtocolWrite::CmdWithHandle(cmd, handle) => {
                 writer.write_obj(cmd)?;
                 num_descriptors = 1;
-                self.descriptors[0] = handle.os_handle.try_as_descriptor()?.as_raw_descriptor();
+                self.descriptors[0] = handle.os_handle.as_raw_descriptor();
                 Some(handle)
             }
             KumquatGpuProtocolWrite::CmdWithData(cmd, data) => {
@@ -122,7 +121,6 @@ impl RutabagaStream {
                     let os_handle = descriptors
                         .pop_front()
                         .ok_or(RutabagaErrorKind::InvalidResourceId)?;
-                    let os_handle = HandleType::Descriptor(os_handle);
                     let resp: kumquat_gpu_protocol_transfer_host_3d = reader.read_obj()?;
 
                     let handle = RutabagaHandle {
@@ -136,7 +134,6 @@ impl RutabagaStream {
                     let os_handle = descriptors
                         .pop_front()
                         .ok_or(RutabagaErrorKind::InvalidResourceId)?;
-                    let os_handle = HandleType::Descriptor(os_handle);
                     let resp: kumquat_gpu_protocol_transfer_host_3d = reader.read_obj()?;
 
                     let handle = RutabagaHandle {
@@ -203,7 +200,6 @@ impl RutabagaStream {
                     let os_handle = descriptors
                         .pop_front()
                         .ok_or(RutabagaErrorKind::InvalidResourceId)?;
-                    let os_handle = HandleType::Descriptor(os_handle);
                     let resp: kumquat_gpu_protocol_resp_resource_create = reader.read_obj()?;
 
                     let handle = RutabagaHandle {
@@ -217,7 +213,6 @@ impl RutabagaStream {
                     let os_handle = descriptors
                         .pop_front()
                         .ok_or(RutabagaErrorKind::InvalidResourceId)?;
-                    let os_handle = HandleType::Descriptor(os_handle);
                     let resp: kumquat_gpu_protocol_resp_cmd_submit_3d = reader.read_obj()?;
 
                     let handle = RutabagaHandle {

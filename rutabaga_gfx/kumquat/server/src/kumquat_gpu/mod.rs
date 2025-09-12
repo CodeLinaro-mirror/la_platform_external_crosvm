@@ -281,7 +281,7 @@ impl KumquatGpuConnection {
                     self.stream.write(KumquatGpuProtocolWrite::CmdWithHandle(
                         resp,
                         RutabagaHandle {
-                            os_handle: rutabaga_gfx::HandleType::Descriptor(descriptor),
+                            os_handle: descriptor,
                             handle_type: RUTABAGA_HANDLE_TYPE_MEM_SHM,
                         },
                     ))?;
