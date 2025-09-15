@@ -25,6 +25,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -73,6 +74,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -122,6 +124,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -171,6 +174,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -220,6 +224,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -269,6 +274,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -318,6 +324,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -367,6 +374,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -416,6 +424,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -460,6 +469,7 @@ rust_library {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
