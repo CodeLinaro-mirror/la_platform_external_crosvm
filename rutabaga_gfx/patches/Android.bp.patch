@@ -1,25 +1,20 @@
 diff --git a/rutabaga_gfx/Android.bp b/rutabaga_gfx/Android.bp
-index 4c2823c2eb..29b565c666 100644
+index 732920f13..f93a861a3 100644
 --- a/rutabaga_gfx/Android.bp
 +++ b/rutabaga_gfx/Android.bp
-@@ -23,7 +23,6 @@ rust_library {
+@@ -23,9 +23,7 @@ rust_library {
      edition: "2021",
      features: [
          "gfxstream",
 -        "gfxstream_stub",
-         "virgl_renderer",
      ],
+-    cfgs: ["fence_passing_option1"],
      rustlibs: [
-@@ -38,9 +37,41 @@ rust_library {
-         "libzerocopy",
+         "libanyhow",
+         "libcfg_if",
+@@ -39,6 +37,36 @@ rust_library {
      ],
      proc_macros: ["libremain"],
--    static_libs: ["libvirglrenderer"],
--    shared_libs: ["libepoxy"],
-+    static_libs: [
-+        "libepoxy",
-+        "libvirglrenderer",
-+    ],
      apex_available: ["com.android.virt"],
 +    cfgs: [
 +        "gfxstream_unstable",
@@ -54,24 +49,22 @@ index 4c2823c2eb..29b565c666 100644
  }
  
  rust_test {
-@@ -59,7 +90,6 @@ rust_test {
+@@ -57,9 +85,7 @@ rust_test {
      edition: "2021",
      features: [
          "gfxstream",
 -        "gfxstream_stub",
-         "virgl_renderer",
      ],
+-    cfgs: ["fence_passing_option1"],
      rustlibs: [
-@@ -75,8 +105,28 @@ rust_test {
+         "libanyhow",
+         "libcfg_if",
+@@ -73,6 +99,26 @@ rust_test {
          "libzerocopy",
      ],
      proc_macros: ["libremain"],
--    static_libs: ["libvirglrenderer"],
--    shared_libs: ["libepoxy"],
 +    static_libs: [
-+        "libepoxy",
 +        "libgfxstream_backend",
-+        "libvirglrenderer",
 +    ],
 +    shared_libs: [
 +        "libc++",
@@ -93,7 +86,7 @@ index 4c2823c2eb..29b565c666 100644
  }
  
  // Manually written variant of librutabaga_gfx.
-@@ -125,6 +175,10 @@ rust_library {
+@@ -121,6 +167,10 @@ rust_library {
                  "fence_passing_option1",
                  "gfxstream_unstable",
              ],
