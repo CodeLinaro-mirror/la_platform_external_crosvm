@@ -15,8 +15,6 @@ use std::time::Duration;
 
 use thiserror::Error as ThisError;
 
-use crate::error;
-use crate::Event;
 use crate::EventToken;
 use crate::Timer;
 use crate::TimerTrait;
@@ -32,7 +30,7 @@ pub struct PeriodicLogger {
     // Map of event counters that are periodically logged
     counters: Arc<RwLock<HashMap<String, AtomicU32>>>,
     // The periodic logger thread
-    worker_thread: Option<WorkerThread<()>>,
+    worker_thread: Option<WorkerThread<Result<(), PeriodicLoggerError>>>,
 }
 
 impl PeriodicLogger {
@@ -83,69 +81,61 @@ impl PeriodicLogger {
             return Err(PeriodicLoggerError::ThreadAlreadyStarted);
         }
 
-        let cloned_counter = self.counters.clone();
-        let interval_copy = self.interval;
-        let name_copy = self.name.clone();
-        self.worker_thread = Some(WorkerThread::start(
-            format!("PeriodicLogger_{}", self.name),
-            move |kill_evt| {
-                if let Err(e) = Self::run_logger(kill_evt, name_copy, interval_copy, cloned_counter)
-                {
-                    error!("PeriodicLogger worker failed: {e:#}");
-                }
-            },
-        ));
-
-        Ok(())
-    }
-
-    fn run_logger(
-        kill_evt: Event,
-        name_copy: String,
-        interval_copy: Duration,
-        cloned_counter: Arc<RwLock<HashMap<String, AtomicU32>>>,
-    ) -> Result<(), PeriodicLoggerError> {
         #[derive(EventToken)]
         enum Token {
             Exit,
             PeriodicLog,
         }
 
-        let mut timer = Timer::new().map_err(PeriodicLoggerError::TimerNewError)?;
-        timer
-            .reset_repeating(interval_copy)
-            .map_err(PeriodicLoggerError::TimerResetError)?;
+        let cloned_counter = self.counters.clone();
+        let interval_copy = self.interval;
+        let name_copy = self.name.clone();
+        self.worker_thread = Some(WorkerThread::start(
+            format!("PeriodicLogger_{}", self.name),
+            move |kill_evt| {
+                let mut timer = Timer::new().map_err(PeriodicLoggerError::TimerNewError)?;
+                timer
+                    .reset_repeating(interval_copy)
+                    .map_err(PeriodicLoggerError::TimerResetError)?;
 
-        let wait_ctx =
-            WaitContext::build_with(&[(&kill_evt, Token::Exit), (&timer, Token::PeriodicLog)])
+                let wait_ctx = WaitContext::build_with(&[
+                    (&kill_evt, Token::Exit),
+                    (&timer, Token::PeriodicLog),
+                ])
                 .map_err(PeriodicLoggerError::WaitContextBuildError)?;
 
-        'outer: loop {
-            let events = wait_ctx.wait().expect("wait failed");
-            for event in events.iter().filter(|e| e.is_readable) {
-                match event.token {
-                    Token::Exit => {
-                        break 'outer;
-                    }
-                    Token::PeriodicLog => {
-                        timer.mark_waited().unwrap();
+                'outer: loop {
+                    let events = wait_ctx.wait().expect("wait failed");
+                    for event in events.iter().filter(|e| e.is_readable) {
+                        match event.token {
+                            Token::Exit => {
+                                break 'outer;
+                            }
+                            Token::PeriodicLog => {
+                                timer.mark_waited().unwrap();
 
-                        let counter_map = cloned_counter
-                            .read()
-                            .map_err(|e| PeriodicLoggerError::ReadLockError(e.to_string()))?;
+                                let counter_map = cloned_counter.read().map_err(|e| {
+                                    PeriodicLoggerError::ReadLockError(e.to_string())
+                                })?;
 
-                        let mut logged_string = format!("{} {:?}:", name_copy, interval_copy);
-                        for (counter_name, counter_value) in counter_map.iter() {
-                            let value = counter_value.swap(0, Ordering::Relaxed);
-                            let _ = write!(logged_string, "\n    {}: {}", counter_name, value);
+                                let mut logged_string =
+                                    format!("{} {:?}:", name_copy, interval_copy);
+                                for (counter_name, counter_value) in counter_map.iter() {
+                                    let value = counter_value.swap(0, Ordering::Relaxed);
+                                    let _ =
+                                        write!(logged_string, "\n    {}: {}", counter_name, value);
+                                }
+
+                                // Log all counters
+                                crate::info!("{}", logged_string);
+                            }
                         }
-
-                        // Log all counters
-                        crate::info!("{}", logged_string);
                     }
                 }
-            }
-        }
+                Ok(())
+            },
+        ));
+
         Ok(())
     }
 }

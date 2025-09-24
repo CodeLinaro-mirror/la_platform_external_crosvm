@@ -222,7 +222,6 @@ use serde::Serialize;
 pub enum VmEventType {
     Exit,
     Reset,
-    DeviceCrashed,
     Crash,
     Panic(u8),
     WatchdogReset,

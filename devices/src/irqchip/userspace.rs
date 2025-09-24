@@ -16,6 +16,7 @@ cfg_if::cfg_if! {
         use base::{Clock, Timer};
     }
 }
+use anyhow::Context;
 use base::error;
 use base::info;
 use base::warn;
@@ -125,7 +126,7 @@ pub struct UserspaceIrqChip<V: VcpuX86_64> {
 /// dropped.
 struct Dropper {
     /// Worker threads that deliver timer events to the APICs.
-    workers: Vec<WorkerThread<()>>,
+    workers: Vec<WorkerThread<TimerWorkerResult<()>>>,
 }
 
 impl<V: VcpuX86_64 + 'static> UserspaceIrqChip<V> {
@@ -340,7 +341,9 @@ impl<V: VcpuX86_64 + 'static> UserspaceIrqChip<V> {
 impl Dropper {
     fn sleep(&mut self) -> anyhow::Result<()> {
         for thread in self.workers.split_off(0).into_iter() {
-            thread.stop();
+            thread
+                .stop()
+                .context("UserspaceIrqChip worker thread exited with error")?;
         }
         Ok(())
     }
@@ -857,11 +860,7 @@ impl<V: VcpuX86_64 + 'static> Suspendable for UserspaceIrqChip<V> {
                 };
                 let worker_thread = WorkerThread::start(
                     format!("UserspaceIrqChip timer worker {}", i),
-                    move |evt| {
-                        if let Err(e) = worker.run(evt) {
-                            error!("UserspaceIrqChip worker failed: {e:#}");
-                        }
-                    },
+                    move |evt| worker.run(evt),
                 );
                 dropper.workers.push(worker_thread);
             }

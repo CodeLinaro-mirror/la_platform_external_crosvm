@@ -124,7 +124,7 @@ pub struct P9 {
     server: Option<p9::Server>,
     avail_features: u64,
     acked_features: u64,
-    worker: Option<WorkerThread<()>>,
+    worker: Option<WorkerThread<P9Result<()>>>,
 }
 
 impl P9 {
@@ -205,9 +205,8 @@ impl VirtioDevice for P9 {
 
         self.worker = Some(WorkerThread::start("v_9p", move |kill_evt| {
             let mut worker = Worker { queue, server };
-            if let Err(e) = worker.run(kill_evt) {
-                error!("p9 worker failed: {e:#}");
-            }
+
+            worker.run(kill_evt)
         }));
 
         Ok(())

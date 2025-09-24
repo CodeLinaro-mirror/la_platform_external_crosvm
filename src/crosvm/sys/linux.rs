@@ -902,7 +902,6 @@ fn create_virtio_devices(
             cfg.protection_type,
             opt,
             cfg.vhost_user_connect_timeout_ms,
-            vm_evt_wrtube.try_clone()?,
         )?);
     }
 
@@ -4158,10 +4157,6 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 info!("vcpu crashed");
                                 exit_state = ExitState::Crash;
                             }
-                            VmEventType::DeviceCrashed => {
-                                info!("device crashed");
-                                exit_state = ExitState::Crash;
-                            }
                             VmEventType::Panic(panic_code) => {
                                 pvpanic_code = PvPanicCode::from_u8(panic_code);
                                 info!("Guest reported panic [Code: {}]", pvpanic_code);
@@ -4251,24 +4246,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             continue;
                         }
 
-                        if siginfo.ssi_signo == libc::SIGCHLD as u32
-                            && (siginfo.ssi_code == libc::CLD_KILLED
-                                || siginfo.ssi_code == libc::CLD_DUMPED)
-                        {
-                            error!(
-                                "child {} killed by signal {} ({})",
-                                pid_label,
-                                siginfo.ssi_status,
-                                base::signal::Signal::try_from(siginfo.ssi_status)
-                                    .map(|s| s.to_string())
-                                    .unwrap_or("unknown".to_string()),
-                            );
-                        } else {
-                            error!(
-                                "child {} exited: signo {}, status {}, code {}",
-                                pid_label, siginfo.ssi_signo, siginfo.ssi_status, siginfo.ssi_code
-                            );
-                        }
+                        error!(
+                            "child {} exited: signo {}, status {}, code {}",
+                            pid_label, siginfo.ssi_signo, siginfo.ssi_status, siginfo.ssi_code
+                        );
                         do_exit = true;
                     }
                     if do_exit {

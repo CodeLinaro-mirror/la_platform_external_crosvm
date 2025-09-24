@@ -952,50 +952,9 @@ enum WorkerState {
     Error,
 }
 
-fn build_rutabaga(
-    gpu_parameters: &GpuParameters,
-    display_params: &[GpuDisplayParameters],
-    rutabaga_component: RutabagaComponentType,
-    rutabaga_channels: Vec<RutabagaChannel>,
-    rutabaga_server_descriptor: Option<RutabagaDescriptor>,
-    fence_handler: RutabagaFenceHandler,
-) -> RutabagaResult<Rutabaga> {
-    let (display_width, display_height) = display_params[0].get_virtual_display_size();
-
-    // Only allow virglrenderer to fork its own render server when explicitly requested.
-    // Caller can enforce its own restrictions (e.g. not allowed when sandboxed) and set the
-    // allow flag appropriately.
-    let use_render_server =
-        rutabaga_server_descriptor.is_some() || gpu_parameters.allow_implicit_render_server_exec;
-
-    let rutabaga_wsi = match gpu_parameters.wsi {
-        Some(GpuWsi::Vulkan) => RutabagaWsi::VulkanSwapchain,
-        _ => RutabagaWsi::Surfaceless,
-    };
-
-    RutabagaBuilder::new(gpu_parameters.capset_mask, fence_handler)
-        .set_default_component(rutabaga_component)
-        .set_display_width(display_width)
-        .set_display_height(display_height)
-        .set_rutabaga_channels(Some(rutabaga_channels))
-        .set_use_egl(gpu_parameters.renderer_use_egl)
-        .set_use_gles(gpu_parameters.renderer_use_gles)
-        .set_use_surfaceless(gpu_parameters.renderer_use_surfaceless)
-        .set_use_vulkan(gpu_parameters.use_vulkan.unwrap_or_default())
-        .set_wsi(rutabaga_wsi)
-        .set_use_external_blob(gpu_parameters.external_blob)
-        .set_use_system_blob(gpu_parameters.system_blob)
-        .set_use_render_server(use_render_server)
-        .set_renderer_features(gpu_parameters.renderer_features.clone())
-        .set_server_descriptor(rutabaga_server_descriptor)
-        .build()
-}
-
 impl Worker {
     fn new(
-        gpu_parameters: GpuParameters,
-        rutabaga_channels: Vec<RutabagaChannel>,
-        rutabaga_component: RutabagaComponentType,
+        rutabaga_builder: RutabagaBuilder,
         rutabaga_server_descriptor: Option<RutabagaDescriptor>,
         display_backends: Vec<DisplayBackend>,
         display_params: Vec<GpuDisplayParameters>,
@@ -1021,16 +980,7 @@ impl Worker {
         let fence_handler_resources = Arc::new(Mutex::new(None));
         let fence_handler =
             create_fence_handler(fence_handler_resources.clone(), fence_state.clone());
-
-        let rutabaga = build_rutabaga(
-            &gpu_parameters,
-            &display_params,
-            rutabaga_component,
-            rutabaga_channels,
-            rutabaga_server_descriptor,
-            fence_handler,
-        )?;
-
+        let rutabaga = rutabaga_builder.build(fence_handler, rutabaga_server_descriptor)?;
         let mut virtio_gpu = build(
             &display_backends,
             display_params,
@@ -1464,8 +1414,7 @@ pub struct Gpu {
     display_backends: Vec<DisplayBackend>,
     display_params: Vec<GpuDisplayParameters>,
     display_event: Arc<AtomicBool>,
-    gpu_parameters: GpuParameters,
-    rutabaga_channels: Vec<RutabagaChannel>,
+    rutabaga_builder: RutabagaBuilder,
     pci_address: Option<PciAddress>,
     pci_bar_size: u64,
     external_blob: bool,
@@ -1509,6 +1458,7 @@ impl Gpu {
         if display_params.is_empty() {
             display_params.push(Default::default());
         }
+        let (display_width, display_height) = display_params[0].get_virtual_display_size();
 
         let mut rutabaga_channels: Vec<RutabagaChannel> = Vec::new();
         for (channel_name, path) in channels {
@@ -1525,6 +1475,7 @@ impl Gpu {
             }
         }
 
+        let rutabaga_channels_opt = Some(rutabaga_channels);
         let component = match gpu_parameters.mode {
             GpuMode::Mode2D => RutabagaComponentType::Rutabaga2D,
             #[cfg(feature = "virgl_renderer")]
@@ -1532,6 +1483,32 @@ impl Gpu {
             #[cfg(feature = "gfxstream")]
             GpuMode::ModeGfxstream => RutabagaComponentType::Gfxstream,
         };
+
+        // Only allow virglrenderer to fork its own render server when explicitly requested.
+        // Caller can enforce its own restrictions (e.g. not allowed when sandboxed) and set the
+        // allow flag appropriately.
+        let use_render_server = rutabaga_server_descriptor.is_some()
+            || gpu_parameters.allow_implicit_render_server_exec;
+
+        let rutabaga_wsi = match gpu_parameters.wsi {
+            Some(GpuWsi::Vulkan) => RutabagaWsi::VulkanSwapchain,
+            _ => RutabagaWsi::Surfaceless,
+        };
+
+        let rutabaga_builder = RutabagaBuilder::new(component, gpu_parameters.capset_mask)
+            .set_display_width(display_width)
+            .set_display_height(display_height)
+            .set_rutabaga_channels(rutabaga_channels_opt)
+            .set_use_egl(gpu_parameters.renderer_use_egl)
+            .set_use_gles(gpu_parameters.renderer_use_gles)
+            .set_use_glx(gpu_parameters.renderer_use_glx)
+            .set_use_surfaceless(gpu_parameters.renderer_use_surfaceless)
+            .set_use_vulkan(gpu_parameters.use_vulkan.unwrap_or_default())
+            .set_wsi(rutabaga_wsi)
+            .set_use_external_blob(gpu_parameters.external_blob)
+            .set_use_system_blob(gpu_parameters.system_blob)
+            .set_use_render_server(use_render_server)
+            .set_renderer_features(gpu_parameters.renderer_features.clone());
 
         #[cfg(windows)]
         let (gpu_display_wait_descriptor_ctrl_wr, gpu_display_wait_descriptor_ctrl_rd) =
@@ -1551,8 +1528,7 @@ impl Gpu {
             display_backends,
             display_params,
             display_event: Arc::new(AtomicBool::new(false)),
-            gpu_parameters: gpu_parameters.clone(),
-            rutabaga_channels,
+            rutabaga_builder,
             pci_address: gpu_parameters.pci_address,
             pci_bar_size: gpu_parameters.pci_bar_size,
             external_blob: gpu_parameters.external_blob,
@@ -1586,17 +1562,12 @@ impl Gpu {
         let rutabaga_server_descriptor = self.rutabaga_server_descriptor.as_ref().map(|d| {
             to_rutabaga_descriptor(d.try_clone().expect("failed to clone server descriptor"))
         });
-
-        let rutabaga = build_rutabaga(
-            &self.gpu_parameters,
-            &self.display_params,
-            self.rutabaga_component,
-            self.rutabaga_channels.clone(),
-            rutabaga_server_descriptor,
-            fence_handler,
-        )
-        .map_err(|e| error!("failed to build rutabaga {}", e))
-        .ok()?;
+        let rutabaga = self
+            .rutabaga_builder
+            .clone()
+            .build(fence_handler, rutabaga_server_descriptor)
+            .map_err(|e| error!("failed to build rutabaga {}", e))
+            .ok()?;
 
         let mut virtio_gpu = build(
             &self.display_backends,
@@ -1681,9 +1652,7 @@ impl Gpu {
 
         let mapper = Arc::clone(&self.mapper);
 
-        let gpu_parameters = self.gpu_parameters.clone();
-        let rutabaga_channels = self.rutabaga_channels.clone();
-        let rutabaga_component = self.rutabaga_component;
+        let rutabaga_builder = self.rutabaga_builder.clone();
         let rutabaga_server_descriptor = self.rutabaga_server_descriptor.as_ref().map(|d| {
             to_rutabaga_descriptor(d.try_clone().expect("failed to clone server descriptor"))
         });
@@ -1701,9 +1670,7 @@ impl Gpu {
             }
 
             let mut worker = Worker::new(
-                gpu_parameters,
-                rutabaga_channels,
-                rutabaga_component,
+                rutabaga_builder,
                 rutabaga_server_descriptor,
                 display_backends,
                 display_params,

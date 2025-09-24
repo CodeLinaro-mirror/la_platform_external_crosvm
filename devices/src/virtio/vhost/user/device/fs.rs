@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use argh::FromArgs;
-use base::error;
 use base::warn;
 use base::RawDescriptor;
 use base::Tube;
@@ -32,6 +31,7 @@ use crate::virtio::copy_config;
 use crate::virtio::device_constants::fs::FS_MAX_TAG_LEN;
 use crate::virtio::fs::passthrough::PassthroughFs;
 use crate::virtio::fs::Config;
+use crate::virtio::fs::Result as FsResult;
 use crate::virtio::fs::Worker;
 use crate::virtio::vhost::user::device::handler::Error as DeviceError;
 use crate::virtio::vhost::user::device::handler::VhostUserDevice;
@@ -43,7 +43,7 @@ struct FsBackend {
     server: Arc<fuse::Server<PassthroughFs>>,
     tag: String,
     avail_features: u64,
-    workers: BTreeMap<usize, WorkerThread<Queue>>,
+    workers: BTreeMap<usize, WorkerThread<FsResult<Queue>>>,
     keep_rds: Vec<RawDescriptor>,
 }
 
@@ -138,10 +138,8 @@ impl VhostUserDevice for FsBackend {
 
         let worker = WorkerThread::start(format!("v_fs:{}:{}", self.tag, idx), move |kill_evt| {
             let mut worker = Worker::new(queue, server, tube, slot);
-            if let Err(e) = worker.run(kill_evt) {
-                error!("vhost-user-fs worker failed: {e:#}");
-            }
-            worker.queue
+            worker.run(kill_evt)?;
+            Ok(worker.queue)
         });
         self.workers.insert(idx, worker);
 
@@ -150,7 +148,11 @@ impl VhostUserDevice for FsBackend {
 
     fn stop_queue(&mut self, idx: usize) -> anyhow::Result<virtio::Queue> {
         if let Some(worker) = self.workers.remove(&idx) {
-            let queue = worker.stop();
+            let queue = match worker.stop() {
+                Ok(queue) => queue,
+                Err(_) => panic!("failed to recover queue from worker"),
+            };
+
             Ok(queue)
         } else {
             Err(anyhow::Error::new(DeviceError::WorkerNotFound))
