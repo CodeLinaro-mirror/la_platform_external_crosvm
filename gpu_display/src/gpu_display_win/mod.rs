@@ -355,13 +355,14 @@ impl DisplayT for DisplayWin {
     }
 
     #[allow(unused_variables)]
-    fn release_import(&mut self, surface_id: u32, import_id: u32) {
+    fn release_import(&mut self, surface_id: u32, import_id: u32) -> anyhow::Result<()> {
         #[cfg(feature = "vulkan_display")]
         if let Some(host_display) = self.host_displays.get(&surface_id) {
             if let HostDisplayWrapper::Initialized(ref mut host_display) = *host_display.lock() {
                 host_display.delete_imported_image_or_semaphore(import_id);
             }
         }
+        Ok(())
     }
 }
 

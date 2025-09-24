@@ -69,7 +69,11 @@ fn import_resource(resource: &mut RutabagaResource) -> RutabagaResult<()> {
 
     if let Some(handle) = &resource.handle {
         if handle.handle_type == RUTABAGA_HANDLE_TYPE_MEM_DMABUF {
-            let dmabuf_fd = handle.os_handle.try_clone()?.into_raw_descriptor();
+            let dmabuf_fd = handle
+                .os_handle
+                .try_as_descriptor()?
+                .try_clone()?
+                .into_raw_descriptor();
             // SAFETY:
             // Safe because we are being passed a valid fd
             unsafe {
@@ -428,7 +432,7 @@ impl VirglRenderer {
         };
 
         Ok(Arc::new(RutabagaHandle {
-            os_handle: handle,
+            os_handle: HandleType::Descriptor(handle),
             handle_type,
         }))
     }
