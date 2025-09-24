@@ -90,7 +90,6 @@ use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
 use rutabaga_gfx::DeviceId;
-use rutabaga_gfx::HandleType;
 use rutabaga_gfx::RutabagaDescriptor;
 use rutabaga_gfx::RutabagaFromRawDescriptor;
 use rutabaga_gfx::RutabagaGralloc;
@@ -490,7 +489,7 @@ impl VmMemorySource {
                 let mapped_region = gralloc
                     .import_and_map(
                         RutabagaHandle {
-                            os_handle: HandleType::Descriptor(to_rutabaga_desciptor(descriptor)),
+                            os_handle: to_rutabaga_desciptor(descriptor),
                             handle_type,
                         },
                         VulkanInfo {

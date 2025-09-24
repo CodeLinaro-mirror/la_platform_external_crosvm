@@ -657,7 +657,7 @@ impl CrossDomainContext {
                     .ok_or(RutabagaErrorKind::InvalidResourceId)?;
 
                 if let Some(ref handle) = context_resource.handle {
-                    *descriptor = handle.os_handle.try_as_descriptor()?.as_raw_descriptor();
+                    *descriptor = handle.os_handle.as_raw_descriptor();
                 } else {
                     return Err(RutabagaErrorKind::InvalidRutabagaHandle.into());
                 }
@@ -852,7 +852,7 @@ impl RutabagaContext for CrossDomainContext {
             match item {
                 CrossDomainItem::WaylandKeymap(descriptor) => {
                     let hnd = RutabagaHandle {
-                        os_handle: HandleType::Descriptor(descriptor),
+                        os_handle: descriptor,
                         handle_type: RUTABAGA_HANDLE_TYPE_MEM_SHM,
                     };
 

@@ -63,9 +63,6 @@ rust_library {
                 "libbinder_ndk",
                 "libnativewindow",
             ],
-            rustlibs: [
-                "libnativewindow_rs",
-            ],
         },
     },
     apex_available: ["com.android.virt"],
