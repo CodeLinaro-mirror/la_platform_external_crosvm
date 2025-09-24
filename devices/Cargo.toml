@@ -34,11 +34,7 @@ gbm = ["rutabaga_gfx/gbm"]
 x = ["gpu_display/x"]
 virgl_renderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
 vtpm = ["system_api", "protobuf", "dbus"]
-# ANDROID: Disable gfxstream in rutabaga_gfx so that developers don't need
-# gfxstream installed to run cargo_embargo.
-# TODO(b/438013965): Better solution.
-# gfxstream = ["gpu", "gpu_display/gfxstream", "rutabaga_gfx/gfxstream"]
-gfxstream = ["gpu", "gpu_display/gfxstream"]
+gfxstream = ["gpu", "gpu_display/gfxstream", "rutabaga_gfx/gfxstream"]
 registered_events = []
 slirp = ["net_util/slirp"]
 slirp-ring-capture = []
