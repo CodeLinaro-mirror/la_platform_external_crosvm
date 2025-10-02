@@ -20,11 +20,6 @@
     "gdb",
     "geniezone",
     "gfxstream",
-    // "gfxstream_stub" is enabled only to allow the cargo build to succeed as
-    // part of cargo_embargo. Patch files are used to remove it from the
-    // generated Android.bp files (so that the real gfxstream implementation is
-    // used).
-    "gfxstream_stub",
     "gpu",
     "gunyah",
     "halla",
@@ -32,8 +27,7 @@
     "media",
     "net",
     "qcow",
-    "usb",
-    "virgl_renderer"
+    "usb"
   ],
   "workspace": true,
   "workspace_excludes": [
@@ -55,7 +49,6 @@
     "prebuilts",
     "proto_build_tools",
     "qcow_utils",
-    "rutabaga_gfx_ffi",
     "sandbox",
     "swap",
     "system_api",
@@ -189,23 +182,6 @@
     "protos": {
       "add_toplevel_block": "protos/cargo2android_protobuf.bp",
       "patch": "protos/patches/Android.bp.patch"
-    },
-    "rutabaga_gfx": {
-      "add_toplevel_block": "rutabaga_gfx/Android.bp.extra",
-      "patch": "rutabaga_gfx/patches/Android.bp.patch",
-      "dep_blocklist": [
-        "libEGL",
-        "libGL",
-        "libX11",
-        "libXau",
-        "libXdmcp",
-        "libdl",
-        "libdrm",
-        "libgbm",
-        "libm",
-        "libpthread",
-        "libxcb"
-      ]
     },
     "vhost": {
       "no_presubmit": true

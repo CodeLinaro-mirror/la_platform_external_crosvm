@@ -90,7 +90,6 @@ use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
 use rutabaga_gfx::DeviceId;
-use rutabaga_gfx::HandleType;
 use rutabaga_gfx::RutabagaDescriptor;
 use rutabaga_gfx::RutabagaFromRawDescriptor;
 use rutabaga_gfx::RutabagaGralloc;
@@ -490,7 +489,7 @@ impl VmMemorySource {
                 let mapped_region = gralloc
                     .import_and_map(
                         RutabagaHandle {
-                            os_handle: HandleType::Descriptor(to_rutabaga_desciptor(descriptor)),
+                            os_handle: to_rutabaga_desciptor(descriptor),
                             handle_type,
                         },
                         VulkanInfo {
@@ -1176,6 +1175,8 @@ pub enum VmIrqRequest {
         gsi: u32,
         msi_address: u64,
         msi_data: u32,
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        pci_address: resources::PciAddress,
     },
     // unregister_irqfs() and release gsi
     ReleaseOneIrq {
@@ -1251,12 +1252,16 @@ impl VmIrqRequest {
                 gsi,
                 msi_address,
                 msi_data,
+                #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                pci_address,
             } => {
                 let route = IrqRoute {
                     gsi,
                     source: IrqSource::Msi {
                         address: msi_address,
                         data: msi_data,
+                        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                        pci_address,
                     },
                 };
                 match set_up_irq(IrqSetup::Route(route)) {
