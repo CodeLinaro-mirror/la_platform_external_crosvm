@@ -52,10 +52,9 @@ pub use gpu_display_win::WindowProcedureThread;
 #[cfg(windows)]
 pub use gpu_display_win::WindowProcedureThreadBuilder;
 use linux_input_sys::virtio_input_event;
-#[cfg(target_os = "android")]
-use nativewindow::HardwareBuffer;
 use sys::SysDisplayT;
 pub use sys::SysGpuDisplayExt;
+
 // The number of bytes in a vulkan UUID.
 #[cfg(feature = "vulkan_display")]
 const VK_UUID_BYTES: usize = 16;
@@ -327,9 +326,6 @@ trait DisplayT: AsRawDescriptor {
         surf_type: SurfaceType,
     ) -> GpuDisplayResult<Box<dyn GpuDisplaySurface>>;
 
-    /// Release a surface with a surface_id
-    fn release_surface(&mut self, _surface_id: u32) {}
-
     /// Imports a resource into the display backend.  The display backend is given a non-zero
     /// `import_id` as a handle for subsequent operations.
     fn import_resource(
@@ -342,9 +338,7 @@ trait DisplayT: AsRawDescriptor {
     }
 
     /// Frees a previously imported resource.
-    fn release_import(&mut self, _import_id: u32, _surface_id: u32) -> anyhow::Result<()> {
-        Ok(())
-    }
+    fn release_import(&mut self, _import_id: u32, _surface_id: u32) {}
 }
 
 pub trait GpuDisplayExt {
@@ -372,10 +366,6 @@ pub enum DisplayExternalResourceImport<'a> {
     },
     VulkanTimelineSemaphore {
         descriptor: &'a dyn AsRawDescriptor,
-    },
-    #[cfg(target_os = "android")]
-    AHardwareBuffer {
-        handle: HardwareBuffer,
     },
 }
 
@@ -601,7 +591,6 @@ impl GpuDisplay {
 
     /// Releases a previously created surface identified by the given handle.
     pub fn release_surface(&mut self, surface_id: u32) {
-        self.inner.release_surface(surface_id);
         self.surfaces.remove(&surface_id);
     }
 
@@ -670,8 +659,8 @@ impl GpuDisplay {
     }
 
     /// Releases a previously imported resource identified by the given handle.
-    pub fn release_import(&mut self, import_id: u32, surface_id: u32) -> anyhow::Result<()> {
-        self.inner.release_import(import_id, surface_id)
+    pub fn release_import(&mut self, import_id: u32, surface_id: u32) {
+        self.inner.release_import(import_id, surface_id);
     }
 
     /// Commits any pending state for the identified surface.

@@ -43,7 +43,6 @@ rust_test {
         "media",
         "net",
         "usb",
-        "virgl_renderer",
         "virtio-media",
     ],
     rustlibs: [
@@ -152,7 +151,6 @@ rust_test {
         "media",
         "net",
         "usb",
-        "virgl_renderer",
         "virtio-media",
     ],
     rustlibs: [
@@ -257,7 +255,6 @@ rust_library {
         "media",
         "net",
         "usb",
-        "virgl_renderer",
         "virtio-media",
     ],
     rustlibs: [

@@ -57,7 +57,7 @@ impl HostDevice {
         let control_transfer_state = ControlTransferState {
             ctl_ep_state: ControlEndpointState::SetupStage,
             control_request_setup: UsbRequestSetup::new(0, 0, 0, 0, 0),
-            executed: false,
+            data_stage_transfer: None,
         };
         let mut host_device = HostDevice {
             device,
@@ -226,6 +226,18 @@ impl BackendDevice for HostDevice {
     ) -> Result<BackendTransferType> {
         Ok(BackendTransferType::HostDevice(
             Transfer::new_interrupt(ep_addr, transfer_buffer).map_err(Error::CreateTransfer)?,
+        ))
+    }
+
+    fn build_isochronous_transfer(
+        &mut self,
+        ep_addr: u8,
+        transfer_buffer: TransferBuffer,
+        packet_size: u32,
+    ) -> Result<BackendTransferType> {
+        Ok(BackendTransferType::HostDevice(
+            Transfer::new_isochronous(ep_addr, transfer_buffer, packet_size)
+                .map_err(Error::CreateTransfer)?,
         ))
     }
 

@@ -67,12 +67,3 @@ extern "C" fn post_android_surface_buffer(
 ) {
     unimplemented!();
 }
-
-#[no_mangle]
-extern "C" fn android_display_flip_to(
-    ctx: *mut AndroidDisplayContext,
-    _surface: *mut AndroidDisplaySurface,
-    ahb_addr: usize,
-) {
-    unimplemented!();
-}

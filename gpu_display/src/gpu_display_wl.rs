@@ -485,9 +485,8 @@ impl DisplayT for DisplayWl {
         }
     }
 
-    fn release_import(&mut self, _surface_id: u32, import_id: u32) -> anyhow::Result<()> {
+    fn release_import(&mut self, _surface_id: u32, import_id: u32) {
         self.dmabufs.remove(&import_id);
-        Ok(())
     }
 }
 
