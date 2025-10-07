@@ -24,6 +24,7 @@ use base::VolatileSlice;
 use gpu_display::*;
 use hypervisor::MemCacheType;
 use libc::c_void;
+use rutabaga_gfx::HandleType;
 use rutabaga_gfx::ResourceCreate3D;
 use rutabaga_gfx::ResourceCreateBlob;
 use rutabaga_gfx::Rutabaga;
@@ -435,7 +436,22 @@ impl VirtioGpuScanout {
             return Some(import_id);
         }
 
-        let dmabuf = to_safe_descriptor(rutabaga.export_blob(resource.resource_id).ok()?.os_handle);
+        let os_handle = match rutabaga.export_blob(resource.resource_id).ok()?.os_handle {
+            HandleType::Descriptor(desc) => desc,
+            #[cfg(target_os = "android")]
+            HandleType::AHardwareBuffer(handle) => {
+                let import_id = display
+                    .borrow_mut()
+                    .import_resource(
+                        surface_id,
+                        DisplayExternalResourceImport::AHardwareBuffer { handle },
+                    )
+                    .ok()?;
+                return Some(import_id);
+            }
+        };
+
+        let dmabuf = to_safe_descriptor(os_handle);
         let query = rutabaga.query(resource.resource_id).ok()?;
 
         let (width, height, format, stride, offset) = match resource.scanout_data {
@@ -842,7 +858,10 @@ impl VirtioGpu {
     /// If supported, export the resource with the given `resource_id` to a file.
     pub fn export_resource(&mut self, resource_id: u32) -> ResourceResponse {
         let handle = match self.rutabaga.export_blob(resource_id) {
-            Ok(handle) => to_safe_descriptor(handle.os_handle),
+            Ok(handle) => match handle.os_handle.try_as_descriptor() {
+                Ok(descriptor) => to_safe_descriptor(descriptor),
+                Err(_) => return ResourceResponse::Invalid,
+            },
             Err(_) => return ResourceResponse::Invalid,
         };
 
@@ -879,9 +898,12 @@ impl VirtioGpu {
     /// If supported, export the fence with the given `fence_id` to a file.
     pub fn export_fence(&mut self, fence_id: u64) -> ResourceResponse {
         match self.rutabaga.export_fence(fence_id) {
-            Ok(handle) => ResourceResponse::Resource(ResourceInfo::Fence {
-                handle: to_safe_descriptor(handle.os_handle),
-            }),
+            Ok(handle) => match handle.os_handle.try_as_descriptor() {
+                Ok(descriptor) => ResourceResponse::Resource(ResourceInfo::Fence {
+                    handle: to_safe_descriptor(descriptor),
+                }),
+                Err(_) => return ResourceResponse::Invalid,
+            },
             Err(_) => ResourceResponse::Invalid,
         }
     }
@@ -1069,7 +1091,7 @@ impl VirtioGpu {
             resource_create_blob,
             rutabaga_iovecs,
             descriptor.map(|descriptor| RutabagaHandle {
-                os_handle: to_rutabaga_descriptor(descriptor),
+                os_handle: rutabaga_gfx::HandleType::Descriptor(to_rutabaga_descriptor(descriptor)),
                 handle_type: RUTABAGA_HANDLE_TYPE_MEM_DMABUF,
             }),
         )?;
@@ -1108,7 +1130,7 @@ impl VirtioGpu {
         if let Ok(export) = self.rutabaga.export_blob(resource_id) {
             if let Ok(vulkan_info) = self.rutabaga.vulkan_info(resource_id) {
                 source = Some(VmMemorySource::Vulkan {
-                    descriptor: to_safe_descriptor(export.os_handle),
+                    descriptor: to_safe_descriptor(export.os_handle.try_as_descriptor()?),
                     handle_type: export.handle_type,
                     memory_idx: vulkan_info.memory_idx,
                     device_uuid: vulkan_info.device_id.device_uuid,
@@ -1117,7 +1139,7 @@ impl VirtioGpu {
                 });
             } else if export.handle_type != RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_FD {
                 source = Some(VmMemorySource::Descriptor {
-                    descriptor: to_safe_descriptor(export.os_handle),
+                    descriptor: to_safe_descriptor(export.os_handle.try_as_descriptor()?),
                     offset: 0,
                     size: resource.size,
                 });

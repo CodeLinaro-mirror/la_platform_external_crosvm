@@ -490,7 +490,7 @@ impl Gralloc for VulkanoGralloc {
         let descriptor = device_memory.export_fd(export_handle_type)?.into();
 
         Ok(RutabagaHandle {
-            os_handle: descriptor,
+            os_handle: HandleType::Descriptor(descriptor),
             handle_type: rutabaga_type,
         })
     }
