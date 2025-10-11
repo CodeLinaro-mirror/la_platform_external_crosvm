@@ -27,6 +27,7 @@ mod i2c;
 mod frpc;
 mod ssr;
 mod eavb;
+#[cfg(feature = "vhost-user-generic")]
 mod generic;
 
 pub use self::block::*;
@@ -48,6 +49,7 @@ pub use self::i2c::*;
 pub use self::frpc::*;
 pub use self::ssr::*;
 pub use self::eavb::*;
+#[cfg(feature = "vhost-user-generic")]
 pub use self::generic::*;
 
 use remain::sorted;
