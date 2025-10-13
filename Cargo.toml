@@ -302,11 +302,11 @@ x = ["devices/x"]
 ## acceleration in the absence of other crosvm features.
 gpu = ["devices/gpu", "gpu_display", "vm_control/gpu"]
 
-## Enables 3D acceleration for guest via the gfxstream protocol over virtio-gpu. This is used for
-## compatibility with the Android Emulator. The protocol provides the best speed and compatibility
-## with GL/vulkan versions by forwarding the guest's calls to the host's graphics libraries and GPU.
-## However, this means the sandbox is not enabled for the virtio-gpu device.
-gfxstream = ["devices/gfxstream"]
+## Enables 3D acceleration for the guest via the gfxstream protocol over virtio-gpu.
+gfxstream = ["rutabaga_gfx/gfxstream"]
+
+## Enables window specific gfxstream integration in gpu_display.
+gfxstream_display = ["gpu_display/gfxstream_display"]
 
 ## Enables 3D acceleration for the guest via the virglrenderer library over virtio-gpu.
 virgl_renderer = ["devices/virgl_renderer"]
@@ -479,6 +479,7 @@ all-default = [
     "gdb",
     "geniezone",
     "gfxstream",
+    "gfxstream_display",
     "libvda-stub",
     "media",
     "net",
