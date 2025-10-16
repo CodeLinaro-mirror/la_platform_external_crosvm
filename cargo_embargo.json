@@ -19,7 +19,12 @@
     // "registered_events",
     "gdb",
     "geniezone",
-    "gfxstream",
+    // The "gfxstream" feature in crosvm only controls whether to enable the
+    // "gfxstream" feature in the rutabaga_gfx crate dependency (which is imported
+    // in Android elsewhere and has gfxstream enabled). To simplify the cargo
+    // build, keep it off here.
+    //
+    // "gfxstream",
     "gpu",
     "gunyah",
     "halla",
