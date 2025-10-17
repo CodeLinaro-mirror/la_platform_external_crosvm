@@ -19,6 +19,7 @@ minigbm = ["rutabaga_gfx/minigbm"]
 #virgl_renderer = ["gpu", "rutabaga_gfx/virgl_renderer"]
 #gfxstream = ["gpu", "rutabaga_gfx/gfxstream"]
 slirp = []
+vhost-user-generic = ["vmm_vhost/vhost-user-generic"]
 
 [dependencies]
 argh = "0.1.7"

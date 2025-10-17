@@ -140,6 +140,7 @@ usb = ["devices/usb"]
 video-decoder = ["devices/video-decoder"]
 video-encoder = ["devices/video-encoder"]
 wl-dmabuf = ["devices/minigbm"]
+vhost-user-generic = ["devices/vhost-user-generic"]
 
 [dependencies]
 anyhow = "1.0.32"
