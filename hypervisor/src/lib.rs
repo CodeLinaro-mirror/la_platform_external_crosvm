@@ -28,6 +28,10 @@ pub mod x86_64;
 #[cfg(all(unix, feature = "geniezone"))]
 pub mod geniezone;
 
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(all(unix, feature = "halla"))]
+pub mod halla;
+
 use base::AsRawDescriptor;
 use base::Event;
 use base::MappedRegion;
@@ -102,6 +106,7 @@ pub enum BalloonEvent {
 pub enum HypervisorKind {
     Geniezone,
     Gunyah,
+    Halla,
     Kvm,
     Haxm,
     Whpx,
@@ -522,6 +527,9 @@ pub enum DeviceKind {
     /// ARM virtual general interrupt controller v3
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     ArmVgicV3,
+    /// ARM virtual interrupt translation service
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    ArmVgicIts,
     /// RiscV AIA in-kernel emulation
     #[cfg(target_arch = "riscv64")]
     RiscvAia,
@@ -542,8 +550,16 @@ pub enum IrqSourceChip {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrqSource {
-    Irqchip { chip: IrqSourceChip, pin: u32 },
-    Msi { address: u64, data: u32 },
+    Irqchip {
+        chip: IrqSourceChip,
+        pin: u32,
+    },
+    Msi {
+        address: u64,
+        data: u32,
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        pci_address: resources::PciAddress,
+    },
 }
 
 /// A single route for an IRQ.

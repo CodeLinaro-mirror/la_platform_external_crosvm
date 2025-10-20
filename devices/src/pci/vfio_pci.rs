@@ -1169,7 +1169,7 @@ impl VfioPciDevice {
             // these bars should be trapped, so that msix could be emulated.
             let mut mmaps = self.device.get_region_mmap(index);
 
-            if self.msix_cap.is_some() {
+            if self.msix_cap.is_some() && !self.device.get_region_msix_mmappable(index) {
                 mmaps = self.remove_bar_mmap_msix(index, mmaps);
             }
             if mmaps.is_empty() {
@@ -1648,6 +1648,15 @@ impl PciDevice for VfioPciDevice {
                 } else {
                     address.func += 1;
                 }
+            }
+            if let Some(msi_cap) = &mut self.msi_cap {
+                msi_cap.config.set_pci_address(self.pci_address.unwrap());
+            }
+            if let Some(msix_cap) = &mut self.msix_cap {
+                msix_cap
+                    .lock()
+                    .config
+                    .set_pci_address(self.pci_address.unwrap());
             }
         }
         self.pci_address.ok_or(PciDeviceError::PciAllocationFailed)

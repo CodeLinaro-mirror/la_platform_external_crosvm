@@ -19,20 +19,20 @@
     // "registered_events",
     "gdb",
     "geniezone",
-    "gfxstream",
-    // "gfxstream_stub" is enabled only to allow the cargo build to succeed as
-    // part of cargo_embargo. Patch files are used to remove it from the
-    // generated Android.bp files (so that the real gfxstream implementation is
-    // used).
-    "gfxstream_stub",
+    // The "gfxstream" feature in crosvm only controls whether to enable the
+    // "gfxstream" feature in the rutabaga_gfx crate dependency (which is imported
+    // in Android elsewhere and has gfxstream enabled). To simplify the cargo
+    // build, keep it off here.
+    //
+    // "gfxstream",
     "gpu",
     "gunyah",
+    "halla",
     "libaaudio_stub",
     "media",
     "net",
     "qcow",
-    "usb",
-    "virgl_renderer"
+    "usb"
   ],
   "workspace": true,
   "workspace_excludes": [
@@ -54,7 +54,6 @@
     "prebuilts",
     "proto_build_tools",
     "qcow_utils",
-    "rutabaga_gfx_ffi",
     "sandbox",
     "swap",
     "system_api",
@@ -188,23 +187,6 @@
     "protos": {
       "add_toplevel_block": "protos/cargo2android_protobuf.bp",
       "patch": "protos/patches/Android.bp.patch"
-    },
-    "rutabaga_gfx": {
-      "add_toplevel_block": "rutabaga_gfx/Android.bp.extra",
-      "patch": "rutabaga_gfx/patches/Android.bp.patch",
-      "dep_blocklist": [
-        "libEGL",
-        "libGL",
-        "libX11",
-        "libXau",
-        "libXdmcp",
-        "libdl",
-        "libdrm",
-        "libgbm",
-        "libm",
-        "libpthread",
-        "libxcb"
-      ]
     },
     "vhost": {
       "no_presubmit": true

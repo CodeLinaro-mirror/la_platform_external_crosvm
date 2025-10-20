@@ -93,8 +93,8 @@ use devices::virtio::gpu::EventDevice;
 #[cfg(target_arch = "x86_64")]
 use devices::virtio::memory_mapper::MemoryMapper;
 use devices::virtio::memory_mapper::MemoryMapperTrait;
-use devices::virtio::vhost::user::VhostUserConnectionTrait;
-use devices::virtio::vhost::user::VhostUserListener;
+use devices::virtio::vhost_user_backend::VhostUserConnectionTrait;
+use devices::virtio::vhost_user_backend::VhostUserListener;
 #[cfg(feature = "balloon")]
 use devices::virtio::BalloonFeatures;
 #[cfg(feature = "pci-hotplug")]
@@ -215,6 +215,9 @@ const KVM_PATH: &str = "/dev/kvm";
 const GENIEZONE_PATH: &str = "/dev/gzvm";
 #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
 static GUNYAH_PATH: &str = "/dev/gunyah";
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(feature = "halla")]
+const HALLA_PATH: &str = "/dev/hvm";
 
 fn create_virtio_devices(
     cfg: &Config,
@@ -899,6 +902,7 @@ fn create_virtio_devices(
             cfg.protection_type,
             opt,
             cfg.vhost_user_connect_timeout_ms,
+            vm_evt_wrtube.try_clone()?,
         )?);
     }
 
@@ -1736,10 +1740,10 @@ fn run_gz(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> 
     let vm_clone = vm.try_clone().context("failed to clone vm")?;
 
     let ioapic_host_tube;
-    let mut irq_chip = match cfg.irq_chip.unwrap_or(IrqChipKind::Kernel) {
+    let mut irq_chip = match cfg.irq_chip.unwrap_or_default() {
         IrqChipKind::Split => bail!("Geniezone does not support split irqchip mode"),
         IrqChipKind::Userspace => bail!("Geniezone does not support userspace irqchip mode"),
-        IrqChipKind::Kernel => {
+        IrqChipKind::Kernel { allow_vgic_its: _ } => {
             ioapic_host_tube = None;
             GeniezoneKernelIrqChip::new(vm_clone, components.vcpu_count)
                 .context("failed to create IRQ chip")?
@@ -1747,6 +1751,66 @@ fn run_gz(device_path: Option<&Path>, cfg: Config, components: VmComponents) -> 
     };
 
     run_vm::<GeniezoneVcpu, GeniezoneVm>(
+        cfg,
+        components,
+        &arch_memory_layout,
+        vm,
+        &mut irq_chip,
+        ioapic_host_tube,
+        #[cfg(feature = "swap")]
+        swap_controller,
+    )
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "halla"))]
+fn run_halla(
+    device_path: Option<&Path>,
+    cfg: Config,
+    components: VmComponents,
+) -> Result<ExitState> {
+    use devices::HallaKernelIrqChip;
+    use hypervisor::halla::Halla;
+    use hypervisor::halla::HallaVcpu;
+    use hypervisor::halla::HallaVm;
+
+    let device_path = device_path.unwrap_or(Path::new(HALLA_PATH));
+    let hvm = Halla::new_with_path(device_path)
+        .with_context(|| format!("failed to open Halla device {}", device_path.display()))?;
+
+    let arch_memory_layout =
+        Arch::arch_memory_layout(&components).context("failed to create arch memory layout")?;
+    let guest_mem = create_guest_memory(&cfg, &components, &arch_memory_layout, &hvm)?;
+
+    #[cfg(feature = "swap")]
+    let swap_controller = if let Some(swap_dir) = cfg.swap_dir.as_ref() {
+        Some(
+            SwapController::launch(guest_mem.clone(), swap_dir, cfg.jail_config.as_ref())
+                .context("launch vmm-swap monitor process")?,
+        )
+    } else {
+        None
+    };
+
+    let vm = HallaVm::new(&hvm, guest_mem, components.hv_cfg).context("failed to create vm")?;
+
+    // Check that the VM was actually created in protected mode as expected.
+    if cfg.protection_type.isolates_memory() && !vm.check_capability(VmCap::Protected) {
+        bail!("Failed to create protected VM");
+    }
+    let vm_clone = vm.try_clone().context("failed to clone vm")?;
+
+    let ioapic_host_tube;
+    let mut irq_chip = match cfg.irq_chip.unwrap_or_default() {
+        IrqChipKind::Split => bail!("Halla does not support split irqchip mode"),
+        IrqChipKind::Userspace => bail!("Halla does not support userspace irqchip mode"),
+        IrqChipKind::Kernel { allow_vgic_its: _ } => {
+            ioapic_host_tube = None;
+            HallaKernelIrqChip::new(vm_clone, components.vcpu_count)
+                .context("failed to create IRQ chip")?
+        }
+    };
+
+    run_vm::<HallaVcpu, HallaVm>(
         cfg,
         components,
         &arch_memory_layout,
@@ -1818,7 +1882,7 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
     }
 
     let ioapic_host_tube;
-    let mut irq_chip = match cfg.irq_chip.unwrap_or(IrqChipKind::Kernel) {
+    let mut irq_chip = match cfg.irq_chip.unwrap_or_default() {
         IrqChipKind::Userspace => {
             bail!("KVM userspace irqchip mode not implemented");
         }
@@ -1841,11 +1905,19 @@ fn run_kvm(device_path: Option<&Path>, cfg: Config, components: VmComponents) ->
                 )
             }
         }
-        IrqChipKind::Kernel => {
+        IrqChipKind::Kernel {
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            allow_vgic_its,
+        } => {
             ioapic_host_tube = None;
             KvmIrqChip::Kernel(
-                KvmKernelIrqChip::new(vm_clone, components.vcpu_count)
-                    .context("failed to create IRQ chip")?,
+                KvmKernelIrqChip::new(
+                    vm_clone,
+                    components.vcpu_count,
+                    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                    allow_vgic_its,
+                )
+                .context("failed to create IRQ chip")?,
             )
         }
     };
@@ -1941,6 +2013,17 @@ fn get_default_hypervisor() -> Option<HypervisorKind> {
         }
     }
 
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(feature = "halla")]
+    {
+        let halla_path = Path::new(HALLA_PATH);
+        if halla_path.exists() {
+            return Some(HypervisorKind::Halla {
+                device: Some(halla_path.to_path_buf()),
+            });
+        }
+    }
+
     #[cfg(all(
         unix,
         any(target_arch = "arm", target_arch = "aarch64"),
@@ -1976,6 +2059,9 @@ pub fn run_config(cfg: Config) -> Result<ExitState> {
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         #[cfg(feature = "geniezone")]
         HypervisorKind::Geniezone { device } => run_gz(device.as_deref(), cfg, components),
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        #[cfg(feature = "halla")]
+        HypervisorKind::Halla { device } => run_halla(device.as_deref(), cfg, components),
         #[cfg(all(
             unix,
             any(target_arch = "arm", target_arch = "aarch64"),
@@ -4080,6 +4166,10 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                                 info!("vcpu crashed");
                                 exit_state = ExitState::Crash;
                             }
+                            VmEventType::DeviceCrashed => {
+                                info!("device crashed");
+                                exit_state = ExitState::Crash;
+                            }
                             VmEventType::Panic(panic_code) => {
                                 pvpanic_code = PvPanicCode::from_u8(panic_code);
                                 info!("Guest reported panic [Code: {}]", pvpanic_code);
@@ -4169,10 +4259,24 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
                             continue;
                         }
 
-                        error!(
-                            "child {} exited: signo {}, status {}, code {}",
-                            pid_label, siginfo.ssi_signo, siginfo.ssi_status, siginfo.ssi_code
-                        );
+                        if siginfo.ssi_signo == libc::SIGCHLD as u32
+                            && (siginfo.ssi_code == libc::CLD_KILLED
+                                || siginfo.ssi_code == libc::CLD_DUMPED)
+                        {
+                            error!(
+                                "child {} killed by signal {} ({})",
+                                pid_label,
+                                siginfo.ssi_status,
+                                base::signal::Signal::try_from(siginfo.ssi_status)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or("unknown".to_string()),
+                            );
+                        } else {
+                            error!(
+                                "child {} exited: signo {}, status {}, code {}",
+                                pid_label, siginfo.ssi_signo, siginfo.ssi_status, siginfo.ssi_code
+                            );
+                        }
                         do_exit = true;
                     }
                     if do_exit {

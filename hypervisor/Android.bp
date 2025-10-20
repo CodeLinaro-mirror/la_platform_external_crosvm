@@ -25,6 +25,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -37,6 +38,7 @@ rust_test {
         "libfnv",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -73,6 +75,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -86,6 +89,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -122,6 +126,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -135,6 +140,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -171,6 +177,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -184,6 +191,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -220,6 +228,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -233,6 +242,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -269,6 +279,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -282,6 +293,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -318,6 +330,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -331,6 +344,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -367,6 +381,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -380,6 +395,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -416,6 +432,7 @@ rust_test {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -429,6 +446,7 @@ rust_test {
         "libhypervisor",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
@@ -460,6 +478,7 @@ rust_library {
     features: [
         "geniezone",
         "gunyah",
+        "halla",
     ],
     rustlibs: [
         "libanyhow",
@@ -472,6 +491,7 @@ rust_library {
         "libfnv",
         "libkvm_sys",
         "liblibc",
+        "libresources",
         "libserde",
         "libserde_json",
         "libsnapshot_crosvm",
