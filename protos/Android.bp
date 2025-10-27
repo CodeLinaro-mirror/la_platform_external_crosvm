@@ -54,11 +54,3 @@ rust_protobuf {
         "com.android.virt",
     ],
 }
-
-rust_protobuf {
-    name: "libcrosvm_plugin_proto",
-    crate_name: "crosvm_plugin_proto",
-    protos: ["src/plugin.proto"],
-    source_stem: "plugin",
-    host_supported: true,
-}
