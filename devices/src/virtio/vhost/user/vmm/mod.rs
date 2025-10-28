@@ -27,6 +27,7 @@ mod gpio;
 mod frpc;
 mod ssr;
 mod eavb;
+mod compressched;
 #[cfg(feature = "vhost-user-generic")]
 mod generic;
 
@@ -50,6 +51,7 @@ pub use self::gpio::*;
 pub use self::frpc::*;
 pub use self::ssr::*;
 pub use self::eavb::*;
+pub use self::compressched::*;
 #[cfg(feature = "vhost-user-generic")]
 pub use self::generic::*;
 
