@@ -1511,6 +1511,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             protection_type: cfg.protection_type,
             #[cfg(all(target_os = "android", target_arch = "aarch64"))]
             ffa: cfg.ffa.map(|g| g.auto).unwrap_or(false),
+            force_disable_readonly_mem: cfg.force_disable_readonly_mem,
         },
         vm_image,
         android_fstab: cfg
@@ -1684,11 +1685,13 @@ fn create_guest_memory(
         mem_policy |= MemoryPolicy::USE_HUGEPAGES;
     }
 
-    if cfg.lock_guest_memory || cfg.lock_guest_memory_dontneed {
+    if cfg.lock_guest_memory {
         mem_policy |= MemoryPolicy::LOCK_GUEST_MEMORY;
     }
-    if cfg.lock_guest_memory_dontneed {
-        mem_policy |= MemoryPolicy::USE_DONTNEED_LOCKED;
+    // When sandboxing is enabled, we can MADV_REMOVE from the balloon process, otherwise, fallback
+    // to using FALLOC_FL_PUNCH_HOLE.
+    if cfg.jail_config.is_none() {
+        mem_policy |= MemoryPolicy::USE_PUNCHHOLE_LOCKED;
     }
     guest_mem.set_memory_policy(mem_policy);
 
