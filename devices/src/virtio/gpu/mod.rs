@@ -118,11 +118,11 @@ pub enum GpuWsi {
     Vulkan,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct VirtioScanoutBlobData {
     pub width: u32,
     pub height: u32,
-    pub drm_format: DrmFormat,
+    pub drm_format: u32,
     pub strides: [u32; 4],
     pub offsets: [u32; 4],
 }
@@ -651,6 +651,7 @@ impl Frontend {
                 let drm_format = match virtio_gpu_format {
                     VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM => DrmFormat::new(b'X', b'R', b'2', b'4'),
                     VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM => DrmFormat::new(b'A', b'R', b'2', b'4'),
+                    VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM => DrmFormat::new(b'R', b'A', b'2', b'4'),
                     _ => {
                         error!("unrecognized virtio-gpu format {}", virtio_gpu_format);
                         return Err(GpuResponse::ErrUnspec);
@@ -665,7 +666,7 @@ impl Frontend {
                 let scanout = VirtioScanoutBlobData {
                     width,
                     height,
-                    drm_format,
+                    drm_format: drm_format.into(),
                     strides,
                     offsets,
                 };
@@ -939,7 +940,7 @@ fn build_rutabaga(
     gpu_parameters: &GpuParameters,
     display_params: &[GpuDisplayParameters],
     rutabaga_component: RutabagaComponentType,
-    rutabaga_channels: Vec<RutabagaChannel>,
+    rutabaga_paths: Vec<RutabagaPath>,
     rutabaga_server_descriptor: Option<RutabagaDescriptor>,
     fence_handler: RutabagaFenceHandler,
 ) -> RutabagaResult<Rutabaga> {
@@ -960,7 +961,7 @@ fn build_rutabaga(
         .set_default_component(rutabaga_component)
         .set_display_width(display_width)
         .set_display_height(display_height)
-        .set_rutabaga_channels(Some(rutabaga_channels))
+        .set_rutabaga_paths(Some(rutabaga_paths))
         .set_use_egl(gpu_parameters.renderer_use_egl)
         .set_use_gles(gpu_parameters.renderer_use_gles)
         .set_use_surfaceless(gpu_parameters.renderer_use_surfaceless)
@@ -977,7 +978,7 @@ fn build_rutabaga(
 impl Worker {
     fn new(
         gpu_parameters: GpuParameters,
-        rutabaga_channels: Vec<RutabagaChannel>,
+        rutabaga_paths: Vec<RutabagaPath>,
         rutabaga_component: RutabagaComponentType,
         rutabaga_server_descriptor: Option<RutabagaDescriptor>,
         display_backends: Vec<DisplayBackend>,
@@ -1009,7 +1010,7 @@ impl Worker {
             &gpu_parameters,
             &display_params,
             rutabaga_component,
-            rutabaga_channels,
+            rutabaga_paths,
             rutabaga_server_descriptor,
             fence_handler,
         )?;
@@ -1448,7 +1449,7 @@ pub struct Gpu {
     display_params: Vec<GpuDisplayParameters>,
     display_event: Arc<AtomicBool>,
     gpu_parameters: GpuParameters,
-    rutabaga_channels: Vec<RutabagaChannel>,
+    rutabaga_paths: Vec<RutabagaPath>,
     pci_address: Option<PciAddress>,
     pci_bar_size: u64,
     external_blob: bool,
@@ -1484,7 +1485,7 @@ impl Gpu {
         rutabaga_server_descriptor: Option<SafeDescriptor>,
         event_devices: Vec<EventDevice>,
         base_features: u64,
-        channels: &BTreeMap<String, PathBuf>,
+        paths: &BTreeMap<String, PathBuf>,
         #[cfg(windows)] wndproc_thread: WindowProcedureThread,
         #[cfg(any(target_os = "android", target_os = "linux"))] gpu_cgroup_path: Option<&PathBuf>,
     ) -> Gpu {
@@ -1493,18 +1494,14 @@ impl Gpu {
             display_params.push(Default::default());
         }
 
-        let mut rutabaga_channels: Vec<RutabagaChannel> = Vec::new();
-        for (channel_name, path) in channels {
-            match &channel_name[..] {
-                "" => rutabaga_channels.push(RutabagaChannel {
-                    base_channel: path.clone(),
-                    channel_type: RUTABAGA_CHANNEL_TYPE_WAYLAND,
+        let mut rutabaga_paths: Vec<RutabagaPath> = Vec::new();
+        for (name, path) in paths {
+            match &name[..] {
+                "" => rutabaga_paths.push(RutabagaPath {
+                    path: path.clone(),
+                    path_type: RUTABAGA_PATH_TYPE_WAYLAND,
                 }),
-                "mojo" => rutabaga_channels.push(RutabagaChannel {
-                    base_channel: path.clone(),
-                    channel_type: RUTABAGA_CHANNEL_TYPE_CAMERA,
-                }),
-                _ => error!("unknown rutabaga channel"),
+                _ => error!("unknown rutabaga path"),
             }
         }
 
@@ -1533,7 +1530,7 @@ impl Gpu {
             display_params,
             display_event: Arc::new(AtomicBool::new(false)),
             gpu_parameters: gpu_parameters.clone(),
-            rutabaga_channels,
+            rutabaga_paths,
             pci_address: gpu_parameters.pci_address,
             pci_bar_size: gpu_parameters.pci_bar_size,
             external_blob: gpu_parameters.external_blob,
@@ -1572,7 +1569,7 @@ impl Gpu {
             &self.gpu_parameters,
             &self.display_params,
             self.rutabaga_component,
-            self.rutabaga_channels.clone(),
+            self.rutabaga_paths.clone(),
             rutabaga_server_descriptor,
             fence_handler,
         )
@@ -1663,7 +1660,7 @@ impl Gpu {
         let mapper = Arc::clone(&self.mapper);
 
         let gpu_parameters = self.gpu_parameters.clone();
-        let rutabaga_channels = self.rutabaga_channels.clone();
+        let rutabaga_paths = self.rutabaga_paths.clone();
         let rutabaga_component = self.rutabaga_component;
         let rutabaga_server_descriptor = self.rutabaga_server_descriptor.as_ref().map(|d| {
             to_rutabaga_descriptor(d.try_clone().expect("failed to clone server descriptor"))
@@ -1683,7 +1680,7 @@ impl Gpu {
 
             let mut worker = Worker::new(
                 gpu_parameters,
-                rutabaga_channels,
+                rutabaga_paths,
                 rutabaga_component,
                 rutabaga_server_descriptor,
                 display_backends,
@@ -1822,16 +1819,14 @@ impl VirtioDevice for Gpu {
     }
 
     fn features(&self) -> u64 {
-        let mut virtio_gpu_features = 1 << VIRTIO_GPU_F_EDID;
+        let mut virtio_gpu_features = 1 << VIRTIO_GPU_F_EDID | 1 << VIRTIO_GPU_F_RESOURCE_BLOB;
 
         // If a non-2D component is specified, enable 3D features.  It is possible to run display
         // contexts without 3D backend (i.e, gfxstream / virglrender), so check for that too.
         if self.rutabaga_component != RutabagaComponentType::Rutabaga2D || self.capset_mask != 0 {
             virtio_gpu_features |= 1 << VIRTIO_GPU_F_VIRGL
                 | 1 << VIRTIO_GPU_F_RESOURCE_UUID
-                | 1 << VIRTIO_GPU_F_RESOURCE_BLOB
-                | 1 << VIRTIO_GPU_F_CONTEXT_INIT
-                | 1 << VIRTIO_GPU_F_EDID;
+                | 1 << VIRTIO_GPU_F_CONTEXT_INIT;
 
             if self.udmabuf {
                 virtio_gpu_features |= 1 << VIRTIO_GPU_F_CREATE_GUEST_HANDLE;
