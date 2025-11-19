@@ -7,7 +7,6 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::BufReader;
-use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -35,7 +34,6 @@ use crate::vm::Config;
 const FROM_GUEST_PIPE: &str = "from_guest";
 const TO_GUEST_PIPE: &str = "to_guest";
 const CONTROL_PIPE: &str = "control";
-const VM_JSON_CONFIG_FILE: &str = "vm.json";
 
 /// Timeout for communicating with the VM. If we do not hear back, panic so we
 /// do not block the tests.
@@ -88,10 +86,7 @@ impl TestVmSys {
             .read(true)
             .open(rootfs_path)
         {
-            panic!(
-                "File open with O_DIRECT expected to work but did not: {}",
-                e
-            );
+            panic!("File open with O_DIRECT expected to work but did not: {e}");
         }
     }
 
@@ -104,7 +99,7 @@ impl TestVmSys {
         from_guest_pipe: &Path,
         to_guest_pipe: &Path,
     ) {
-        let stdout_serial_option = format!("type=stdout,hardware={},console", stdout_hardware_type);
+        let stdout_serial_option = format!("type=stdout,hardware={stdout_hardware_type},console");
         command.args(["--serial", &stdout_serial_option]);
 
         // Setup channel for communication with the delegate.
@@ -185,7 +180,7 @@ impl TestVmSys {
 
         command.args(&cfg.extra_args);
 
-        println!("$ {:?}", command);
+        println!("$ {command:?}");
         let mut process = command.spawn()?;
 
         // Open pipes. Apply timeout to `to_guest` and `from_guest` since it will block until crosvm
@@ -199,7 +194,7 @@ impl TestVmSys {
                     return false;
                 }
                 if let Some(wait_result) = process.try_wait().unwrap() {
-                    println!("crosvm unexpectedly exited: {:?}", wait_result);
+                    println!("crosvm unexpectedly exited: {wait_result:?}");
                     false
                 } else {
                     true
@@ -216,7 +211,7 @@ impl TestVmSys {
                 // Kill the crosvm process if we cannot connect in time.
                 process.kill().unwrap();
                 process.wait().unwrap();
-                panic!("Cannot connect to VM: {}", error);
+                panic!("Cannot connect to VM: {error}");
             }
         };
 
@@ -282,85 +277,6 @@ impl TestVmSys {
 
         // Set kernel as the last argument.
         command.arg(local_path_from_url(&cfg.kernel_url));
-        Ok(())
-    }
-
-    /// Generate a JSON configuration file for `cfg` and returns its path.
-    fn generate_json_config_file(test_dir: &Path, cfg: &Config) -> Result<PathBuf> {
-        let config_file_path = test_dir.join(VM_JSON_CONFIG_FILE);
-        let mut config_file = File::create(&config_file_path)?;
-
-        writeln!(config_file, "{{")?;
-        writeln!(
-            config_file,
-            r#""kernel": "{}""#,
-            local_path_from_url(&cfg.kernel_url).display()
-        )?;
-        if let Some(initrd_url) = &cfg.initrd_url {
-            writeln!(
-                config_file,
-                r#"",initrd": "{}""#,
-                local_path_from_url(initrd_url)
-                    .to_str()
-                    .context("invalid initrd path")?
-            )?;
-        };
-        writeln!(
-            config_file,
-            r#"
-        ,"socket": "{}",
-        "params": [ "init=/bin/delegate" ],
-        "serial": [
-          {{
-            "type": "stdout"
-          }},
-          {{
-            "type": "file",
-            "path": "{}",
-            "input": "{}",
-            "num": 2
-          }}
-        ]
-        "#,
-            test_dir.join(CONTROL_PIPE).display(),
-            test_dir.join(FROM_GUEST_PIPE).display(),
-            test_dir.join(TO_GUEST_PIPE).display(),
-        )?;
-
-        if let Some(rootfs_url) = &cfg.rootfs_url {
-            writeln!(
-                config_file,
-                r#"
-                ,"block": [
-                    {{
-                      "path": "{}",
-                      "ro": true,
-                      "root": true,
-                      "direct": {}
-                    }}
-                  ]
-                  "#,
-                local_path_from_url(rootfs_url)
-                    .to_str()
-                    .context("invalid rootfs path")?,
-                cfg.o_direct,
-            )?;
-        };
-
-        writeln!(config_file, "}}")?;
-
-        Ok(config_file_path)
-    }
-
-    // Generates a config file from cfg and appends the command to use the config file.
-    pub fn append_config_file_arg(
-        command: &mut Command,
-        test_dir: &Path,
-        cfg: &Config,
-    ) -> Result<()> {
-        let config_file_path = TestVmSys::generate_json_config_file(test_dir, cfg)?;
-        command.args(["--cfg", config_file_path.to_str().unwrap()]);
-
         Ok(())
     }
 
