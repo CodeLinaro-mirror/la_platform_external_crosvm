@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use aarch64::AArch64 as Arch;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -209,7 +209,7 @@ impl VcpuRunThread {
             None,  /* hybrid_type */
         ));
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         let cpu_config = None;
 
         Arch::configure_vcpu(
@@ -1028,7 +1028,7 @@ mod tests {
         let _ = monitor
             .run(&exit_evt)?
             .join()
-            .unwrap_or_else(|e| panic!("Thread join failed: {e:?}"));
+            .unwrap_or_else(|e| panic!("Thread join failed: {:?}", e));
         Ok(())
     }
 }

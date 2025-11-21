@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 mod aarch64;
 
 mod gunyah_sys;
@@ -254,10 +254,10 @@ impl GunyahVm {
                 match region.options.purpose {
                     MemoryRegionPurpose::Bios => true,
                     MemoryRegionPurpose::GuestMemoryRegion => true,
-                    #[cfg(target_arch = "aarch64")]
+                    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
                     MemoryRegionPurpose::ProtectedFirmwareRegion => true,
                     MemoryRegionPurpose::ReservedMemory => true,
-                    #[cfg(target_arch = "aarch64")]
+                    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
                     MemoryRegionPurpose::StaticSwiotlbRegion => false,
                 }
             } else {
@@ -586,7 +586,7 @@ impl Vm for GunyahVm {
             VmCap::BusLockDetect => false,
             VmCap::ReadOnlyMemoryRegion => false,
             VmCap::MemNoncoherentDma => false,
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
             VmCap::Sve => false,
         }
     }
@@ -611,7 +611,7 @@ impl Vm for GunyahVm {
         // Gunyah require to set the user memory region with page size aligned size. Safe to extend
         // the mem.size() to be page size aligned because the mmap will round up the size to be
         // page size aligned if it is not.
-        let size = (mem_region.size() as u64).div_ceil(pgsz) * pgsz;
+        let size = (mem_region.size() as u64 + pgsz - 1) / pgsz * pgsz;
         let end_addr = guest_addr.checked_add(size).ok_or(Error::new(EOVERFLOW))?;
 
         if self.guest_mem.range_overlap(guest_addr, end_addr) {

@@ -374,7 +374,8 @@ impl SysDisplayT for DisplayWin {
         self.import_event_device_internal(event_device_id, event_device)
             .map_err(|e| {
                 GpuDisplayError::FailedEventDeviceImport(format!(
-                    "Failed to import event device (ID: {event_device_id}): {e:?}"
+                    "Failed to import event device (ID: {}): {:?}",
+                    event_device_id, e
                 ))
             })
     }

@@ -142,7 +142,7 @@ pub enum MemoryRegionPurpose {
     /// guest.
     ReservedMemory,
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     StaticSwiotlbRegion,
 }
 

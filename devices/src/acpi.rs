@@ -789,7 +789,10 @@ mod tests {
     fn get_irq_evt() -> IrqLevelEvent {
         match crate::IrqLevelEvent::new() {
             Ok(evt) => evt,
-            Err(e) => panic!("failed to create irqlevelevt: {e} - panic. Can't test ACPI"),
+            Err(e) => panic!(
+                "failed to create irqlevelevt: {} - panic. Can't test ACPI",
+                e
+            ),
         }
     }
 

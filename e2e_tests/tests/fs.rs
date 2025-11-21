@@ -33,7 +33,8 @@ fn copy_file(mut vm: TestVm, tag: &str, dir: TempDir) {
 
     // TODO(b/269137600): Split this into multiple lines instead of connecting commands with `&&`.
     vm.exec_in_guest(&format!(
-        "mount -t virtiofs {tag} /mnt && cp /mnt/{ORIGINAL_FILE_NAME} /mnt/{NEW_FILE_NAME} && sync",
+        "mount -t virtiofs {tag} /mnt && cp /mnt/{} /mnt/{} && sync",
+        ORIGINAL_FILE_NAME, NEW_FILE_NAME,
     ))
     .unwrap();
 
@@ -121,8 +122,8 @@ fn file_ugid() {
     let gid = base::getegid();
     let mapped_uid: u32 = rand::random();
     let mapped_gid: u32 = rand::random();
-    let uid_map: String = format!("{mapped_uid} {uid} 1");
-    let gid_map = format!("{mapped_gid} {gid} 1");
+    let uid_map: String = format!("{} {} 1", mapped_uid, uid);
+    let gid_map = format!("{} {} 1", mapped_gid, gid);
 
     let temp_dir = tempfile::tempdir().unwrap();
     let orig_file = temp_dir.path().join(FILE_NAME);
@@ -147,7 +148,7 @@ fn file_ugid() {
     vm.exec_in_guest(&format!("mount -t virtiofs {tag} /mnt"))
         .unwrap();
     let output = vm
-        .exec_in_guest(&format!("stat /mnt/{FILE_NAME}",))
+        .exec_in_guest(&format!("stat /mnt/{}", FILE_NAME,))
         .unwrap();
     // stat output example:
     // File: /mnt/user_file.txt
@@ -157,8 +158,8 @@ fn file_ugid() {
     // Access: 2023-04-05 03:06:27.110144457 +0000
     // Modify: 2023-04-05 03:06:27.110144457 +0000
     // Change: 2023-04-05 03:06:27.110144457 +0000
-    assert!(output.stdout.contains(&format!("Uid: ({mapped_uid}/")));
-    assert!(output.stdout.contains(&format!("Gid: ({mapped_gid}/")));
+    assert!(output.stdout.contains(&format!("Uid: ({}/", mapped_uid)));
+    assert!(output.stdout.contains(&format!("Gid: ({}/", mapped_gid)));
 }
 
 pub fn create_vu_fs_config(socket: &Path, shared_dir: &Path, tag: &str) -> VuConfig {
@@ -230,16 +231,17 @@ fn copy_file_validate_ugid_mapping(
     std::fs::write(orig_file, TEST_DATA).unwrap();
 
     vm.exec_in_guest(&format!(
-        "mount -t virtiofs {tag} /mnt && cp /mnt/{ORIGINAL_FILE_NAME} /mnt/{NEW_FILE_NAME} && sync",
+        "mount -t virtiofs {tag} /mnt && cp /mnt/{} /mnt/{} && sync",
+        ORIGINAL_FILE_NAME, NEW_FILE_NAME,
     ))
     .unwrap();
 
     let output = vm
-        .exec_in_guest(&format!("stat /mnt/{ORIGINAL_FILE_NAME}",))
+        .exec_in_guest(&format!("stat /mnt/{}", ORIGINAL_FILE_NAME,))
         .unwrap();
 
-    assert!(output.stdout.contains(&format!("Uid: ({mapped_uid}/")));
-    assert!(output.stdout.contains(&format!("Gid: ({mapped_gid}/")));
+    assert!(output.stdout.contains(&format!("Uid: ({}/", mapped_uid)));
+    assert!(output.stdout.contains(&format!("Gid: ({}/", mapped_gid)));
 
     let new_file = dir.path().join(NEW_FILE_NAME);
     let output_stat = std::fs::metadata(new_file.clone());
@@ -275,9 +277,9 @@ pub fn create_ugid_map_config(
 
     let uid = base::geteuid();
     let gid = base::getegid();
-    let ugid_map_value = format!("{mapped_uid} {mapped_gid} {uid} {gid} 7 /",);
+    let ugid_map_value = format!("{} {} {} {} 7 /", mapped_uid, mapped_gid, uid, gid,);
 
-    let cfg_arg = format!("writeback=true,ugid_map='{ugid_map_value}'");
+    let cfg_arg = format!("writeback=true,ugid_map='{}'", ugid_map_value);
 
     println!("socket={socket_path}, tag={tag}, shared_dir={shared_dir_path}");
 

@@ -337,7 +337,8 @@ pub fn create_decoder_device(
             decoder::backend::vda::LibvdaDecoder::new(libvda::decode::VdaImplType::Gavda)
                 .map_err(|e| {
                     Error::DeviceCreationFailed(format!(
-                        "Failed to initialize VDA for decoder: {e}"
+                        "Failed to initialize VDA for decoder: {}",
+                        e
                     ))
                 })?
                 .into_trait_object()
@@ -346,7 +347,10 @@ pub fn create_decoder_device(
         VideoBackendType::LibvdaVd => {
             decoder::backend::vda::LibvdaDecoder::new(libvda::decode::VdaImplType::Gavd)
                 .map_err(|e| {
-                    Error::DeviceCreationFailed(format!("Failed to initialize VD for decoder: {e}"))
+                    Error::DeviceCreationFailed(format!(
+                        "Failed to initialize VD for decoder: {}",
+                        e
+                    ))
                 })?
                 .into_trait_object()
         }
@@ -358,7 +362,8 @@ pub fn create_decoder_device(
         VideoBackendType::Vaapi => decoder::backend::vaapi::VaapiDecoder::new()
             .map_err(|e| {
                 Error::DeviceCreationFailed(format!(
-                    "Failed to initialize VA-API driver for decoder: {e}"
+                    "Failed to initialize VA-API driver for decoder: {}",
+                    e
                 ))
             })?
             .into_trait_object(),

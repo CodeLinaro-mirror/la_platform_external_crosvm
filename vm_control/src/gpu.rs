@@ -25,10 +25,6 @@ fn default_refresh_rate() -> u32 {
     DEFAULT_REFRESH_RATE
 }
 
-fn default_dpi() -> (u32, u32) {
-    (DEFAULT_DPI, DEFAULT_DPI)
-}
-
 /// Trait that the platform-specific type `DisplayMode` needs to implement.
 pub(crate) trait DisplayModeTrait {
     /// Returns the initial host window size.
@@ -66,8 +62,14 @@ pub struct DisplayParameters {
     pub hidden: bool,
     #[serde(default = "default_refresh_rate")]
     pub refresh_rate: u32,
-    #[serde(default = "default_dpi")]
-    pub dpi: (u32, u32),
+    // TODO(b/260101753): `dpi` has to be an `Option` for supporting CLI backward compatibility.
+    // That should be changed once compat fields below are deprecated.
+    pub dpi: Option<(u32, u32)>,
+    // `horizontal-dpi` and `vertical-dpi` are supported for CLI backward compatibility.
+    #[serde(rename = "horizontal-dpi")]
+    pub __horizontal_dpi_compat: Option<u32>,
+    #[serde(rename = "vertical-dpi")]
+    pub __vertical_dpi_compat: Option<u32>,
 }
 
 impl DisplayParameters {
@@ -82,7 +84,9 @@ impl DisplayParameters {
             mode,
             hidden,
             refresh_rate,
-            dpi: (horizontal_dpi, vertical_dpi),
+            dpi: Some((horizontal_dpi, vertical_dpi)),
+            __horizontal_dpi_compat: None,
+            __vertical_dpi_compat: None,
         }
     }
 
@@ -103,11 +107,11 @@ impl DisplayParameters {
     }
 
     pub fn horizontal_dpi(&self) -> u32 {
-        self.dpi.0
+        self.dpi.expect("'dpi' is None").0
     }
 
     pub fn vertical_dpi(&self) -> u32 {
-        self.dpi.1
+        self.dpi.expect("'dpi' is None").1
     }
 }
 
@@ -161,15 +165,16 @@ impl Display for GpuControlResult {
                 });
                 let json_pretty =
                     serde_json::to_string_pretty(&json).map_err(|_| std::fmt::Error)?;
-                write!(f, "{json_pretty}")
+                write!(f, "{}", json_pretty)
             }
             TooManyDisplays { allowed, requested } => write!(
                 f,
-                "too_many_displays: allowed {allowed}, requested {requested}"
+                "too_many_displays: allowed {}, requested {}",
+                allowed, requested
             ),
-            NoSuchDisplay { display_id } => write!(f, "no_such_display {display_id}"),
+            NoSuchDisplay { display_id } => write!(f, "no_such_display {}", display_id),
             DisplayMouseModeSet => write!(f, "display_mouse_mode_set"),
-            ErrString(reason) => write!(f, "err_string {reason}"),
+            ErrString(reason) => write!(f, "err_string {}", reason),
         }
     }
 }
@@ -187,9 +192,9 @@ impl fmt::Display for ModifyGpuError {
 
         match self {
             SocketFailed => write!(f, "socket failed"),
-            UnexpectedResponse(r) => write!(f, "unexpected response: {r}"),
-            UnknownCommand(c) => write!(f, "unknown display command: `{c}`"),
-            GpuControl(e) => write!(f, "{e}"),
+            UnexpectedResponse(r) => write!(f, "unexpected response: {}", r),
+            UnknownCommand(c) => write!(f, "unknown display command: `{}`", c),
+            GpuControl(e) => write!(f, "{}", e),
         }
     }
 }

@@ -829,7 +829,10 @@ impl Worker {
                 };
                 self.connections.lock().await.insert(port, connection);
                 self.connection_event.signal().unwrap_or_else(|_| {
-                    panic!("Failed to signal new connection event for vsock port {port}.")
+                    panic!(
+                        "Failed to signal new connection event for vsock port {}.",
+                        port
+                    )
                 });
                 info!("vsock: port {}: signaled connection ready", port);
                 true
@@ -915,13 +918,16 @@ impl Worker {
                     if len != data.len() as u32 {
                         return Err(VsockError::WriteFailed(
                             port,
-                            std::io::Error::other(format!(
-                                "port {} failed to write correct number of bytes:
+                            std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!(
+                                    "port {} failed to write correct number of bytes:
                                         (expected: {}, wrote: {})",
-                                port,
-                                data.len(),
-                                len
-                            )),
+                                    port,
+                                    data.len(),
+                                    len
+                                ),
+                            ),
                         ));
                     }
                 }
@@ -1266,7 +1272,7 @@ impl Worker {
                 response.as_mut_bytes(),
             )
             .await
-            .unwrap_or_else(|_| panic!("vsock: port {port}: failed to write to queue"));
+            .unwrap_or_else(|_| panic!("vsock: port {}: failed to write to queue", port));
         } else {
             error!(
                 "vsock: port {}: error sending credit update on unknown port",
@@ -1371,7 +1377,8 @@ impl Worker {
             Ok(())
         } else {
             error!("vsock: failed to write bytes to queue");
-            Err(VsockError::WriteQueue(std::io::Error::other(
+            Err(VsockError::WriteQueue(std::io::Error::new(
+                std::io::ErrorKind::Other,
                 "failed to write bytes to queue",
             )))
         }
@@ -1611,7 +1618,7 @@ impl PausedQueues {
 }
 
 fn get_pipe_name(guid: &str, pipe: u32) -> String {
-    format!("\\\\.\\pipe\\{guid}\\vsock-{pipe}")
+    format!("\\\\.\\pipe\\{}\\vsock-{}", guid, pipe)
 }
 
 async fn wait_event_and_return_port_pair(evt: EventAsync, pair: PortPair) -> PortPair {

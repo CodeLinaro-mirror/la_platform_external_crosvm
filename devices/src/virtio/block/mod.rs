@@ -67,7 +67,8 @@ fn deserialize_disk_id<'de, D: Deserializer<'de>>(
         Some(id) => {
             if id.len() > DISK_ID_LEN {
                 return Err(serde::de::Error::custom(format!(
-                    "disk id must be {DISK_ID_LEN} or fewer characters"
+                    "disk id must be {} or fewer characters",
+                    DISK_ID_LEN
                 )));
             }
 

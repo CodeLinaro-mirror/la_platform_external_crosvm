@@ -11,6 +11,12 @@ BUILD_CONTEXT=$(shell realpath ../../../)
 
 DOCKER ?= podman
 
+upload: crosvm_dev
+	$(DOCKER) push $(TAG_BASE)/crosvm_dev:$(VERSION)
+	$(DOCKER) push $(TAG_BASE)/crosvm_dev:latest
+	$(DOCKER) push $(TAG_BASE)/crosvm_dev_base:$(BASE_VERSION)
+	$(DOCKER) push $(TAG_BASE)/crosvm_dev_base:latest
+
 crosvm_dev:
 	$(DOCKER) pull $(TAG_BASE)/crosvm_dev_base:$(BASE_VERSION)
 	$(DOCKER) build \
@@ -20,10 +26,6 @@ crosvm_dev:
 		$(BUILD_CONTEXT)
 	$(DOCKER) tag $(TAG_BASE)/$@:$(VERSION) $(TAG_BASE)/$@:latest
 
-upload_dev: crosvm_dev
-	$(DOCKER) push $(TAG_BASE)/crosvm_dev:$(VERSION)
-	$(DOCKER) push $(TAG_BASE)/crosvm_dev:latest
-
 crosvm_dev_base:
 	$(DOCKER) build \
 		-t $(TAG_BASE)/$@:$(BASE_VERSION) \
@@ -31,8 +33,4 @@ crosvm_dev_base:
 		$(BUILD_CONTEXT)
 	$(DOCKER) tag $(TAG_BASE)/$@:$(BASE_VERSION) $(TAG_BASE)/$@:latest
 
-upload_base: crosvm_dev_base
-	$(DOCKER) push $(TAG_BASE)/crosvm_dev_base:$(BASE_VERSION)
-	$(DOCKER) push $(TAG_BASE)/crosvm_dev_base:latest
-
-.PHONY: all crosvm_dev crosvm_dev_base upload_dev upload_base
+.PHONY: all crosvm_dev crosvm_dev_base upload

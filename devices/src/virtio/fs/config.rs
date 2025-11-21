@@ -183,7 +183,8 @@ fn deserialize_ugid_map<'de, D: Deserializer<'de>>(
         Ok(p) => p,
         Err(e) => {
             return Err(D::Error::custom(format!(
-                "Error processing uid_gid_map: {e}"
+                "Error processing uid_gid_map: {}",
+                e
             )));
         }
     };

@@ -39,7 +39,7 @@ fn test_download_prebuilt() {
         assert!(file.exists());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            format!("hello world {build_type}\n")
+            format!("hello world {}\n", build_type)
         );
     }
 }
@@ -54,7 +54,7 @@ fn test_download_prebuilt_files() {
             assert!(file.exists());
             assert_eq!(
                 std::fs::read_to_string(&file).unwrap(),
-                format!("hello world {build_type}\n"),
+                format!("hello world {}\n", build_type),
                 "failed for file {file:?}"
             );
         }

@@ -204,7 +204,8 @@ fn assert_eq_dirs(
             let dst2 = read_link(path2).unwrap();
             assert_eq!(
                 dst1, dst2,
-                "symlink mismatch ({name1}): {path1:?}->{dst1:?} vs {path2:?}->{dst2:?}"
+                "symlink mismatch ({name1}): {:?}->{:?} vs {:?}->{:?}",
+                path1, dst1, path2, dst2
             );
         } else {
             assert_eq!(m1.len(), m2.len(), "length mismatch ({name1})");
@@ -234,7 +235,7 @@ fn assert_eq_dirs(
                 }
                 // If no xattr is specified, any value must not be set.
                 _ => {
-                    let s = run_debugfs_cmd(&[&format!("ea_list {name1}",)], disk);
+                    let s = run_debugfs_cmd(&[&format!("ea_list {}", name1,)], disk);
                     assert_eq!(s, "");
                 }
             }

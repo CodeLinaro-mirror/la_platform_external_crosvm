@@ -111,10 +111,10 @@ pub fn run_snd_device_worker(config: SndBackendConfig) -> anyhow::Result<()> {
     let card_index = config.card_index;
     let vhost_user_tube = config
         .device_vhost_user_tube
-        .unwrap_or_else(|| panic!("[Card {card_index}] vhost-user Snd tube must be set"));
+        .unwrap_or_else(|| panic!("[Card {}] vhost-user Snd tube must be set", card_index));
 
     let ex = Executor::new()
-        .with_context(|| format!("[Card {card_index}] Failed to create executor"))?;
+        .with_context(|| format!("[Card {}] Failed to create executor", card_index))?;
 
     let snd_device = Box::new(SndBackend::new(
         &ex,

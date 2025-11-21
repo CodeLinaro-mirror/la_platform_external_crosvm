@@ -224,7 +224,7 @@ fn jail_worker_process(
 ///
 /// PermissiveJailWarden is used when disable_sandbox flag is selected from crosvm CLI.
 pub struct PermissiveJailWarden {
-    protection_type: hypervisor::ProtectionType,
+    config: Config,
     guest_memory: GuestMemory,
 }
 
@@ -235,8 +235,11 @@ impl PermissiveJailWarden {
         config: &Config,
         #[cfg(feature = "swap")] _swap_device_helper: Option<SwapDeviceHelper>,
     ) -> Result<Self> {
+        let (main_tube, loopback_tube) = Tube::pair()?;
+        main_tube.send(config)?;
+        let config_clone = loopback_tube.recv::<Config>()?;
         Ok(Self {
-            protection_type: config.protection_type,
+            config: config_clone,
             guest_memory,
         })
     }
@@ -250,7 +253,7 @@ impl JailWarden for PermissiveJailWarden {
         let pci_device = match resource_carrier {
             ResourceCarrier::VirtioNet(net_resource_carrier) => {
                 let net_local_parameters =
-                    NetLocalParameters::new(self.guest_memory.clone(), self.protection_type);
+                    NetLocalParameters::new(self.guest_memory.clone(), self.config.protection_type);
                 build_hotplug_net_device(net_resource_carrier, net_local_parameters)?
             }
         };

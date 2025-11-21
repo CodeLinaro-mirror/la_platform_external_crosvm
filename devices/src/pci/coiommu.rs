@@ -640,7 +640,7 @@ impl PinWorker {
 
         let bdf = pin_page_info.bdf;
         ensure!(
-            self.endpoints.contains(&bdf),
+            self.endpoints.iter().any(|&x| x == bdf),
             "pin page for unexpected bdf 0x{:x}",
             bdf
         );
@@ -682,7 +682,7 @@ impl PinWorker {
             let gfn = gfn_bdf >> 16;
             let mut dtt_iter: DTTIter = Default::default();
             ensure!(
-                self.endpoints.contains(&bdf),
+                self.endpoints.iter().any(|&x| x == bdf),
                 "pin page for unexpected bdf 0x{:x}",
                 bdf
             );

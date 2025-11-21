@@ -115,7 +115,7 @@ fn syslogger_char() {
     std::mem::drop(syslogger);
     std::mem::drop(state);
     assert_eq!(
-        format!("{string}\n"),
+        format!("{}\n", string),
         String::from_utf8_lossy(&output.into_inner()[..])
     );
 }

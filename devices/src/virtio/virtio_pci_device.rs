@@ -785,7 +785,7 @@ impl PciDevice for VirtioPciDevice {
                     .allocate_mmio(
                         size,
                         alloc,
-                        format!("virtio-{device_type}-cap_bar"),
+                        format!("virtio-{}-cap_bar", device_type),
                         alloc_option,
                     )
                     .map_err(|e| PciDeviceError::IoAllocationFailed(size, e))
@@ -805,7 +805,7 @@ impl PciDevice for VirtioPciDevice {
                     .allocate_mmio(
                         size,
                         alloc,
-                        format!("virtio-{device_type}-custom_bar"),
+                        format!("virtio-{}-custom_bar", device_type),
                         alloc_option,
                     )
                     .map_err(|e| PciDeviceError::IoAllocationFailed(size, e))

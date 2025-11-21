@@ -304,6 +304,7 @@ def infra_builder(name, postsubmit, **args):
 
 verify_linux_builder("x86_64")
 verify_linux_builder("aarch64")
+verify_linux_builder("armhf")
 verify_linux_builder("mingw64")
 verify_linux_builder("riscv64")
 

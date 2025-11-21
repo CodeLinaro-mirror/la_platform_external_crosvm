@@ -6,6 +6,7 @@
 #![cfg(any(target_os = "android", target_os = "linux"))]
 
 use std::fs::File;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
@@ -47,7 +48,7 @@ fn create_guest_with_virtio_net_backend(
     Command::new("sudo")
         .args(["ip", "tuntap", "del", "mode", "tap", &host_net_name])
         .output()
-        .unwrap_or_else(|_| panic!("Fail to del {host_net_name}"));
+        .unwrap_or_else(|_| panic!("Fail to del {}", host_net_name));
     // Enable crosvm_tap in backend and up
     Command::new("sudo")
         .args([
@@ -61,7 +62,7 @@ fn create_guest_with_virtio_net_backend(
             &host_net_name,
         ])
         .output()
-        .unwrap_or_else(|_| panic!("Fail to create {host_net_name}"));
+        .unwrap_or_else(|_| panic!("Fail to create {}", host_net_name));
     Command::new("sudo")
         .args([
             "ip",
@@ -72,11 +73,11 @@ fn create_guest_with_virtio_net_backend(
             &host_net_name,
         ])
         .output()
-        .unwrap_or_else(|_| panic!("Fail to set {host_net_name} address"));
+        .unwrap_or_else(|_| panic!("Fail to set {} address", host_net_name));
     Command::new("sudo")
         .args(["ip", "link", "set", &host_net_name, "up"])
         .output()
-        .unwrap_or_else(|_| panic!("Fail to up {host_net_name}"));
+        .unwrap_or_else(|_| panic!("Fail to up {}", host_net_name));
 
     let (vu, cfg) = if vhost_user_mode {
         // Start a vhost-user-net backend firstly
@@ -92,9 +93,9 @@ fn create_guest_with_virtio_net_backend(
     } else {
         let mut extra_args = vec!["--mem".to_owned(), "512".to_owned(), "--net".to_owned()];
         if mrg_rxbuf {
-            extra_args.push(format!("tap-name={host_net_name},mrg-rxbuf"))
+            extra_args.push(format!("tap-name={},mrg-rxbuf", host_net_name))
         } else {
-            extra_args.push(format!("tap-name={host_net_name}"))
+            extra_args.push(format!("tap-name={}", host_net_name))
         }
         (None, config.extra_args(extra_args))
     };
@@ -126,27 +127,27 @@ fn network_configure_in_guest(
     let virtio_net_id = virtio_id_list.iter().position(|&x| x == "0x0001");
     // The name of virtio-net driver is virtioX
     let virtio_name = if let Some(id) = virtio_net_id {
-        format!("virtio{id}")
+        format!("virtio{}", id)
     } else {
         return Err(anyhow!("fail to find virtio net driver"));
     };
 
     // Find the ethernet interface name in guest
     let guest_dev = vm
-        .exec_in_guest(&format!("ls /sys/bus/virtio/devices/{virtio_name}/net"))
+        .exec_in_guest(&format!("ls /sys/bus/virtio/devices/{}/net", virtio_name))
         .expect("Can not find the name of virtio-net")
         .stdout
         .trim_end()
         .to_string();
 
     // set ip address in guest
-    vm.exec_in_guest(&format!("ip addr add {guest_ip}/24 dev {guest_dev}"))
+    vm.exec_in_guest(&format!("ip addr add {}/24 dev {}", guest_ip, guest_dev))
         .expect("fail to configure net device address");
     // up network device
-    vm.exec_in_guest(&format!("ip link set {guest_dev} up"))
+    vm.exec_in_guest(&format!("ip link set {} up", guest_dev))
         .expect("fail to up net device");
     // route information add
-    vm.exec_in_guest(&format!("ip route add default via {host_ip}"))
+    vm.exec_in_guest(&format!("ip route add default via {}", host_ip))
         .expect("fail to configure net device address");
 
     vm.exec_in_guest("ip route show")
@@ -163,7 +164,8 @@ fn check_driver_negotiated_features_with_mrg_rxbuf(
 ) -> anyhow::Result<bool> {
     let binding = vm
         .exec_in_guest(&format!(
-            "cat /sys/bus/virtio/devices/{virtio_name}/features"
+            "cat /sys/bus/virtio/devices/{}/features",
+            virtio_name
         ))
         .expect("Can not get the features of virtio-net");
     // Find the ethernet interface name in guest
@@ -180,7 +182,7 @@ fn test_net_connection(
     mrg_rxbuf: bool,
     vhost_user_mode: bool,
 ) -> anyhow::Result<()> {
-    let host_ip_with_mask = format!("{host_ip}/24");
+    let host_ip_with_mask = format!("{}/24", host_ip);
     let (_vu_device, mut vm) = create_guest_with_virtio_net_backend(
         config,
         host_ip_with_mask,
@@ -205,14 +207,16 @@ fn test_net_connection(
     assert!(String::from_utf8(host_ping_guest_result)
         .unwrap()
         .contains(&format!(
-            "{packets_num} packets transmitted, {packets_num} received"
+            "{} packets transmitted, {} received",
+            packets_num, packets_num
         )));
     let guest_ping_host_result = vm
         .exec_in_guest(&format!("ping {} -c {}", host_ip.clone(), packets_num))
         .expect("fail to ping host")
         .stdout;
     assert!(guest_ping_host_result.contains(&format!(
-        "{packets_num} packets transmitted, {packets_num} received"
+        "{} packets transmitted, {} received",
+        packets_num, packets_num
     )));
     Command::new("sudo")
         .args(["ip", "link", "set", &host_net_name.clone(), "down"])
@@ -282,7 +286,7 @@ fn guest_to_host_ncat_test(vm: &mut TestVm, host_ip: String, port: String) -> an
     let listen_args = vec!["-l", &listen_port];
     //Create a recv file in host, then ncat listen a port and re-direct to this file
     let recv_file = File::create("/tmp/host_recv.txt")?;
-    let mut ncat_process = Command::new("ncat")
+    Command::new("ncat")
         .args(listen_args)
         .stdout(Stdio::from(recv_file))
         .spawn()
@@ -302,11 +306,10 @@ fn guest_to_host_ncat_test(vm: &mut TestVm, host_ip: String, port: String) -> an
 
     // Transfer this file to host via virtio-net and calculate its md5sum value
     vm.exec_in_guest(&format!(
-        "ncat {host_ip} {listen_port} < /tmp/guest_send.txt"
+        "ncat {} {listen_port} < /tmp/guest_send.txt",
+        host_ip
     ))
     .expect("fail to send file");
-
-    ncat_process.wait().expect("failed to wait");
 
     let res = Command::new("md5sum")
         .stdout(Stdio::piped())
@@ -320,7 +323,6 @@ fn guest_to_host_ncat_test(vm: &mut TestVm, host_ip: String, port: String) -> an
         .to_string();
 
     assert_eq!(md5_guest.trim_end(), md5_host);
-
     Ok(())
 }
 
@@ -364,7 +366,10 @@ fn host_to_guest_ncat_test(vm: &mut TestVm, guest_ip: String, port: String) -> a
             }) {
                 out
             } else {
-                Err(std::io::Error::other("Ncat: Connection refused"))
+                Err(std::io::Error::new(
+                    ErrorKind::Other,
+                    "Ncat: Connection refused",
+                ))
             }
         },
         NCAT_RETRIES,
@@ -389,7 +394,7 @@ fn test_ncat_guest_to_host(
     mrg_rxbuf: bool,
     vhost_user_mode: bool,
 ) -> anyhow::Result<()> {
-    let host_ip_with_mask = format!("{host_ip}/24");
+    let host_ip_with_mask = format!("{}/24", host_ip);
     let (_vu_device, mut vm) = create_guest_with_virtio_net_backend(
         config,
         host_ip_with_mask,
@@ -416,7 +421,7 @@ fn test_ncat_host_to_guest(
     mrg_rxbuf: bool,
     vhost_user_mode: bool,
 ) -> anyhow::Result<()> {
-    let host_ip_with_mask = format!("{host_ip}/24");
+    let host_ip_with_mask = format!("{}/24", host_ip);
     let (_vu_device, mut vm) = create_guest_with_virtio_net_backend(
         config,
         host_ip_with_mask,

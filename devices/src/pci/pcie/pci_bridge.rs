@@ -210,7 +210,8 @@ fn finalize_window(
         ) {
             Ok(addr) => Ok((addr, size)),
             Err(e) => Err(PciDeviceError::PciBusWindowAllocationFailure(format!(
-                "failed to allocate bridge window: {e}"
+                "failed to allocate bridge window: {}",
+                e
             ))),
         }
     } else {

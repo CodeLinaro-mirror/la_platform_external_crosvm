@@ -58,7 +58,8 @@ impl DBusMonitor {
             Connection::get_private(BusType::System).map_err(DBusMonitorError::DBusConnect)?;
         connection
             .add_match(&format!(
-                "interface='{POWER_INTERFACE_NAME}',member='{POLL_SIGNAL_NAME}'"
+                "interface='{}',member='{}'",
+                POWER_INTERFACE_NAME, POLL_SIGNAL_NAME
             ))
             .map_err(DBusMonitorError::DBusAddMatch)?;
         // Get the D-Bus connection's fd for async I/O. This should always return a single fd.

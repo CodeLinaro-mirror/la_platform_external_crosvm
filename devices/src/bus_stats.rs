@@ -245,7 +245,9 @@ impl std::fmt::Display for BusStatistics {
         for (opname, op) in &[("Read", BusOperation::Read), ("Write", BusOperation::Write)] {
             writeln!(
                 f,
-                "Device Name                   Device Id      Address Range            {opname:<15}s{opname:<15} Duration"
+                "Device Name                   Device Id      Address Range            {:<15}s{:<15} Duration",
+                opname,
+                opname
             )?;
 
             let mut device_indices: Vec<usize> = (0..self.device_stats.len()).collect();

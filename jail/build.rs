@@ -115,7 +115,11 @@ fn main() {
 
     // check policies exist for target architecture
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let seccomp_policy_path = src_dir.join("seccomp").join(target_arch);
+    let seccomp_arch_name = match target_arch.as_str() {
+        "armv7" => "arm",
+        x => x,
+    };
+    let seccomp_policy_path = src_dir.join("seccomp").join(seccomp_arch_name);
     assert!(
         seccomp_policy_path.is_dir(),
         "Seccomp policy dir doesn't exist"

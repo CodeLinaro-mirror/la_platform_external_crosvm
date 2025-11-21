@@ -72,10 +72,7 @@ fn get_cpu_curfreq_khz(cpu_id: u32) -> Result<u32, Error> {
 }
 
 fn handle_read_err(err: Error) -> String {
-    warn!(
-        "Unable to get cpufreq governor, using 100% default util factor. Err: {:?}",
-        err
-    );
+    warn!("Unable to get cpufreq governor, using 100% default util factor. Err: {:?}", err);
     "unknown_governor".to_string()
 }
 
@@ -92,9 +89,7 @@ impl VirtCpufreq {
         let util_factor = get_cpu_util_factor(pcpu).expect("Error getting util factor");
         let pcpu_capacity = get_cpu_capacity(pcpu).expect("Error reading capacity");
         let pcpu_fmax = get_cpu_maxfreq_khz(pcpu).expect("Error reading max freq");
-        let vcpu_relative_capacity =
-            u32::try_from((u64::from(cpu_capacity) * u64::from(pcpu_fmax) / u64::from(cpu_fmax)))
-                .unwrap();
+        let vcpu_relative_capacity = u32::try_from((u64::from(cpu_capacity) * u64::from(pcpu_fmax) / u64::from(cpu_fmax))).unwrap();
 
         VirtCpufreq {
             pcpu_fmax,
@@ -130,11 +125,9 @@ impl BusDevice for VirtCpufreq {
         }
         // TODO(davidai): Evaluate opening file and re-reading the same fd.
         let freq = match get_cpu_curfreq_khz(self.pcpu) {
-            Ok(freq) => u32::try_from(
-                (u64::from(freq) * u64::from(self.pcpu_capacity)
-                    / u64::from(self.vcpu_relative_capacity)),
-            )
-            .unwrap(),
+            Ok(freq) => {
+                u32::try_from((u64::from(freq) * u64::from(self.pcpu_capacity) / u64::from(self.vcpu_relative_capacity))).unwrap()
+            },
             Err(e) => panic!("{}: Error reading freq: {}", self.debug_label(), e),
         };
 
@@ -156,27 +149,16 @@ impl BusDevice for VirtCpufreq {
         };
 
         // Util margin depends on the cpufreq governor on the host
-        let cpu_cap_scaled =
-            self.vcpu_capacity * self.util_factor / CPUFREQ_GOV_SCALE_FACTOR_DEFAULT;
-        let mut util =
-            u32::try_from(u64::from(cpu_cap_scaled) * u64::from(freq) / u64::from(self.vcpu_fmax))
-                .unwrap();
+        let cpu_cap_scaled = self.vcpu_capacity * self.util_factor / CPUFREQ_GOV_SCALE_FACTOR_DEFAULT;
+        let mut util = u32::try_from(u64::from(cpu_cap_scaled) * u64::from(freq) / u64::from(self.vcpu_fmax)).unwrap();
 
         let mut sched_attr = sched_attr::default();
-        sched_attr.sched_flags = SCHED_FLAG_KEEP_ALL
-            | SCHED_FLAG_UTIL_CLAMP_MIN
-            | SCHED_FLAG_UTIL_CLAMP_MAX
-            | SCHED_FLAG_RESET_ON_FORK;
+        sched_attr.sched_flags =
+            SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP_MIN | SCHED_FLAG_UTIL_CLAMP_MAX | SCHED_FLAG_RESET_ON_FORK;
 
         if (util > 1024) {
             if (!self.bad_util_logged) {
-                warn!(
-                    "{}: Out of range util value: {}, freq:{}, fmax:{}",
-                    self.debug_label(),
-                    util,
-                    freq,
-                    self.vcpu_fmax
-                );
+                warn!("{}: Out of range util value: {}, freq:{}, fmax:{}", self.debug_label(), util, freq, self.vcpu_fmax);
                 self.bad_util_logged = true;
             }
             util = 1024;
@@ -194,12 +176,7 @@ impl BusDevice for VirtCpufreq {
             // The logging above should catch out of range util values, if we're still unable
             // to successfully call sched_setattr, there might be intermittent permission issues.
             if (!self.sched_setattr_fail_logged) {
-                warn!(
-                    "{}: Error setting util:{}, Error: {}",
-                    self.debug_label(),
-                    util,
-                    e
-                );
+                warn!("{}: Error setting util:{}, Error: {}", self.debug_label(), util, e);
                 self.sched_setattr_fail_logged = true;
             }
         }

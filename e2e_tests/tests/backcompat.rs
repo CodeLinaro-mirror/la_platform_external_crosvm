@@ -36,6 +36,7 @@ fn backcompat_test_simple_lspci(vm: &mut TestVm) {
     assert_eq!(
         expected,
         result,
-        "PCI Devices changed:\n<<< Expected <<<\n{expected}\n<<<<<<<<<<<<<<<<\n>>> Got      >>>\n{result}\n>>>>>>>>>>>>>>>>\n"
+        "PCI Devices changed:\n<<< Expected <<<\n{}\n<<<<<<<<<<<<<<<<\n>>> Got      >>>\n{}\n>>>>>>>>>>>>>>>>\n",
+        expected, result
     );
 }

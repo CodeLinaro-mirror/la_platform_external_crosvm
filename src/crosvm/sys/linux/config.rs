@@ -26,16 +26,17 @@ pub enum HypervisorKind {
     Kvm {
         device: Option<PathBuf>,
     },
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     #[cfg(feature = "halla")]
     Halla {
         device: Option<PathBuf>,
     },
-    #[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(feature = "geniezone")]
     Geniezone {
         device: Option<PathBuf>,
     },
-    #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+    #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
     Gunyah {
         device: Option<PathBuf>,
         qcom_trusted_vm_id: Option<u16>,
@@ -324,25 +325,25 @@ pub fn parse_pmem_ext2_option(param: &str) -> Result<PmemExt2Option, String> {
 
         if !ugid_cfg
             .parse_ugid_config(kind, value)
-            .map_err(|e| format!("failed to parse ugid config for pmem-ext2: {e:#}"))?
+            .map_err(|e| format!("failed to parse ugid config for pmem-ext2: {:#}", e))?
         {
             match kind {
                 "blocks_per_group" => {
                     opt.blocks_per_group = value.parse().map_err(|e| {
-                        format!("failed to parse blocks_per_groups '{value}': {e:#}")
+                        format!("failed to parse blocks_per_groups '{value}': {:#}", e)
                     })?
                 }
                 "inodes_per_group" => {
                     opt.inodes_per_group = value.parse().map_err(|e| {
-                        format!("failed to parse inodes_per_groups '{value}': {e:#}")
+                        format!("failed to parse inodes_per_groups '{value}': {:#}", e)
                     })?
                 }
                 "size" => {
                     opt.size = value
                         .parse()
-                        .map_err(|e| format!("failed to parse memory size '{value}': {e:#}"))?
+                        .map_err(|e| format!("failed to parse memory size '{value}': {:#}", e))?
                 }
-                _ => return Err(format!("invalid `pmem-ext2` option: {kind}")),
+                _ => return Err(format!("invalid `pmem-ext2` option: {}", kind)),
             }
         }
     }
@@ -569,7 +570,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "aarch64", feature = "halla"))]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(feature = "halla")]
     fn hypervisor_halla() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
@@ -586,7 +588,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "aarch64", feature = "halla"))]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(feature = "halla")]
     fn hypervisor_halla_device() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
@@ -605,7 +608,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(feature = "geniezone")]
     fn hypervisor_geniezone() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
@@ -622,7 +626,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    #[cfg(feature = "geniezone")]
     fn hypervisor_geniezone_device() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
@@ -645,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+    #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
     fn hypervisor_gunyah() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
@@ -666,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+    #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
     fn hypervisor_gunyah_device() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
@@ -687,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+    #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))]
     fn hypervisor_gunyah_device_with_qtvm_ids() {
         let config: Config = crate::crosvm::cmdline::RunCommand::from_args(
             &[],
