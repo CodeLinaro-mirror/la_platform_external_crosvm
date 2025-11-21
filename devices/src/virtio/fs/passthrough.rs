@@ -421,25 +421,11 @@ macro_rules! scoped_cred {
         }
     };
 }
-#[cfg(not(target_arch = "arm"))]
 scoped_cred!(ScopedUid, libc::uid_t, libc::SYS_setresuid);
-#[cfg(target_arch = "arm")]
-scoped_cred!(ScopedUid, libc::uid_t, libc::SYS_setresuid32);
-
-#[cfg(not(target_arch = "arm"))]
 scoped_cred!(ScopedGid, libc::gid_t, libc::SYS_setresgid);
-#[cfg(target_arch = "arm")]
-scoped_cred!(ScopedGid, libc::gid_t, libc::SYS_setresgid32);
 
-#[cfg(not(target_arch = "arm"))]
 const SYS_GETEUID: libc::c_long = libc::SYS_geteuid;
-#[cfg(target_arch = "arm")]
-const SYS_GETEUID: libc::c_long = libc::SYS_geteuid32;
-
-#[cfg(not(target_arch = "arm"))]
 const SYS_GETEGID: libc::c_long = libc::SYS_getegid;
-#[cfg(target_arch = "arm")]
-const SYS_GETEGID: libc::c_long = libc::SYS_getegid32;
 
 thread_local! {
     // SAFETY: both calls take no parameters and only return an integer value. The kernel also
@@ -869,7 +855,7 @@ impl PassthroughFs {
             (None, None)
         } else {
             let mut channel = dbus::channel::Channel::get_private(dbus::channel::BusType::System)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
             channel.set_watch_enabled(true);
             let dbus_fd = channel.watch().fd;
             channel.set_watch_enabled(false);
@@ -946,7 +932,7 @@ impl PassthroughFs {
             Err(e) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("Failed to canonicalize root_dir: {}", e),
+                    format!("Failed to canonicalize root_dir: {e}"),
                 ));
             }
         };
@@ -1001,7 +987,7 @@ impl PassthroughFs {
     }
 
     fn open_fd(&self, fd: RawDescriptor, flags: i32) -> io::Result<File> {
-        let pathname = CString::new(format!("self/fd/{}", fd))
+        let pathname = CString::new(format!("self/fd/{fd}"))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // SAFETY: this doesn't modify any memory and we check the return value. We don't really
@@ -1555,7 +1541,7 @@ impl PassthroughFs {
                         }
                     }
                     Err(e) => {
-                        return Err(io::Error::new(io::ErrorKind::Other, e));
+                        return Err(io::Error::other(e));
                     }
                 };
             }
@@ -1649,7 +1635,7 @@ impl PassthroughFs {
                         }
                     }
                     Err(e) => {
-                        return Err(io::Error::new(io::ErrorKind::Other, e));
+                        return Err(io::Error::other(e));
                     }
                 };
             }
@@ -1693,7 +1679,7 @@ impl PassthroughFs {
                     *file = OpenedFile::new(newfile, flags);
                 }
                 libc::O_RDONLY => {}
-                _ => panic!("Unexpected flags: {:#x}", flags),
+                _ => panic!("Unexpected flags: {flags:#x}"),
             }
         }
 
@@ -2732,7 +2718,7 @@ impl FileSystem for PassthroughFs {
                     *file = OpenedFile::new(newfile, flags);
                 }
                 libc::O_RDONLY | libc::O_RDWR => {}
-                _ => panic!("Unexpected flags: {:#x}", flags),
+                _ => panic!("Unexpected flags: {flags:#x}"),
             }
 
             w.write_from(file.file_mut(), size as usize, offset)
@@ -2789,7 +2775,7 @@ impl FileSystem for PassthroughFs {
                     *file = OpenedFile::new(newfile, flags);
                 }
                 libc::O_WRONLY | libc::O_RDWR => {}
-                _ => panic!("Unexpected flags: {:#x}", flags),
+                _ => panic!("Unexpected flags: {flags:#x}"),
             }
 
             r.read_to(file.file_mut(), size as usize, offset)
@@ -3454,7 +3440,7 @@ impl FileSystem for PassthroughFs {
                         *file = OpenedFile::new(newfile, flags);
                     }
                     libc::O_WRONLY | libc::O_RDWR => {}
-                    _ => panic!("Unexpected flags: {:#x}", flags),
+                    _ => panic!("Unexpected flags: {flags:#x}"),
                 }
             }
 
@@ -3670,10 +3656,7 @@ impl FileSystem for PassthroughFs {
                 (libc::O_RDONLY, libc::O_RDONLY)
                 | (libc::O_RDONLY, libc::O_RDWR)
                 | (libc::O_RDWR, libc::O_RDWR) => {}
-                (m, o) => panic!(
-                    "Unexpected combination of access flags: ({:#x}, {:#x})",
-                    m, o
-                ),
+                (m, o) => panic!("Unexpected combination of access flags: ({m:#x}, {o:#x})"),
             }
             mapper.map(mem_offset, size, file.file(), file_offset, prot)
         } else {
