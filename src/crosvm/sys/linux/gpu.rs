@@ -41,7 +41,7 @@ pub fn get_gpu_cache_info<'a>(
             env.push(("MESA_GLSL_CACHE_DISABLE", "true"));
 
             env.push(("MESA_SHADER_CACHE_DISABLE", "true"));
-        } else if cfg!(any(target_arch = "arm", target_arch = "aarch64")) && sandbox {
+        } else if cfg!(target_arch = "aarch64") && sandbox {
             warn!("shader caching not yet supported on ARM with sandbox enabled");
             // Deprecated in https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/15390
             env.push(("MESA_GLSL_CACHE_DISABLE", "true"));
@@ -281,7 +281,7 @@ fn get_gpu_render_server_environment(
         );
     }
 
-    Ok(env.iter().map(|(k, v)| format!("{}={}", k, v)).collect())
+    Ok(env.iter().map(|(k, v)| format!("{k}={v}")).collect())
 }
 
 pub fn start_gpu_render_server(

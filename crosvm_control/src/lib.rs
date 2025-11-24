@@ -236,7 +236,7 @@ pub unsafe extern "C" fn crosvm_client_balloon_vms_wait_with_timeout(
             if matches!(resp, Ok(VmResponse::Ok)) {
                 return true;
             }
-            println!("adjust failure: {:?}", resp);
+            println!("adjust failure: {resp:?}");
         }
         false
     })
@@ -1334,8 +1334,8 @@ impl TryFrom<&HypervisorKind> for HypervisorFfi {
 pub union HypervisorSpecificVmDescriptorFfi {
     // We use c_int instead of RawFd here because the std::os::fd crate is only available on unix
     // platforms.
-    vm_fd: c_int,
-    _reserved: u64,
+    pub vm_fd: c_int,
+    pub _reserved: u64,
 }
 
 /// A unique identifier of a VM.
