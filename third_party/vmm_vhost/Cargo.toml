@@ -15,6 +15,7 @@ default = []
 vmm = []
 device = []
 vfio-device = []
+vhost-user-generic = []
 
 [dependencies]
 anyhow = "*"

@@ -2,10 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//Changes from Qualcomm Innovation Center, Inc. are provided under the following license:
-
-//Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
-//SPDX-License-Identifier: BSD-3-Clause-Clear
+// Changes from Qualcomm Technologies, Inc. are provided under the following license:
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 
 mod block;
 mod console;
@@ -27,6 +26,8 @@ mod i2c;
 mod frpc;
 mod ssr;
 mod eavb;
+#[cfg(feature = "vhost-user-generic")]
+mod generic;
 
 pub use self::block::*;
 pub use self::console::*;
@@ -47,6 +48,8 @@ pub use self::i2c::*;
 pub use self::frpc::*;
 pub use self::ssr::*;
 pub use self::eavb::*;
+#[cfg(feature = "vhost-user-generic")]
+pub use self::generic::*;
 
 use remain::sorted;
 use thiserror::Error as ThisError;

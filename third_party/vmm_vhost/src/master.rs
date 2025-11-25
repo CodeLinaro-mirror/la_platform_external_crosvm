@@ -1,5 +1,8 @@
 // Copyright (C) 2019 Alibaba Cloud Computing. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+// Changes from Qualcomm Technologies, Inc. are provided under the following license:
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 
 //! Traits and Struct for vhost-user master.
 
@@ -345,12 +348,16 @@ impl<E: Endpoint<MasterReq>> VhostUserMaster for Master<E> {
         let hdr = node.send_request_header(MasterReq::GET_PROTOCOL_FEATURES, None)?;
         let val = node.recv_reply::<VhostUserU64>(&hdr)?;
         node.protocol_features = val.value;
+
         // Should we support forward compatibility?
         // If so just mask out unrecognized flags instead of return errors.
+        #[cfg(not(feature = "vhost-user-generic"))]
         match VhostUserProtocolFeatures::from_bits(node.protocol_features) {
             Some(val) => Ok(val),
             None => Err(VhostUserError::InvalidMessage),
         }
+        #[cfg(feature = "vhost-user-generic")]
+        Ok(VhostUserProtocolFeatures::from_bits_truncate(node.protocol_features))
     }
 
     fn set_protocol_features(&mut self, features: VhostUserProtocolFeatures) -> Result<()> {
