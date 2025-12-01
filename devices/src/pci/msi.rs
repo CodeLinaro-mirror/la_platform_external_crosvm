@@ -195,7 +195,7 @@ impl MsiConfig {
             gsi,
             msi_address: self.address,
             msi_data: self.data.into(),
-            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            #[cfg(target_arch = "aarch64")]
             pci_address,
         }) {
             error!("failed to send AddMsiRoute request at {:?}", e);
@@ -370,7 +370,7 @@ const MSI_CONFIG_READ_MASK: [u32; MSI_LENGTH_64BIT_WITH_MASK as usize / 4] =
 
 impl PciCapConfig for MsiConfig {
     fn read_mask(&self) -> &'static [u32] {
-        let num_regs = (self.len() + 3) / 4;
+        let num_regs = self.len().div_ceil(4);
         &MSI_CONFIG_READ_MASK[0..(num_regs as usize)]
     }
 

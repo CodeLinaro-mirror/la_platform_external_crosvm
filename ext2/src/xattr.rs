@@ -49,7 +49,7 @@ fn listxattr(path: &CString) -> Result<Vec<Vec<u8>>> {
 
     // While `c_char` is `i8` on x86_64, it's `u8` on ARM. So, disable the clippy for the cast.
     #[cfg_attr(
-        any(target_arch = "arm", target_arch = "aarch64", target_arch = "riscv64"),
+        any(target_arch = "aarch64", target_arch = "riscv64"),
         allow(clippy::unnecessary_cast)
     )]
     let keys = buf
@@ -228,7 +228,7 @@ const XATTR_HEADER_MAGIC: u32 = 0xEA020000;
 impl InlineXattrs {
     // Creates `InlineXattrs` for the given path.
     pub fn from_path(path: &Path) -> Result<Self> {
-        let v = dump_xattrs(path).with_context(|| format!("failed to get xattr for {:?}", path))?;
+        let v = dump_xattrs(path).with_context(|| format!("failed to get xattr for {path:?}"))?;
 
         // Assume all the data are in inode record.
         let mut entry_table = vec![];

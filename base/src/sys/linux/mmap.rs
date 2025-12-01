@@ -1000,7 +1000,7 @@ mod tests {
         if let Error::SystemCallFailed(e) = res {
             assert_eq!(e.errno(), libc::EINVAL);
         } else {
-            panic!("unexpected error: {}", res);
+            panic!("unexpected error: {res}");
         }
     }
 
@@ -1011,7 +1011,7 @@ mod tests {
         if let Error::SystemCallFailed(e) = res {
             assert_eq!(e.errno(), libc::EBADF);
         } else {
-            panic!("unexpected error: {}", res);
+            panic!("unexpected error: {res}");
         }
     }
 
@@ -1064,7 +1064,7 @@ mod tests {
             MemoryMapping::from_fd_offset(&fd, 4096, (libc::off64_t::MAX as u64) + 1).unwrap_err();
         match res {
             Error::InvalidOffset => {}
-            e => panic!("unexpected error: {}", e),
+            e => panic!("unexpected error: {e}"),
         }
     }
 
@@ -1095,7 +1095,7 @@ mod tests {
         let res = m.add_anon(pagesize() + 1, 0x100).unwrap_err();
         match res {
             Error::NotPageAligned => {}
-            e => panic!("unexpected error: {}", e),
+            e => panic!("unexpected error: {e}"),
         }
     }
 
@@ -1105,7 +1105,7 @@ mod tests {
         let res = m.add_anon(0, pagesize() + 1).unwrap_err();
         match res {
             Error::InvalidAddress => {}
-            e => panic!("unexpected error: {}", e),
+            e => panic!("unexpected error: {e}"),
         }
     }
 
@@ -1178,7 +1178,7 @@ mod tests {
         let res = <dyn MappedRegion>::msync(&m, ps, size).unwrap_err();
         match res {
             Error::InvalidAddress => {}
-            e => panic!("unexpected error: {}", e),
+            e => panic!("unexpected error: {e}"),
         }
     }
 
@@ -1195,7 +1195,7 @@ mod tests {
         let res = <dyn MappedRegion>::madvise(&m, ps, size, libc::MADV_PAGEOUT).unwrap_err();
         match res {
             Error::InvalidAddress => {}
-            e => panic!("unexpected error: {}", e),
+            e => panic!("unexpected error: {e}"),
         }
     }
 }

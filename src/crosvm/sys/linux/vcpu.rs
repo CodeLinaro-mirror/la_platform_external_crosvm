@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 #[cfg(target_arch = "x86_64")]
 use std::time::Duration;
 
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 use aarch64::AArch64 as Arch;
 use anyhow::Context;
 use anyhow::Result;
@@ -547,7 +547,7 @@ where
     V: VcpuArch + 'static,
 {
     thread::Builder::new()
-        .name(format!("crosvm_vcpu{}", cpu_id))
+        .name(format!("crosvm_vcpu{cpu_id}"))
         .spawn(move || {
             // Having a closure returning ExitState guarentees that we
             // send a VmEventType on all code paths after the closure
