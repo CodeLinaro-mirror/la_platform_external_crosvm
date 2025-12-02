@@ -4,7 +4,7 @@
 
 //! ARM 64-bit architecture support.
 
-#![cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#![cfg(target_arch = "aarch64")]
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -501,10 +501,7 @@ impl arch::LinuxArch for AArch64 {
         let high_mmio_size = guest_phys_end
             .checked_sub(high_mmio_base)
             .unwrap_or_else(|| {
-                panic!(
-                    "guest_phys_end {:#x} < high_mmio_base {:#x}",
-                    guest_phys_end, high_mmio_base,
-                );
+                panic!("guest_phys_end {guest_phys_end:#x} < high_mmio_base {high_mmio_base:#x}",);
             });
         SystemAllocatorConfig {
             io: None,
