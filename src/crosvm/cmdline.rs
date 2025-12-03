@@ -5,7 +5,7 @@
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "android", target_os = "linux"))] {
         use base::RawDescriptor;
-        use devices::virtio::vhost::user::device::parse_wayland_sock;
+        use devices::virtio::vhost_user_backend::parse_wayland_sock;
 
         use crate::crosvm::sys::config::parse_pmem_ext2_option;
         use crate::crosvm::sys::config::VfioOption;
@@ -42,7 +42,7 @@ use devices::virtio::device_constants::video::VideoDeviceConfig;
 use devices::virtio::scsi::ScsiOption;
 #[cfg(feature = "audio")]
 use devices::virtio::snd::parameters::Parameters as SndParameters;
-use devices::virtio::vhost::user::device;
+use devices::virtio::vhost_user_backend;
 use devices::virtio::vsock::VsockConfig;
 #[cfg(feature = "gpu")]
 use devices::virtio::GpuDisplayParameters;
@@ -79,7 +79,7 @@ use super::config::PmemOption;
 use super::gpu_config::fixup_gpu_display_options;
 #[cfg(feature = "gpu")]
 use super::gpu_config::fixup_gpu_options;
-#[cfg(all(feature = "gpu", feature = "virgl_renderer"))]
+#[cfg(all(unix, feature = "gpu"))]
 use super::sys::GpuRenderServerParameters;
 use crate::crosvm::config::from_key_values;
 use crate::crosvm::config::parse_bus_id_addr;
@@ -579,13 +579,13 @@ pub struct DeviceCommand {
 #[argh(subcommand)]
 /// Cross-platform Devices
 pub enum CrossPlatformDevicesCommands {
-    Block(device::BlockOptions),
+    Block(vhost_user_backend::BlockOptions),
     #[cfg(feature = "gpu")]
-    Gpu(device::GpuOptions),
+    Gpu(vhost_user_backend::GpuOptions),
     #[cfg(feature = "net")]
-    Net(device::NetOptions),
+    Net(vhost_user_backend::NetOptions),
     #[cfg(feature = "audio")]
-    Snd(device::SndOptions),
+    Snd(vhost_user_backend::SndOptions),
 }
 
 #[derive(argh_helpers::FlattenSubcommand)]
@@ -1463,9 +1463,6 @@ pub struct RunCommand {
     ///        context for rendering.
     ///     surfaceless[=true|=false] - If the backend should use a
     ///         surfaceless context for rendering.
-    ///     angle[=true|=false] - If the gfxstream backend should
-    ///        use ANGLE (OpenGL on Vulkan) as its native OpenGL
-    ///        driver.
     ///     vulkan[=true|=false] - If the backend should support
     ///        vulkan
     ///     wsi=vk - If the gfxstream backend should use the Vulkan
@@ -1520,7 +1517,7 @@ pub struct RunCommand {
     /// for possible key values of GpuDisplayParameters.
     pub gpu_display: Vec<FixedGpuDisplayParameters>,
 
-    #[cfg(all(unix, feature = "gpu", feature = "virgl_renderer"))]
+    #[cfg(all(unix, feature = "gpu"))]
     #[argh(option)]
     #[serde(skip)] // TODO(b/255223604)
     #[merge(strategy = overwrite_option)]
@@ -3555,7 +3552,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
             cfg.coiommu_param = cmd.coiommu;
 
-            #[cfg(all(feature = "gpu", feature = "virgl_renderer"))]
+            #[cfg(feature = "gpu")]
             {
                 cfg.gpu_render_server_parameters = cmd.gpu_render_server;
             }
@@ -3619,6 +3616,20 @@ impl TryFrom<RunCommand> for super::config::Config {
             cfg.usb = false;
             // Protected VMs can't trust the RNG device, so don't provide it.
             cfg.rng = false;
+
+            // Balloon is not supported for protected VMs on x86 yet.
+            #[cfg(all(feature = "balloon", target_arch = "x86_64"))]
+            {
+                if cfg.balloon {
+                    log::warn!(
+                        "Disabling balloon, it is not supported for protected VMs on x86 yet."
+                    );
+                    cfg.balloon = false;
+                    cfg.balloon_control = None;
+                    cfg.balloon_page_reporting = false;
+                    cfg.balloon_ws_reporting = false;
+                }
+            }
         }
 
         cfg.battery_config = cmd.battery;

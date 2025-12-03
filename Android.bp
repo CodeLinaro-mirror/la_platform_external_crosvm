@@ -57,7 +57,6 @@ rust_binary {
         "gdbstub",
         "gdbstub_arch",
         "geniezone",
-        "gfxstream",
         "gpu",
         "gpu_display",
         "gunyah",
@@ -67,7 +66,6 @@ rust_binary {
         "net",
         "qcow",
         "usb",
-        "virgl_renderer",
     ],
     rustlibs: [
         "libaarch64_sys_reg",
@@ -200,7 +198,6 @@ rust_test {
         "gdbstub",
         "gdbstub_arch",
         "geniezone",
-        "gfxstream",
         "gpu",
         "gpu_display",
         "gunyah",
@@ -210,7 +207,6 @@ rust_test {
         "net",
         "qcow",
         "usb",
-        "virgl_renderer",
     ],
     rustlibs: [
         "libaarch64_sys_reg",

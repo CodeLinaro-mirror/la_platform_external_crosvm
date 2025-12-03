@@ -46,9 +46,9 @@ use devices::virtio::scsi::ScsiOption;
 use devices::virtio::snd::parameters::Parameters as SndParameters;
 use devices::virtio::vfio_wrapper::VfioWrapper;
 #[cfg(feature = "net")]
-use devices::virtio::vhost::user::NetBackend;
-use devices::virtio::vhost::user::VhostUserDeviceBuilder;
-use devices::virtio::vhost::user::VhostUserVsockDevice;
+use devices::virtio::vhost_user_backend::NetBackend;
+use devices::virtio::vhost_user_backend::VhostUserDeviceBuilder;
+use devices::virtio::vhost_user_backend::VhostUserVsockDevice;
 use devices::virtio::vsock::VsockConfig;
 use devices::virtio::Console;
 use devices::virtio::MemSlotConfig;
@@ -437,6 +437,7 @@ pub fn create_vhost_user_frontend(
     protection_type: ProtectionType,
     opt: &VhostUserFrontendOption,
     connect_timeout_ms: Option<u64>,
+    vm_evt_wrtube: base::SendTube,
 ) -> DeviceResult {
     let connection = if let Some(socket_fd) = safe_descriptor_from_path(&opt.socket)? {
         socket_fd
@@ -449,6 +450,7 @@ pub fn create_vhost_user_frontend(
         opt.type_,
         virtio::base_features(protection_type),
         connection,
+        vm_evt_wrtube,
         opt.max_queue_size,
         opt.pci_address,
     )
@@ -1564,9 +1566,9 @@ impl VirtioDeviceBuilder for &SerialParameters {
         self,
         keep_rds: &mut Vec<RawDescriptor>,
     ) -> anyhow::Result<Box<dyn VhostUserDeviceBuilder>> {
-        Ok(Box::new(virtio::vhost::user::create_vu_console_device(
-            self, keep_rds,
-        )?))
+        Ok(Box::new(
+            virtio::vhost_user_backend::create_vu_console_device(self, keep_rds)?,
+        ))
     }
 
     fn create_jail(

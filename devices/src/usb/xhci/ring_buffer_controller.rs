@@ -8,9 +8,7 @@ use std::sync::Arc;
 use std::sync::MutexGuard;
 
 use anyhow::Context;
-use base::debug;
 use base::error;
-use base::info;
 use base::Error as SysError;
 use base::Event;
 use base::EventType;
@@ -42,9 +40,6 @@ type Result<T> = std::result::Result<T, Error>;
 enum RingBufferState {
     /// Running: RingBuffer is running, consuming transfer descriptor.
     Running,
-    /// Stopping: Some thread requested RingBuffer stop. It will stop when current descriptor is
-    /// handled.
-    Stopping,
     /// Stopped: RingBuffer already stopped.
     Stopped,
 }
@@ -59,19 +54,13 @@ pub trait TransferDescriptorHandler {
         complete_event: Event,
     ) -> anyhow::Result<()>;
 
-    /// Stop is called when trying to stop ring buffer controller. Returns true when stop must be
-    /// performed asynchronously. This happens because the handler is handling some descriptor
-    /// asynchronously, the stop callback of ring buffer controller must be called after the
-    /// `async` part is handled or canceled. If the TransferDescriptorHandler decide it could stop
-    /// immediately, it could return false.
-    /// For example, if a handler submitted a transfer but the transfer has not yet finished. Then
-    /// guest kernel requests to stop the ring buffer controller. Transfer descriptor handler will
-    /// return true, thus RingBufferController would transfer to Stopping state. It will be stopped
-    /// when all pending transfer completed.
-    /// On the other hand, if hander does not have any pending transfers, it would return false.
-    fn stop(&self) -> bool {
-        true
-    }
+    /// Cancel transfer descriptors. This is called when stopping a ring buffer controller, due to
+    /// receiving a Stop Endpoint command.
+    /// There may be one or more transfers in-flight at the hardware level and the xHCI spec says
+    /// we need to cancel or complete them before sending the completion event for the Stop
+    /// Endpoint command. Use the callback to send the completion event once all the in-flight ones
+    /// are cleared.
+    fn cancel(&self, _callback: RingBufferStopCallback) {}
 }
 
 /// RingBufferController owns a ring buffer. It lives on a event_loop. It will pop out transfer
@@ -79,7 +68,6 @@ pub trait TransferDescriptorHandler {
 pub struct RingBufferController<T: 'static + TransferDescriptorHandler> {
     name: String,
     state: Mutex<RingBufferState>,
-    stop_callback: Mutex<Vec<RingBufferStopCallback>>,
     ring_buffer: Mutex<RingBuffer>,
     handler: Mutex<T>,
     event_loop: Arc<EventLoop>,
@@ -107,7 +95,6 @@ where
         let controller = Arc::new(RingBufferController {
             name: name.clone(),
             state: Mutex::new(RingBufferState::Stopped),
-            stop_callback: Mutex::new(Vec::new()),
             ring_buffer: Mutex::new(RingBuffer::new(name, mem)),
             handler: Mutex::new(handler),
             event_loop: event_loop.clone(),
@@ -167,17 +154,11 @@ where
     /// Stop the ring buffer asynchronously.
     pub fn stop(&self, callback: RingBufferStopCallback) {
         xhci_trace!("stop {}", self.name);
+
+        // This lock prevents new descriptors to be processed in on_event().
         let mut state = self.state.lock();
-        if *state == RingBufferState::Stopped {
-            info!("xhci: {} is already stopped", self.name);
-            return;
-        }
-        if self.handler.lock().stop() {
-            *state = RingBufferState::Stopping;
-            self.stop_callback.lock().push(callback);
-        } else {
-            *state = RingBufferState::Stopped;
-        }
+        self.handler.lock().cancel(callback);
+        *state = RingBufferState::Stopped;
     }
 }
 
@@ -203,37 +184,36 @@ where
     fn on_event(&self) -> anyhow::Result<()> {
         // `self.event` triggers ring buffer controller to run.
         self.event.wait().context("cannot read from event")?;
-        let mut state = self.state.lock();
 
-        match *state {
-            RingBufferState::Stopped => return Ok(()),
-            RingBufferState::Stopping => {
-                debug!("xhci: {}: stopping ring buffer controller", self.name);
-                *state = RingBufferState::Stopped;
-                self.stop_callback.lock().clear();
-                return Ok(());
+        // ISOC transfers post many small descriptors at once, which need to be submitted to xHCI
+        // as soon as possible to keep up with the transfer rate. Otherwise, the device will send
+        // an error in later TDs.
+        loop {
+            let mut state = self.state.lock();
+
+            match *state {
+                RingBufferState::Stopped => return Ok(()),
+                RingBufferState::Running => {}
             }
-            RingBufferState::Running => {}
+
+            let transfer_descriptor = self
+                .lock_ring_buffer()
+                .dequeue_transfer_descriptor()
+                .context("cannot dequeue transfer descriptor")?;
+
+            let transfer_descriptor = match transfer_descriptor {
+                Some(t) => t,
+                None => {
+                    *state = RingBufferState::Stopped;
+                    return Ok(());
+                }
+            };
+
+            let event = self.event.try_clone().context("cannot clone event")?;
+            self.handler
+                .lock()
+                .handle_transfer_descriptor(transfer_descriptor, event)?;
         }
-
-        let transfer_descriptor = self
-            .lock_ring_buffer()
-            .dequeue_transfer_descriptor()
-            .context("cannot dequeue transfer descriptor")?;
-
-        let transfer_descriptor = match transfer_descriptor {
-            Some(t) => t,
-            None => {
-                *state = RingBufferState::Stopped;
-                self.stop_callback.lock().clear();
-                return Ok(());
-            }
-        };
-
-        let event = self.event.try_clone().context("cannot clone event")?;
-        self.handler
-            .lock()
-            .handle_transfer_descriptor(transfer_descriptor, event)
     }
 }
 
@@ -319,6 +299,7 @@ mod tests {
             .unwrap();
 
         ltrb.set_ring_segment_pointer(0x100);
+        ltrb.set_toggle_cycle(true);
         gm.write_obj_at_addr(ltrb, GuestAddress(0x300 + 2 * trb_size))
             .unwrap();
         gm

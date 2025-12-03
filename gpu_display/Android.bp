@@ -29,7 +29,6 @@ rust_library {
     edition: "2021",
     features: [
         "android_display",
-        "gfxstream",
     ],
     rustlibs: [
         "libanyhow",
@@ -62,9 +61,6 @@ rust_library {
                 "libc++",
                 "libbinder_ndk",
                 "libnativewindow",
-            ],
-            rustlibs: [
-                "libnativewindow_rs",
             ],
         },
     },
