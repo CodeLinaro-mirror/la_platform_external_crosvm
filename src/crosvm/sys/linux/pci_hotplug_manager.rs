@@ -924,11 +924,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use devices::DeviceId;
     use devices::Suspendable;
     use serde::Deserialize;
     use serde::Serialize;
     use snapshot::AnySnapshot;
+    use vm_control::DeviceId;
 
     use super::*;
 
@@ -986,7 +986,7 @@ mod tests {
 
     impl BusDevice for MockDevice {
         fn device_id(&self) -> DeviceId {
-            DeviceId::try_from(0xdead_beef).unwrap()
+            vm_control::PciId::from(0xdead_beef).into()
         }
         fn debug_label(&self) -> String {
             "mock device".to_owned()

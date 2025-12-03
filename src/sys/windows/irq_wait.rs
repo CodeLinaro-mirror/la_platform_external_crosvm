@@ -226,7 +226,7 @@ impl IrqWaitWorker {
                                                             .expect("Failed to clone irq event."),
                                                     );
                                                     let source = IrqEventSource {
-                                                        device_id: device_id.try_into()?,
+                                                        device_id,
                                                         queue_id,
                                                         device_name,
                                                     };
@@ -336,8 +336,13 @@ impl IrqWaitWorker {
                             {
                                 bytes[i] = *byte
                             }
-                            let device_id: u32 = source.device_id.into();
-                            for (i, byte) in device_id.to_le_bytes().iter().enumerate() {
+                            for (i, byte) in source
+                                .device_id
+                                .metrics_id()
+                                .to_le_bytes()
+                                .iter()
+                                .enumerate()
+                            {
                                 bytes[i + 4] = *byte
                             }
                             bytes

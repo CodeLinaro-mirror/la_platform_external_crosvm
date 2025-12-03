@@ -11,6 +11,12 @@
 //! if the request type expects one.
 
 pub mod api;
+
+mod device_id;
+pub use device_id::CrosvmDeviceId;
+pub use device_id::DeviceId;
+pub use device_id::PciId;
+
 #[cfg(feature = "gdb")]
 pub mod gdb;
 #[cfg(feature = "gpu")]
@@ -89,7 +95,6 @@ use protos::registered_events;
 use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
-use rutabaga_gfx::DeviceId;
 use rutabaga_gfx::RutabagaDescriptor;
 use rutabaga_gfx::RutabagaFromRawDescriptor;
 use rutabaga_gfx::RutabagaGralloc;
@@ -482,7 +487,7 @@ impl VmMemorySource {
                 driver_uuid,
                 size,
             } => {
-                let device_id = DeviceId {
+                let device_id = rutabaga_gfx::DeviceId {
                     device_uuid,
                     driver_uuid,
                 };
@@ -1154,7 +1159,7 @@ pub enum VmIrqRequest {
     /// Allocate one gsi, and associate gsi to irqfd with register_irqfd()
     AllocateOneMsi {
         irqfd: Event,
-        device_id: u32,
+        device_id: DeviceId,
         queue_id: usize,
         device_name: String,
     },
@@ -1165,7 +1170,7 @@ pub enum VmIrqRequest {
     AllocateOneMsiAtGsi {
         irqfd: Event,
         gsi: u32,
-        device_id: u32,
+        device_id: DeviceId,
         queue_id: usize,
         device_name: String,
     },
@@ -1188,7 +1193,7 @@ pub enum VmIrqRequest {
 /// VmIrqRequest::execute can't take an `IrqChip` argument, because of a dependency cycle between
 /// devices and vm_control, so it takes a Fn that processes an `IrqSetup`.
 pub enum IrqSetup<'a> {
-    Event(u32, &'a Event, u32, usize, String),
+    Event(u32, &'a Event, DeviceId, usize, String),
     Route(IrqRoute),
     UnRegister(u32, &'a Event),
 }
