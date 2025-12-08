@@ -1,7 +1,6 @@
 // Copyright 2023 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
 use base::sched_attr;
 use base::sched_setattr;
 use base::warn;
@@ -15,11 +14,12 @@ use serde::Serialize;
 use snapshot::AnySnapshot;
 use sync::Mutex;
 
-use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::Suspendable;
+
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 
 const CPUFREQ_GOV_SCALE_FACTOR_DEFAULT: u32 = 100;
 const CPUFREQ_GOV_SCALE_FACTOR_SCHEDUTIL: u32 = 80;
