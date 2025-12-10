@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Changes from Qualcomm Innovation Center are provided under the following license:
-// Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
-// SPDX-License-Identifier: BSD-3-Clause-Clear
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ */
 
 //! Implements virtio devices, queues, and transport mechanisms.
 
@@ -100,6 +101,7 @@ const TYPE_VIDEO_ENC: u32 = 30;
 const TYPE_VIDEO_DEC: u32 = 31;
 const TYPE_SCMI: u32 = 32;
 const TYPE_I2C_ADAPTER: u32 = 34;
+const TYPE_GPIO : u32 = 41;
 // Additional types invented by crosvm
 const MAX_VIRTIO_DEVICE_ID: u32 = 63;
 const TYPE_WL: u32 = MAX_VIRTIO_DEVICE_ID;

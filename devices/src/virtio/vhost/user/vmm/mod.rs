@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Changes from Qualcomm Technologies, Inc. are provided under the following license:
-// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
-// SPDX-License-Identifier: BSD-3-Clause-Clear
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ */
 
 mod block;
 mod console;
@@ -23,6 +24,7 @@ mod hab;
 mod scmi;
 mod glink_cma;
 mod i2c;
+mod gpio;
 mod frpc;
 mod ssr;
 mod eavb;
@@ -45,6 +47,7 @@ pub use self::hab::*;
 pub use self::scmi::*;
 pub use self::glink_cma::*;
 pub use self::i2c::*;
+pub use self::gpio::*;
 pub use self::frpc::*;
 pub use self::ssr::*;
 pub use self::eavb::*;
