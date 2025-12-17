@@ -68,7 +68,7 @@ struct WorkerClient {
     command_sender: mpsc::Sender<WorkerCommand>,
     /// response channel from worker
     response_receiver: mpsc::Receiver<WorkerResponse>,
-    _worker_thread: WorkerThread<Result<()>>,
+    _worker_thread: WorkerThread<()>,
 }
 
 impl WorkerClient {
@@ -79,16 +79,17 @@ impl WorkerClient {
         let control_evt = Event::new()?;
         let control_evt_cpy = control_evt.try_clone()?;
         let worker_thread = WorkerThread::start("pcihp_mgr_workr", move |kill_evt| {
-            let mut worker = PciHotPlugWorker::new(
+            if let Err(e) = PciHotPlugWorker::new(
                 rootbus_controller,
                 command_receiver,
                 response_sender,
                 control_evt_cpy,
                 &kill_evt,
-            )?;
-            worker.run(kill_evt).inspect_err(|e| {
-                error!("Worker exited with error: {:?}", e);
-            })
+            )
+            .and_then(move |mut worker| worker.run(kill_evt))
+            {
+                error!("PciHotPlugManager worker failed: {e:#}");
+            }
         });
         Ok(WorkerClient {
             control_evt,
@@ -924,11 +925,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use devices::Suspendable;
-    use serde::Deserialize;
-    use serde::Serialize;
-    use snapshot::AnySnapshot;
-    use vm_control::DeviceId;
+    use devices::MockDevice;
 
     use super::*;
 
@@ -959,37 +956,6 @@ mod tests {
                 event.reset().unwrap();
                 event.signal().unwrap();
             }
-        }
-    }
-
-    #[derive(Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
-    struct MockDevice;
-
-    impl Suspendable for MockDevice {
-        fn snapshot(&mut self) -> anyhow::Result<AnySnapshot> {
-            AnySnapshot::to_any(self).context("error serializing")
-        }
-
-        fn restore(&mut self, data: AnySnapshot) -> anyhow::Result<()> {
-            *self = AnySnapshot::from_any(data).context("error deserializing")?;
-            Ok(())
-        }
-
-        fn sleep(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn wake(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl BusDevice for MockDevice {
-        fn device_id(&self) -> DeviceId {
-            vm_control::PciId::from(0xdead_beef).into()
-        }
-        fn debug_label(&self) -> String {
-            "mock device".to_owned()
         }
     }
 
@@ -1076,7 +1042,7 @@ mod tests {
         let device_a = GuestDeviceStub {
             pci_addr: downstream_addr_a,
             key: hotplug_key_a,
-            device: Arc::new(Mutex::new(MockDevice)),
+            device: Arc::new(Mutex::new(MockDevice::new())),
         };
         let hotplug_command_a =
             SignalHotPlugCommand::new(upstream_addr_a, [device_a].to_vec()).unwrap();
@@ -1099,7 +1065,7 @@ mod tests {
         let device_b = GuestDeviceStub {
             pci_addr: downstream_addr_b,
             key: hotplug_key_b,
-            device: Arc::new(Mutex::new(MockDevice)),
+            device: Arc::new(Mutex::new(MockDevice::new())),
         };
         let hotplug_command_b =
             SignalHotPlugCommand::new(upstream_addr_b, [device_b].to_vec()).unwrap();
@@ -1122,7 +1088,7 @@ mod tests {
         let device_c = GuestDeviceStub {
             pci_addr: downstream_addr_c,
             key: hotplug_key_c,
-            device: Arc::new(Mutex::new(MockDevice)),
+            device: Arc::new(Mutex::new(MockDevice::new())),
         };
         let hotplug_command_c =
             SignalHotPlugCommand::new(upstream_addr_c, [device_c].to_vec()).unwrap();
@@ -1269,7 +1235,7 @@ mod tests {
         let device = GuestDeviceStub {
             pci_addr: downstream_addr,
             key: hotplug_key,
-            device: Arc::new(Mutex::new(MockDevice)),
+            device: Arc::new(Mutex::new(MockDevice::new())),
         };
         let hotplug_command = SignalHotPlugCommand::new(upstream_addr, [device].to_vec()).unwrap();
         let port = new_port(bus);
@@ -1383,7 +1349,7 @@ mod tests {
         let device = GuestDeviceStub {
             pci_addr: downstream_addr,
             key: hotplug_key,
-            device: Arc::new(Mutex::new(MockDevice)),
+            device: Arc::new(Mutex::new(MockDevice::new())),
         };
         let hotplug_command = SignalHotPlugCommand::new(upstream_addr, [device].to_vec()).unwrap();
         let port = new_port(bus);
