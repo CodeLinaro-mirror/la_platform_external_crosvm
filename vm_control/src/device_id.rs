@@ -5,7 +5,7 @@
 //! Device ID types.
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum CrosvmDeviceId {
+pub enum PlatformDeviceId {
     Pit = 1,
     Pic = 2,
     Ioapic = 3,
@@ -29,6 +29,7 @@ pub enum CrosvmDeviceId {
     VirtualPmc = 21,
     VirtCpufreq = 22,
     FwCfg = 23,
+    Mock = 0xff,
 }
 
 /// A wrapper structure for pci device and vendor id.
@@ -67,7 +68,7 @@ pub enum DeviceId {
     /// PCI Device, use its PciId directly.
     PciDeviceId(PciId),
     /// Platform device, use a unique Id.
-    PlatformDeviceId(CrosvmDeviceId),
+    PlatformDeviceId(PlatformDeviceId),
 }
 
 impl From<PciId> for DeviceId {
@@ -76,8 +77,8 @@ impl From<PciId> for DeviceId {
     }
 }
 
-impl From<CrosvmDeviceId> for DeviceId {
-    fn from(v: CrosvmDeviceId) -> Self {
+impl From<PlatformDeviceId> for DeviceId {
+    fn from(v: PlatformDeviceId) -> Self {
         Self::PlatformDeviceId(v)
     }
 }
@@ -87,7 +88,7 @@ impl DeviceId {
         match self {
             DeviceId::PciDeviceId(pci_id) => pci_id.into(),
             DeviceId::PlatformDeviceId(id) => {
-                static_assertions::const_assert!(std::mem::size_of::<CrosvmDeviceId>() <= 2);
+                static_assertions::const_assert!(std::mem::size_of::<PlatformDeviceId>() <= 2);
                 0xFFFF0000 | id as u32
             }
         }
