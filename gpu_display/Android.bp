@@ -36,6 +36,7 @@ rust_library {
         "libcfg_if",
         "liblibc",
         "liblinux_input_sys",
+        "librutabaga_gfx",
         "libserde",
         "libsync_rust",
         "libthiserror",
