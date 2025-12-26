@@ -98,8 +98,6 @@ pub enum Executable {
     Bios(PathBuf),
     /// A elf linux kernel, loaded and executed by crosvm.
     Kernel(PathBuf),
-    /// Path to a plugin executable that is forked by crosvm.
-    Plugin(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, FromKeyValues)]
@@ -530,10 +528,6 @@ pub fn parse_cpu_affinity(s: &str) -> Result<VcpuAffinity, String> {
     }
 }
 
-pub fn executable_is_plugin(executable: &Option<Executable>) -> bool {
-    matches!(executable, Some(Executable::Plugin(_)))
-}
-
 pub fn parse_pflash_parameters(s: &str) -> Result<PflashParameters, String> {
     let pflash_parameters: PflashParameters = from_key_values(s)?;
 
@@ -651,6 +645,7 @@ pub struct Config {
     pub file_backed_mappings_mmio: Vec<FileBackedMappingParameters>,
     pub file_backed_mappings_ram: Vec<FileBackedMappingParameters>,
     pub force_calibrated_tsc_leaf: bool,
+    pub force_disable_readonly_mem: bool,
     pub force_s2idle: bool,
     pub fw_cfg_parameters: Vec<FwCfgParameters>,
     #[cfg(feature = "gdb")]
@@ -684,8 +679,6 @@ pub struct Config {
     pub kernel_log_file: Option<String>,
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub lock_guest_memory: bool,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    pub lock_guest_memory_dontneed: bool,
     #[cfg(windows)]
     pub log_file: Option<String>,
     #[cfg(windows)]
@@ -712,11 +705,6 @@ pub struct Config {
     pub pci_hotplug_slots: Option<u8>,
     pub per_vm_core_scheduling: bool,
     pub pflash_parameters: Option<PflashParameters>,
-    #[cfg(feature = "plugin")]
-    pub plugin_gid_maps: Vec<crate::crosvm::plugin::GidMap>,
-    #[cfg(feature = "plugin")]
-    pub plugin_mounts: Vec<crate::crosvm::plugin::BindMount>,
-    pub plugin_root: Option<PathBuf>,
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub pmem_ext2: Vec<crate::crosvm::sys::config::PmemExt2Option>,
     pub pmems: Vec<PmemOption>,
@@ -887,6 +875,7 @@ impl Default for Config {
             file_backed_mappings_mmio: Vec::new(),
             file_backed_mappings_ram: Vec::new(),
             force_calibrated_tsc_leaf: false,
+            force_disable_readonly_mem: false,
             force_s2idle: false,
             fw_cfg_parameters: Vec::new(),
             #[cfg(feature = "gdb")]
@@ -928,8 +917,6 @@ impl Default for Config {
             kernel_log_file: None,
             #[cfg(any(target_os = "android", target_os = "linux"))]
             lock_guest_memory: false,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
-            lock_guest_memory_dontneed: false,
             #[cfg(windows)]
             log_file: None,
             #[cfg(windows)]
@@ -958,11 +945,6 @@ impl Default for Config {
             pci_hotplug_slots: None,
             per_vm_core_scheduling: false,
             pflash_parameters: None,
-            #[cfg(feature = "plugin")]
-            plugin_gid_maps: Vec::new(),
-            #[cfg(feature = "plugin")]
-            plugin_mounts: Vec::new(),
-            plugin_root: None,
             #[cfg(any(target_os = "android", target_os = "linux"))]
             pmem_ext2: Vec::new(),
             pmems: Vec::new(),
@@ -1055,10 +1037,6 @@ impl Default for Config {
 pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
     if cfg.executable_path.is_none() {
         return Err("Executable is not specified".to_string());
-    }
-
-    if cfg.plugin_root.is_some() && !executable_is_plugin(&cfg.executable_path) {
-        return Err("`plugin-root` requires `plugin`".to_string());
     }
 
     #[cfg(feature = "gpu")]
@@ -1226,19 +1204,6 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         if !cfg.balloon && cfg.balloon_page_reporting {
             return Err("'balloon_page_reporting' requires enabled balloon".to_string());
         }
-    }
-
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    if cfg.lock_guest_memory && cfg.jail_config.is_none() {
-        return Err("'lock-guest-memory' and 'disable-sandbox' are mutually exclusive".to_string());
-    }
-
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    if cfg.lock_guest_memory && cfg.lock_guest_memory_dontneed {
-        return Err(
-            "'lock-guest-memory' and 'lock-guest-memory-dontneed' are mutually exclusive"
-                .to_string(),
-        );
     }
 
     // TODO(b/253386409): Vmm-swap only support sandboxed devices until vmm-swap use

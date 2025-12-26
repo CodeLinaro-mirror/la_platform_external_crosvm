@@ -20,6 +20,14 @@ rust_test {
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
+    srcs: [
+        "test-files/base.dtb",
+        "test-files/external_refs_base.dtb",
+        "test-files/external_refs_overlay.dtb",
+        "test-files/local_refs.dtb",
+        "test-files/overlay.dtb",
+        "test-files/overlay_deps.dtb",
+    ],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -42,6 +50,14 @@ rust_library {
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
+    srcs: [
+        "test-files/base.dtb",
+        "test-files/external_refs_base.dtb",
+        "test-files/external_refs_overlay.dtb",
+        "test-files/local_refs.dtb",
+        "test-files/overlay.dtb",
+        "test-files/overlay_deps.dtb",
+    ],
     edition: "2021",
     rustlibs: [
         "libanyhow",
