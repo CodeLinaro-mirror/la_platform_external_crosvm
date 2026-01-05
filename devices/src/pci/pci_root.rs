@@ -26,6 +26,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use snapshot::AnySnapshot;
 use sync::Mutex;
+use vm_control::DeviceId;
+use vm_control::PciId;
 use vm_memory::GuestAddress;
 
 use crate::pci::pci_configuration::PciBarConfiguration;
@@ -41,13 +43,11 @@ use crate::pci::pci_device::PciBus;
 use crate::pci::pci_device::PciDevice;
 use crate::pci::PciAddress;
 use crate::pci::PciBarIndex;
-use crate::pci::PciId;
 use crate::pci::PCI_VENDOR_ID_INTEL;
 use crate::Bus;
 use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::BusType;
-use crate::DeviceId;
 use crate::Suspendable;
 
 // A PciDevice that holds the root hub's configuration.
@@ -246,11 +246,11 @@ impl PciRoot {
                 Some(format!(
                     "_SB_.{}.{}",
                     path.iter()
-                        .map(|x| format!("PC{:02X}", x))
+                        .map(|x| format!("PC{x:02X}"))
                         .collect::<Vec<String>>()
                         .join("."),
                     match device.lock().is_bridge() {
-                        Some(bus_no) => format!("PC{:02X}", bus_no),
+                        Some(bus_no) => format!("PC{bus_no:02X}"),
                         None => format!("PE{:02X}", address.devfn()),
                     }
                 ))
@@ -489,10 +489,9 @@ impl PciRootMmioState {
     where
         T: PciMmioMapper,
     {
-        // The PCI spec requires that config writes are non-posted. This requires
-        // uncached mappings in the guest. 32-bit ARM does not support flushing to
-        // PoC from userspace. The cache maintance story for riscv is unclear, so
-        // that is also not implemmented.
+        // The PCI spec requires that config writes are non-posted. This requires uncached mappings
+        // in the guest. The cache maintenance story for riscv is unclear, so that is not
+        // implemented.
         if cfg!(not(any(target_arch = "x86_64", target_arch = "aarch64"))) {
             return Ok(());
         }
@@ -509,7 +508,7 @@ impl PciRootMmioState {
         let (shmem, new_entry) = match self.mappings.entry(mmio_mapping_num) {
             BTreeMapEntry::Vacant(e) => {
                 let shmem = SharedMemory::new(
-                    format!("{:04x}_pci_cfg_mapping", mmio_mapping_num),
+                    format!("{mmio_mapping_num:04x}_pci_cfg_mapping"),
                     pagesize as u64,
                 )
                 .context("failed to create shmem")?;

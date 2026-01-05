@@ -91,20 +91,14 @@ impl Kvm {
 impl KvmVm {
     /// Does platform specific initialization for the KvmVm.
     pub fn init_arch(&self, cfg: &Config) -> Result<()> {
-        #[cfg(target_arch = "aarch64")]
         if cfg.mte {
             // SAFETY:
             // Safe because it does not take pointer arguments.
             unsafe { self.enable_raw_capability(KvmCap::ArmMte, 0, &[0, 0, 0, 0])? }
         }
-        #[cfg(all(target_os = "android", target_arch = "aarch64"))]
+        #[cfg(target_os = "android")]
         if cfg.ffa {
             self.set_enable_ffa(true)?;
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            // Suppress warning.
-            let _ = cfg;
         }
 
         Ok(())
@@ -501,7 +495,7 @@ impl KvmVcpuRegister {
             KVM_REG_SIZE_U1024 => 128,
             KVM_REG_SIZE_U2048 => 256,
             // `From<KvmVcpuRegister> for u64` should always include a valid size.
-            _ => panic!("invalid size field {}", size_field),
+            _ => panic!("invalid size field {size_field}"),
         }
     }
 }

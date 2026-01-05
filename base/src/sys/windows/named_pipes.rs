@@ -15,7 +15,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use sync::Mutex;
@@ -332,7 +331,7 @@ pub fn pair_with_buffer_size(
         r"\\.\pipe\crosvm_ipc.pid{}.{}.rand{}",
         process::id(),
         NEXT_PIPE_INDEX.fetch_add(1, Ordering::SeqCst),
-        rand::thread_rng().gen::<u32>(),
+        rand::random::<u32>(),
     );
 
     let server_end = create_server_pipe(
@@ -552,10 +551,9 @@ impl PipeConnection {
             // actually use/understand this error from other parts of KiwiVM (e.g. PipeConnection
             // consumers), we could use ErrorKind::Interrupted (which as of 24/11/26 is not used by
             // Rust for other purposes).
-            Ok(len) if len == 0 && !buf.is_empty() => Err(io::Error::new(
-                io::ErrorKind::Other,
-                PipeError::ZeroByteReadNoEof,
-            )),
+            Ok(len) if len == 0 && !buf.is_empty() => {
+                Err(io::Error::other(PipeError::ZeroByteReadNoEof))
+            }
 
             // Read at least 1 byte, or 0 bytes if a zero byte buffer was provided.
             Ok(len) => Ok(len),
@@ -1162,7 +1160,7 @@ impl MultiPartMessagePipe {
     /// Create client side of MutiPartMessagePipe.
     pub fn create_as_client(pipe_name: &str) -> Result<Self> {
         let pipe = create_client_pipe(
-            &format!(r"\\.\pipe\{}", pipe_name),
+            &format!(r"\\.\pipe\{pipe_name}"),
             &FramingMode::Message,
             &BlockingMode::Wait,
             /* overlapped= */ true,
@@ -1173,7 +1171,7 @@ impl MultiPartMessagePipe {
     /// Create server side of MutiPartMessagePipe.
     pub fn create_as_server(pipe_name: &str) -> Result<Self> {
         let pipe = create_server_pipe(
-            &format!(r"\\.\pipe\{}", pipe_name,),
+            &format!(r"\\.\pipe\{pipe_name}",),
             &FramingMode::Message,
             &BlockingMode::Wait,
             0,
@@ -1308,7 +1306,7 @@ mod tests {
         // SAFETY: trivially safe with pipe created and return value checked.
         unsafe {
             for (dir, sender, receiver) in [("1 -> 2", &p1, &p2), ("2 -> 1", &p2, &p1)].iter() {
-                println!("{}", dir);
+                println!("{dir}");
 
                 sender.write(&[75, 77, 54, 82, 76, 65]).unwrap();
 
@@ -1364,7 +1362,7 @@ mod tests {
         // SAFETY: trivially safe with pipe created and return value checked.
         unsafe {
             for (dir, sender, receiver) in [("1 -> 2", &p1, &p2), ("2 -> 1", &p2, &p1)].iter() {
-                println!("{}", dir);
+                println!("{dir}");
 
                 // Send 2 messages so that we can check that message framing works
                 sender.write(&[1, 23, 45]).unwrap();
@@ -1391,7 +1389,7 @@ mod tests {
         // SAFETY: trivially safe with PipeConnection created and return value checked.
         unsafe {
             for (dir, sender, receiver) in [("1 -> 2", &p1, &p2), ("2 -> 1", &p2, &p1)].iter() {
-                println!("{}", dir);
+                println!("{dir}");
                 sender.write(&[1]).unwrap();
                 assert_eq!(receiver.read(&mut recv_buffer).unwrap(), 1); // Should succeed!
                 assert_eq!(
@@ -1524,10 +1522,7 @@ mod tests {
     }
 
     fn generate_pipe_name() -> String {
-        format!(
-            r"\\.\pipe\test-ipc-pipe-name.rand{}",
-            rand::thread_rng().gen::<u64>(),
-        )
+        format!(r"\\.\pipe\test-ipc-pipe-name.rand{}", rand::random::<u64>())
     }
 
     fn send_receive_msgs(pipe: MultiPartMessagePipe, msg_count: u32) -> JoinHandle<()> {
@@ -1537,7 +1532,7 @@ mod tests {
             let exit_event = Event::new().unwrap();
             for _i in 0..msg_count {
                 let message = *messages
-                    .get(rand::thread_rng().gen::<usize>() % messages.len())
+                    .get(rand::random::<usize>() % messages.len())
                     .unwrap();
                 pipe.write_overlapped_blocking_message(
                     &message.len().to_be_bytes(),
@@ -1588,7 +1583,7 @@ mod tests {
     fn multipart_message_into_inner_pipe() {
         let pipe_name = generate_pipe_name();
         let mut pipe = create_server_pipe(
-            &format!(r"\\.\pipe\{}", pipe_name),
+            &format!(r"\\.\pipe\{pipe_name}"),
             &FramingMode::Message,
             &BlockingMode::Wait,
             0,

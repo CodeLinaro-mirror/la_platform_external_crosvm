@@ -26,12 +26,12 @@ use serde::Serialize;
 use snapshot::AnySnapshot;
 use sync::Mutex;
 use thiserror::Error;
+use vm_control::DeviceId;
 
 #[cfg(feature = "stats")]
 use crate::bus_stats::BusOperation;
 #[cfg(feature = "stats")]
 use crate::BusStatistics;
-use crate::DeviceId;
 use crate::PciAddress;
 use crate::PciDevice;
 use crate::Suspendable;
@@ -52,7 +52,7 @@ pub struct BusAccessInfo {
 // Implement `Display` for `MinMax`.
 impl std::fmt::Display for BusAccessInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -411,8 +411,8 @@ impl Bus {
         let mut seen_ptrs = BTreeSet::new();
         self.devices
             .lock()
-            .iter()
-            .map(|(_, bus_entry)| bus_entry.device.clone())
+            .values()
+            .map(|bus_entry| bus_entry.device.clone())
             .filter(|dev| match dev {
                 BusDeviceEntry::OuterSync(dev) => seen_ptrs.insert(Arc::as_ptr(dev) as *const u8),
                 BusDeviceEntry::InnerSync(dev) => seen_ptrs.insert(Arc::as_ptr(dev) as *const u8),
@@ -432,7 +432,7 @@ impl Bus {
         let mut choose_key = |debug_label: String| -> String {
             let label = debug_label.replace(char::is_whitespace, "-");
             let id = next_ids.entry(label.clone()).or_default();
-            let key = format!("{}-{}", label, id);
+            let key = format!("{label}-{id}");
             *id += 1;
             key
         };
@@ -587,10 +587,12 @@ impl Bus {
                 BusRange { base, len },
                 BusEntry {
                     #[cfg(feature = "stats")]
-                    index: self
-                        .stats
-                        .lock()
-                        .next_device_index(name, device_id.into(), base, len),
+                    index: self.stats.lock().next_device_index(
+                        name,
+                        device_id.metrics_id(),
+                        base,
+                        len,
+                    ),
                     device: BusDeviceEntry::OuterSync(device),
                 },
             )
@@ -642,7 +644,7 @@ impl Bus {
                     #[cfg(feature = "stats")]
                     index: self.stats.lock().next_device_index(
                         device.debug_label(),
-                        device.device_id().into(),
+                        device.device_id().metrics_id(),
                         base,
                         len,
                     ),
@@ -778,9 +780,9 @@ impl Default for Bus {
 #[cfg(test)]
 mod tests {
     use anyhow::Result as AnyhowResult;
+    use vm_control::CrosvmDeviceId;
 
     use super::*;
-    use crate::pci::CrosvmDeviceId;
     use crate::suspendable::Suspendable;
     use crate::suspendable_tests;
 

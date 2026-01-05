@@ -46,6 +46,8 @@ use resources::SystemAllocator;
 use snapshot::AnySnapshot;
 use sync::Condvar;
 use sync::Mutex;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 
 use crate::bus::BusDeviceSync;
 use crate::irqchip::Apic;
@@ -64,11 +66,9 @@ use crate::irqchip::APIC_BASE_ADDRESS;
 use crate::irqchip::APIC_MEM_LENGTH_BYTES;
 use crate::irqchip::IOAPIC_BASE_ADDRESS;
 use crate::irqchip::IOAPIC_MEM_LENGTH_BYTES;
-use crate::pci::CrosvmDeviceId;
 use crate::Bus;
 use crate::BusAccessInfo;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::IrqChip;
 use crate::IrqChipCap;
 use crate::IrqChipX86_64;
@@ -857,14 +857,12 @@ impl<V: VcpuX86_64 + 'static> Suspendable for UserspaceIrqChip<V> {
                     vcpus: self.vcpus.clone(),
                     waiter: self.waiters[i].clone(),
                 };
-                let worker_thread = WorkerThread::start(
-                    format!("UserspaceIrqChip timer worker {}", i),
-                    move |evt| {
+                let worker_thread =
+                    WorkerThread::start(format!("UserspaceIrqChip timer worker {i}"), move |evt| {
                         if let Err(e) = worker.run(evt) {
                             error!("UserspaceIrqChip worker failed: {e:#}");
                         }
-                    },
-                );
+                    });
                 dropper.workers.push(worker_thread);
             }
         }
@@ -1033,8 +1031,8 @@ impl Display for TimerWorkerError {
         use self::TimerWorkerError::*;
 
         match self {
-            CreateWaitContext(e) => write!(f, "failed to create event context: {}", e),
-            WaitError(e) => write!(f, "failed to wait for events: {}", e),
+            CreateWaitContext(e) => write!(f, "failed to create event context: {e}"),
+            WaitError(e) => write!(f, "failed to wait for events: {e}"),
         }
     }
 }

@@ -71,7 +71,7 @@ pub struct HostWindowSpace;
 pub enum HostDisplayWrapper {
     Uninitialized,
     #[cfg(feature = "vulkan_display")]
-    Initialized(HostDisplay),
+    Initialized(Box<HostDisplay>),
 }
 
 pub struct DisplayWin {
@@ -167,7 +167,9 @@ impl DisplayWin {
                             .map(create_display_closure)
                             .transpose()?;
                         let host_display = match host_display {
-                            Some(host_display) => HostDisplayWrapper::Initialized(host_display),
+                            Some(host_display) => {
+                                HostDisplayWrapper::Initialized(Box::new(host_display))
+                            }
                             None => HostDisplayWrapper::Uninitialized,
                         };
                         let host_display = Arc::new(Mutex::new(host_display));
@@ -374,8 +376,7 @@ impl SysDisplayT for DisplayWin {
         self.import_event_device_internal(event_device_id, event_device)
             .map_err(|e| {
                 GpuDisplayError::FailedEventDeviceImport(format!(
-                    "Failed to import event device (ID: {}): {:?}",
-                    event_device_id, e
+                    "Failed to import event device (ID: {event_device_id}): {e:?}"
                 ))
             })
     }

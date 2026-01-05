@@ -13,9 +13,8 @@ use hypervisor::Vcpu;
 use resources::SystemAllocator;
 use serde::Deserialize;
 use serde::Serialize;
+use vm_control::DeviceId;
 
-use crate::pci::CrosvmDeviceId;
-use crate::pci::PciId;
 use crate::Bus;
 use crate::BusDevice;
 use crate::IrqEdgeEvent;
@@ -27,18 +26,21 @@ cfg_if::cfg_if! {
         pub use self::kvm::KvmKernelIrqChip;
         #[cfg(target_arch = "x86_64")]
         pub use self::kvm::KvmSplitIrqChip;
-        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        #[cfg(target_arch = "aarch64")]
         pub use self::kvm::{AARCH64_GIC_NR_IRQS, AARCH64_GIC_NR_SPIS};
+
+        #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+        mod gunyah;
+        #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+        pub use self::gunyah::GunyahIrqChip;
+
+        #[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
+        mod geniezone;
+        #[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
+        pub use self::geniezone::GeniezoneKernelIrqChip;
     } else if #[cfg(all(windows, feature = "whpx"))] {
         mod whpx;
         pub use self::whpx::WhpxSplitIrqChip;
-    }
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(all(unix, any(target_arch = "arm", target_arch = "aarch64"), feature = "gunyah"))] {
-        mod gunyah;
-        pub use self::gunyah::GunyahIrqChip;
     }
 }
 
@@ -54,7 +56,7 @@ cfg_if::cfg_if! {
         pub use apic::*;
         mod userspace;
         pub use userspace::*;
-    } else if #[cfg(any(target_arch = "arm", target_arch = "aarch64"))] {
+    } else if #[cfg(target_arch = "aarch64")] {
         mod aarch64;
         pub use aarch64::*;
     } else if #[cfg(target_arch = "riscv64")] {
@@ -71,11 +73,6 @@ cfg_if::cfg_if! {
 
 }
 
-#[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
-mod geniezone;
-#[cfg(all(target_arch = "aarch64", feature = "geniezone"))]
-pub use self::geniezone::GeniezoneKernelIrqChip;
-
 #[cfg(all(target_arch = "aarch64", feature = "halla"))]
 mod halla;
 #[cfg(all(target_arch = "aarch64", feature = "halla"))]
@@ -89,51 +86,6 @@ struct IrqEvent {
     gsi: u32,
     resample_event: Option<Event>,
     source: IrqEventSource,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeviceId {
-    /// PCI Device, use its PciId directly.
-    PciDeviceId(PciId),
-    /// Platform device, use a unique Id.
-    PlatformDeviceId(CrosvmDeviceId),
-}
-
-impl From<PciId> for DeviceId {
-    fn from(v: PciId) -> Self {
-        Self::PciDeviceId(v)
-    }
-}
-
-impl From<CrosvmDeviceId> for DeviceId {
-    fn from(v: CrosvmDeviceId) -> Self {
-        Self::PlatformDeviceId(v)
-    }
-}
-
-impl TryFrom<u32> for DeviceId {
-    type Error = base::Error;
-
-    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
-        let device_id = (value & 0xFFFF) as u16;
-        let vendor_id = ((value & 0xFFFF_0000) >> 16) as u16;
-        if vendor_id == 0xFFFF {
-            Ok(DeviceId::PlatformDeviceId(CrosvmDeviceId::try_from(
-                device_id,
-            )?))
-        } else {
-            Ok(DeviceId::PciDeviceId(PciId::new(vendor_id, device_id)))
-        }
-    }
-}
-
-impl From<DeviceId> for u32 {
-    fn from(id: DeviceId) -> Self {
-        match id {
-            DeviceId::PciDeviceId(pci_id) => pci_id.into(),
-            DeviceId::PlatformDeviceId(id) => 0xFFFF0000 | id as u32,
-        }
-    }
 }
 
 /// Identification information about the source of an IrqEvent

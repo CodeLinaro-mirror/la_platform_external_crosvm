@@ -28,6 +28,8 @@ use serde::Serialize;
 use snapshot::AnySnapshot;
 use sync::Mutex;
 use thiserror::Error;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 use vm_control::GpeNotify;
 use vm_control::PmResource;
 use vm_control::PmeNotify;
@@ -36,11 +38,9 @@ use vm_control::VmResponse;
 
 use crate::ac_adapter::AcAdapter;
 use crate::pci::pm::PmConfig;
-use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::BusResumeDevice;
-use crate::DeviceId;
 use crate::IrqLevelEvent;
 use crate::Suspendable;
 
@@ -789,10 +789,7 @@ mod tests {
     fn get_irq_evt() -> IrqLevelEvent {
         match crate::IrqLevelEvent::new() {
             Ok(evt) => evt,
-            Err(e) => panic!(
-                "failed to create irqlevelevt: {} - panic. Can't test ACPI",
-                e
-            ),
+            Err(e) => panic!("failed to create irqlevelevt: {e} - panic. Can't test ACPI"),
         }
     }
 

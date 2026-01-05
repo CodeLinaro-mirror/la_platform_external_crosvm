@@ -80,7 +80,7 @@ impl IrqWaitWorker {
     ) -> Result<Arc<WaitContext<ChildToken>>> {
         let (child_control_tube, child_control_tube_for_child) = Tube::pair().map_err(|e| {
             error!("failed to create IRQ child control tube: {:?}", e);
-            base::Error::from(io::Error::new(io::ErrorKind::Other, e))
+            base::Error::from(io::Error::other(e))
         })?;
         let (child_wait_ctx, child_join_handle) =
             IrqWaitWorkerChild::start(child_control_tube_for_child, irq_chip, irq_frequencies)?;
@@ -181,8 +181,7 @@ impl IrqWaitWorker {
                                                 token_count += tokens_serviced;
                                             }
                                             unexpected_resp => panic!(
-                                                "got unexpected response: {:?}",
-                                                unexpected_resp
+                                                "got unexpected response: {unexpected_resp:?}"
                                             ),
                                         }
                                     }
@@ -227,7 +226,7 @@ impl IrqWaitWorker {
                                                             .expect("Failed to clone irq event."),
                                                     );
                                                     let source = IrqEventSource {
-                                                        device_id: device_id.try_into()?,
+                                                        device_id,
                                                         queue_id,
                                                         device_name,
                                                     };
@@ -337,8 +336,13 @@ impl IrqWaitWorker {
                             {
                                 bytes[i] = *byte
                             }
-                            let device_id: u32 = source.device_id.into();
-                            for (i, byte) in device_id.to_le_bytes().iter().enumerate() {
+                            for (i, byte) in source
+                                .device_id
+                                .metrics_id()
+                                .to_le_bytes()
+                                .iter()
+                                .enumerate()
+                            {
                                 bytes[i + 4] = *byte
                             }
                             bytes

@@ -10,6 +10,7 @@ use base::Event;
 use base::RawDescriptor;
 use base::Tube;
 use bit_field::*;
+use vm_control::PciId;
 use vm_control::VmIrqRequest;
 use vm_control::VmIrqResponse;
 use zerocopy::FromBytes;
@@ -195,7 +196,7 @@ impl MsiConfig {
             gsi,
             msi_address: self.address,
             msi_data: self.data.into(),
-            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            #[cfg(target_arch = "aarch64")]
             pci_address,
         }) {
             error!("failed to send AddMsiRoute request at {:?}", e);
@@ -222,7 +223,7 @@ impl MsiConfig {
 
         let request = VmIrqRequest::AllocateOneMsi {
             irqfd,
-            device_id: self.device_id,
+            device_id: PciId::from(self.device_id).into(),
             queue_id: 0,
             device_name: self.device_name.clone(),
         };
@@ -370,7 +371,7 @@ const MSI_CONFIG_READ_MASK: [u32; MSI_LENGTH_64BIT_WITH_MASK as usize / 4] =
 
 impl PciCapConfig for MsiConfig {
     fn read_mask(&self) -> &'static [u32] {
-        let num_regs = (self.len() + 3) / 4;
+        let num_regs = self.len().div_ceil(4);
         &MSI_CONFIG_READ_MASK[0..(num_regs as usize)]
     }
 

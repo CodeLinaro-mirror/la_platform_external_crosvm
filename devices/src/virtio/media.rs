@@ -586,7 +586,6 @@ where
         let shm_mapper = self
             .shm_mapper
             .clone()
-            .take()
             .context("shared memory mapper was not specified")?;
 
         let wait_ctx = WaitContext::new()?;
@@ -700,7 +699,7 @@ pub fn create_virtio_media_v4l2_proxy_device<P: AsRef<Path>>(
         card: Default::default(),
     };
     let card = &device.caps().card;
-    let name_slice = card[0..std::cmp::min(card.len(), config.card.len())].as_bytes();
+    let name_slice = &card.as_bytes()[0..std::cmp::min(card.len(), config.card.len())];
     config.card.as_mut_slice()[0..name_slice.len()].copy_from_slice(name_slice);
     let device_path = PathBuf::from(device_path.as_ref());
 
@@ -740,7 +739,7 @@ pub fn create_virtio_media_decoder_adapter_device(
     use crate::virtio::video::decoder::DecoderBackend;
 
     let mut card = [0u8; 32];
-    let card_name = format!("{:?} decoder adapter", backend).to_lowercase();
+    let card_name = format!("{backend:?} decoder adapter").to_lowercase();
     card[0..card_name.len()].copy_from_slice(card_name.as_bytes());
     let config = VirtioMediaDeviceConfig {
         device_caps: (Capabilities::VIDEO_M2M_MPLANE | Capabilities::STREAMING).bits(),

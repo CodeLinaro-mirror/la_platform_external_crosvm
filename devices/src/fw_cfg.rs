@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::iter::repeat;
 use std::path::PathBuf;
 
 #[cfg(windows)]
@@ -16,10 +15,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_keyvalue::FromKeyValues;
 use thiserror::Error as ThisError;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 
 use crate::BusAccessInfo;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::Suspendable;
 
 pub const FW_CFG_BASE_PORT: u64 = 0x510;
@@ -273,7 +273,10 @@ impl FwCfgDevice {
             raw_file_dir.extend_from_slice(&[0, 0]);
             raw_file_dir.extend_from_slice(file.name.as_bytes());
             // Padding for c-style char[]
-            raw_file_dir.extend(repeat(0).take(FW_CFG_FILENAME_SIZE - file.name.len()));
+            raw_file_dir.extend(std::iter::repeat_n(
+                0,
+                FW_CFG_FILENAME_SIZE - file.name.len(),
+            ));
         }
 
         self.add_bytes(raw_file_dir, FwCfgItemType::FileDir);
@@ -283,7 +286,7 @@ impl FwCfgDevice {
 // We implement two 8-bit registers: a Selector(Control) Register and a Data Register
 impl BusDevice for FwCfgDevice {
     fn device_id(&self) -> DeviceId {
-        super::CrosvmDeviceId::FwCfg.into()
+        CrosvmDeviceId::FwCfg.into()
     }
 
     fn debug_label(&self) -> String {

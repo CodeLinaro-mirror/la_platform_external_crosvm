@@ -31,12 +31,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use snapshot::AnySnapshot;
 use sync::Mutex;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 use vm_control::VmResponse;
 
-use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::IrqEdgeEvent;
 use crate::Suspendable;
 
@@ -344,7 +344,7 @@ impl BusDevice for Cmos {
                     self.set_alarm();
                 }
             }
-            o => panic!("bad write offset on CMOS device: {}", o),
+            o => panic!("bad write offset on CMOS device: {o}"),
         }
     }
 
@@ -395,7 +395,7 @@ impl BusDevice for Cmos {
                     }
                 }
             }
-            o => panic!("bad read offset on CMOS device: {}", o),
+            o => panic!("bad read offset on CMOS device: {o}"),
         }
     }
 }

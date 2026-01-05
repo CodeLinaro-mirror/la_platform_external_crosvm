@@ -11,6 +11,12 @@
 //! if the request type expects one.
 
 pub mod api;
+
+mod device_id;
+pub use device_id::CrosvmDeviceId;
+pub use device_id::DeviceId;
+pub use device_id::PciId;
+
 #[cfg(feature = "gdb")]
 pub mod gdb;
 #[cfg(feature = "gpu")]
@@ -89,7 +95,6 @@ use protos::registered_events;
 use remain::sorted;
 use resources::Alloc;
 use resources::SystemAllocator;
-use rutabaga_gfx::DeviceId;
 use rutabaga_gfx::RutabagaDescriptor;
 use rutabaga_gfx::RutabagaFromRawDescriptor;
 use rutabaga_gfx::RutabagaGralloc;
@@ -224,7 +229,7 @@ impl Display for DiskControlCommand {
         use self::DiskControlCommand::*;
 
         match self {
-            Resize { new_size } => write!(f, "disk_resize {}", new_size),
+            Resize { new_size } => write!(f, "disk_resize {new_size}"),
         }
     }
 }
@@ -290,8 +295,8 @@ impl Display for PciControlResult {
         use self::PciControlResult::*;
 
         match self {
-            AddOk { bus } => write!(f, "add_ok {}", bus),
-            ErrString(e) => write!(f, "error: {}", e),
+            AddOk { bus } => write!(f, "add_ok {bus}"),
+            ErrString(e) => write!(f, "error: {e}"),
             RemoveOk => write!(f, "remove_ok"),
         }
     }
@@ -313,7 +318,7 @@ impl Display for UsbControlResult {
         use self::UsbControlResult::*;
 
         match self {
-            UsbControlResult::Ok { port } => write!(f, "ok {}", port),
+            UsbControlResult::Ok { port } => write!(f, "ok {port}"),
             NoAvailablePort => write!(f, "no_available_port"),
             NoSuchDevice => write!(f, "no_such_device"),
             NoSuchPort => write!(f, "no_such_port"),
@@ -482,7 +487,7 @@ impl VmMemorySource {
                 driver_uuid,
                 size,
             } => {
-                let device_id = DeviceId {
+                let device_id = rutabaga_gfx::DeviceId {
                     device_uuid,
                     driver_uuid,
                 };
@@ -500,9 +505,8 @@ impl VmMemorySource {
                     )
                     .with_context(|| {
                         format!(
-                            "gralloc failed to import and map, handle type: {}, memory index {}, \
-                             size: {}",
-                            handle_type, memory_idx, size
+                            "gralloc failed to import and map, handle type: {handle_type}, memory index {memory_idx}, \
+                             size: {size}"
                         )
                     })?;
                 let mapped_region: Box<dyn MappedRegion> =
@@ -1070,7 +1074,7 @@ impl VmMemoryRequest {
 #[derive(Serialize, Deserialize, Debug, PartialOrd, PartialEq, Eq, Ord, Clone, Copy)]
 /// Identifer for registered memory regions. Globally unique.
 // The current implementation uses guest physical address as the unique identifier.
-pub struct VmMemoryRegionId(GuestAddress);
+pub struct VmMemoryRegionId(pub GuestAddress);
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum VmMemoryResponse {
@@ -1155,7 +1159,7 @@ pub enum VmIrqRequest {
     /// Allocate one gsi, and associate gsi to irqfd with register_irqfd()
     AllocateOneMsi {
         irqfd: Event,
-        device_id: u32,
+        device_id: DeviceId,
         queue_id: usize,
         device_name: String,
     },
@@ -1166,7 +1170,7 @@ pub enum VmIrqRequest {
     AllocateOneMsiAtGsi {
         irqfd: Event,
         gsi: u32,
-        device_id: u32,
+        device_id: DeviceId,
         queue_id: usize,
         device_name: String,
     },
@@ -1175,7 +1179,7 @@ pub enum VmIrqRequest {
         gsi: u32,
         msi_address: u64,
         msi_data: u32,
-        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        #[cfg(target_arch = "aarch64")]
         pci_address: resources::PciAddress,
     },
     // unregister_irqfs() and release gsi
@@ -1189,7 +1193,7 @@ pub enum VmIrqRequest {
 /// VmIrqRequest::execute can't take an `IrqChip` argument, because of a dependency cycle between
 /// devices and vm_control, so it takes a Fn that processes an `IrqSetup`.
 pub enum IrqSetup<'a> {
-    Event(u32, &'a Event, u32, usize, String),
+    Event(u32, &'a Event, DeviceId, usize, String),
     Route(IrqRoute),
     UnRegister(u32, &'a Event),
 }
@@ -1252,7 +1256,7 @@ impl VmIrqRequest {
                 gsi,
                 msi_address,
                 msi_data,
-                #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                #[cfg(target_arch = "aarch64")]
                 pci_address,
             } => {
                 let route = IrqRoute {
@@ -1260,7 +1264,7 @@ impl VmIrqRequest {
                     source: IrqSource::Msi {
                         address: msi_address,
                         data: msi_data,
-                        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                        #[cfg(target_arch = "aarch64")]
                         pci_address,
                     },
                 };
@@ -1639,6 +1643,16 @@ pub enum VmRequest {
     Throttle(usize, u32),
     /// Returns unique descriptor of this VM.
     GetVmDescriptor,
+    /// Registers memory in guest.
+    RegisterMemory {
+        fd: SafeDescriptor,
+        offset: u64,
+        range_start: u64,
+        range_end: u64,
+        cache_coherent: bool,
+    },
+    /// Unregisters memory in guest.
+    UnregisterMemory { region_id: u64 },
 }
 
 /// NOTE: when making any changes to this enum please also update
@@ -1882,12 +1896,12 @@ impl Drop for DeviceSleepGuard<'_> {
                 .device_control_tube
                 .send(&DeviceControlCommand::WakeDevices)
             {
-                panic!("failed to request device wake after snapshot: {}", e);
+                panic!("failed to request device wake after snapshot: {e}");
             }
             match self.device_control_tube.recv() {
                 Ok(VmResponse::Ok) => (),
-                Ok(resp) => panic!("unexpected response to device wake request: {}", resp),
-                Err(e) => panic!("failed to get reply for device wake request: {}", e),
+                Ok(resp) => panic!("unexpected response to device wake request: {resp}"),
+                Err(e) => panic!("failed to get reply for device wake request: {e}"),
             }
         }
     }
@@ -2384,6 +2398,8 @@ impl VmRequest {
                     vm_fd,
                 }
             }
+            VmRequest::RegisterMemory { .. } => unreachable!(),
+            VmRequest::UnregisterMemory { .. } => unreachable!(),
         }
     }
 }
@@ -2689,6 +2705,8 @@ pub enum VmResponse {
     ErrString(String),
     /// The memory was registered into guest address space in memory slot number `slot`.
     RegisterMemory { slot: u32 },
+    /// Variant of the register memory but with region_id.
+    RegisterMemory2 { region_id: u64 },
     /// Results of balloon control commands.
     #[cfg(feature = "balloon")]
     BalloonStats {
@@ -2731,9 +2749,12 @@ impl Display for VmResponse {
 
         match self {
             Ok => write!(f, "ok"),
-            Err(e) => write!(f, "error: {}", e),
-            ErrString(e) => write!(f, "error: {}", e),
-            RegisterMemory { slot } => write!(f, "memory registered in slot {}", slot),
+            Err(e) => write!(f, "error: {e}"),
+            ErrString(e) => write!(f, "error: {e}"),
+            RegisterMemory { slot } => write!(f, "memory registered in slot {slot}"),
+            RegisterMemory2 { region_id } => {
+                write!(f, "memory registered in region id {region_id}")
+            }
             #[cfg(feature = "balloon")]
             VmResponse::BalloonStats {
                 stats,
@@ -2757,12 +2778,12 @@ impl Display for VmResponse {
                     balloon_actual,
                 )
             }
-            UsbResponse(result) => write!(f, "usb control request get result {:?}", result),
+            UsbResponse(result) => write!(f, "usb control request get result {result:?}"),
             #[cfg(feature = "pci-hotplug")]
-            PciHotPlugResponse { bus } => write!(f, "pci hotplug bus {:?}", bus),
+            PciHotPlugResponse { bus } => write!(f, "pci hotplug bus {bus:?}"),
             #[cfg(feature = "gpu")]
-            GpuResponse(result) => write!(f, "gpu control request result {:?}", result),
-            BatResponse(result) => write!(f, "{}", result),
+            GpuResponse(result) => write!(f, "gpu control request result {result:?}"),
+            BatResponse(result) => write!(f, "{result}"),
             SwapStatus(status) => {
                 write!(
                     f,
@@ -2771,10 +2792,10 @@ impl Display for VmResponse {
                         .unwrap_or_else(|_| "invalid_response".to_string()),
                 )
             }
-            DevicesState(status) => write!(f, "devices status: {:?}", status),
-            VcpuPidTidResponse { pid_tid_map } => write!(f, "vcpu pid tid map: {:?}", pid_tid_map),
+            DevicesState(status) => write!(f, "devices status: {status:?}"),
+            VcpuPidTidResponse { pid_tid_map } => write!(f, "vcpu pid tid map: {pid_tid_map:?}"),
             VmDescriptor { hypervisor, vm_fd } => {
-                write!(f, "hypervisor: {:?}, vm_fd: {:?}", hypervisor, vm_fd)
+                write!(f, "hypervisor: {hypervisor:?}, vm_fd: {vm_fd:?}")
             }
         }
     }
@@ -2878,11 +2899,10 @@ impl Display for VirtioIOMMUResponse {
         use self::VirtioIOMMUResponse::*;
         match self {
             Ok => write!(f, "ok"),
-            Err(e) => write!(f, "error: {}", e),
+            Err(e) => write!(f, "error: {e}"),
             VfioResponse(result) => write!(
                 f,
-                "The vfio-related virtio-iommu request got result: {:?}",
-                result
+                "The vfio-related virtio-iommu request got result: {result:?}"
             ),
         }
     }

@@ -45,11 +45,11 @@ done
 
 # Use the specific rust version that crosvm upstream expects.
 #
-# TODO: Consider reading the toolchain from external/crosvm/rust-toolchain
+# Read the toolchain from external/crosvm/rust-toolchain
 #
 # TODO: Consider using android's prebuilt rust binaries. Currently doesn't work
 # because they try to incorrectly use system clang and llvm.
-RUST_TOOLCHAIN="1.81.0"
+RUST_TOOLCHAIN=$(grep channel "$CROSVM_DIR/rust-toolchain" | cut -d '"' -f 2)
 rustup which --toolchain $RUST_TOOLCHAIN cargo || \
   rustup toolchain install $RUST_TOOLCHAIN
 CARGO_BIN="$(dirname $(rustup which --toolchain $RUST_TOOLCHAIN cargo))"

@@ -25,6 +25,8 @@ use hypervisor::PitState;
 use remain::sorted;
 use sync::Mutex;
 use thiserror::Error;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 
 cfg_if::cfg_if! {
     if #[cfg(test)] {
@@ -40,9 +42,7 @@ use base::WorkerThread;
 use snapshot::AnySnapshot;
 
 use crate::bus::BusAccessInfo;
-use crate::pci::CrosvmDeviceId;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::IrqEdgeEvent;
 use crate::Suspendable;
 
@@ -644,7 +644,7 @@ impl PitCounter {
             Some(CommandMode::CommandInterrupt) => ticks_passed >= count,
             Some(CommandMode::CommandHWOneShot) => ticks_passed < count,
             Some(CommandMode::CommandRateGen) => ticks_passed != 0 && ticks_passed % count == 0,
-            Some(CommandMode::CommandSquareWaveGen) => ticks_passed < (count + 1) / 2,
+            Some(CommandMode::CommandSquareWaveGen) => ticks_passed < count.div_ceil(2),
             Some(CommandMode::CommandSWStrobe) | Some(CommandMode::CommandHWStrobe) => {
                 ticks_passed == count
             }
@@ -952,7 +952,7 @@ mod tests {
             0 => PortIOSpace::PortCounter0Data,
             1 => PortIOSpace::PortCounter1Data,
             2 => PortIOSpace::PortCounter2Data,
-            _ => panic!("Invalid counter_idx: {}", counter_idx),
+            _ => panic!("Invalid counter_idx: {counter_idx}"),
         };
         // Write the least, then the most, significant byte.
         if access_mode == CommandAccess::CommandRWLeast
@@ -973,7 +973,7 @@ mod tests {
             0 => PortIOSpace::PortCounter0Data,
             1 => PortIOSpace::PortCounter1Data,
             2 => PortIOSpace::PortCounter2Data,
-            _ => panic!("Invalid counter_idx: {}", counter_idx),
+            _ => panic!("Invalid counter_idx: {counter_idx}"),
         };
         let mut result: u16 = 0;
         if access_mode == CommandAccess::CommandRWLeast

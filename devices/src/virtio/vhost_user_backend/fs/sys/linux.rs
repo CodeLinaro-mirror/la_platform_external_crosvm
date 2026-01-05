@@ -26,13 +26,13 @@ use crate::virtio::vhost_user_backend::BackendConnection;
 fn default_uidmap() -> String {
     // SAFETY: trivially safe
     let euid = unsafe { libc::geteuid() };
-    format!("{} {} 1", euid, euid)
+    format!("{euid} {euid} 1")
 }
 
 fn default_gidmap() -> String {
     // SAFETY: trivially safe
     let egid = unsafe { libc::getegid() };
-    format!("{} {} 1", egid, egid)
+    format!("{egid} {egid} 1")
 }
 
 #[allow(clippy::unnecessary_cast)]
@@ -125,6 +125,10 @@ pub fn start_device(mut opts: Options) -> anyhow::Result<()> {
     if let Some(ref mut cfg) = opts.cfg {
         if !cfg.ugid_map.is_empty() && (!opts.disable_sandbox || !opts.skip_pivot_root) {
             bail!("uid_gid_map can only be set with disable sandbox and skip_pivot_root option");
+        }
+
+        if cfg.unmap_guest_memory_on_fork && !opts.disable_sandbox {
+            bail!("unmap_guest_memory_on_fork requires --disable-sandbox");
         }
 
         if opts.skip_pivot_root {

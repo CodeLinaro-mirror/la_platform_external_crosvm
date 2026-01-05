@@ -463,7 +463,7 @@ pub fn create_vhost_user_frontend(
     })
 }
 
-pub fn create_rng_device(
+pub fn create_virtio_rng_device(
     protection_type: ProtectionType,
     jail_config: Option<&JailConfig>,
 ) -> DeviceResult {
@@ -962,8 +962,8 @@ pub fn create_wayland_device(
     resource_bridge: Option<Tube>,
 ) -> DeviceResult {
     let wayland_socket_dirs = wayland_socket_paths
-        .iter()
-        .map(|(_name, path)| path.parent())
+        .values()
+        .map(|path| path.parent())
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| anyhow!("wayland socket path has no parent or file name"))?;
 
@@ -1179,7 +1179,7 @@ impl VirtioDeviceBuilder for &VsockConfig {
     }
 }
 
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 pub fn create_vhost_scmi_device(
     protected_vm: ProtectionType,
     jail_config: Option<&JailConfig>,
@@ -1360,7 +1360,7 @@ pub fn create_pmem_device(
             .allocate_mmio(
                 arena_size,
                 Alloc::PmemDevice(index),
-                format!("pmem_disk_image_{}", index),
+                format!("pmem_disk_image_{index}"),
                 AllocOptions::new()
                 // Allocate from the bottom up rather than top down to avoid exceeding PHYSMEM_END
                 // with kaslr.
@@ -1432,7 +1432,7 @@ pub fn create_pmem_ext2_device(
             .allocate_mmio(
                 mapping_size,
                 Alloc::PmemDevice(index),
-                format!("pmem_ext2_image_{}", index),
+                format!("pmem_ext2_image_{index}"),
                 AllocOptions::new()
                 .top_down(true)
                 .prefetchable(true)

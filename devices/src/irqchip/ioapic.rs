@@ -25,14 +25,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use snapshot::AnySnapshot;
 use thiserror::Error;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 use vm_control::VmIrqRequest;
 use vm_control::VmIrqResponse;
 
 use super::IrqEvent;
 use crate::bus::BusAccessInfo;
-use crate::pci::CrosvmDeviceId;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::IrqEventSource;
 use crate::Suspendable;
 
@@ -453,7 +453,7 @@ impl Ioapic {
             let event = Event::new().map_err(IoapicError::CreateEvent)?;
             let request = VmIrqRequest::AllocateOneMsi {
                 irqfd: event,
-                device_id: self.device_id().into(),
+                device_id: self.device_id(),
                 queue_id: index, // Use out_events index as queue_id for outgoing ioapic MSIs
                 device_name: name.clone(),
             };
@@ -539,7 +539,7 @@ impl Ioapic {
         let request = VmIrqRequest::AllocateOneMsiAtGsi {
             irqfd: event,
             gsi,
-            device_id: self.device_id().into(),
+            device_id: self.device_id(),
             queue_id: index, // Use out_events index as queue_id for outgoing ioapic MSIs
             device_name: name.clone(),
         };
@@ -1213,7 +1213,7 @@ mod tests {
     fn recv_allocate_msi(t: &Tube) -> u32 {
         match t.recv::<VmIrqRequest>().unwrap() {
             VmIrqRequest::AllocateOneMsiAtGsi { gsi, .. } => gsi,
-            msg => panic!("unexpected irqchip message: {:?}", msg),
+            msg => panic!("unexpected irqchip message: {msg:?}"),
         }
     }
 
@@ -1235,7 +1235,7 @@ mod tests {
                 msi_address,
                 msi_data,
             },
-            msg => panic!("unexpected irqchip message: {:?}", msg),
+            msg => panic!("unexpected irqchip message: {msg:?}"),
         }
     }
 
@@ -1243,7 +1243,7 @@ mod tests {
     fn recv_release_one_irq(t: &Tube) -> u32 {
         match t.recv::<VmIrqRequest>().unwrap() {
             VmIrqRequest::ReleaseOneIrq { gsi, irqfd: _ } => gsi,
-            msg => panic!("unexpected irqchip message: {:?}", msg),
+            msg => panic!("unexpected irqchip message: {msg:?}"),
         }
     }
 

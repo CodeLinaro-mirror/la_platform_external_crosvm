@@ -23,11 +23,11 @@ use base::Tube;
 use base::WaitContext;
 use base::WorkerThread;
 use sync::Mutex;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 
-use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::Suspendable;
 
 const CPUFREQ_GOV_SCALE_FACTOR_DEFAULT: u32 = 100;
@@ -278,7 +278,7 @@ impl BusDevice for VirtCpufreqV2 {
                 {
                     use std::io::Write;
                     let val = util as f32 * 100.0 / SCHED_CAPACITY_SCALE as f32;
-                    let val_formatted = format!("{:4}", val).into_bytes();
+                    let val_formatted = format!("{val:4}").into_bytes();
 
                     if self.vcpu_fmax != self.pcpu_fmax {
                         if let Err(e) = domain_uclamp_max.write(&val_formatted) {

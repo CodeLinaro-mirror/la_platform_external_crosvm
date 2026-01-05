@@ -33,12 +33,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use snapshot::AnySnapshot;
 use sync::Mutex;
+use vm_control::CrosvmDeviceId;
+use vm_control::DeviceId;
 use vm_control::VmResponse;
 
-use crate::pci::CrosvmDeviceId;
 use crate::BusAccessInfo;
 use crate::BusDevice;
-use crate::DeviceId;
 use crate::IrqEdgeEvent;
 use crate::Suspendable;
 
@@ -306,7 +306,7 @@ impl Vmwdt {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn get_guest_time_ms(process_id: u32, thread_id: u32) -> Result<i64, SysError> {
         // TODO: @sebastianene check if we can avoid open-read-close on each call
-        let stat_path = format!("/proc/{}/task/{}/stat", process_id, thread_id);
+        let stat_path = format!("/proc/{process_id}/task/{thread_id}/stat");
         let contents = fs::read_to_string(stat_path)?;
 
         let gtime_ticks = contents

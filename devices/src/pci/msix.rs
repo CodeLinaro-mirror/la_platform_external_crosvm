@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use snapshot::AnySnapshot;
 use thiserror::Error;
+use vm_control::PciId;
 use vm_control::VmIrqRequest;
 use vm_control::VmIrqResponse;
 use zerocopy::FromBytes;
@@ -310,7 +311,7 @@ impl MsixConfig {
         let request = VmIrqRequest::AllocateOneMsiAtGsi {
             irqfd,
             gsi,
-            device_id: self.pci_id,
+            device_id: PciId::from(self.pci_id).into(),
             queue_id: index,
             device_name: self.device_name.clone(),
         };
@@ -384,7 +385,7 @@ impl MsixConfig {
                 gsi,
                 msi_address,
                 msi_data,
-                #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                #[cfg(target_arch = "aarch64")]
                 pci_address,
             })
             .map_err(MsixError::AddMsiRouteSend)?;
@@ -419,7 +420,7 @@ impl MsixConfig {
         let irqfd = Event::new().map_err(MsixError::AllocateOneMsi)?;
         let request = VmIrqRequest::AllocateOneMsi {
             irqfd,
-            device_id: self.pci_id,
+            device_id: vm_control::PciId::from(self.pci_id).into(),
             queue_id: index,
             device_name: self.device_name.clone(),
         };
@@ -870,7 +871,7 @@ mod tests {
     fn recv_allocate_msi(t: &Tube) -> u32 {
         match t.recv::<VmIrqRequest>().unwrap() {
             VmIrqRequest::AllocateOneMsiAtGsi { gsi, .. } => gsi,
-            msg => panic!("unexpected irqchip message: {:?}", msg),
+            msg => panic!("unexpected irqchip message: {msg:?}"),
         }
     }
 
@@ -879,7 +880,7 @@ mod tests {
         gsi: u32,
         msi_address: u64,
         msi_data: u32,
-        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        #[cfg(target_arch = "aarch64")]
         pci_address: resources::PciAddress,
     }
 
@@ -896,16 +897,16 @@ mod tests {
                 gsi,
                 msi_address,
                 msi_data,
-                #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                #[cfg(target_arch = "aarch64")]
                 pci_address,
             } => MsiRouteDetails {
                 gsi,
                 msi_address,
                 msi_data,
-                #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                #[cfg(target_arch = "aarch64")]
                 pci_address,
             },
-            msg => panic!("unexpected irqchip message: {:?}", msg),
+            msg => panic!("unexpected irqchip message: {msg:?}"),
         }
     }
 
@@ -913,7 +914,7 @@ mod tests {
     fn recv_release_one_irq(t: &Tube) -> u32 {
         match t.recv::<VmIrqRequest>().unwrap() {
             VmIrqRequest::ReleaseOneIrq { gsi, irqfd: _ } => gsi,
-            msg => panic!("unexpected irqchip message: {:?}", msg),
+            msg => panic!("unexpected irqchip message: {msg:?}"),
         }
     }
 
@@ -967,7 +968,7 @@ mod tests {
                     gsi: 10,
                     msi_address: 0xa0,
                     msi_data: 0xd0,
-                    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                    #[cfg(target_arch = "aarch64")]
                     pci_address: TEST_PCI_ADDRESS,
                 }
             );
@@ -981,7 +982,7 @@ mod tests {
                     gsi: 20,
                     msi_address: 0xa1,
                     msi_data: 0xd1,
-                    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                    #[cfg(target_arch = "aarch64")]
                     pci_address: TEST_PCI_ADDRESS,
                 }
             );
@@ -1048,7 +1049,7 @@ mod tests {
                     gsi: 10,
                     msi_address: 0xa0,
                     msi_data: 0xd0,
-                    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                    #[cfg(target_arch = "aarch64")]
                     pci_address: TEST_PCI_ADDRESS,
                 }
             );
@@ -1062,7 +1063,7 @@ mod tests {
                     gsi: 20,
                     msi_address: 0xa1,
                     msi_data: 0xd1,
-                    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+                    #[cfg(target_arch = "aarch64")]
                     pci_address: TEST_PCI_ADDRESS,
                 }
             );

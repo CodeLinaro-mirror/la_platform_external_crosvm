@@ -6,10 +6,8 @@
 // start a VM on windows. Enable e2e tests on windows and remove this comment.
 
 use std::env;
-use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::BufReader;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -18,12 +16,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::Context;
 use anyhow::Result;
 use base::named_pipes;
 use base::PipeConnection;
 use delegate::wire_format::DelegateMessage;
-use rand::Rng;
 use serde_json::StreamDeserializer;
 
 use crate::utils::find_crosvm_binary;
@@ -33,7 +29,6 @@ use crate::vm::Config;
 const GUEST_EARLYCON: &str = "guest_earlycon.log";
 const GUEST_CONSOLE: &str = "guest_latecon.log";
 const HYPERVISOR_LOG: &str = "hypervisor.log";
-const VM_JSON_CONFIG_FILE: &str = "vm.json";
 // SLEEP_TIMEOUT is somewhat arbitrarily chosen by looking at a few downstream
 // presubmit runs.
 const SLEEP_TIMEOUT: Duration = Duration::from_millis(500);
@@ -54,10 +49,7 @@ pub fn binary_name() -> &'static str {
 
 // Generates random pipe name in device folder.
 fn generate_pipe_name() -> String {
-    format!(
-        r"\\.\pipe\test-ipc-pipe-name.rand{}",
-        rand::thread_rng().gen::<u64>(),
-    )
+    format!(r"\\.\pipe\test-ipc-pipe-name.rand{}", rand::random::<u64>())
 }
 
 // Gets custom hypervisor from `CROSVM_TEST_HYPERVISOR` environment variable or
@@ -144,7 +136,7 @@ impl TestVmSys {
     pub fn check_rootfs_file(rootfs_path: &Path) {
         // Check if the test file system is a known compatible one.
         if let Err(e) = OpenOptions::new().write(false).read(true).open(rootfs_path) {
-            panic!("File open expected to work but did not: {}", e);
+            panic!("File open expected to work but did not: {e}");
         }
     }
 
@@ -229,7 +221,7 @@ impl TestVmSys {
         command.args(get_hypervisor_args());
         command.args(cfg.extra_args);
 
-        println!("Running command: {:?}", command);
+        println!("Running command: {command:?}");
 
         let process = Some(command.spawn().unwrap());
 
@@ -269,117 +261,6 @@ impl TestVmSys {
 
         // Set kernel as the last argument.
         command.arg(local_path_from_url(&cfg.kernel_url));
-
-        Ok(())
-    }
-
-    /// Generate a JSON configuration file for `cfg` and returns its path.
-    fn generate_json_config_file(
-        from_guest_pipe: &Path,
-        logs_path: &Path,
-        cfg: &Config,
-    ) -> Result<PathBuf> {
-        let config_file_path = logs_path.join(VM_JSON_CONFIG_FILE);
-        let mut config_file = File::create(&config_file_path)?;
-
-        writeln!(config_file, "{{")?;
-
-        writeln!(
-            config_file,
-            r#"
-              "params": [ "init=/bin/delegate noxsaves noxsave nopat nopti tsc=reliable" ],
-              "serial": [
-                {{
-                    "type": "file",
-                    "hardware": "serial",
-                    "num": "1",
-                    "path": "{}",
-                    "earlycon": "true"
-                }},
-                {{
-                    "type": "file",
-                    "path": "{}",
-                    "hardware": "serial",
-                    "num": "1",
-                    "console": "true"
-                   }},
-                {{
-                    "hardware": "serial",
-                    "num": "2",
-                    "type": "namedpipe",
-                    "path": "{}",
-                }},
-              ]
-            }}
-            "#,
-            logs_path.join(GUEST_EARLYCON).display(),
-            logs_path.join(GUEST_CONSOLE).display(),
-            from_guest_pipe.display()
-        )?;
-
-        if let Some(rootfs_url) = &cfg.rootfs_url {
-            writeln!(
-                config_file,
-                r#"
-                ,"root": [
-                {{
-                  "path": "{}",
-                  "ro": true,
-                  "root": true,
-                  "sparse": false
-                }}
-              ]
-                  "#,
-                local_path_from_url(rootfs_url)
-                    .to_str()
-                    .context("invalid rootfs path")?,
-            )?;
-        };
-        if let Some(initrd_url) = &cfg.initrd_url {
-            writeln!(
-                config_file,
-                r#"",initrd": "{}""#,
-                local_path_from_url(initrd_url)
-                    .to_str()
-                    .context("invalid initrd path")?
-            )?;
-        };
-
-        writeln!(
-            config_file,
-            r#"
-        ,"logs-directory": "{}",
-        "kernel-log-file": "{},
-        "hypervisor": "{}"
-        {},
-        {}"#,
-            logs_path.display(),
-            logs_path.join(HYPERVISOR_LOG).display(),
-            get_hypervisor(),
-            local_path_from_url(&cfg.kernel_url).display(),
-            &get_irqchip(&get_hypervisor()).map_or("".to_owned(), |irqchip| format!(
-                r#","irqchip": "{}""#,
-                irqchip
-            ))
-        )?;
-
-        writeln!(config_file, "}}")?;
-
-        Ok(config_file_path)
-    }
-
-    // Generates a config file from cfg and appends the command to use the config file.
-    pub fn append_config_file_arg(
-        command: &mut Command,
-        serial_args: &SerialArgs,
-        cfg: &Config,
-    ) -> Result<()> {
-        let config_file_path = TestVmSys::generate_json_config_file(
-            &serial_args.from_guest_pipe,
-            &serial_args.logs_dir,
-            cfg,
-        )?;
-        command.args(["--cfg", config_file_path.to_str().unwrap()]);
 
         Ok(())
     }

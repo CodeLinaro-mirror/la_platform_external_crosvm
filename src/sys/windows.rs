@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 use aarch64::AArch64 as Arch;
 use acpi_tables::sdt::SDT;
 use anyhow::anyhow;
@@ -121,7 +121,7 @@ use devices::BusDeviceObj;
 use devices::BusResumeDevice;
 #[cfg(feature = "gvm")]
 use devices::GvmIrqChip;
-#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 use devices::IrqChip;
 use devices::UserspaceIrqChip;
 use devices::VcpuRunState;
@@ -440,7 +440,7 @@ fn create_vhost_user_net_device(
     })
 }
 
-fn create_rng_device(cfg: &Config) -> DeviceResult {
+fn create_virtio_rng_device(cfg: &Config) -> DeviceResult {
     let dev = virtio::Rng::new(virtio::base_features(cfg.protection_type))
         .exit_context(Exit::RngDeviceNew, "failed to set up rng")?;
 
@@ -585,7 +585,7 @@ fn create_virtio_devices(
         product::push_pvclock_device(cfg, &mut devs, tsc_frequency, tube);
     }
 
-    devs.push(create_rng_device(cfg)?);
+    devs.push(create_virtio_rng_device(cfg)?);
 
     #[cfg(feature = "slirp")]
     if let Some(net_vhost_user_tube) = cfg.net_vhost_user_tube.take() {

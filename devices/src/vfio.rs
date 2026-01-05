@@ -14,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(all(target_os = "android", target_arch = "aarch64"))]
 use std::ptr::addr_of_mut;
+use std::result;
 use std::slice;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -37,7 +38,6 @@ use data_model::vec_with_array_field;
 use hypervisor::DeviceKind;
 use hypervisor::Vm;
 use rand::seq::index::sample;
-use rand::thread_rng;
 use remain::sorted;
 use resources::address_allocator::AddressAllocator;
 use resources::AddressRange;
@@ -103,11 +103,11 @@ pub enum VfioError {
     UnknownDeviceType(u32),
     #[error("failed to call vfio device's ACPI _DSM: {0}")]
     VfioAcpiDsm(Error),
-    #[error("failed to disable vfio deviece's acpi notification: {0}")]
+    #[error("failed to disable vfio device's acpi notification: {0}")]
     VfioAcpiNotificationDisable(Error),
-    #[error("failed to enable vfio deviece's acpi notification: {0}")]
+    #[error("failed to enable vfio device's acpi notification: {0}")]
     VfioAcpiNotificationEnable(Error),
-    #[error("failed to test vfio deviece's acpi notification: {0}")]
+    #[error("failed to test vfio device's acpi notification: {0}")]
     VfioAcpiNotificationTest(Error),
     #[error(
         "vfio API version doesn't match with VFIO_API_VERSION defined in vfio_sys/src/vfio.rs"
@@ -119,17 +119,17 @@ pub enum VfioError {
     VfioDeviceGetRegionInfo(Error),
     #[error("container doesn't support IOMMU driver type {0:?}")]
     VfioIommuSupport(IommuType),
-    #[error("failed to disable vfio deviece's irq: {0}")]
+    #[error("failed to disable vfio device's irq: {0}")]
     VfioIrqDisable(Error),
-    #[error("failed to enable vfio deviece's irq: {0}")]
+    #[error("failed to enable vfio device's irq: {0}")]
     VfioIrqEnable(Error),
-    #[error("failed to mask vfio deviece's irq: {0}")]
+    #[error("failed to mask vfio device's irq: {0}")]
     VfioIrqMask(Error),
-    #[error("failed to unmask vfio deviece's irq: {0}")]
+    #[error("failed to unmask vfio device's irq: {0}")]
     VfioIrqUnmask(Error),
-    #[error("failed to enter vfio deviece's low power state: {0}")]
+    #[error("failed to enter vfio device's low power state: {0}")]
     VfioPmLowPowerEnter(Error),
-    #[error("failed to exit vfio deviece's low power state: {0}")]
+    #[error("failed to exit vfio device's low power state: {0}")]
     VfioPmLowPowerExit(Error),
 }
 
@@ -732,7 +732,7 @@ struct VfioGroup {
 
 impl VfioGroup {
     fn new(container: &VfioContainer, id: u32) -> Result<Self> {
-        let group_path = format!("/dev/vfio/{}", id);
+        let group_path = format!("/dev/vfio/{id}");
         let group_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1044,7 +1044,7 @@ impl VfioDevice {
 
             let vsids_len = KvmVfioPviommu::get_sid_count(vm, &dev)?.try_into().unwrap();
             let max_vsid = u32::MAX.try_into().unwrap();
-            let random_vsids = sample(&mut thread_rng(), max_vsid, vsids_len).into_iter();
+            let random_vsids = sample(&mut rand::thread_rng(), max_vsid, vsids_len).into_iter();
             let vsids = Vec::from_iter(random_vsids.map(|v| u32::try_from(v).unwrap()));
             for (i, vsid) in vsids.iter().enumerate() {
                 pviommu.attach(&dev, i.try_into().unwrap(), *vsid)?;
@@ -1163,17 +1163,8 @@ impl VfioDevice {
 
     /// enter the device's low power state
     pub fn pm_low_power_enter(&self) -> Result<()> {
-        let mut device_feature = vec_with_array_field::<vfio_device_feature, u8>(0);
-        device_feature[0].argsz = mem::size_of::<vfio_device_feature>() as u32;
-        device_feature[0].flags = VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_ENTRY;
-        // SAFETY:
-        // Safe as we are the owner of self and power_management which are valid value
-        let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE, &device_feature[0]) };
-        if ret < 0 {
-            Err(VfioError::VfioPmLowPowerEnter(get_error()))
-        } else {
-            Ok(())
-        }
+        self.device_feature(VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_ENTRY)
+            .map_err(VfioError::VfioPmLowPowerEnter)
     }
 
     /// enter the device's low power state with wakeup notification
@@ -1210,14 +1201,19 @@ impl VfioDevice {
 
     /// exit the device's low power state
     pub fn pm_low_power_exit(&self) -> Result<()> {
+        self.device_feature(VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_EXIT)
+            .map_err(VfioError::VfioPmLowPowerExit)
+    }
+
+    fn device_feature(&self, flags: u32) -> result::Result<(), Error> {
         let mut device_feature = vec_with_array_field::<vfio_device_feature, u8>(0);
         device_feature[0].argsz = mem::size_of::<vfio_device_feature>() as u32;
-        device_feature[0].flags = VFIO_DEVICE_FEATURE_SET | VFIO_DEVICE_FEATURE_LOW_POWER_EXIT;
+        device_feature[0].flags = flags;
         // SAFETY:
-        // Safe as we are the owner of self and power_management which are valid value
+        // Safe as we are the owner of self and device_feature which are valid value
         let ret = unsafe { ioctl_with_ref(&self.dev, VFIO_DEVICE_FEATURE, &device_feature[0]) };
         if ret < 0 {
-            Err(VfioError::VfioPmLowPowerExit(get_error()))
+            Err(get_error())
         } else {
             Ok(())
         }
@@ -1797,23 +1793,19 @@ impl VfioDevice {
         let stub: &VfioRegion = self
             .regions
             .get(index)
-            .unwrap_or_else(|| panic!("tried to read VFIO with an invalid index: {}", index));
+            .unwrap_or_else(|| panic!("tried to read VFIO with an invalid index: {index}"));
 
         let size = buf.len() as u64;
         if size > stub.size || addr + size > stub.size {
             panic!(
-                "tried to read VFIO region with invalid arguments: index={}, addr=0x{:x}, size=0x{:x}",
-                index, addr, size
+                "tried to read VFIO region with invalid arguments: index={index}, addr=0x{addr:x}, size=0x{size:x}"
             );
         }
 
         self.dev
             .read_exact_at(buf, stub.offset + addr)
             .unwrap_or_else(|e| {
-                panic!(
-                    "failed to read region: index={}, addr=0x{:x}, error={}",
-                    index, addr, e
-                )
+                panic!("failed to read region: index={index}, addr=0x{addr:x}, error={e}")
             });
     }
 
@@ -1838,7 +1830,7 @@ impl VfioDevice {
         let stub: &VfioRegion = self
             .regions
             .get(index)
-            .unwrap_or_else(|| panic!("tried to write VFIO with an invalid index: {}", index));
+            .unwrap_or_else(|| panic!("tried to write VFIO with an invalid index: {index}"));
 
         let size = buf.len() as u64;
         if size > stub.size
@@ -1846,18 +1838,14 @@ impl VfioDevice {
             || (stub.flags & VFIO_REGION_INFO_FLAG_WRITE) == 0
         {
             panic!(
-                "tried to write VFIO region with invalid arguments: index={}, addr=0x{:x}, size=0x{:x}",
-                index, addr, size
+                "tried to write VFIO region with invalid arguments: index={index}, addr=0x{addr:x}, size=0x{size:x}"
             );
         }
 
         self.dev
             .write_all_at(buf, stub.offset + addr)
             .unwrap_or_else(|e| {
-                panic!(
-                    "failed to write region: index={}, addr=0x{:x}, error={}",
-                    index, addr, e
-                )
+                panic!("failed to write region: index={index}, addr=0x{addr:x}, error={e}")
             });
     }
 
