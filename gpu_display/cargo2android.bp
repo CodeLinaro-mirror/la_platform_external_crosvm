@@ -37,10 +37,10 @@ cc_library_static {
 //  1. virtio-gpu-metadata-v1.xml is missing
 //  2. crosvm expects a different header suffix
 
-wayland_protocol_codegen {
+gensrcs {
     name: "gpu_display_protocol_sources",
     cmd: "$(location wayland_scanner) private-code < $(in) > $(out)",
-    suffix: ".c",
+    output: "$(in:base).c",
     srcs: [
         ":wayland_extension_protocols",
         "protocol/virtio-gpu-metadata-v1.xml",
@@ -48,10 +48,10 @@ wayland_protocol_codegen {
     tools: ["wayland_scanner"],
 }
 
-wayland_protocol_codegen {
+gensrcs {
     name: "gpu_display_client_protocol_headers",
     cmd: "$(location wayland_scanner) client-header < $(in) > $(out)",
-    suffix: ".h",
+    output: "$(in:base).h",
     srcs: [
         ":wayland_extension_protocols",
         "protocol/virtio-gpu-metadata-v1.xml",
@@ -59,10 +59,10 @@ wayland_protocol_codegen {
     tools: ["wayland_scanner"],
 }
 
-wayland_protocol_codegen {
+gensrcs {
     name: "gpu_display_server_protocol_headers",
     cmd: "$(location wayland_scanner) server-header < $(in) > $(out)",
-    suffix: ".h",
+    output: "$(in:base).h",
     srcs: [
         ":wayland_extension_protocols",
         "protocol/virtio-gpu-metadata-v1.xml",
