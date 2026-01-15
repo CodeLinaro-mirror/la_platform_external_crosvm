@@ -20,7 +20,11 @@ rust_test {
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
-    srcs: ["tests/data/input/*.json"],
+    srcs: [
+        "src/**/*.rs",
+        "tests/**/*.rs",
+        "tests/data/input/*.json",
+    ],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -112,6 +116,7 @@ rust_test {
         "libenumn",
         "libremain",
     ],
+    use_expansive_default_srcs: false,
     arch: {
         arm64: {
             rustlibs: ["libaarch64_sys_reg"],
@@ -128,7 +133,11 @@ rust_test {
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     crate_root: "tests/irqchip/main.rs",
-    srcs: ["tests/data/input/*.json"],
+    srcs: [
+        "src/**/*.rs",
+        "tests/**/*.rs",
+        "tests/data/input/*.json",
+    ],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -221,6 +230,7 @@ rust_test {
         "libenumn",
         "libremain",
     ],
+    use_expansive_default_srcs: false,
     arch: {
         arm64: {
             rustlibs: ["libaarch64_sys_reg"],
@@ -237,7 +247,11 @@ rust_library {
     cargo_env_compat: true,
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
-    srcs: ["tests/data/input/*.json"],
+    srcs: [
+        "src/**/*.rs",
+        "tests/**/*.rs",
+        "tests/data/input/*.json",
+    ],
     edition: "2021",
     features: [
         "android_display",
@@ -322,6 +336,7 @@ rust_library {
         "libremain",
     ],
     apex_available: ["com.android.virt"],
+    use_expansive_default_srcs: false,
     arch: {
         arm64: {
             rustlibs: ["libaarch64_sys_reg"],

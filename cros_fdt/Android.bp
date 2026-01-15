@@ -21,6 +21,7 @@ rust_test {
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
     srcs: [
+        "src/**/*.rs",
         "test-files/base.dtb",
         "test-files/external_refs_base.dtb",
         "test-files/external_refs_overlay.dtb",
@@ -40,6 +41,7 @@ rust_test {
         "libthiserror",
     ],
     proc_macros: ["libremain"],
+    use_expansive_default_srcs: false,
 }
 
 rust_library {
@@ -51,6 +53,7 @@ rust_library {
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
     srcs: [
+        "src/**/*.rs",
         "test-files/base.dtb",
         "test-files/external_refs_base.dtb",
         "test-files/external_refs_overlay.dtb",
@@ -66,4 +69,5 @@ rust_library {
     ],
     proc_macros: ["libremain"],
     apex_available: ["com.android.virt"],
+    use_expansive_default_srcs: false,
 }
