@@ -134,7 +134,8 @@
       "no_presubmit": true
     },
     "cros_fdt": {
-      "extra_srcs": [
+      "srcs": [
+        "src/**/*.rs",
         "test-files/base.dtb",
         "test-files/external_refs_base.dtb",
         "test-files/external_refs_overlay.dtb",
@@ -166,7 +167,11 @@
         // "devices_test_tests_passthroughfs_main" is the culprit).
         "liblibtest_mimic"
       ],
-      "extra_srcs": ["tests/data/input/*.json"]
+      "srcs": [
+        "src/**/*.rs",
+        "tests/**/*.rs",
+        "tests/data/input/*.json"
+      ]
     },
     "disk": {
       "patch": "disk/patches/Android.bp.patch"
@@ -183,7 +188,11 @@
       "no_presubmit": true
     },
     "kernel_loader": {
-      "extra_srcs": ["src/test_elf32.bin"]
+      "srcs": [
+        "src/**/*.rs",
+        "src/test_elf32.bin",
+        "src/test_elf64.bin"
+      ]
     },
     "kvm": {
       "no_presubmit": true
