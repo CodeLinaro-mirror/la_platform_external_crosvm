@@ -18,8 +18,8 @@ use crate::BusAccessInfo;
 use crate::BusDevice;
 use crate::Suspendable;
 
-use vm_control::CrosvmDeviceId;
 use vm_control::DeviceId;
+use vm_control::PlatformDeviceId;
 
 const CPUFREQ_GOV_SCALE_FACTOR_DEFAULT: u32 = 100;
 const CPUFREQ_GOV_SCALE_FACTOR_SCHEDUTIL: u32 = 80;
@@ -112,7 +112,7 @@ impl VirtCpufreq {
 
 impl BusDevice for VirtCpufreq {
     fn device_id(&self) -> DeviceId {
-        CrosvmDeviceId::VirtCpufreq.into()
+        PlatformDeviceId::VirtCpufreq.into()
     }
 
     fn debug_label(&self) -> String {
