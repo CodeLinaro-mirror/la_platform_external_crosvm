@@ -784,6 +784,10 @@ impl Vm for GunyahVm {
         Ok(())
     }
 
+    fn enable_hypercalls(&mut self, _nr: u64, _count: usize) -> Result<()> {
+        unimplemented!()
+    }
+
     fn get_pvclock(&self) -> Result<ClockState> {
         unimplemented!()
     }

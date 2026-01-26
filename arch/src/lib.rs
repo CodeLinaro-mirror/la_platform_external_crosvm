@@ -262,6 +262,24 @@ impl IntoIterator for CpuSet {
     }
 }
 
+/// Selects the interface for guest-controlled power management of assigned devices.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub enum DevicePowerManagerConfig {
+    /// Uses the protected KVM hypercall interface.
+    PkvmHvc,
+}
+
+impl FromStr for DevicePowerManagerConfig {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pkvm-hvc" => Ok(Self::PkvmHvc),
+            _ => Err(format!("DevicePowerManagerConfig '{s}' not supported")),
+        }
+    }
+}
+
 /// Deserializes a `CpuSet` from a sequence which elements can either be integers, or strings
 /// representing CPU ranges (e.g. `5-8`).
 impl<'de> Deserialize<'de> for CpuSet {
@@ -400,6 +418,7 @@ pub struct VmComponents {
     ))]
     pub cpu_frequencies: BTreeMap<usize, Vec<u32>>,
     pub delay_rt: bool,
+    pub dev_pm: Option<DevicePowerManagerConfig>,
     pub dynamic_power_coefficient: BTreeMap<usize, u32>,
     pub extra_kernel_params: Vec<String>,
     #[cfg(target_arch = "x86_64")]
@@ -430,6 +449,7 @@ pub struct VmComponents {
     pub rt_cpus: CpuSet,
     #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
+    pub smccc_trng: bool,
     #[cfg(target_arch = "aarch64")]
     pub sve_config: SveConfig,
     pub swiotlb: Option<u64>,
@@ -445,6 +465,8 @@ pub struct VmComponents {
         any(target_os = "android", target_os = "linux")
     ))]
     pub vcpu_domains: BTreeMap<usize, u32>,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub vfio_platform_pm: bool,
     #[cfg(all(
         target_arch = "aarch64",
         any(target_os = "android", target_os = "linux")
@@ -460,6 +482,7 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub delay_rt: bool,
     pub devices_thread: Option<std::thread::JoinHandle<()>>,
     pub hotplug_bus: BTreeMap<u8, Arc<Mutex<dyn HotPlugBus>>>,
+    pub hypercall_bus: Arc<Bus>,
     pub io_bus: Arc<Bus>,
     pub irq_chip: Box<dyn IrqChipArch>,
     pub mmio_bus: Arc<Bus>,
@@ -691,6 +714,8 @@ pub enum DeviceRegistrationError {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[error("Allocating IRQ resource: {0}")]
     AllocateIrqResource(devices::vfio::VfioError),
+    #[error("failed to attach the device to its power domain: {0}")]
+    AttachDevicePowerDomain(anyhow::Error),
     /// Broken pci topology
     #[error("pci topology is broken")]
     BrokenPciTopology,

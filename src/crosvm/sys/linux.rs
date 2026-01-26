@@ -1500,6 +1500,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         fw_cfg_parameters: cfg.fw_cfg_parameters.clone(),
         cpu_clusters,
         cpu_capacity,
+        dev_pm: cfg.dev_pm,
         #[cfg(target_arch = "aarch64")]
         normalized_cpu_ipc_ratios,
         no_smt: cfg.no_smt,
@@ -1548,8 +1549,10 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         pci_config: cfg.pci_config,
         dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
         boot_cpu: cfg.boot_cpu,
+        vfio_platform_pm: cfg.vfio_platform_pm,
         #[cfg(target_arch = "aarch64")]
         virt_cpufreq_v2: cfg.virt_cpufreq_v2,
+        smccc_trng: cfg.smccc_trng,
         #[cfg(target_arch = "aarch64")]
         sve_config: cfg.sve.unwrap_or_default(),
     })
@@ -3986,6 +3989,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             vcpu_thread_barrier.clone(),
             (*linux.io_bus).clone(),
             (*linux.mmio_bus).clone(),
+            (*linux.hypercall_bus).clone(),
             vm_evt_wrtube
                 .try_clone()
                 .context("failed to clone vm event tube")?,

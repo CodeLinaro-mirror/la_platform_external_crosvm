@@ -12,13 +12,13 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
-use base::Protection;
 use bitflags::bitflags;
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
 use zerocopy::IntoBytes;
 use zerocopy::KnownLayout;
 
+use crate::SharedMemoryRegion;
 use crate::VringConfigData;
 
 /// The VhostUserMemory message has variable message size and variable number of attached file
@@ -151,10 +151,8 @@ pub enum FrontendReq {
     /// After transferring the back-end’s internal state during migration, check whether the
     /// back-end was able to successfully fully process the state.
     CHECK_DEVICE_STATE = 43,
-
-    // Non-standard message types.
-    /// Get a list of the device's shared memory regions.
-    GET_SHARED_MEMORY_REGIONS = 1004,
+    /// Retrieve Shared Memory Regions configuration.
+    GET_SHMEM_CONFIG = 44,
 }
 
 impl From<FrontendReq> for u32 {
@@ -191,12 +189,12 @@ pub enum BackendReq {
     VRING_CALL = 4,
     /// Indicate that an error occurred on the specific vring.
     VRING_ERR = 5,
+    /// Map a fd into a shared memory region.
+    SHMEM_MAP = 9,
+    /// Unmap a shared memory region.
+    SHMEM_UNMAP = 10,
 
     // Non-standard message types.
-    /// Indicates a request to map a fd into a shared memory region.
-    SHMEM_MAP = 1000,
-    /// Indicates a request to unmap part of a shared memory region.
-    SHMEM_UNMAP = 1001,
     /// Virtio-fs draft: map file content into the window.
     DEPRECATED__FS_MAP = 1002,
     /// Virtio-fs draft: unmap file content from the window.
@@ -259,7 +257,7 @@ bitflags! {
 /// Common message header for vhost-user requests and replies.
 /// A vhost-user message consists of 3 header fields and an optional payload. All numbers are in the
 /// machine native byte order.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Copy)]
 pub struct VhostUserMsgHeader<R: Req> {
     request: u32,
@@ -291,13 +289,26 @@ impl<R: Req> PartialEq for VhostUserMsgHeader<R> {
 }
 
 impl<R: Req> VhostUserMsgHeader<R> {
-    /// Create a new instance of `VhostUserMsgHeader`.
-    pub fn new(request: R, flags: u32, size: u32) -> Self {
-        // Default to protocol version 1
-        let fl = (flags & VhostUserHeaderFlag::ALL_FLAGS.bits()) | 0x1;
+    /// Header for a request.
+    pub fn new_request_header(request: R, size: u32, need_reply: bool) -> Self {
         VhostUserMsgHeader {
             request: request.into(),
-            flags: fl,
+            flags: 0x1
+                | if need_reply {
+                    VhostUserHeaderFlag::NEED_REPLY.bits()
+                } else {
+                    0
+                },
+            size,
+            _r: PhantomData,
+        }
+    }
+
+    /// Header for a reply.
+    pub fn new_reply_header(request: R, size: u32) -> Self {
+        VhostUserMsgHeader {
+            request: request.into(),
+            flags: 0x1 | VhostUserHeaderFlag::REPLY.bits(),
             size,
             _r: PhantomData,
         }
@@ -322,7 +333,7 @@ impl<R: Req> VhostUserMsgHeader<R> {
     }
 
     /// Set message type.
-    pub fn set_code(&mut self, request: R) {
+    fn set_code(&mut self, request: R) {
         self.request = request.into();
     }
 
@@ -332,7 +343,7 @@ impl<R: Req> VhostUserMsgHeader<R> {
     }
 
     /// Set message version number.
-    pub fn set_version(&mut self, ver: u32) {
+    fn set_version(&mut self, ver: u32) {
         self.flags &= !0x3;
         self.flags |= ver & 0x3;
     }
@@ -343,7 +354,7 @@ impl<R: Req> VhostUserMsgHeader<R> {
     }
 
     /// Mark message as reply.
-    pub fn set_reply(&mut self, is_reply: bool) {
+    fn set_reply(&mut self, is_reply: bool) {
         if is_reply {
             self.flags |= VhostUserHeaderFlag::REPLY.bits();
         } else {
@@ -357,7 +368,7 @@ impl<R: Req> VhostUserMsgHeader<R> {
     }
 
     /// Mark that reply for this message is needed.
-    pub fn set_need_reply(&mut self, need_reply: bool) {
+    fn set_need_reply(&mut self, need_reply: bool) {
         if need_reply {
             self.flags |= VhostUserHeaderFlag::NEED_REPLY.bits();
         } else {
@@ -376,19 +387,8 @@ impl<R: Req> VhostUserMsgHeader<R> {
     }
 
     /// Set message size.
-    pub fn set_size(&mut self, size: u32) {
+    fn set_size(&mut self, size: u32) {
         self.size = size;
-    }
-}
-
-impl<R: Req> Default for VhostUserMsgHeader<R> {
-    fn default() -> Self {
-        VhostUserMsgHeader {
-            request: 0,
-            flags: 0x1,
-            size: 0,
-            _r: PhantomData,
-        }
     }
 }
 
@@ -455,13 +455,13 @@ bitflags! {
         const XEN_MMAP = 0x0002_0000;
         /// Support VHOST_USER_SET_DEVICE_STATE_FD and VHOST_USER_CHECK_DEVICE_STATE messages.
         const DEVICE_STATE = 0x0008_0000;
-        /// Support shared memory regions. (Non-standard.)
-        const SHARED_MEMORY_REGIONS = 0x8000_0000;
+        /// Support shared memory regions.
+        const SHMEM_MAP = 0x0010_0000;
     }
 }
 
 /// A generic message to encapsulate a 64-bit value.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserU64 {
     /// The encapsulated 64-bit common value.
@@ -493,7 +493,7 @@ pub struct VhostUserEmptyMessage;
 impl VhostUserMsgValidator for VhostUserEmptyMessage {}
 
 /// Memory region descriptor for the SET_MEM_TABLE request.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserMemory {
     /// Number of memory regions in the payload.
@@ -525,7 +525,7 @@ impl VhostUserMsgValidator for VhostUserMemory {
 }
 
 /// Memory region descriptors as payload for the SET_MEM_TABLE request.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserMemoryRegion {
     /// Guest physical address of the memory region.
@@ -610,7 +610,7 @@ impl VhostUserMsgValidator for VhostUserSingleMemoryRegion {
 }
 
 /// Vring state descriptor.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserVringState {
     /// Vring index.
@@ -641,7 +641,7 @@ bitflags! {
 }
 
 /// Vring address descriptor.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserVringAddr {
     /// Vring index.
@@ -722,7 +722,7 @@ bitflags! {
 }
 
 /// Message to read/write device configuration space.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserConfig {
     /// Offset of virtio device's configuration space.
@@ -824,7 +824,7 @@ impl VhostUserMsgValidator for DeviceStateTransferParameters {
 
 /*
  * TODO: support dirty log, live migration and IOTLB operations.
-#[repr(C, packed)]
+#[repr(C)]
 pub struct VhostUserVringArea {
     pub index: u32,
     pub flags: u32,
@@ -832,13 +832,13 @@ pub struct VhostUserVringArea {
     pub offset: u64,
 }
 
-#[repr(C, packed)]
+#[repr(C)]
 pub struct VhostUserLog {
     pub size: u64,
     pub offset: u64,
 }
 
-#[repr(C, packed)]
+#[repr(C)]
 pub struct VhostUserIotlb {
     pub iova: u64,
     pub size: u64,
@@ -865,88 +865,43 @@ pub struct VhostUserIotlb {
     PartialEq,
     PartialOrd,
 )]
-pub struct VhostUserShmemMapMsgFlags(u8);
+pub struct VhostUserMMapFlags(u64);
 
 bitflags! {
-    impl VhostUserShmemMapMsgFlags: u8 {
-        /// Empty permission.
-        const EMPTY = 0x0;
-        /// Read permission.
-        const MAP_R = 0x1;
-        /// Write permission.
-        const MAP_W = 0x2;
-    }
-}
-
-impl From<Protection> for VhostUserShmemMapMsgFlags {
-    fn from(prot: Protection) -> Self {
-        let mut flags = Self::EMPTY;
-        flags.set(Self::MAP_R, prot.allows(&Protection::read()));
-        flags.set(Self::MAP_W, prot.allows(&Protection::write()));
-        flags
-    }
-}
-
-impl From<VhostUserShmemMapMsgFlags> for Protection {
-    fn from(flags: VhostUserShmemMapMsgFlags) -> Self {
-        let mut prot = Protection::default();
-        if flags.contains(VhostUserShmemMapMsgFlags::MAP_R) {
-            prot = prot.set_read();
-        }
-        if flags.contains(VhostUserShmemMapMsgFlags::MAP_W) {
-            prot = prot.set_write();
-        }
-        prot
+    impl VhostUserMMapFlags: u64 {
+        /// Pages are mapped read-write.
+        const MAP_RW = 0x1;
     }
 }
 
 /// Backend request message to map a file into a shared memory region.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
-pub struct VhostUserShmemMapMsg {
-    /// Flags for the mmap operation
-    pub flags: VhostUserShmemMapMsgFlags,
-    /// Shared memory region id.
+pub struct VhostUserMMap {
+    /// Shared memory region ID.
     pub shmid: u8,
-    padding: [u8; 6],
-    /// Offset into the shared memory region.
-    pub shm_offset: u64,
+    /// Struct padding.
+    pub padding: [u8; 7],
     /// File offset.
     pub fd_offset: u64,
+    /// Offset into the shared memory region.
+    pub shm_offset: u64,
     /// Size of region to map.
     pub len: u64,
+    /// Flags for the mmap operation
+    pub flags: VhostUserMMapFlags,
 }
 
-impl VhostUserMsgValidator for VhostUserShmemMapMsg {
+impl VhostUserMsgValidator for VhostUserMMap {
     fn is_valid(&self) -> bool {
-        (self.flags.bits() & !VhostUserShmemMapMsgFlags::all().bits()) == 0
+        (self.flags.bits() & !VhostUserMMapFlags::all().bits()) == 0
             && self.fd_offset.checked_add(self.len).is_some()
             && self.shm_offset.checked_add(self.len).is_some()
     }
 }
 
-impl VhostUserShmemMapMsg {
-    /// New instance of VhostUserShmemMapMsg struct
-    pub fn new(
-        shmid: u8,
-        shm_offset: u64,
-        fd_offset: u64,
-        len: u64,
-        flags: VhostUserShmemMapMsgFlags,
-    ) -> Self {
-        Self {
-            flags,
-            shmid,
-            padding: [0; 6],
-            shm_offset,
-            fd_offset,
-            len,
-        }
-    }
-}
-
 /// Backend request message to map GPU memory into a shared memory region.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserGpuMapMsg {
     /// Shared memory region id.
@@ -997,7 +952,7 @@ impl VhostUserGpuMapMsg {
 }
 
 /// Backend request message to map external memory into a shared memory region.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
 pub struct VhostUserExternalMapMsg {
     /// Shared memory region id.
@@ -1030,39 +985,8 @@ impl VhostUserExternalMapMsg {
     }
 }
 
-/// Backend request message to unmap part of a shared memory region.
-#[repr(C, packed)]
-#[derive(Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
-pub struct VhostUserShmemUnmapMsg {
-    /// Shared memory region id.
-    pub shmid: u8,
-    padding: [u8; 7],
-    /// Offset into the shared memory region.
-    pub shm_offset: u64,
-    /// Size of region to unmap.
-    pub len: u64,
-}
-
-impl VhostUserMsgValidator for VhostUserShmemUnmapMsg {
-    fn is_valid(&self) -> bool {
-        self.shm_offset.checked_add(self.len).is_some()
-    }
-}
-
-impl VhostUserShmemUnmapMsg {
-    /// New instance of VhostUserShmemUnmapMsg struct
-    pub fn new(shmid: u8, shm_offset: u64, len: u64) -> Self {
-        Self {
-            shmid,
-            padding: [0; 7],
-            shm_offset,
-            len,
-        }
-    }
-}
-
 /// Inflight I/O descriptor state for split virtqueues
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct DescStateSplit {
     /// Indicate whether this descriptor (only head) is inflight or not.
@@ -1083,7 +1007,7 @@ impl DescStateSplit {
 }
 
 /// Inflight I/O queue region for split virtqueues
-#[repr(C, packed)]
+#[repr(C)]
 pub struct QueueRegionSplit {
     /// Features flags of this region
     pub features: u64,
@@ -1114,7 +1038,7 @@ impl QueueRegionSplit {
 }
 
 /// Inflight I/O descriptor state for packed virtqueues
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct DescStatePacked {
     /// Indicate whether this descriptor (only head) is inflight or not.
@@ -1147,7 +1071,7 @@ impl DescStatePacked {
 }
 
 /// Inflight I/O queue region for packed virtqueues
-#[repr(C, packed)]
+#[repr(C)]
 pub struct QueueRegionPacked {
     /// Features flags of this region
     pub features: u64,
@@ -1192,25 +1116,46 @@ impl QueueRegionPacked {
     }
 }
 
-/// Virtio shared memory descriptor.
-#[repr(C, packed)]
-#[derive(Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
-pub struct VhostSharedMemoryRegion {
-    /// The shared memory region's shmid.
-    pub id: u8,
-    /// Padding
-    padding: [u8; 7],
-    /// The length of the shared memory region.
-    pub length: u64,
+#[repr(C)]
+#[derive(Debug, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]
+pub struct VhostUserShMemConfig {
+    /// Total number of shared memory regions
+    pub nregions: u32,
+    /// Padding for correct alignment
+    padding: u32,
+    /// Sizes of each shared memory region.
+    pub sizes: [u64; 256],
 }
 
-impl VhostSharedMemoryRegion {
-    /// New instance of VhostSharedMemoryRegion struct
-    pub fn new(id: u8, length: u64) -> Self {
-        VhostSharedMemoryRegion {
-            id,
-            padding: [0; 7],
-            length,
+impl Default for VhostUserShMemConfig {
+    fn default() -> Self {
+        VhostUserShMemConfig {
+            nregions: 0,
+            padding: 0,
+            sizes: [0; 256],
+        }
+    }
+}
+
+impl VhostUserMsgValidator for VhostUserShMemConfig {
+    #[allow(clippy::if_same_then_else)]
+    fn is_valid(&self) -> bool {
+        true
+    }
+}
+
+impl VhostUserShMemConfig {
+    /// Create a new instance
+    pub fn new(regions: &[SharedMemoryRegion]) -> Self {
+        let mut sizes = [0; 256];
+        for region in regions {
+            *sizes.get_mut(usize::from(region.id)).unwrap() = region.length;
+        }
+
+        Self {
+            nregions: regions.len().try_into().unwrap(),
+            padding: 0,
+            sizes,
         }
     }
 }
@@ -1252,7 +1197,8 @@ mod tests {
 
     #[test]
     fn msg_header_ops() {
-        let mut hdr = VhostUserMsgHeader::new(FrontendReq::GET_FEATURES, 0, 0x100);
+        let mut hdr =
+            VhostUserMsgHeader::new_request_header(FrontendReq::GET_FEATURES, 0x100, false);
         assert_eq!(hdr.get_code(), Ok(FrontendReq::GET_FEATURES));
         hdr.set_code(FrontendReq::SET_FEATURES);
         assert_eq!(hdr.get_code(), Ok(FrontendReq::SET_FEATURES));
