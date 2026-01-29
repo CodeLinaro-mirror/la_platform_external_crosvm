@@ -18,6 +18,7 @@ use std::sync::Arc;
 use aarch64_sys_reg::AArch64SysRegId;
 use arch::get_serial_cmdline;
 use arch::CpuSet;
+use arch::DevicePowerManagerConfig;
 use arch::DtbOverlay;
 use arch::FdtPosition;
 use arch::GetSerialCmdlineError;
@@ -37,6 +38,8 @@ use devices::Bus;
 use devices::BusDeviceObj;
 use devices::BusError;
 use devices::BusType;
+use devices::DevicePowerManager;
+use devices::HvcDevicePowerManager;
 use devices::IrqChip;
 use devices::IrqChipAArch64;
 use devices::IrqEventSource;
@@ -45,6 +48,7 @@ use devices::PciConfigMmio;
 use devices::PciDevice;
 use devices::PciRootCommand;
 use devices::Serial;
+use devices::SmcccTrng;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use devices::VirtCpufreq;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -286,6 +290,8 @@ pub enum Error {
     CustomPvmFwLoadFailure(arch::LoadImageError),
     #[error("vm created wrong kind of vcpu")]
     DowncastVcpu,
+    #[error("error enabling hypercalls base={0:#x}, count={1}: {2}")]
+    EnableHypercalls(u64, usize, base::Error),
     #[error("failed to enable singlestep execution: {0}")]
     EnableSinglestep(base::Error),
     #[error("failed to finalize IRQ chip: {0}")]
@@ -308,6 +314,8 @@ pub enum Error {
     LoadElfKernel(kernel_loader::Error),
     #[error("failed to map arm pvtime memory: {0}")]
     MapPvtimeError(base::Error),
+    #[error("missing power manager for assigned devices")]
+    MissingDevicePowerManager,
     #[error("pVM firmware could not be loaded: {0}")]
     PvmFwLoadFailure(base::Error),
     #[error("ramoops address is different from high_mmio_base: {0} vs {1}")]
@@ -318,6 +326,8 @@ pub enum Error {
     ReadReg(base::Error),
     #[error("error reading CPU registers: {0}")]
     ReadRegs(base::Error),
+    #[error("error registering hypercalls base={0:#x}, count={1}: {2}")]
+    RegisterHypercalls(u64, usize, BusError),
     #[error("failed to register irq fd: {0}")]
     RegisterIrqfd(base::Error),
     #[error("error registering PCI bus: {0}")]
@@ -713,6 +723,8 @@ impl arch::LinuxArch for AArch64 {
 
         let mmio_bus = Arc::new(devices::Bus::new(BusType::Mmio));
 
+        let hypercall_bus = Arc::new(devices::Bus::new(BusType::Hypercall));
+
         // ARM doesn't really use the io bus like x86, so just create an empty bus.
         let io_bus = Arc::new(devices::Bus::new(BusType::Io));
 
@@ -757,6 +769,8 @@ impl arch::LinuxArch for AArch64 {
             .into_iter()
             .map(|(dev, jail_orig)| (*(dev.into_platform_device().unwrap()), jail_orig))
             .collect();
+        // vfio-platform is currently the only backend for PM of platform devices.
+        let mut dev_pm = components.vfio_platform_pm.then(DevicePowerManager::new);
         let (platform_devices, mut platform_pid_debug_label_map, dev_resources) =
             arch::sys::linux::generate_platform_bus(
                 platform_devices,
@@ -766,10 +780,39 @@ impl arch::LinuxArch for AArch64 {
                 &mut vm,
                 #[cfg(feature = "swap")]
                 swap_controller,
+                &mut dev_pm,
                 components.hv_cfg.protection_type,
             )
             .map_err(Error::CreatePlatformBus)?;
         pid_debug_label_map.append(&mut platform_pid_debug_label_map);
+
+        if components.smccc_trng {
+            let arced_trng = Arc::new(SmcccTrng::new());
+            for fid_range in [SmcccTrng::HVC32_FID_RANGE, SmcccTrng::HVC64_FID_RANGE] {
+                let base = fid_range.start.into();
+                let count = fid_range.len();
+                hypercall_bus
+                    .insert_sync(arced_trng.clone(), base, count.try_into().unwrap())
+                    .map_err(|e| Error::RegisterHypercalls(base, count, e))?;
+                vm.enable_hypercalls(base, count)
+                    .map_err(|e| Error::EnableHypercalls(base, count, e))?;
+            }
+        }
+
+        if let Some(config) = components.dev_pm {
+            let dev_pm = dev_pm.ok_or(Error::MissingDevicePowerManager)?;
+            match config {
+                DevicePowerManagerConfig::PkvmHvc => {
+                    let hvc_pm_dev = HvcDevicePowerManager::new(dev_pm);
+                    let hvc_id = HvcDevicePowerManager::HVC_FUNCTION_ID.into();
+                    hypercall_bus
+                        .insert_sync(Arc::new(hvc_pm_dev), hvc_id, 1)
+                        .map_err(|e| Error::RegisterHypercalls(hvc_id, 1, e))?;
+                    vm.enable_hypercall(hvc_id)
+                        .map_err(|e| Error::EnableHypercalls(hvc_id, 1, e))?;
+                }
+            }
+        }
 
         let (vmwdt_host_tube, vmwdt_control_tube) = Tube::pair().map_err(Error::CreateTube)?;
         Self::add_arch_devs(
@@ -1024,6 +1067,7 @@ impl arch::LinuxArch for AArch64 {
             irq_chip: irq_chip.try_box_clone().map_err(Error::CloneIrqChip)?,
             io_bus,
             mmio_bus,
+            hypercall_bus,
             pid_debug_label_map,
             suspend_tube: (suspend_tube_send, suspend_tube_recv),
             rt_cpus: components.rt_cpus,

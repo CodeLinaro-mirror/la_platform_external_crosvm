@@ -15,7 +15,6 @@ use std::os::raw::c_void;
 use std::sync::Arc;
 use std::sync::Weak;
 
-use base::debug;
 use base::error;
 use base::handle_eintr_errno;
 use base::warn;
@@ -28,7 +27,6 @@ use base::Protection;
 use base::RawDescriptor;
 use data_model::vec_with_array_field;
 use libc::EAGAIN;
-use libc::EINVAL;
 use libc::ENODEV;
 use libc::ENOENT;
 use libc::EPIPE;
@@ -646,52 +644,9 @@ impl Transfer {
     }
 
     /// Create an isochronous transfer.
-    pub fn new_isochronous(
-        endpoint: u8,
-        buffer: TransferBuffer,
-        packet_size: u32,
-    ) -> Result<Transfer> {
-        let buffer_size: u32 = buffer
-            .size()
-            .ok_or(Error::InvalidBuffer)?
-            .try_into()
-            .map_err(Error::InvalidBufferLength)?;
-        // Isochronous transfers divide the buffer into multiple packets. If its count is 0 or is
-        // larger than what u32 can hold, then either the buffer_size or packet_size is wrong.
-        let count = match buffer_size
-            .checked_add(packet_size)
-            .and_then(|s| s.checked_sub(1))
-            .and_then(|s| s.checked_div(packet_size))
-        {
-            Some(0) | None => {
-                error!("invalid ISOC packet count: buffer_size={buffer_size}, packet_size={packet_size}");
-                return Err(Error::InvalidISOCPacketCount);
-            }
-            Some(q) => q,
-        };
-
-        let mut iso_packets = vec![
-            usb_sys::usbdevfs_iso_packet_desc {
-                length: packet_size,
-                actual_length: 0,
-                status: 0,
-            };
-            count as usize
-        ];
-        let last_entry = iso_packets
-            .last_mut()
-            .expect("there should be at least one entry for ISOC packet");
-        last_entry.length = buffer_size - packet_size * (count - 1);
-
-        let mut transfer = Self::new(
-            usb_sys::USBDEVFS_URB_TYPE_ISO,
-            endpoint,
-            buffer,
-            &iso_packets,
-        )?;
-        transfer.urb_mut().number_of_packets_or_stream_id = count;
-        transfer.urb_mut().flags = usb_sys::USBDEVFS_URB_ISO_ASAP;
-        Ok(transfer)
+    pub fn new_isochronous(endpoint: u8, buffer: TransferBuffer) -> Result<Transfer> {
+        // TODO(dverkamp): allow user to specify iso descriptors
+        Self::new(usb_sys::USBDEVFS_URB_TYPE_ISO, endpoint, buffer, &[])
     }
 
     /// Get the status of a completed transfer.
@@ -749,14 +704,10 @@ impl TransferHandle {
             ))
         } < 0
         {
-            // EINVAL is actually not an error because this is racy by nature. The target URB can
-            // be completed while we are trying to discard it.
-            let error = base::Error::last();
-            if error.errno() == EINVAL {
-                debug!("URB not found: already completed or invalid pointer to URB");
-            } else {
-                return Err(Error::IoctlFailed(usb_sys::USBDEVFS_DISCARDURB, error));
-            }
+            return Err(Error::IoctlFailed(
+                usb_sys::USBDEVFS_DISCARDURB,
+                base::Error::last(),
+            ));
         }
 
         Ok(())

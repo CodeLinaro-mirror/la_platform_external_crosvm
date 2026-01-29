@@ -2116,6 +2116,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         vcpu_affinity: cfg.vcpu_affinity.clone(),
         cpu_clusters: cfg.cpu_clusters.clone(),
         cpu_capacity: cfg.cpu_capacity.clone(),
+        dev_pm: None,
         no_smt: cfg.no_smt,
         hugepages: cfg.hugepages,
         hv_cfg: hypervisor::Config {
@@ -2159,6 +2160,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         pci_config: cfg.pci_config,
         #[cfg(target_arch = "x86_64")]
         smbios: cfg.smbios.clone(),
+        smccc_trng: cfg.smccc_trng,
         dynamic_power_coefficient: cfg.dynamic_power_coefficient.clone(),
         #[cfg(target_arch = "x86_64")]
         break_linux_pci_config_io: cfg.break_linux_pci_config_io,
