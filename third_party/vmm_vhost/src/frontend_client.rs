@@ -22,15 +22,18 @@ pub struct FrontendClient {
     sock: Connection<BackendReq>,
 
     // Protocol feature VHOST_USER_PROTOCOL_F_REPLY_ACK has been negotiated.
+    //
+    // When true, we automatically set the "need_reply" bit for a subset of message types where we
+    // think it is useful to receive an ACK.
     reply_ack_negotiated: bool,
 }
 
 impl FrontendClient {
     /// Create a new instance from the given connection.
-    pub fn new(ep: Connection<BackendReq>) -> Self {
+    pub fn new(ep: Connection<BackendReq>, reply_ack_negotiated: bool) -> Self {
         FrontendClient {
             sock: ep,
-            reply_ack_negotiated: false,
+            reply_ack_negotiated,
         }
     }
 
@@ -39,34 +42,29 @@ impl FrontendClient {
         request: BackendReq,
         msg: &T,
         fds: Option<&[RawDescriptor]>,
-    ) -> HandlerResult<u64>
+        want_reply: bool,
+    ) -> HandlerResult<()>
     where
         T: IntoBytes + Immutable,
     {
+        let need_reply = want_reply && self.reply_ack_negotiated;
+
         let len = mem::size_of::<T>();
-        let mut hdr = VhostUserMsgHeader::new(request, 0, len as u32);
-        if self.reply_ack_negotiated {
-            hdr.set_need_reply(true);
-        }
+        let hdr = VhostUserMsgHeader::new_request_header(request, len as u32, need_reply);
         self.sock
             .send_message(&hdr, msg, fds)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        self.wait_for_reply(&hdr)
-            .map_err(|e| std::io::Error::other(e.to_string()))
+        let non_standard_forced_reply =
+            [BackendReq::GPU_MAP, BackendReq::EXTERNAL_MAP].contains(&request);
+        if need_reply || non_standard_forced_reply {
+            self.wait_for_reply(&hdr)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(())
     }
 
-    fn wait_for_reply(&mut self, hdr: &VhostUserMsgHeader<BackendReq>) -> Result<u64> {
-        let code = hdr.get_code().map_err(|_| Error::InvalidMessage)?;
-        if code != BackendReq::SHMEM_MAP
-            && code != BackendReq::SHMEM_UNMAP
-            && code != BackendReq::GPU_MAP
-            && code != BackendReq::EXTERNAL_MAP
-            && !self.reply_ack_negotiated
-        {
-            return Ok(0);
-        }
-
+    fn wait_for_reply(&mut self, hdr: &VhostUserMsgHeader<BackendReq>) -> Result<()> {
         let (reply, body, rfds) = self.sock.recv_message::<VhostUserU64>()?;
         if !reply.is_valid() || !reply.is_reply_for(hdr) || !rfds.is_empty() || !body.is_valid() {
             return Err(Error::InvalidMessage);
@@ -75,37 +73,42 @@ impl FrontendClient {
             return Err(Error::FrontendInternalError);
         }
 
-        Ok(body.value)
-    }
-
-    /// Set the negotiation state of the `VHOST_USER_PROTOCOL_F_REPLY_ACK` protocol feature.
-    ///
-    /// When the `VHOST_USER_PROTOCOL_F_REPLY_ACK` protocol feature has been negotiated, the
-    /// "REPLY_ACK" flag will be set in the message header for every backend to frontend request
-    /// message.
-    pub fn set_reply_ack_flag(&mut self, enable: bool) {
-        self.reply_ack_negotiated = enable;
+        Ok(())
     }
 }
 
 impl Frontend for FrontendClient {
     /// Handle shared memory region mapping requests.
-    fn shmem_map(
-        &mut self,
-        req: &VhostUserShmemMapMsg,
-        fd: &dyn AsRawDescriptor,
-    ) -> HandlerResult<u64> {
-        self.send_message(BackendReq::SHMEM_MAP, req, Some(&[fd.as_raw_descriptor()]))
+    fn shmem_map(&mut self, req: &VhostUserMMap, fd: &dyn AsRawDescriptor) -> HandlerResult<()> {
+        if !self.reply_ack_negotiated {
+            base::warn!("SHMEM_MAP without REPLY_ACK is prone to race conditions");
+        }
+        self.send_message(
+            BackendReq::SHMEM_MAP,
+            req,
+            Some(&[fd.as_raw_descriptor()]),
+            /* want_reply= */ true,
+        )
     }
 
     /// Handle shared memory region unmapping requests.
-    fn shmem_unmap(&mut self, req: &VhostUserShmemUnmapMsg) -> HandlerResult<u64> {
-        self.send_message(BackendReq::SHMEM_UNMAP, req, None)
+    fn shmem_unmap(&mut self, req: &VhostUserMMap) -> HandlerResult<()> {
+        self.send_message(
+            BackendReq::SHMEM_UNMAP,
+            req,
+            None,
+            /* want_reply= */ true,
+        )
     }
 
     /// Handle config change requests.
-    fn handle_config_change(&mut self) -> HandlerResult<u64> {
-        self.send_message(BackendReq::CONFIG_CHANGE_MSG, &VhostUserEmptyMessage, None)
+    fn handle_config_change(&mut self) -> HandlerResult<()> {
+        self.send_message(
+            BackendReq::CONFIG_CHANGE_MSG,
+            &VhostUserEmptyMessage,
+            None,
+            /* want_reply= */ false,
+        )
     }
 
     /// Handle GPU shared memory region mapping requests.
@@ -113,16 +116,22 @@ impl Frontend for FrontendClient {
         &mut self,
         req: &VhostUserGpuMapMsg,
         descriptor: &dyn AsRawDescriptor,
-    ) -> HandlerResult<u64> {
+    ) -> HandlerResult<()> {
         self.send_message(
             BackendReq::GPU_MAP,
             req,
             Some(&[descriptor.as_raw_descriptor()]),
+            /* want_reply= */ false,
         )
     }
 
     /// Handle external memory region mapping requests.
-    fn external_map(&mut self, req: &VhostUserExternalMapMsg) -> HandlerResult<u64> {
-        self.send_message(BackendReq::EXTERNAL_MAP, req, None)
+    fn external_map(&mut self, req: &VhostUserExternalMapMsg) -> HandlerResult<()> {
+        self.send_message(
+            BackendReq::EXTERNAL_MAP,
+            req,
+            None,
+            /* want_reply= */ false,
+        )
     }
 }
