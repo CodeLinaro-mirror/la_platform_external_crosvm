@@ -80,7 +80,7 @@ impl FidoPassthroughDevice {
         let control_transfer_state = ControlTransferState {
             ctl_ep_state: ControlEndpointState::SetupStage,
             control_request_setup: UsbRequestSetup::new(0, 0, 0, 0, 0),
-            data_stage_transfer: None,
+            executed: false,
         };
         let job_queue = AsyncJobQueue::init(&event_loop).map_err(Error::StartAsyncFidoQueue)?;
         Ok(FidoPassthroughDevice {
@@ -411,16 +411,6 @@ impl BackendDevice for FidoPassthroughDevice {
             ep_addr,
             transfer_buffer,
         )))
-    }
-
-    fn build_isochronous_transfer(
-        &mut self,
-        _ep_addr: u8,
-        _transfer_buffer: TransferBuffer,
-        _packet_size: u32,
-    ) -> BackendResult<BackendTransferType> {
-        // Fido devices don't support isochronous transfer requests
-        Err(BackendError::MalformedBackendTransfer)
     }
 
     fn get_control_transfer_state(&mut self) -> Arc<RwLock<ControlTransferState>> {

@@ -24,8 +24,10 @@ mod pci;
 mod pflash;
 pub mod pl030;
 pub mod pmc_virt;
+mod power;
 mod serial;
 pub mod serial_device;
+mod smccc_trng;
 mod suspendable;
 mod sys;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -124,12 +126,15 @@ pub use self::pflash::Pflash;
 pub use self::pflash::PflashParameters;
 pub use self::pl030::Pl030;
 pub use self::pmc_virt::VirtualPmc;
+pub use self::power::hvc::HvcDevicePowerManager;
+pub use self::power::DevicePowerManager;
 pub use self::serial::Serial;
 pub use self::serial_device::Error as SerialError;
 pub use self::serial_device::SerialDevice;
 pub use self::serial_device::SerialHardware;
 pub use self::serial_device::SerialParameters;
 pub use self::serial_device::SerialType;
+pub use self::smccc_trng::SmcccTrng;
 pub use self::suspendable::DeviceState;
 pub use self::suspendable::Suspendable;
 #[cfg(any(target_os = "android", target_os = "linux"))]

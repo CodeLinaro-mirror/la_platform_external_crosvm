@@ -19,6 +19,7 @@ use crate::Connection;
 use crate::Error;
 use crate::FrontendReq;
 use crate::Result;
+use crate::SharedMemoryRegion;
 
 /// Trait for vhost-user backends.
 ///
@@ -75,7 +76,7 @@ pub trait Backend {
         fd: File,
     ) -> Result<Option<File>>;
     fn check_device_state(&mut self) -> Result<()>;
-    fn get_shared_memory_regions(&mut self) -> Result<Vec<VhostSharedMemoryRegion>>;
+    fn get_shmem_config(&mut self) -> Result<Vec<SharedMemoryRegion>>;
 }
 
 impl<T> Backend for T
@@ -209,8 +210,8 @@ where
         self.as_mut().check_device_state()
     }
 
-    fn get_shared_memory_regions(&mut self) -> Result<Vec<VhostSharedMemoryRegion>> {
-        self.as_mut().get_shared_memory_regions()
+    fn get_shmem_config(&mut self) -> Result<Vec<SharedMemoryRegion>> {
+        self.as_mut().get_shmem_config()
     }
 }
 
@@ -655,14 +656,9 @@ impl<S: Backend> BackendServer<S> {
                 self.send_reply_message(&hdr, &msg)?;
                 res?;
             }
-            Ok(FrontendReq::GET_SHARED_MEMORY_REGIONS) => {
-                let regions = self.backend.get_shared_memory_regions()?;
-                let mut buf = Vec::new();
-                let msg = VhostUserU64::new(regions.len() as u64);
-                for r in regions {
-                    buf.extend_from_slice(r.as_bytes())
-                }
-                self.send_reply_with_payload(&hdr, &msg, buf.as_slice())?;
+            Ok(FrontendReq::GET_SHMEM_CONFIG) => {
+                let msg = VhostUserShMemConfig::new(&self.backend.get_shmem_config()?);
+                self.send_reply_message(&hdr, &msg)?;
             }
             _ => {
                 return Err(Error::InvalidMessage);
@@ -676,9 +672,8 @@ impl<S: Backend> BackendServer<S> {
         req: &VhostUserMsgHeader<FrontendReq>,
         payload_size: usize,
     ) -> Result<VhostUserMsgHeader<FrontendReq>> {
-        Ok(VhostUserMsgHeader::new(
+        Ok(VhostUserMsgHeader::new_reply_header(
             req.get_code().map_err(|_| Error::InvalidMessage)?,
-            VhostUserHeaderFlag::REPLY.bits(),
             (mem::size_of::<T>()
                 .checked_add(payload_size)
                 .ok_or(Error::OversizedMsg)?)

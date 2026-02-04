@@ -64,8 +64,6 @@ pub enum Error {
     MalformedBackendTransfer,
     #[error("request missing required data buffer")]
     MissingRequiredBuffer,
-    #[error("failed to proceed to next TD: {0}")]
-    Proceed(XhciTransferError),
     #[error("failed to queue async job: {0}")]
     QueueAsyncJob(UtilsError),
     #[error("failed to read buffer: {0}")]
@@ -88,8 +86,6 @@ pub enum Error {
     StartAsyncJobQueue(UtilsError),
     #[error("xhci transfer completed: {0}")]
     TransferComplete(XhciTransferError),
-    #[error("failed to get max payload size for xhci transfer: {0}")]
-    TransferGetMaxPayload(XhciTransferError),
     #[error("failed to cancel transfer: {0}")]
     TransferHandle(UsbUtilError),
     #[error("transfer has already completed when being cancelled")]
