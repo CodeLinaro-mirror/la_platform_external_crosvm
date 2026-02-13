@@ -41,7 +41,7 @@ rust_library {
         "libkernel_loader",
         "liblibc",
         "libminijail_rust",
-        "librand-0.8",
+        "librand",
         "libresources",
         "libswap",
         "libsync_rust",
