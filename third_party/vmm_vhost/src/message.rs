@@ -10,7 +10,6 @@
 #![allow(clippy::upper_case_acronyms)]
 
 use std::fmt::Debug;
-use std::marker::PhantomData;
 
 use bitflags::bitflags;
 use zerocopy::FromBytes;
@@ -235,149 +234,82 @@ pub trait VhostUserMsgValidator {
     }
 }
 
-// Bit mask for common message flags.
-bitflags! {
-    /// Common message flags for vhost-user requests and replies.
-    #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    #[repr(transparent)]
-    pub struct VhostUserHeaderFlag: u32 {
-        /// Bits[0..2] is message version number.
-        const VERSION = 0x3;
-        /// Mark message as reply.
-        const REPLY = 0x4;
-        /// Sender anticipates a reply message from the peer.
-        const NEED_REPLY = 0x8;
-        /// All valid bits.
-        const ALL_FLAGS = 0xc;
-        /// All reserved bits.
-        const RESERVED_BITS = !0xf;
-    }
+#[bit_field::bitfield]
+#[derive(
+    Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FromBytes, Immutable, IntoBytes, KnownLayout,
+)]
+pub struct VhostUserHeaderFlags {
+    version: bit_field::B2,
+    #[bits = 1]
+    is_reply: bool,
+    #[bits = 1]
+    need_reply: bool,
+    reserved: bit_field::B28,
 }
 
 /// Common message header for vhost-user requests and replies.
 /// A vhost-user message consists of 3 header fields and an optional payload. All numbers are in the
 /// machine native byte order.
 #[repr(C)]
-#[derive(Copy)]
-pub struct VhostUserMsgHeader<R: Req> {
+#[derive(Copy, Clone, Debug, PartialEq, Eq, FromBytes, Immutable, IntoBytes, KnownLayout)]
+pub struct VhostUserMsgHeader {
     request: u32,
-    flags: u32,
+    flags: VhostUserHeaderFlags,
     size: u32,
-    _r: PhantomData<R>,
 }
 
-impl<R: Req> Debug for VhostUserMsgHeader<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VhostUserMsgHeader")
-            .field("request", &{ self.request })
-            .field("flags", &{ self.flags })
-            .field("size", &{ self.size })
-            .finish()
-    }
-}
-
-impl<R: Req> Clone for VhostUserMsgHeader<R> {
-    fn clone(&self) -> VhostUserMsgHeader<R> {
-        *self
-    }
-}
-
-impl<R: Req> PartialEq for VhostUserMsgHeader<R> {
-    fn eq(&self, other: &Self) -> bool {
-        self.request == other.request && self.flags == other.flags && self.size == other.size
-    }
-}
-
-impl<R: Req> VhostUserMsgHeader<R> {
+impl VhostUserMsgHeader {
     /// Header for a request.
-    pub fn new_request_header(request: R, size: u32, need_reply: bool) -> Self {
+    pub fn new_request_header(request: impl Req, size: u32, need_reply: bool) -> Self {
+        let mut flags = VhostUserHeaderFlags::new();
+        flags.set_version(1);
+        flags.set_need_reply(need_reply);
         VhostUserMsgHeader {
             request: request.into(),
-            flags: 0x1
-                | if need_reply {
-                    VhostUserHeaderFlag::NEED_REPLY.bits()
-                } else {
-                    0
-                },
+            flags,
             size,
-            _r: PhantomData,
         }
     }
 
     /// Header for a reply.
-    pub fn new_reply_header(request: R, size: u32) -> Self {
+    pub fn new_reply_header(request: impl Req, size: u32) -> Self {
+        let mut flags = VhostUserHeaderFlags::new();
+        flags.set_version(1);
+        flags.set_is_reply(true);
         VhostUserMsgHeader {
             request: request.into(),
-            flags: 0x1 | VhostUserHeaderFlag::REPLY.bits(),
+            flags,
             size,
-            _r: PhantomData,
-        }
-    }
-
-    pub fn into_raw(self) -> [u32; 3] {
-        [self.request, self.flags, self.size]
-    }
-
-    pub fn from_raw(raw: [u32; 3]) -> Self {
-        Self {
-            request: raw[0],
-            flags: raw[1],
-            size: raw[2],
-            _r: PhantomData,
         }
     }
 
     /// Get message type.
-    pub fn get_code(&self) -> std::result::Result<R, R::Error> {
+    pub fn get_code<R: Req>(&self) -> std::result::Result<R, R::Error> {
         R::try_from(self.request)
     }
 
     /// Set message type.
-    fn set_code(&mut self, request: R) {
+    fn set_code(&mut self, request: impl Req) {
         self.request = request.into();
     }
 
     /// Get message version number.
     pub fn get_version(&self) -> u32 {
-        self.flags & 0x3
-    }
-
-    /// Set message version number.
-    fn set_version(&mut self, ver: u32) {
-        self.flags &= !0x3;
-        self.flags |= ver & 0x3;
+        self.flags.get_version().into()
     }
 
     /// Check whether it's a reply message.
     pub fn is_reply(&self) -> bool {
-        (self.flags & VhostUserHeaderFlag::REPLY.bits()) != 0
-    }
-
-    /// Mark message as reply.
-    fn set_reply(&mut self, is_reply: bool) {
-        if is_reply {
-            self.flags |= VhostUserHeaderFlag::REPLY.bits();
-        } else {
-            self.flags &= !VhostUserHeaderFlag::REPLY.bits();
-        }
+        self.flags.get_is_reply()
     }
 
     /// Check whether reply for this message is requested.
     pub fn is_need_reply(&self) -> bool {
-        (self.flags & VhostUserHeaderFlag::NEED_REPLY.bits()) != 0
-    }
-
-    /// Mark that reply for this message is needed.
-    fn set_need_reply(&mut self, need_reply: bool) {
-        if need_reply {
-            self.flags |= VhostUserHeaderFlag::NEED_REPLY.bits();
-        } else {
-            self.flags &= !VhostUserHeaderFlag::NEED_REPLY.bits();
-        }
+        self.flags.get_need_reply()
     }
 
     /// Check whether it's the reply message for the request `req`.
-    pub fn is_reply_for(&self, req: &VhostUserMsgHeader<R>) -> bool {
+    pub fn is_reply_for(&self, req: &VhostUserMsgHeader) -> bool {
         self.is_reply() && !req.is_reply() && self.request == req.request
     }
 
@@ -385,21 +317,14 @@ impl<R: Req> VhostUserMsgHeader<R> {
     pub fn get_size(&self) -> u32 {
         self.size
     }
-
-    /// Set message size.
-    fn set_size(&mut self, size: u32) {
-        self.size = size;
-    }
 }
 
-impl<T: Req> VhostUserMsgValidator for VhostUserMsgHeader<T> {
+impl VhostUserMsgValidator for VhostUserMsgHeader {
     #[allow(clippy::if_same_then_else)]
     fn is_valid(&self) -> bool {
-        if self.get_code().is_err() {
+        if self.get_version() != 0x1 {
             return false;
-        } else if self.get_version() != 0x1 {
-            return false;
-        } else if (self.flags & VhostUserHeaderFlag::RESERVED_BITS.bits()) != 0 {
+        } else if self.flags.get_reserved() != 0 {
             return false;
         }
         true
@@ -1206,17 +1131,17 @@ mod tests {
         assert_eq!(hdr.get_version(), 0x1);
 
         assert!(!hdr.is_reply());
-        hdr.set_reply(true);
+        hdr.flags.set_is_reply(true);
         assert!(hdr.is_reply());
-        hdr.set_reply(false);
+        hdr.flags.set_is_reply(false);
 
         assert!(!hdr.is_need_reply());
-        hdr.set_need_reply(true);
+        hdr.flags.set_need_reply(true);
         assert!(hdr.is_need_reply());
-        hdr.set_need_reply(false);
+        hdr.flags.set_need_reply(false);
 
         assert_eq!(hdr.get_size(), 0x100);
-        hdr.set_size(0x200);
+        hdr.size = 0x200;
         assert_eq!(hdr.get_size(), 0x200);
 
         assert!(!hdr.is_need_reply());
@@ -1224,17 +1149,12 @@ mod tests {
         assert_eq!(hdr.get_version(), 0x1);
 
         // Check version
-        hdr.set_version(0x0);
+        hdr.flags.set_version(0x0);
         assert!(!hdr.is_valid());
-        hdr.set_version(0x2);
+        hdr.flags.set_version(0x2);
         assert!(!hdr.is_valid());
-        hdr.set_version(0x1);
+        hdr.flags.set_version(0x1);
         assert!(hdr.is_valid());
-
-        // Test Debug, Clone, PartiaEq trait
-        assert_eq!(hdr, hdr.clone());
-        assert_eq!(hdr.clone().get_code(), hdr.get_code());
-        assert_eq!(format!("{:?}", hdr.clone()), format!("{:?}", hdr));
     }
 
     #[test]

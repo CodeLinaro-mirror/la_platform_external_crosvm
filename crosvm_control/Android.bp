@@ -21,7 +21,10 @@ rust_ffi_shared {
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
     edition: "2021",
-    features: ["audio"],
+    features: [
+        "audio",
+        "gpu",
+    ],
     rustlibs: [
         "libballoon_control",
         "libbase_rust",
@@ -46,7 +49,10 @@ rust_ffi_static {
     cargo_pkg_version: "0.1.0",
     crate_root: "src/lib.rs",
     edition: "2021",
-    features: ["audio"],
+    features: [
+        "audio",
+        "gpu",
+    ],
     rustlibs: [
         "libballoon_control",
         "libbase_rust",
