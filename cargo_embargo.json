@@ -73,7 +73,7 @@
     "libfuse": "libfuse_rust",
     "liblog": "liblog_rust",
     "libminijail": "libminijail_rust",
-    "librand": "librand-0.8",
+    "librand": "librand",
     "libsnapshot": "libsnapshot_crosvm",
     "libsync": "libsync_rust",
     "libx86_64": "libx86_64_rust"

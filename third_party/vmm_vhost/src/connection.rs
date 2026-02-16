@@ -10,11 +10,10 @@ use std::mem;
 use base::AsRawDescriptor;
 use base::RawDescriptor;
 use zerocopy::FromBytes;
+use zerocopy::FromZeros;
 use zerocopy::Immutable;
 use zerocopy::IntoBytes;
 
-use crate::connection::Req;
-use crate::message::FrontendReq;
 use crate::message::*;
 use crate::sys::PlatformConnection;
 use crate::Error;
@@ -23,7 +22,7 @@ use crate::Result;
 /// Listener for accepting connections.
 pub trait Listener: Sized {
     /// Accept an incoming connection.
-    fn accept(&mut self) -> Result<Option<Connection<FrontendReq>>>;
+    fn accept(&mut self) -> Result<Option<Connection>>;
 
     /// Change blocking status on the listener.
     fn set_nonblocking(&self, block: bool) -> Result<()>;
@@ -55,48 +54,46 @@ fn advance_slices_mut(bufs: &mut &mut [&mut [u8]], mut count: usize) {
 ///
 /// Builds on top of `PlatformConnection`, which provides methods for sending and receiving raw
 /// bytes and file descriptors (a thin cross-platform abstraction for unix domain sockets).
-pub struct Connection<R: Req>(
+pub struct Connection(
     pub(crate) PlatformConnection,
-    pub(crate) std::marker::PhantomData<R>,
     // Mark `Connection` as `!Sync` because message sends and recvs cannot safely be done
     // concurrently.
     pub(crate) std::marker::PhantomData<std::cell::Cell<()>>,
 );
 
-impl<R: Req> Connection<R> {
+impl Connection {
     /// Sends a header-only message with optional attached file descriptors.
     pub fn send_header_only_message(
         &self,
-        hdr: &VhostUserMsgHeader<R>,
+        hdr: &VhostUserMsgHeader,
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
-        self.0
-            .send_message(hdr.into_raw().as_bytes(), &[], &[], fds)
+        self.0.send_message(hdr.as_bytes(), &[], &[], fds)
     }
 
     /// Send a message with header and body. Optional file descriptors may be attached to
     /// the message.
     pub fn send_message<T: IntoBytes + Immutable>(
         &self,
-        hdr: &VhostUserMsgHeader<R>,
+        hdr: &VhostUserMsgHeader,
         body: &T,
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
         self.0
-            .send_message(hdr.into_raw().as_bytes(), body.as_bytes(), &[], fds)
+            .send_message(hdr.as_bytes(), body.as_bytes(), &[], fds)
     }
 
     /// Send a message with header and body. `payload` is appended to the end of the body. Optional
     /// file descriptors may also be attached to the message.
     pub fn send_message_with_payload<T: IntoBytes + Immutable>(
         &self,
-        hdr: &VhostUserMsgHeader<R>,
+        hdr: &VhostUserMsgHeader,
         body: &T,
         payload: &[u8],
         fds: Option<&[RawDescriptor]>,
     ) -> Result<()> {
         self.0
-            .send_message(hdr.into_raw().as_bytes(), body.as_bytes(), payload, fds)
+            .send_message(hdr.as_bytes(), body.as_bytes(), payload, fds)
     }
 
     /// Reads all bytes into the given scatter/gather vectors with optional attached files. Will
@@ -145,15 +142,14 @@ impl<R: Req> Connection<R> {
     ///
     /// Note, only the first MAX_ATTACHED_FD_ENTRIES file descriptors will be accepted and all
     /// other file descriptor will be discard silently.
-    pub fn recv_header(&self) -> Result<(VhostUserMsgHeader<R>, Vec<File>)> {
-        let mut hdr_raw = [0u32; 3];
-        let files = self.recv_into_bufs_all(&mut [hdr_raw.as_mut_bytes()])?;
-        let hdr = VhostUserMsgHeader::from_raw(hdr_raw);
+    pub fn recv_header(&self) -> Result<(VhostUserMsgHeader, Vec<File>)> {
+        let mut hdr = VhostUserMsgHeader::new_zeroed();
+        let files = self.recv_into_bufs_all(&mut [hdr.as_mut_bytes()])?;
         Ok((hdr, files))
     }
 
     /// Receive the body following the header `hdr`.
-    pub fn recv_body_bytes(&self, hdr: &VhostUserMsgHeader<R>) -> Result<(Vec<u8>, Vec<File>)> {
+    pub fn recv_body_bytes(&self, hdr: &VhostUserMsgHeader) -> Result<(Vec<u8>, Vec<File>)> {
         // NOTE: `recv_into_bufs_all` is a noop when the buffer is empty, so `hdr.get_size() == 0`
         // works as expected.
         let mut body = vec![0; hdr.get_size().try_into().unwrap()];
@@ -167,14 +163,11 @@ impl<R: Req> Connection<R> {
     /// accepted and all other file descriptor will be discard silently.
     pub fn recv_message<T: IntoBytes + FromBytes>(
         &self,
-    ) -> Result<(VhostUserMsgHeader<R>, T, Vec<File>)> {
-        let mut hdr_raw = [0u32; 3];
+    ) -> Result<(VhostUserMsgHeader, T, Vec<File>)> {
+        let mut hdr = VhostUserMsgHeader::new_zeroed();
         let mut body = T::new_zeroed();
-        let mut slices = [hdr_raw.as_mut_bytes(), body.as_mut_bytes()];
+        let mut slices = [hdr.as_mut_bytes(), body.as_mut_bytes()];
         let files = self.recv_into_bufs_all(&mut slices)?;
-
-        let hdr = VhostUserMsgHeader::from_raw(hdr_raw);
-
         Ok((hdr, body, files))
     }
 
@@ -185,7 +178,7 @@ impl<R: Req> Connection<R> {
     /// other file descriptor will be discard silently.
     pub fn recv_message_with_payload<T: IntoBytes + FromBytes>(
         &self,
-    ) -> Result<(VhostUserMsgHeader<R>, T, Vec<u8>, Vec<File>, Vec<File>)> {
+    ) -> Result<(VhostUserMsgHeader, T, Vec<u8>, Vec<File>, Vec<File>)> {
         let (hdr, files) = self.recv_header()?;
 
         let mut body = T::new_zeroed();
@@ -198,7 +191,7 @@ impl<R: Req> Connection<R> {
     }
 }
 
-impl<R: Req> AsRawDescriptor for Connection<R> {
+impl AsRawDescriptor for Connection {
     fn as_raw_descriptor(&self) -> RawDescriptor {
         self.0.as_raw_descriptor()
     }
@@ -214,6 +207,7 @@ pub(crate) mod tests {
     use tempfile::tempfile;
 
     use super::*;
+    use crate::message::FrontendReq;
     use crate::message::VhostUserEmptyMessage;
     use crate::message::VhostUserU64;
 
