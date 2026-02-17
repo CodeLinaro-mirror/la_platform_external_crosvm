@@ -79,17 +79,15 @@ use vm_control::VmMemorySource;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 use vm_memory::MemoryRegion;
-use vmm_vhost::message::VhostSharedMemoryRegion;
 use vmm_vhost::message::VhostUserConfigFlags;
 use vmm_vhost::message::VhostUserExternalMapMsg;
 use vmm_vhost::message::VhostUserGpuMapMsg;
 use vmm_vhost::message::VhostUserInflight;
+use vmm_vhost::message::VhostUserMMap;
+use vmm_vhost::message::VhostUserMMapFlags;
 use vmm_vhost::message::VhostUserMemoryRegion;
 use vmm_vhost::message::VhostUserMigrationPhase;
 use vmm_vhost::message::VhostUserProtocolFeatures;
-use vmm_vhost::message::VhostUserShmemMapMsg;
-use vmm_vhost::message::VhostUserShmemMapMsgFlags;
-use vmm_vhost::message::VhostUserShmemUnmapMsg;
 use vmm_vhost::message::VhostUserSingleMemoryRegion;
 use vmm_vhost::message::VhostUserTransferDirection;
 use vmm_vhost::message::VhostUserVringAddrFlags;
@@ -429,7 +427,7 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
     }
 
     fn get_protocol_features(&mut self) -> VhostResult<VhostUserProtocolFeatures> {
-        Ok(self.backend.protocol_features())
+        Ok(self.backend.protocol_features() | VhostUserProtocolFeatures::REPLY_ACK)
     }
 
     fn set_protocol_features(&mut self, features: u64) -> VhostResult<()> {
@@ -443,7 +441,7 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
                 return Err(VhostError::InvalidOperation);
             }
         };
-        let supported = self.backend.protocol_features();
+        let supported = self.get_protocol_features()?;
         self.acked_protocol_features = features & supported;
         Ok(())
     }
@@ -698,7 +696,11 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
 
     fn set_backend_req_fd(&mut self, ep: Connection<BackendReq>) {
         let conn = VhostBackendReqConnection::new(
-            FrontendClient::new(ep),
+            FrontendClient::new(
+                ep,
+                self.acked_protocol_features
+                    .contains(VhostUserProtocolFeatures::REPLY_ACK),
+            ),
             self.backend.get_shared_memory_region().map(|r| r.id),
         );
 
@@ -828,12 +830,12 @@ impl<T: VhostUserDevice> vmm_vhost::Backend for DeviceRequestHandler<T> {
         }
     }
 
-    fn get_shared_memory_regions(&mut self) -> VhostResult<Vec<VhostSharedMemoryRegion>> {
-        Ok(if let Some(r) = self.backend.get_shared_memory_region() {
-            vec![VhostSharedMemoryRegion::new(r.id, r.length)]
-        } else {
-            Vec::new()
-        })
+    fn get_shmem_config(&mut self) -> VhostResult<Vec<SharedMemoryRegion>> {
+        Ok(self
+            .backend
+            .get_shared_memory_region()
+            .into_iter()
+            .collect())
     }
 }
 
@@ -931,7 +933,7 @@ impl SharedMemoryMapper for VhostShmemMapper {
                 size
             }
             source => {
-                // The last two sources use the same VhostUserShmemMapMsg, continue matching here
+                // The last two sources use the same VhostUserMMap, continue matching here
                 // on the aliased `source` above.
                 let (descriptor, fd_offset, size) = match source {
                     VmMemorySource::Descriptor {
@@ -946,8 +948,19 @@ impl SharedMemoryMapper for VhostShmemMapper {
                     }
                     _ => bail!("unsupported source"),
                 };
-                let flags = VhostUserShmemMapMsgFlags::from(prot);
-                let msg = VhostUserShmemMapMsg::new(self.shmid, offset, fd_offset, size, flags);
+                let mut flags = VhostUserMMapFlags::empty();
+                anyhow::ensure!(prot.allows(&Protection::read()), "mapping must be readable");
+                if prot.allows(&Protection::write()) {
+                    flags |= VhostUserMMapFlags::MAP_RW;
+                }
+                let msg = VhostUserMMap {
+                    shmid: self.shmid,
+                    padding: Default::default(),
+                    fd_offset,
+                    shm_offset: offset,
+                    len: size,
+                    flags,
+                };
                 shared
                     .conn
                     .shmem_map(&msg, &descriptor)
@@ -966,7 +979,14 @@ impl SharedMemoryMapper for VhostShmemMapper {
             .mapped_regions
             .remove(&offset)
             .context("unknown offset")?;
-        let msg = VhostUserShmemUnmapMsg::new(self.shmid, offset, size);
+        let msg = VhostUserMMap {
+            shmid: self.shmid,
+            padding: Default::default(),
+            fd_offset: 0,
+            shm_offset: offset,
+            len: size,
+            flags: VhostUserMMapFlags::empty(),
+        };
         shared
             .conn
             .shmem_unmap(&msg)

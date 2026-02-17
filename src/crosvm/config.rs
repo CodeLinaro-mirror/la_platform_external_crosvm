@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
+use arch::DevicePowerManagerConfig;
 use arch::FdtPosition;
 #[cfg(all(target_os = "android", target_arch = "aarch64"))]
 use arch::FfaConfig;
@@ -625,6 +626,7 @@ pub struct Config {
     #[cfg(feature = "crash-report")]
     pub crash_report_uuid: Option<String>,
     pub delay_rt: bool,
+    pub dev_pm: Option<DevicePowerManagerConfig>,
     pub device_tree_overlay: Vec<DtboOption>,
     pub disable_virtio_intx: bool,
     pub disks: Vec<DiskOption>,
@@ -741,6 +743,7 @@ pub struct Config {
     pub slirp_capture_file: Option<String>,
     #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
+    pub smccc_trng: bool,
     #[cfg(all(windows, feature = "audio"))]
     pub snd_split_configs: Vec<SndSplitConfig>,
     pub socket_path: Option<PathBuf>,
@@ -769,6 +772,8 @@ pub struct Config {
     pub vfio: Vec<super::sys::config::VfioOption>,
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub vfio_isolate_hotplug: bool,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub vfio_platform_pm: bool,
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[cfg(target_arch = "aarch64")]
     pub vhost_scmi: bool,
@@ -856,6 +861,7 @@ impl Default for Config {
             cpu_ipc_ratio: BTreeMap::new(),
             delay_rt: false,
             device_tree_overlay: Vec::new(),
+            dev_pm: None,
             disks: Vec::new(),
             disable_virtio_intx: false,
             display_input_height: None,
@@ -974,6 +980,7 @@ impl Default for Config {
             slirp_capture_file: None,
             #[cfg(target_arch = "x86_64")]
             smbios: SmbiosOptions::default(),
+            smccc_trng: false,
             #[cfg(all(windows, feature = "audio"))]
             snd_split_configs: Vec::new(),
             socket_path: None,
@@ -999,6 +1006,8 @@ impl Default for Config {
             vfio: Vec::new(),
             #[cfg(any(target_os = "android", target_os = "linux"))]
             vfio_isolate_hotplug: false,
+            #[cfg(any(target_os = "android", target_os = "linux"))]
+            vfio_platform_pm: false,
             #[cfg(any(target_os = "android", target_os = "linux"))]
             #[cfg(target_arch = "aarch64")]
             vhost_scmi: false,

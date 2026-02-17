@@ -29,6 +29,8 @@ pub enum PlatformDeviceId {
     VirtualPmc = 21,
     VirtCpufreq = 22,
     FwCfg = 23,
+    SmcccTrng = 24,
+    HvcDevicePowerManager = 25,
     Mock = 0xff,
 }
 

@@ -48,6 +48,8 @@ pub enum Error {
     InvalidString(String),
     #[error("Expected phandle value for IOMMU of type: {}, id: {:?}", .0, .1)]
     MissingIommuPhandle(String, Option<u32>),
+    #[error("Expected power domain: offset={}", .0)]
+    MissingPowerDomain(usize),
     #[error("Property value is not valid")]
     PropertyValueInvalid,
     #[error("Property value size must fit in 32 bits")]
@@ -688,7 +690,7 @@ impl Fdt {
             .get(..FdtHeader::SIZE)
             .ok_or_else(|| Error::FdtParseError("cannot extract header, input too small".into()))?;
         let header = FdtHeader::from_blob(header)?;
-        if header.total_size as usize != input.len() {
+        if header.total_size as usize > input.len() {
             return Err(Error::FdtParseError("input size doesn't match".into()));
         }
 
