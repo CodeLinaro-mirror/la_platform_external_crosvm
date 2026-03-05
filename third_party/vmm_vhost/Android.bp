@@ -26,6 +26,7 @@ rust_library {
     rustlibs: [
         "libanyhow",
         "libbase_rust",
+        "libbit_field_crosvm",
         "libbitflags",
         "libcfg_if",
         "liblibc",
@@ -57,6 +58,7 @@ rust_test {
     rustlibs: [
         "libanyhow",
         "libbase_rust",
+        "libbit_field_crosvm",
         "libbitflags",
         "libcfg_if",
         "liblibc",
