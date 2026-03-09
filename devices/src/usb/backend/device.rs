@@ -131,23 +131,6 @@ impl BackendDevice for BackendDeviceType {
         )
     }
 
-    fn build_isochronous_transfer(
-        &mut self,
-        ep_addr: u8,
-        transfer_buffer: TransferBuffer,
-        packet_size: u32,
-    ) -> Result<BackendTransferType> {
-        multi_dispatch!(
-            self,
-            BackendDeviceType,
-            HostDevice FidoDevice,
-            build_isochronous_transfer,
-            ep_addr,
-            transfer_buffer,
-            packet_size
-        )
-    }
-
     fn get_control_transfer_state(&mut self) -> Arc<RwLock<ControlTransferState>> {
         multi_dispatch!(
             self,
@@ -455,11 +438,10 @@ impl BackendDeviceType {
 
     fn execute_control_transfer(
         &mut self,
-        transfer: XhciTransfer,
-        control_request_setup: &UsbRequestSetup,
+        xhci_transfer: Arc<XhciTransfer>,
         buffer: Option<ScatterGatherBuffer>,
+        control_request_setup: &UsbRequestSetup,
     ) -> Result<()> {
-        let xhci_transfer = Arc::new(transfer);
         if self.intercepted_control_transfer(&xhci_transfer, &buffer, control_request_setup)? {
             return Ok(());
         }
@@ -573,14 +555,15 @@ impl BackendDeviceType {
     }
 
     fn handle_control_transfer(&mut self, transfer: XhciTransfer) -> Result<()> {
-        let transfer_type = transfer
+        let xhci_transfer = Arc::new(transfer);
+        let transfer_type = xhci_transfer
             .get_transfer_type()
             .map_err(Error::GetXhciTransferType)?;
         let control_transfer_state_binding = self.get_control_transfer_state();
         let mut control_transfer_state = control_transfer_state_binding.write().unwrap();
         match transfer_type {
             XhciTransferType::SetupStage => {
-                let setup = transfer
+                let setup = xhci_transfer
                     .create_usb_request_setup()
                     .map_err(Error::CreateUsbRequestSetup)?;
                 if control_transfer_state.ctl_ep_state != ControlEndpointState::SetupStage {
@@ -589,7 +572,7 @@ impl BackendDeviceType {
                 }
                 usb_trace!("setup stage: setup buffer: {:?}", setup);
                 control_transfer_state.control_request_setup = setup;
-                transfer
+                xhci_transfer
                     .on_transfer_complete(&TransferStatus::Completed, 0)
                     .map_err(Error::TransferComplete)?;
                 control_transfer_state.ctl_ep_state = ControlEndpointState::DataStage;
@@ -599,9 +582,15 @@ impl BackendDeviceType {
                     error!("Control endpoint is in an inconsistant state");
                     return Ok(());
                 }
-                // Postpone the execution of this stage until the status stage.
-                transfer.proceed().map_err(Error::Proceed)?;
-                control_transfer_state.data_stage_transfer = Some(transfer);
+                // Requests with a DataStage will be executed here.
+                // Requests without a DataStage will be executed in StatusStage.
+                let buffer = xhci_transfer.create_buffer().map_err(Error::CreateBuffer)?;
+                self.execute_control_transfer(
+                    xhci_transfer,
+                    Some(buffer),
+                    &control_transfer_state.control_request_setup,
+                )?;
+                control_transfer_state.executed = true;
                 control_transfer_state.ctl_ep_state = ControlEndpointState::StatusStage;
             }
             XhciTransferType::StatusStage => {
@@ -609,29 +598,21 @@ impl BackendDeviceType {
                     error!("Control endpoint is in an inconsistant state");
                     return Ok(());
                 }
-
-                // If there's a data stage, merge the status stage onto it, so the completion of
-                // status stage can wait for the data stage and the event TRBs are submitted in the
-                // correct order.
-                if let Some(mut data_stage_transfer) =
-                    control_transfer_state.data_stage_transfer.take()
-                {
-                    let buffer = data_stage_transfer
-                        .create_buffer()
-                        .map_err(Error::CreateBuffer)?;
-                    data_stage_transfer.append_trbs(transfer);
-                    self.execute_control_transfer(
-                        data_stage_transfer,
-                        &control_transfer_state.control_request_setup,
-                        Some(buffer),
-                    )?;
+                if control_transfer_state.executed {
+                    // Request was already executed during DataStage.
+                    // Just complete the StatusStage transfer.
+                    xhci_transfer
+                        .on_transfer_complete(&TransferStatus::Completed, 0)
+                        .map_err(Error::TransferComplete)?;
                 } else {
+                    // Execute the request now since there was no DataStage.
                     self.execute_control_transfer(
-                        transfer,
-                        &control_transfer_state.control_request_setup,
+                        xhci_transfer,
                         None,
+                        &control_transfer_state.control_request_setup,
                     )?;
-                };
+                }
+                control_transfer_state.executed = false;
                 control_transfer_state.ctl_ep_state = ControlEndpointState::SetupStage;
             }
             _ => {
@@ -640,7 +621,7 @@ impl BackendDeviceType {
                     "Non control {} transfer sent to control endpoint.",
                     transfer_type,
                 );
-                transfer
+                xhci_transfer
                     .on_transfer_complete(&TransferStatus::Completed, 0)
                     .map_err(Error::TransferComplete)?;
             }
@@ -790,25 +771,18 @@ pub trait BackendDevice: Sync + Send {
     /// by this function must be consumed by `submit_backend_transfer()`.
     fn request_transfer_buffer(&mut self, size: usize) -> TransferBuffer;
 
-    /// Requests the backend to build a backend-specific bulk transfer request.
+    /// Requests the backend to build a backend-specific bulk transfer request
     fn build_bulk_transfer(
         &mut self,
         ep_addr: u8,
         transfer_buffer: TransferBuffer,
         stream_id: Option<u16>,
     ) -> Result<BackendTransferType>;
-    /// Requests the backend to build a backend-specific interrupt transfer request.
+    /// Requests the backend to build a backend-specific interrupt transfer request
     fn build_interrupt_transfer(
         &mut self,
         ep_addr: u8,
         transfer_buffer: TransferBuffer,
-    ) -> Result<BackendTransferType>;
-    /// Requests the backend to build a backend-specific isochronous transfer request.
-    fn build_isochronous_transfer(
-        &mut self,
-        ep_addr: u8,
-        transfer_buffer: TransferBuffer,
-        packet_size: u32,
     ) -> Result<BackendTransferType>;
 
     /// Returns the `ControlTransferState` for the given backend device.

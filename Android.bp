@@ -236,7 +236,7 @@ rust_test {
         "libnet_util",
         "libp9",
         "libproc_init",
-        "librand-0.8",
+        "librand",
         "libresources",
         "librutabaga_gfx",
         "libserde",

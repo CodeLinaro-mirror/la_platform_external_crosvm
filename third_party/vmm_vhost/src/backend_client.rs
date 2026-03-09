@@ -23,16 +23,28 @@ use crate::Error as VhostUserError;
 use crate::FrontendReq;
 use crate::Result as VhostUserResult;
 use crate::Result;
+use crate::SharedMemoryRegion;
 
 /// Client for a vhost-user device. The API is a thin abstraction over the vhost-user protocol.
 pub struct BackendClient {
-    connection: Connection<FrontendReq>,
+    connection: Connection,
+    set_need_reply: bool,
 }
 
 impl BackendClient {
     /// Create a new instance.
-    pub fn new(connection: Connection<FrontendReq>) -> Self {
-        BackendClient { connection }
+    pub fn new(connection: Connection) -> Self {
+        BackendClient {
+            connection,
+            set_need_reply: false,
+        }
+    }
+
+    /// Whether to set the "need_reply" flag in the message header for every request message.
+    ///
+    /// Requires the `VHOST_USER_PROTOCOL_F_REPLY_ACK` protocol feature to have been negotiated.
+    pub fn set_need_reply(&mut self, enable: bool) {
+        self.set_need_reply = enable;
     }
 
     /// Get a bitmask of supported virtio/vhost features.
@@ -91,13 +103,12 @@ impl BackendClient {
     /// Set base address for page modification logging.
     pub fn set_log_base(&self, base: u64, fd: Option<RawDescriptor>) -> Result<()> {
         let val = VhostUserU64::new(base);
-        let _ = self.send_request_with_body(
+        let hdr = self.send_request_with_body(
             FrontendReq::SET_LOG_BASE,
             &val,
             fd.as_ref().map(std::slice::from_ref),
         )?;
-
-        Ok(())
+        self.wait_for_ack(&hdr)
     }
 
     /// Specify an event file descriptor to signal on log write.
@@ -368,34 +379,31 @@ impl BackendClient {
         self.wait_for_ack(&hdr)
     }
 
-    /// Gets the shared memory regions used by the device.
-    pub fn get_shared_memory_regions(&self) -> Result<Vec<VhostSharedMemoryRegion>> {
-        let hdr = self.send_request_header(FrontendReq::GET_SHARED_MEMORY_REGIONS, None)?;
-        let (body_reply, buf_reply, rfds) = self.recv_reply_with_payload::<VhostUserU64>(&hdr)?;
-        let struct_size = mem::size_of::<VhostSharedMemoryRegion>();
-        if !rfds.is_empty() || buf_reply.len() != body_reply.value as usize * struct_size {
-            return Err(VhostUserError::InvalidMessage);
-        }
-        let mut regions = Vec::new();
-        let mut offset = 0;
-        for _ in 0..body_reply.value {
-            regions.push(
-                // Can't fail because the input is the correct size.
-                VhostSharedMemoryRegion::read_from_bytes(
-                    &buf_reply[offset..(offset + struct_size)],
-                )
-                .unwrap(),
-            );
-            offset += struct_size;
-        }
-        Ok(regions)
+    /// Get the shared memory configuration.
+    pub fn get_shmem_config(&self) -> Result<Vec<SharedMemoryRegion>> {
+        let hdr = self.send_request_header(FrontendReq::GET_SHMEM_CONFIG, None)?;
+        let reply: VhostUserShMemConfig = self.recv_reply(&hdr)?;
+
+        let shared_memory_regions = reply
+            .sizes
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, n)| n != 0)
+            .take(reply.nregions.try_into().unwrap())
+            .map(|(id, length)| SharedMemoryRegion {
+                id: id as u8,
+                length,
+            })
+            .collect();
+
+        Ok(shared_memory_regions)
     }
 
     fn send_request_header(
         &self,
         code: FrontendReq,
         fds: Option<&[RawDescriptor]>,
-    ) -> VhostUserResult<VhostUserMsgHeader<FrontendReq>> {
+    ) -> VhostUserResult<VhostUserMsgHeader> {
         let hdr = self.new_request_header(code, 0);
         self.connection.send_header_only_message(&hdr, fds)?;
         Ok(hdr)
@@ -406,7 +414,7 @@ impl BackendClient {
         code: FrontendReq,
         msg: &T,
         fds: Option<&[RawDescriptor]>,
-    ) -> VhostUserResult<VhostUserMsgHeader<FrontendReq>> {
+    ) -> VhostUserResult<VhostUserMsgHeader> {
         let hdr = self.new_request_header(code, mem::size_of::<T>() as u32);
         self.connection.send_message(&hdr, msg, fds)?;
         Ok(hdr)
@@ -418,7 +426,7 @@ impl BackendClient {
         msg: &T,
         payload: &[u8],
         fds: Option<&[RawDescriptor]>,
-    ) -> VhostUserResult<VhostUserMsgHeader<FrontendReq>> {
+    ) -> VhostUserResult<VhostUserMsgHeader> {
         let len = mem::size_of::<T>()
             .checked_add(payload.len())
             .ok_or(VhostUserError::OversizedMsg)?;
@@ -436,7 +444,7 @@ impl BackendClient {
         code: FrontendReq,
         queue_index: usize,
         fd: RawDescriptor,
-    ) -> VhostUserResult<VhostUserMsgHeader<FrontendReq>> {
+    ) -> VhostUserResult<VhostUserMsgHeader> {
         // Bits (0-7) of the payload contain the vring index. Bit 8 is the invalid FD flag.
         // This flag is set when there is no file descriptor in the ancillary data. This signals
         // that polling will be used instead of waiting for the call.
@@ -448,7 +456,7 @@ impl BackendClient {
 
     fn recv_reply<T: Sized + FromBytes + IntoBytes + Default + VhostUserMsgValidator>(
         &self,
-        hdr: &VhostUserMsgHeader<FrontendReq>,
+        hdr: &VhostUserMsgHeader,
     ) -> VhostUserResult<T> {
         if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam(
@@ -464,7 +472,7 @@ impl BackendClient {
 
     fn recv_reply_with_files<T: Sized + IntoBytes + FromBytes + Default + VhostUserMsgValidator>(
         &self,
-        hdr: &VhostUserMsgHeader<FrontendReq>,
+        hdr: &VhostUserMsgHeader,
     ) -> VhostUserResult<(T, Vec<File>)> {
         if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam(
@@ -483,7 +491,7 @@ impl BackendClient {
         T: Sized + IntoBytes + FromBytes + Default + VhostUserMsgValidator,
     >(
         &self,
-        hdr: &VhostUserMsgHeader<FrontendReq>,
+        hdr: &VhostUserMsgHeader,
     ) -> VhostUserResult<(T, Vec<u8>, Vec<File>)> {
         if hdr.is_reply() {
             return Err(VhostUserError::InvalidParam(
@@ -505,7 +513,7 @@ impl BackendClient {
         Ok((body, buf, files))
     }
 
-    fn wait_for_ack(&self, hdr: &VhostUserMsgHeader<FrontendReq>) -> VhostUserResult<()> {
+    fn wait_for_ack(&self, hdr: &VhostUserMsgHeader) -> VhostUserResult<()> {
         if !hdr.is_need_reply() {
             return Ok(());
         }
@@ -521,12 +529,8 @@ impl BackendClient {
     }
 
     #[inline]
-    fn new_request_header(
-        &self,
-        request: FrontendReq,
-        size: u32,
-    ) -> VhostUserMsgHeader<FrontendReq> {
-        VhostUserMsgHeader::new(request, 0x1, size)
+    fn new_request_header(&self, request: FrontendReq, size: u32) -> VhostUserMsgHeader {
+        VhostUserMsgHeader::new_request_header(request, size, self.set_need_reply)
     }
 }
 
@@ -575,7 +579,7 @@ mod tests {
     const BUFFER_SIZE: usize = 0x1001;
     const INVALID_PROTOCOL_FEATURE: u64 = 1 << 63;
 
-    fn create_pair() -> (BackendClient, Connection<FrontendReq>) {
+    fn create_pair() -> (BackendClient, Connection) {
         let (client_connection, server_connection) = Connection::pair().unwrap();
         let backend_client = BackendClient::new(client_connection);
         (backend_client, server_connection)
@@ -614,7 +618,7 @@ mod tests {
         assert_eq!(hdr.get_version(), 0x1);
         assert!(rfds.is_empty());
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_FEATURES, 0x4, 8);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_FEATURES, 8);
         let msg = VhostUserU64::new(0x15);
         peer.send_message(&hdr, &msg, None).unwrap();
         let features = backend_client.get_features().unwrap();
@@ -622,7 +626,7 @@ mod tests {
         let (_hdr, rfds) = peer.recv_header().unwrap();
         assert!(rfds.is_empty());
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::SET_FEATURES, 0x4, 8);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::SET_FEATURES, 8);
         let msg = VhostUserU64::new(0x15);
         peer.send_message(&hdr, &msg, None).unwrap();
         backend_client.set_features(0x15).unwrap();
@@ -631,7 +635,7 @@ mod tests {
         let val = msg.value;
         assert_eq!(val, 0x15);
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_FEATURES, 0x4, 8);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_FEATURES, 8);
         let msg = 0x15u32;
         peer.send_message(&hdr, &msg, None).unwrap();
         assert!(backend_client.get_features().is_err());
@@ -647,7 +651,7 @@ mod tests {
         assert!(rfds.is_empty());
 
         let pfeatures = VhostUserProtocolFeatures::all();
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_PROTOCOL_FEATURES, 0x4, 8);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_PROTOCOL_FEATURES, 8);
         // Unknown feature bits should be ignored.
         let msg = VhostUserU64::new(pfeatures.bits() | INVALID_PROTOCOL_FEATURE);
         peer.send_message(&hdr, &msg, None).unwrap();
@@ -665,7 +669,7 @@ mod tests {
         assert_eq!(val, pfeatures.bits());
 
         let vfeatures = 0x15 | 1 << VHOST_USER_F_PROTOCOL_FEATURES;
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_FEATURES, 0x4, 8);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_FEATURES, 8);
         let msg = VhostUserU64::new(vfeatures);
         peer.send_message(&hdr, &msg, None).unwrap();
         let features = backend_client.get_features().unwrap();
@@ -680,7 +684,7 @@ mod tests {
         assert_eq!(val, vfeatures);
 
         let pfeatures = VhostUserProtocolFeatures::all();
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_PROTOCOL_FEATURES, 0x4, 8);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_PROTOCOL_FEATURES, 8);
         // Unknown feature bits should be ignored.
         let msg = VhostUserU64::new(pfeatures.bits() | INVALID_PROTOCOL_FEATURE);
         peer.send_message(&hdr, &msg, None).unwrap();
@@ -695,7 +699,7 @@ mod tests {
         let val = msg.value;
         assert_eq!(val, pfeatures.bits());
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::SET_PROTOCOL_FEATURES, 0x4, 8);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::SET_PROTOCOL_FEATURES, 8);
         let msg = VhostUserU64::new(pfeatures.bits());
         peer.send_message(&hdr, &msg, None).unwrap();
         assert!(backend_client.get_protocol_features().is_err());
@@ -706,7 +710,7 @@ mod tests {
         let (backend_client, peer) = create_pair();
         let buf = vec![0x0; BUFFER_SIZE];
 
-        let mut hdr = VhostUserMsgHeader::new(FrontendReq::GET_CONFIG, 0x4, 16);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_CONFIG, 16);
         let msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
@@ -714,13 +718,12 @@ mod tests {
             .get_config(0x100, 4, VhostUserConfigFlags::WRITABLE, &buf[0..4])
             .is_ok());
 
-        hdr.set_code(FrontendReq::GET_FEATURES);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_FEATURES, 16);
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
         assert!(backend_client
             .get_config(0x100, 4, VhostUserConfigFlags::WRITABLE, &buf[0..4])
             .is_err());
-        hdr.set_code(FrontendReq::GET_CONFIG);
     }
 
     #[test]
@@ -728,7 +731,7 @@ mod tests {
         let (backend_client, peer) = create_pair();
         let buf = vec![0x0; BUFFER_SIZE];
 
-        let mut hdr = VhostUserMsgHeader::new(FrontendReq::GET_CONFIG, 0x4, 16);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_CONFIG, 16);
         let msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
@@ -736,7 +739,7 @@ mod tests {
             .get_config(0x100, 4, VhostUserConfigFlags::WRITABLE, &buf[0..4])
             .is_ok());
 
-        hdr.set_reply(false);
+        let hdr = VhostUserMsgHeader::new_request_header(FrontendReq::GET_CONFIG, 16, false);
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
         assert!(backend_client
@@ -749,7 +752,7 @@ mod tests {
         let (backend_client, peer) = create_pair();
         let buf = vec![0x0; BUFFER_SIZE];
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_CONFIG, 0x4, 16);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_CONFIG, 16);
         let msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
@@ -763,7 +766,7 @@ mod tests {
         let (backend_client, peer) = create_pair();
         let buf = vec![0x0; BUFFER_SIZE];
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_CONFIG, 0x4, 16);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_CONFIG, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
@@ -784,7 +787,7 @@ mod tests {
         let (backend_client, peer) = create_pair();
         let buf = vec![0x0; BUFFER_SIZE];
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_CONFIG, 0x4, 16);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_CONFIG, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
@@ -805,7 +808,7 @@ mod tests {
         let (backend_client, peer) = create_pair();
         let buf = vec![0x0; BUFFER_SIZE];
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_CONFIG, 0x4, 16);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_CONFIG, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();
@@ -826,7 +829,7 @@ mod tests {
         let (backend_client, peer) = create_pair();
         let buf = vec![0x0; BUFFER_SIZE];
 
-        let hdr = VhostUserMsgHeader::new(FrontendReq::GET_CONFIG, 0x4, 16);
+        let hdr = VhostUserMsgHeader::new_reply_header(FrontendReq::GET_CONFIG, 16);
         let mut msg = VhostUserConfig::new(0x100, 4, VhostUserConfigFlags::empty());
         peer.send_message_with_payload(&hdr, &msg, &buf[0..4], None)
             .unwrap();

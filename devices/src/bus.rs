@@ -20,6 +20,7 @@ use base::debug;
 use base::error;
 use base::Event;
 use base::SharedMemory;
+use hypervisor::HypercallAbi;
 use remain::sorted;
 use serde::Deserialize;
 use serde::Serialize;
@@ -81,6 +82,7 @@ pub struct ConfigWriteResult {
 pub enum BusType {
     Mmio,
     Io,
+    Hypercall,
 }
 
 /// Trait for devices that respond to reads or writes in an arbitrary address space.
@@ -148,9 +150,48 @@ pub trait BusDevice: Send + Suspendable {
     /// Invoked when the device is destroyed
     fn destroy_device(&mut self) {}
 
+    /// Supports runtime power_on()/power_off()
+    fn supports_power_management(&self) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    /// Returns whether the device starts powered on.
+    fn initial_power_state(&self) -> bool {
+        // Most devices should start on, in particular if they don't support PM.
+        true
+    }
+
+    /// Powers the device on.
+    fn power_on(&mut self) -> anyhow::Result<()> {
+        Err(anyhow!(
+            "power_on not implemented for {}",
+            std::any::type_name::<Self>()
+        ))
+    }
+
+    /// Powers the device off.
+    fn power_off(&mut self) -> anyhow::Result<()> {
+        Err(anyhow!(
+            "power_off not implemented for {}",
+            std::any::type_name::<Self>()
+        ))
+    }
+
     /// Returns the secondary bus number if this bus device is pci bridge
     fn is_bridge(&self) -> Option<u8> {
         None
+    }
+
+    /// Handles a hypercall. Only used by hypercall-based devices.
+    ///
+    /// # Returns
+    /// Ok(()) or Err(_) depending on whether an error occurred. Either way, the ABI-specific
+    /// result for the guest is stored in `abi`, even on failure.
+    fn handle_hypercall(&self, abi: &mut HypercallAbi) -> anyhow::Result<()> {
+        Err(anyhow!(
+            "handle_hypercall not implemented for {}",
+            std::any::type_name::<Self>()
+        ))
     }
 }
 
@@ -766,6 +807,22 @@ impl Bus {
         }
         device_index.is_some()
     }
+
+    /// Handles a guest hypercall.
+    ///
+    /// # Returns
+    /// Ok(()) or Err(_) depending on whether an error occurred. Either way, the ABI-specific
+    /// result for the guest is stored in `abi`, even on failure.
+    pub fn handle_hypercall(&self, abi: &mut HypercallAbi) -> anyhow::Result<()> {
+        let id = abi.hypercall_id().try_into().unwrap();
+        let (_, _, entry) = self
+            .get_device(id)
+            .with_context(|| format!("Unknown hypercall {id:#x}"))?;
+        match &entry.device {
+            BusDeviceEntry::OuterSync(dev) => dev.lock().handle_hypercall(abi),
+            BusDeviceEntry::InnerSync(dev) => dev.handle_hypercall(abi),
+        }
+    }
 }
 
 impl Default for Bus {
@@ -782,37 +839,7 @@ mod tests {
     use super::*;
     use crate::suspendable::Suspendable;
     use crate::suspendable_tests;
-
-    #[derive(Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
-    struct DummyDevice;
-
-    impl BusDevice for DummyDevice {
-        fn device_id(&self) -> DeviceId {
-            PlatformDeviceId::Cmos.into()
-        }
-        fn debug_label(&self) -> String {
-            "dummy device".to_owned()
-        }
-    }
-
-    impl Suspendable for DummyDevice {
-        fn snapshot(&mut self) -> AnyhowResult<AnySnapshot> {
-            AnySnapshot::to_any(self).context("error serializing")
-        }
-
-        fn restore(&mut self, data: AnySnapshot) -> AnyhowResult<()> {
-            *self = AnySnapshot::from_any(data).context("error deserializing")?;
-            Ok(())
-        }
-
-        fn sleep(&mut self) -> AnyhowResult<()> {
-            Ok(())
-        }
-
-        fn wake(&mut self) -> AnyhowResult<()> {
-            Ok(())
-        }
-    }
+    use crate::MockDevice;
 
     #[derive(Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
     struct ConstantDevice {
@@ -877,7 +904,7 @@ mod tests {
     #[test]
     fn bus_insert() {
         let bus = Bus::new(BusType::Io);
-        let dev = Arc::new(Mutex::new(DummyDevice));
+        let dev = Arc::new(Mutex::new(MockDevice::new()));
         assert_eq!(
             bus.insert(dev.clone(), 0x10, 0),
             Err(Error::Overlap {
@@ -950,7 +977,7 @@ mod tests {
     #[test]
     fn bus_insert_full_addr() {
         let bus = Bus::new(BusType::Io);
-        let dev = Arc::new(Mutex::new(DummyDevice));
+        let dev = Arc::new(Mutex::new(MockDevice::new()));
         assert_eq!(
             bus.insert(dev.clone(), 0x10, 0),
             Err(Error::Overlap {
@@ -1023,7 +1050,7 @@ mod tests {
     #[test]
     fn bus_read_write() {
         let bus = Bus::new(BusType::Io);
-        let dev = Arc::new(Mutex::new(DummyDevice));
+        let dev = Arc::new(Mutex::new(MockDevice::new()));
         assert_eq!(bus.insert(dev, 0x10, 0x10), Ok(()));
         assert!(bus.read(0x10, &mut [0, 0, 0, 0]));
         assert!(bus.write(0x10, &[0, 0, 0, 0]));

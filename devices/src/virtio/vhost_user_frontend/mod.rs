@@ -104,7 +104,7 @@ impl VhostUserFrontend {
     pub fn new(
         device_type: DeviceType,
         mut base_features: u64,
-        connection: vmm_vhost::Connection<vmm_vhost::FrontendReq>,
+        connection: vmm_vhost::Connection,
         vm_evt_wrtube: SendTube,
         max_queue_size: Option<u16>,
         pci_address: Option<PciAddress>,
@@ -134,20 +134,17 @@ impl VhostUserFrontend {
             allow_features & backend_client.get_features().map_err(Error::GetFeatures)?;
         let mut acked_features = 0;
 
-        let mut allow_protocol_features = VhostUserProtocolFeatures::CONFIG
+        let allow_protocol_features = VhostUserProtocolFeatures::CONFIG
             | VhostUserProtocolFeatures::MQ
             | VhostUserProtocolFeatures::BACKEND_REQ
-            | VhostUserProtocolFeatures::DEVICE_STATE;
-
-        // HACK: the crosvm vhost-user GPU backend supports the non-standard
-        // VHOST_USER_PROTOCOL_FEATURE_SHARED_MEMORY_REGIONS. This should either be standardized
-        // (and enabled for all device types) or removed.
-        let expose_shmem_descriptors_with_viommu = if device_type == DeviceType::Gpu {
-            allow_protocol_features |= VhostUserProtocolFeatures::SHARED_MEMORY_REGIONS;
-            true
-        } else {
-            false
-        };
+            | VhostUserProtocolFeatures::DEVICE_STATE
+            | VhostUserProtocolFeatures::SHMEM_MAP
+            // NOTE: We advertise REPLY_ACK, but we don't actually set the "need_reply" bit in any
+            // `BackendClient` requests because there is a theoretical latency penalty and no
+            // obvious advantage at the moment. Instead, we negotiate it only so that the backend
+            // can choose to set the "need_reply" in the backend-to-frontend requests (e.g. to
+            // avoid race conditions when using SHMEM_MAP).
+            | VhostUserProtocolFeatures::REPLY_ACK;
 
         let mut protocol_features = VhostUserProtocolFeatures::empty();
         if avail_features & 1 << VHOST_USER_F_PROTOCOL_FEATURES != 0 {
@@ -172,11 +169,14 @@ impl VhostUserFrontend {
         // if protocol feature `VhostUserProtocolFeatures::BACKEND_REQ` is negotiated.
         let backend_req_handler =
             if protocol_features.contains(VhostUserProtocolFeatures::BACKEND_REQ) {
-                let (handler, tx_fd) = create_backend_req_handler(
+                let (mut handler, tx_fd) = create_backend_req_handler(
                     BackendReqHandlerImpl::new(),
                     #[cfg(windows)]
                     backend_pid,
                 )?;
+                handler.set_reply_ack_flag(
+                    protocol_features.contains(VhostUserProtocolFeatures::REPLY_ACK),
+                );
                 backend_client
                     .set_backend_req_fd(&tx_fd)
                     .map_err(Error::SetDeviceRequestChannel)?;
@@ -226,7 +226,7 @@ impl VhostUserFrontend {
             backend_req_handler,
             shmem_region: RefCell::new(None),
             queue_sizes,
-            expose_shmem_descriptors_with_viommu,
+            expose_shmem_descriptors_with_viommu: device_type == DeviceType::Gpu,
             pci_address,
             vm_evt_wrtube,
             sent_queues: None,
@@ -488,6 +488,9 @@ impl VirtioDevice for VhostUserFrontend {
     }
 
     fn reset(&mut self) -> anyhow::Result<()> {
+        // TODO: Reset SHMEM_MAP mappings. The vhost-user spec says "mappings are automatically
+        // unmapped by the front-end across device reset operation".
+
         if let Some(sent_queues) = self.sent_queues.take() {
             for queue_index in sent_queues.into_keys() {
                 let _vring_base = self
@@ -514,40 +517,36 @@ impl VirtioDevice for VhostUserFrontend {
     fn get_shared_memory_region(&self) -> Option<SharedMemoryRegion> {
         if !self
             .protocol_features
-            .contains(VhostUserProtocolFeatures::SHARED_MEMORY_REGIONS)
+            .contains(VhostUserProtocolFeatures::SHMEM_MAP)
         {
             return None;
         }
         if let Some(r) = self.shmem_region.borrow().as_ref() {
-            return r.clone();
+            return *r;
         }
         let regions = match self
             .backend_client
-            .get_shared_memory_regions()
+            .get_shmem_config()
             .map_err(Error::ShmemRegions)
         {
             Ok(x) => x,
             Err(e) => {
-                error!("Failed to get shared memory regions {}", e);
+                error!("Failed to get shared memory config {}", e);
                 return None;
             }
         };
         let region = match regions.len() {
             0 => None,
-            1 => Some(SharedMemoryRegion {
-                id: regions[0].id,
-                length: regions[0].length,
-            }),
+            1 => Some(regions[0]),
             n => {
                 error!(
-                    "Failed to get shared memory regions {}",
+                    "Failed to get shared memory region {}",
                     Error::TooManyShmemRegions(n)
                 );
                 return None;
             }
         };
-
-        *self.shmem_region.borrow_mut() = Some(region.clone());
+        *self.shmem_region.borrow_mut() = Some(region);
         region
     }
 
@@ -566,7 +565,6 @@ impl VirtioDevice for VhostUserFrontend {
         let shmid = self
             .shmem_region
             .borrow()
-            .clone()
             .flatten()
             .expect("missing shmid")
             .id;
@@ -646,7 +644,11 @@ impl VirtioDevice for VhostUserFrontend {
         self.backend_client
             .check_device_state()
             .context("failed to transfer device state")?;
-        Ok(AnySnapshot::to_any(snapshot_bytes).map_err(Error::SliceToSerdeValue)?)
+        Ok(AnySnapshot::to_any(VhostUserDeviceState {
+            acked_features: self.acked_features,
+            backend_state: snapshot_bytes,
+        })
+        .map_err(Error::SliceToSerdeValue)?)
     }
 
     fn virtio_restore(&mut self, data: AnySnapshot) -> anyhow::Result<()> {
@@ -662,7 +664,14 @@ impl VirtioDevice for VhostUserFrontend {
             bail!("restore requires VHOST_USER_PROTOCOL_F_DEVICE_STATE");
         }
 
-        let data_bytes: Vec<u8> = AnySnapshot::from_any(data).map_err(Error::SerdeValueToSlice)?;
+        let device_state: VhostUserDeviceState =
+            AnySnapshot::from_any(data).map_err(Error::SerdeValueToSlice)?;
+        let missing_features = !self.avail_features & device_state.acked_features;
+        if missing_features != 0 {
+            bail!("The destination backend doesn't support all features acknowledged by the source, missing: {}", missing_features);
+        }
+        // Set the features in the destination to match the source before restoring its state.
+        self.ack_features(device_state.acked_features);
         // Send the backend an FD to read the device state from. If it gives us an FD back,
         // then we need to write to that instead.
         let (r, w) = new_pipe_pair()?;
@@ -682,9 +691,9 @@ impl VirtioDevice for VhostUserFrontend {
             let backend_w = backend_w;
             let mut w = w;
             if let Some(mut backend_w) = backend_w {
-                backend_w.write_all(data_bytes.as_slice())
+                backend_w.write_all(device_state.backend_state.as_slice())
             } else {
-                w.write_all(data_bytes.as_slice())
+                w.write_all(device_state.backend_state.as_slice())
             }
             .context("failed to write device state")?;
         }
@@ -694,6 +703,12 @@ impl VirtioDevice for VhostUserFrontend {
             .context("failed to transfer device state")?;
         Ok(())
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct VhostUserDeviceState {
+    acked_features: u64,
+    backend_state: Vec<u8>,
 }
 
 #[cfg(unix)]

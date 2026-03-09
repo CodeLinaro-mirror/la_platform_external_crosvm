@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use arch::set_default_serial_parameters;
 use arch::CpuSet;
+use arch::DevicePowerManagerConfig;
 use arch::FdtPosition;
 #[cfg(all(target_os = "android", target_arch = "aarch64"))]
 use arch::FfaConfig;
@@ -625,6 +626,7 @@ pub struct Config {
     #[cfg(feature = "crash-report")]
     pub crash_report_uuid: Option<String>,
     pub delay_rt: bool,
+    pub dev_pm: Option<DevicePowerManagerConfig>,
     pub device_tree_overlay: Vec<DtboOption>,
     pub disable_virtio_intx: bool,
     pub disks: Vec<DiskOption>,
@@ -741,6 +743,7 @@ pub struct Config {
     pub slirp_capture_file: Option<String>,
     #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
+    pub smccc_trng: bool,
     #[cfg(all(windows, feature = "audio"))]
     pub snd_split_configs: Vec<SndSplitConfig>,
     pub socket_path: Option<PathBuf>,
@@ -769,6 +772,8 @@ pub struct Config {
     pub vfio: Vec<super::sys::config::VfioOption>,
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub vfio_isolate_hotplug: bool,
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub vfio_platform_pm: bool,
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[cfg(target_arch = "aarch64")]
     pub vhost_scmi: bool,
@@ -856,6 +861,7 @@ impl Default for Config {
             cpu_ipc_ratio: BTreeMap::new(),
             delay_rt: false,
             device_tree_overlay: Vec::new(),
+            dev_pm: None,
             disks: Vec::new(),
             disable_virtio_intx: false,
             display_input_height: None,
@@ -974,6 +980,7 @@ impl Default for Config {
             slirp_capture_file: None,
             #[cfg(target_arch = "x86_64")]
             smbios: SmbiosOptions::default(),
+            smccc_trng: false,
             #[cfg(all(windows, feature = "audio"))]
             snd_split_configs: Vec::new(),
             socket_path: None,
@@ -999,6 +1006,8 @@ impl Default for Config {
             vfio: Vec::new(),
             #[cfg(any(target_os = "android", target_os = "linux"))]
             vfio_isolate_hotplug: false,
+            #[cfg(any(target_os = "android", target_os = "linux"))]
+            vfio_platform_pm: false,
             #[cfg(any(target_os = "android", target_os = "linux"))]
             #[cfg(target_arch = "aarch64")]
             vhost_scmi: false,
@@ -1058,12 +1067,12 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
         }
 
         let pcpu_count =
-            base::number_of_logical_cores().expect("Could not read number of logical cores");
+            base::number_of_online_cores().expect("Could not read number of online cores");
         if let Some(vcpu_count) = cfg.vcpu_count {
             if pcpu_count != vcpu_count {
                 return Err(format!(
                     "`host-cpu-topology` requires the count of vCPUs({vcpu_count}) to equal the \
-                            count of CPUs({pcpu_count}) on host."
+                            count of online CPUs({pcpu_count}) on host."
                 ));
             }
         } else {
@@ -1072,10 +1081,11 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
 
         match &cfg.vcpu_affinity {
             None => {
-                let mut affinity_map = BTreeMap::new();
-                for cpu_id in 0..cfg.vcpu_count.unwrap() {
-                    affinity_map.insert(cpu_id, CpuSet::new([cpu_id]));
-                }
+                let vcpu_count = cfg.vcpu_count.unwrap();
+                let max_cores = base::number_of_logical_cores()
+                    .expect("Could not read number of logical cores");
+                let affinity_map =
+                    default_vcpu_affinity_map(vcpu_count, max_cores, base::is_cpu_online);
                 cfg.vcpu_affinity = Some(VcpuAffinity::PerVcpu(affinity_map));
             }
             _ => {
@@ -1233,6 +1243,26 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
 
     // Validate platform specific things
     super::sys::config::validate_config(cfg)
+}
+
+fn default_vcpu_affinity_map(
+    vcpu_count: usize,
+    max_cores: usize,
+    is_cpu_online: impl Fn(usize) -> base::Result<bool>,
+) -> BTreeMap<usize, CpuSet> {
+    let mut affinity_map = BTreeMap::new();
+    let mut vcpu_id = 0;
+    for cpu_id in 0..max_cores {
+        if is_cpu_online(cpu_id).expect("Couldn't check if cpu is online") {
+            affinity_map.insert(vcpu_id, CpuSet::new([cpu_id]));
+            vcpu_id += 1;
+        }
+        if vcpu_id >= vcpu_count {
+            // Exit early if we've allocated all the vcpu's.
+            break;
+        }
+    }
+    affinity_map
 }
 
 fn validate_file_backed_mapping(mapping: &mut FileBackedMappingParameters) -> Result<(), String> {
@@ -2374,5 +2404,23 @@ mod tests {
         assert!(validate_pmem(&pmem)
             .unwrap_err()
             .contains("swap-interval parameter can only be set for writable pmem device"));
+    }
+
+    #[test]
+    fn test_default_vcpu_affinity_map() {
+        // Simple 1:1 mapping of vcpu:cpu.
+        let affinity = default_vcpu_affinity_map(4, 4, |_| Ok(true));
+        assert_eq!(affinity.len(), 4);
+        assert_eq!(affinity.get(&0), Some(&CpuSet::new([0])));
+        assert_eq!(affinity.get(&1), Some(&CpuSet::new([1])));
+        assert_eq!(affinity.get(&2), Some(&CpuSet::new([2])));
+        assert_eq!(affinity.get(&3), Some(&CpuSet::new([3])));
+
+        // cpu 1 is offline, so skip it when assigning vcpu's.
+        let affinity = default_vcpu_affinity_map(3, 4, |id| Ok(id != 1));
+        assert_eq!(affinity.len(), 3);
+        assert_eq!(affinity.get(&0), Some(&CpuSet::new([0])));
+        assert_eq!(affinity.get(&1), Some(&CpuSet::new([2])));
+        assert_eq!(affinity.get(&2), Some(&CpuSet::new([3])));
     }
 }

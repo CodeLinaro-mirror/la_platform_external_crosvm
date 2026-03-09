@@ -23,8 +23,6 @@ use vhost::Vhost;
 use vhost::Vsock;
 use vm_memory::GuestMemory;
 use vmm_vhost::connection::Connection;
-use vmm_vhost::message::BackendReq;
-use vmm_vhost::message::VhostSharedMemoryRegion;
 use vmm_vhost::message::VhostUserConfigFlags;
 use vmm_vhost::message::VhostUserInflight;
 use vmm_vhost::message::VhostUserMemoryRegion;
@@ -36,6 +34,7 @@ use vmm_vhost::message::VhostUserVringAddrFlags;
 use vmm_vhost::message::VhostUserVringState;
 use vmm_vhost::Error;
 use vmm_vhost::Result;
+use vmm_vhost::SharedMemoryRegion;
 use vmm_vhost::VHOST_USER_F_PROTOCOL_FEATURES;
 use zerocopy::IntoBytes;
 
@@ -399,7 +398,7 @@ impl vmm_vhost::Backend for VsockBackend {
         Err(Error::InvalidOperation)
     }
 
-    fn set_backend_req_fd(&mut self, _vu_req: Connection<BackendReq>) {
+    fn set_backend_req_fd(&mut self, _vu_req: Connection) {
         // We didn't set VhostUserProtocolFeatures::BACKEND_REQ
         unreachable!("unexpected set_backend_req_fd");
     }
@@ -440,8 +439,8 @@ impl vmm_vhost::Backend for VsockBackend {
         Err(Error::InvalidOperation)
     }
 
-    fn get_shared_memory_regions(&mut self) -> Result<Vec<VhostSharedMemoryRegion>> {
-        Ok(vec![])
+    fn get_shmem_config(&mut self) -> Result<Vec<SharedMemoryRegion>> {
+        Ok(Vec::new())
     }
 }
 

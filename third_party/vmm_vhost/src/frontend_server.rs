@@ -19,21 +19,17 @@ use crate::Result;
 /// Each method corresponds to a vhost-user protocol method. See the specification for details.
 pub trait Frontend {
     /// Handle device configuration change notifications.
-    fn handle_config_change(&mut self) -> HandlerResult<u64> {
+    fn handle_config_change(&mut self) -> HandlerResult<()> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
     /// Handle shared memory region mapping requests.
-    fn shmem_map(
-        &mut self,
-        _req: &VhostUserShmemMapMsg,
-        _fd: &dyn AsRawDescriptor,
-    ) -> HandlerResult<u64> {
+    fn shmem_map(&mut self, _req: &VhostUserMMap, _fd: &dyn AsRawDescriptor) -> HandlerResult<()> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
     /// Handle shared memory region unmapping requests.
-    fn shmem_unmap(&mut self, _req: &VhostUserShmemUnmapMsg) -> HandlerResult<u64> {
+    fn shmem_unmap(&mut self, _req: &VhostUserMMap) -> HandlerResult<()> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
@@ -45,12 +41,12 @@ pub trait Frontend {
         &mut self,
         _req: &VhostUserGpuMapMsg,
         _descriptor: &dyn AsRawDescriptor,
-    ) -> HandlerResult<u64> {
+    ) -> HandlerResult<()> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
     /// Handle external memory region mapping requests.
-    fn external_map(&mut self, _req: &VhostUserExternalMapMsg) -> HandlerResult<u64> {
+    fn external_map(&mut self, _req: &VhostUserExternalMapMsg) -> HandlerResult<()> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 }
@@ -59,7 +55,7 @@ pub trait Frontend {
 /// methods.
 pub struct FrontendServer<S: Frontend> {
     // underlying Unix domain socket for communication
-    pub(crate) sub_sock: Connection<BackendReq>,
+    pub(crate) sub_sock: Connection,
     // Protocol feature VHOST_USER_PROTOCOL_F_REPLY_ACK has been negotiated.
     reply_ack_negotiated: bool,
 
@@ -68,7 +64,7 @@ pub struct FrontendServer<S: Frontend> {
 
 impl<S: Frontend> FrontendServer<S> {
     /// Create a server to handle requests from `connection`.
-    pub(crate) fn new(frontend: S, connection: Connection<BackendReq>) -> Result<Self> {
+    pub(crate) fn new(frontend: S, connection: Connection) -> Result<Self> {
         Ok(FrontendServer {
             sub_sock: connection,
             reply_ack_negotiated: false,
@@ -77,9 +73,6 @@ impl<S: Frontend> FrontendServer<S> {
     }
 
     /// Set the negotiation state of the `VHOST_USER_PROTOCOL_F_REPLY_ACK` protocol feature.
-    ///
-    /// When the `VHOST_USER_PROTOCOL_F_REPLY_ACK` protocol feature has been negotiated,
-    /// the "REPLY_ACK" flag will be set in the message header for every request message.
     pub fn set_reply_ack_flag(&mut self, enable: bool) {
         self.reply_ack_negotiated = enable;
     }
@@ -95,7 +88,7 @@ impl<S: Frontend> FrontendServer<S> {
     /// - serialize calls to this function
     /// - decide what to do when errer happens
     /// - optional recover from failure
-    pub fn handle_request(&mut self) -> Result<u64> {
+    pub fn handle_request(&mut self) -> Result<()> {
         // The underlying communication channel is a Unix domain socket in
         // stream mode, and recvmsg() is a little tricky here. To successfully
         // receive attached file descriptors, we need to receive messages and
@@ -123,14 +116,14 @@ impl<S: Frontend> FrontendServer<S> {
                     .map_err(Error::ReqHandlerError)
             }
             Ok(BackendReq::SHMEM_MAP) => {
-                let msg = self.extract_msg_body::<VhostUserShmemMapMsg>(&hdr, &buf)?;
+                let msg = self.extract_msg_body::<VhostUserMMap>(&hdr, &buf)?;
                 // check_attached_files() has validated files
                 self.frontend
                     .shmem_map(&msg, &files[0])
                     .map_err(Error::ReqHandlerError)
             }
             Ok(BackendReq::SHMEM_UNMAP) => {
-                let msg = self.extract_msg_body::<VhostUserShmemUnmapMsg>(&hdr, &buf)?;
+                let msg = self.extract_msg_body::<VhostUserMMap>(&hdr, &buf)?;
                 self.frontend
                     .shmem_unmap(&msg)
                     .map_err(Error::ReqHandlerError)
@@ -156,18 +149,14 @@ impl<S: Frontend> FrontendServer<S> {
         res
     }
 
-    fn check_msg_size(&self, hdr: &VhostUserMsgHeader<BackendReq>, expected: usize) -> Result<()> {
+    fn check_msg_size(&self, hdr: &VhostUserMsgHeader, expected: usize) -> Result<()> {
         if hdr.get_size() as usize != expected {
             return Err(Error::InvalidMessage);
         }
         Ok(())
     }
 
-    fn check_attached_files(
-        &self,
-        hdr: &VhostUserMsgHeader<BackendReq>,
-        files: &[File],
-    ) -> Result<()> {
+    fn check_attached_files(&self, hdr: &VhostUserMsgHeader, files: &[File]) -> Result<()> {
         let expected_num_files = match hdr.get_code().map_err(|_| Error::InvalidMessage)? {
             // Expect a single file is passed.
             BackendReq::SHMEM_MAP | BackendReq::GPU_MAP => 1,
@@ -183,7 +172,7 @@ impl<S: Frontend> FrontendServer<S> {
 
     fn extract_msg_body<T: FromBytes + VhostUserMsgValidator>(
         &self,
-        hdr: &VhostUserMsgHeader<BackendReq>,
+        hdr: &VhostUserMsgHeader,
         buf: &[u8],
     ) -> Result<T> {
         self.check_msg_size(hdr, mem::size_of::<T>())?;
@@ -194,33 +183,26 @@ impl<S: Frontend> FrontendServer<S> {
         Ok(msg)
     }
 
-    fn new_reply_header<T: Sized>(
-        &self,
-        req: &VhostUserMsgHeader<BackendReq>,
-    ) -> Result<VhostUserMsgHeader<BackendReq>> {
-        Ok(VhostUserMsgHeader::new(
-            req.get_code().map_err(|_| Error::InvalidMessage)?,
-            VhostUserHeaderFlag::REPLY.bits(),
+    fn new_reply_header<T: Sized>(&self, req: &VhostUserMsgHeader) -> Result<VhostUserMsgHeader> {
+        Ok(VhostUserMsgHeader::new_reply_header(
+            req.get_code::<BackendReq>()
+                .map_err(|_| Error::InvalidMessage)?,
             mem::size_of::<T>() as u32,
         ))
     }
 
-    fn send_reply(
-        &mut self,
-        req: &VhostUserMsgHeader<BackendReq>,
-        res: &Result<u64>,
-    ) -> Result<()> {
-        let code = req.get_code().map_err(|_| Error::InvalidMessage)?;
-        if code == BackendReq::SHMEM_MAP
-            || code == BackendReq::SHMEM_UNMAP
-            || code == BackendReq::GPU_MAP
+    fn send_reply(&mut self, req: &VhostUserMsgHeader, res: &Result<()>) -> Result<()> {
+        let code = req
+            .get_code::<BackendReq>()
+            .map_err(|_| Error::InvalidMessage)?;
+        if code == BackendReq::GPU_MAP
             || code == BackendReq::EXTERNAL_MAP
             || (self.reply_ack_negotiated && req.is_need_reply())
         {
             let hdr = self.new_reply_header::<VhostUserU64>(req)?;
             let def_err = libc::EINVAL;
             let val = match res {
-                Ok(n) => *n,
+                Ok(()) => 0,
                 Err(e) => match e {
                     Error::ReqHandlerError(ioerr) => match ioerr.raw_os_error() {
                         Some(rawerr) => -rawerr as u64,

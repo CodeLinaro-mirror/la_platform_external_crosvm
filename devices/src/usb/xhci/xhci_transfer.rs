@@ -27,7 +27,6 @@ use vm_memory::GuestMemoryError;
 use super::device_slot::DeviceSlot;
 use super::interrupter::Error as InterrupterError;
 use super::interrupter::Interrupter;
-use super::ring_buffer_stop_cb::RingBufferStopCallback;
 use super::scatter_gather_buffer::Error as BufferError;
 use super::scatter_gather_buffer::ScatterGatherBuffer;
 use super::usb_hub::Error as HubError;
@@ -53,8 +52,6 @@ pub enum Error {
     CreateBuffer(BufferError),
     #[error("cannot detach from port: {0}")]
     DetachPort(HubError),
-    #[error("failed to get max payload length for ep: {0}")]
-    GetMaxPayload(u8),
     #[error("failed to halt the endpoint: {0}")]
     HaltEndpoint(u8),
     #[error("failed to read guest memory: {0}")]
@@ -151,7 +148,6 @@ impl Display for XhciTransferType {
 pub struct XhciTransferManager {
     transfers: Arc<Mutex<Vec<Weak<Mutex<XhciTransferState>>>>>,
     device_slot: Weak<DeviceSlot>,
-    stop_callback: Arc<Mutex<Vec<RingBufferStopCallback>>>,
 }
 
 impl XhciTransferManager {
@@ -160,7 +156,6 @@ impl XhciTransferManager {
         XhciTransferManager {
             transfers: Arc::new(Mutex::new(Vec::new())),
             device_slot,
-            stop_callback: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -218,14 +213,6 @@ impl XhciTransferManager {
         });
     }
 
-    /// Set the callback to be called when all the transfers are actually gone. This is used to
-    /// delay the completion event for the Stop Endpoint command.
-    pub fn set_stop_callback(&self, callback: RingBufferStopCallback) {
-        if !self.transfers.lock().is_empty() {
-            self.stop_callback.lock().push(callback);
-        }
-    }
-
     fn remove_transfer(&self, t: &Arc<Mutex<XhciTransferState>>) {
         let mut transfers = self.transfers.lock();
         match transfers.iter().position(|wt| match wt.upgrade() {
@@ -236,9 +223,6 @@ impl XhciTransferManager {
             Some(i) => {
                 transfers.swap_remove(i);
             }
-        }
-        if transfers.is_empty() {
-            self.stop_callback.lock().clear();
         }
     }
 }
@@ -343,16 +327,6 @@ impl XhciTransfer {
     /// get stream id.
     pub fn get_stream_id(&self) -> Option<u16> {
         self.stream_id
-    }
-
-    /// get max payload length for synchronous transfers.
-    pub fn get_max_payload(&self) -> Result<u32> {
-        let Some(device_slot) = self.device_slot.upgrade() else {
-            return Err(Error::GetMaxPayload(self.endpoint_id));
-        };
-        device_slot
-            .get_max_esit_payload(self.endpoint_id)
-            .map_err(|_| Error::GetMaxPayload(self.endpoint_id))
     }
 
     /// This functions should be invoked when transfer is completed (or failed).
@@ -535,16 +509,6 @@ impl XhciTransfer {
             }
         }
         Ok(valid)
-    }
-
-    pub fn proceed(&self) -> Result<()> {
-        self.transfer_completion_event
-            .signal()
-            .map_err(Error::WriteCompletionEvent)
-    }
-
-    pub fn append_trbs(&mut self, mut transfer: XhciTransfer) {
-        self.transfer_trbs.append(&mut transfer.transfer_trbs);
     }
 }
 
