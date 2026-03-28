@@ -353,5 +353,6 @@ rust_library {
     flags: [
         "--cfg zerocopy_derive_union_into_bytes",
     ],
+    cfgs: ["zerocopy_derive_union_into_bytes"],
 
 }
