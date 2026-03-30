@@ -2,9 +2,10 @@ diff --git a/crosvm_control/Android.bp b/crosvm_control/Android.bp
 index 34e77e142..d73c7ec15 100644
 --- a/crosvm_control/Android.bp
 +++ b/crosvm_control/Android.bp
-@@ -28,8 +28,12 @@ rust_ffi_shared {
+@@ -28,9 +28,13 @@ rust_ffi_shared {
          "libswap",
          "libvm_control",
+         "libzerocopy",
      ],
 -    static_libs: ["libcrosvm_control_test"],
 +    // The build.rs file compiles the generated C header just as a test, which
@@ -16,9 +17,10 @@ index 34e77e142..d73c7ec15 100644
  }
  
  rust_ffi_static {
-@@ -47,7 +51,11 @@ rust_ffi_static {
+@@ -48,8 +52,12 @@ rust_ffi_static {
          "libswap",
          "libvm_control",
+         "libzerocopy",
      ],
 -    static_libs: ["libcrosvm_control_test"],
 +    // The build.rs file compiles the generated C header just as a test, which
