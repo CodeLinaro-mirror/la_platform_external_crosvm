@@ -70,7 +70,7 @@ impl UsbEndpoint {
         self.endpoint_number | ((self.direction as u8) << ENDPOINT_DIRECTION_OFFSET)
     }
 
-    /// Returns true is this endpoint matches number and direction.
+    /// Returns true if this endpoint matches number and direction.
     pub fn match_ep(&self, endpoint_number: u8, dir: TransferDirection) -> bool {
         let self_dir = match self.direction {
             EndpointDirection::HostToDevice => TransferDirection::Out,
@@ -80,15 +80,24 @@ impl UsbEndpoint {
     }
 
     /// Handle a xhci transfer.
+    // This function should return an error only when we want to remove the ring handler from the
+    // event loop. For any error that might originate from the guest driver, it should report an
+    // error to the guest and return Ok.
     pub fn handle_transfer(
         &self,
         device: &mut BackendDeviceType,
         transfer: XhciTransfer,
     ) -> Result<()> {
-        let buffer = match transfer
-            .get_transfer_type()
-            .map_err(Error::GetXhciTransferType)?
-        {
+        let transfer_type = match transfer.get_transfer_type() {
+            Ok(ty) => ty,
+            Err(e) => {
+                error!("failed to get transfer type: {}", e);
+                return transfer
+                    .on_transfer_complete(&TransferStatus::Error, 0)
+                    .map_err(Error::TransferComplete);
+            }
+        };
+        let buffer = match transfer_type {
             XhciTransferType::Normal => transfer.create_buffer().map_err(Error::CreateBuffer)?,
             XhciTransferType::Noop => {
                 return transfer
@@ -190,8 +199,8 @@ impl UsbEndpoint {
                     buffer.len()
                 );
                 let callback = move |t: BackendTransferType| {
-                    update_transfer_state(&xhci_transfer, t.status())?;
-                    let state = xhci_transfer.state().lock();
+                    let mut state = xhci_transfer.state().lock();
+                    update_transfer_state(&mut state, t.status())?;
                     match *state {
                         XhciTransferState::Cancelled => {
                             debug!("Xhci transfer has been cancelled");
@@ -238,8 +247,8 @@ impl UsbEndpoint {
                 );
                 let _addr = self.ep_addr();
                 let callback = move |t: BackendTransferType| {
-                    update_transfer_state(&xhci_transfer, t.status())?;
-                    let state = xhci_transfer.state().lock();
+                    let mut state = xhci_transfer.state().lock();
+                    update_transfer_state(&mut state, t.status())?;
                     match *state {
                         XhciTransferState::Cancelled => {
                             debug!("Xhci transfer has been cancelled");
