@@ -92,7 +92,6 @@ rust_test {
         "libresources",
         "librutabaga_gfx",
         "libserde",
-        "libserde_bytes",
         "libserde_json",
         "libserde_keyvalue",
         "libsmallvec",
@@ -124,9 +123,6 @@ rust_test {
             rustlibs: ["libaarch64_sys_reg"],
         },
     },
-    flags: [
-        "--cfg zerocopy_derive_union_into_bytes",
-    ],
 
 }
 
@@ -317,7 +313,6 @@ rust_library {
         "libresources",
         "librutabaga_gfx",
         "libserde",
-        "libserde_bytes",
         "libserde_json",
         "libserde_keyvalue",
         "libsmallvec",
@@ -353,8 +348,4 @@ rust_library {
             rustlibs: ["libaarch64_sys_reg"],
         },
     },
-    flags: [
-        "--cfg zerocopy_derive_union_into_bytes",
-    ],
-
 }
