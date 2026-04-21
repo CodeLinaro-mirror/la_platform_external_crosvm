@@ -52,6 +52,7 @@ const VIRTIO_FASTRPC_F_VQUEUE_SETTING: u32  = 7;
 /* indicates fastrpc_mmap/fastrpc_munmap is supported */
 const VIRTIO_FASTRPC_F_HYBRID: u32 = 9;
 const VIRTIO_FASTRPC_F_DEVICE_DISCOVERY: u32 = 11;
+const VIRTIO_FASTRPC_F_NSP_SHARING: u32 = 13;
 
 pub struct Frpc {
     kill_evt: Option<Event>,
@@ -67,6 +68,7 @@ impl Frpc {
       //Enable transport specific flags in VirtIO feature set defined by vhost-user
         let init_features = base_features | 1 << VIRTIO_FASTRPC_F_HYBRID | 1 << VIRTIO_FASTRPC_F_VERSION
       | 1 << VIRTIO_FASTRPC_F_DOMAIN_NUM | 1 << VIRTIO_FASTRPC_F_VQUEUE_SETTING |1 << VIRTIO_FASTRPC_F_DEVICE_DISCOVERY
+      | 1 << VIRTIO_FASTRPC_F_NSP_SHARING
       |VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
         let allow_features = init_features
