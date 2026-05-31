@@ -781,7 +781,16 @@ impl<E: Endpoint<MasterReq>> MasterInternal<E> {
 
     #[inline]
     fn new_request_header(&self, request: MasterReq, size: u32) -> VhostUserMsgHeader<MasterReq> {
-        VhostUserMsgHeader::new(request, self.hdr_flags.bits() | 0x1, size)
+        // If REPLY_ACK protocol feature has been negotiated, set NEED_REPLY on every
+        // request so that wait_for_ack() will block until the backend has processed
+        // the message.  This makes SET_VRING_ENABLE (and all other commands) truly
+        // synchronous, preventing races where GH_ACK_DRIVER_OK is issued before the
+        // vhost-user backend has finished enabling its vrings.
+        let mut flags = self.hdr_flags.bits() | 0x1;
+        if self.acked_protocol_features & VhostUserProtocolFeatures::REPLY_ACK.bits() != 0 {
+            flags |= VhostUserHeaderFlag::NEED_REPLY.bits();
+        }
+        VhostUserMsgHeader::new(request, flags, size)
     }
 }
 

@@ -60,7 +60,8 @@ impl Scmi {
         let allow_features = init_features
             | 1u64 << crate::virtio::VIRTIO_F_VERSION_1
             | 1 << VIRTIO_RING_F_EVENT_IDX;
-        let allow_protocol_features = VhostUserProtocolFeatures::CONFIG;
+        let allow_protocol_features = VhostUserProtocolFeatures::CONFIG
+            | VhostUserProtocolFeatures::REPLY_ACK;
 
         let mut handler = VhostUserHandler::new_from_stream(
             socket,
