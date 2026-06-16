@@ -76,7 +76,9 @@ impl Gpio {
             | 1 << VIRTIO_RING_F_EVENT_IDX
             | 1 << VIRTIO_GPIO_F_IRQ;
 
-        let allow_protocol_features = VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::CONFIG;
+        let allow_protocol_features = VhostUserProtocolFeatures::MQ
+            | VhostUserProtocolFeatures::CONFIG
+            | VhostUserProtocolFeatures::REPLY_ACK;
 
         let mut handler = VhostUserHandler::new_from_stream(
             socket,
