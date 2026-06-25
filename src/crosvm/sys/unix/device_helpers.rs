@@ -1235,7 +1235,7 @@ pub fn create_pmem_device(
             Alloc::PmemDevice(index),
             format!("pmem_disk_image_{}", index),
             AllocOptions::new()
-                .top_down(true)
+                .top_down(false)
                 .prefetchable(true)
                 // Linux kernel requires pmem namespaces to be 128 MiB aligned.
                 .align(128 * 1024 * 1024), /* 128 MiB */
