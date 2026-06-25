@@ -112,6 +112,8 @@ const TYPE_QCOM_EAVB: u32 = VIRTIO_DT_QCOM_BASE + 6;
 const TYPE_QCOM_GLINK: u32 = VIRTIO_DT_QCOM_BASE + 10;
 const TYPE_QCOM_FRPC: u32 = VIRTIO_DT_QCOM_BASE + 0x0b;
 const TYPE_QCOM_SSR: u32 = VIRTIO_DT_QCOM_BASE + 0x0e;
+const TYPE_QCOM_COMPRESSCHED: u32 = VIRTIO_DT_QCOM_BASE + 0x0f;
+
 pub const VIRTIO_F_VERSION_1: u32 = 32;
 pub const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
 
@@ -151,6 +153,7 @@ pub fn type_to_str(type_: u32) -> Option<&'static str> {
         TYPE_VIDEO_DEC => "video-decoder",
         TYPE_VIDEO_ENC => "video-encoder",
         TYPE_FRPC => "fastrpc",
+        TYPE_QCOM_COMPRESSCHED => "compressched",
         _ => return None,
     })
 }
