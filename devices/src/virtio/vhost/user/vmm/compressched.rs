@@ -1,4 +1,4 @@
-/*Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+/* Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 
 Copyright 2021 The Chromium OS Authors. All rights reserved.
@@ -42,51 +42,64 @@ use vm_memory::GuestMemory;
 use vmm_vhost::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 
 use crate::virtio::vhost::user::vmm::{handler::VhostUserHandler, worker::Worker, Error, Result};
-use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_QCOM_FRPC};
+use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_QCOM_COMPRESSCHED};
 
 const QUEUE_SIZE: u16 = 32;
-const VIRTIO_FASTRPC_F_VERSION: u32 = 5;
+const VIRTIO_COMPRESSCHED_F_VERSION: u32 = 5;
 /* indicates domain num is available in config space */
-const VIRTIO_FASTRPC_F_DOMAIN_NUM: u32 = 6;
-const VIRTIO_FASTRPC_F_VQUEUE_SETTING: u32  = 7;
-/* indicates fastrpc_mmap/fastrpc_munmap is supported */
-const VIRTIO_FASTRPC_F_HYBRID: u32 = 9;
-const VIRTIO_FASTRPC_F_DEVICE_DISCOVERY: u32 = 11;
-const VIRTIO_FASTRPC_F_NSP_SHARING: u32 = 13;
+const VIRTIO_COMPRESSCHED_F_DOMAIN_NUM: u32 = 6;
+/* indicates compressched_mmap/compressched_munmap is supported */
+const VIRTIO_COMPRESSCHED_F_HYBRID: u32 = 9;
+const VIRTIO_COMPRESSCHED_F_DEVICE_DISCOVERY: u32 = 11;
+const VIRTIO_COMPRESSCHED_F_NSP_SHARING: u32  = 7;
 
-pub struct Frpc {
+pub struct Compressched {
     kill_evt: Option<Event>,
     worker_thread: Option<thread::JoinHandle<Worker>>,
     handler: RefCell<VhostUserHandler>,
     queue_sizes: Vec<u16>,
 }
 
-impl Frpc {
-    pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P) -> Result<Frpc> {
+impl Compressched {
+    pub fn new<P: AsRef<Path>>(base_features: u64, socket_path: P) -> Result<Compressched> {
         let socket = UnixStream::connect(&socket_path).map_err(Error::SocketConnect)?;
 
-      //Enable transport specific flags in VirtIO feature set defined by vhost-user
-        let init_features = base_features | 1 << VIRTIO_FASTRPC_F_HYBRID | 1 << VIRTIO_FASTRPC_F_VERSION
-      | 1 << VIRTIO_FASTRPC_F_DOMAIN_NUM | 1 << VIRTIO_FASTRPC_F_VQUEUE_SETTING |1 << VIRTIO_FASTRPC_F_DEVICE_DISCOVERY
-      | 1 << VIRTIO_FASTRPC_F_NSP_SHARING
-      |VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+        let init_features = base_features | 1 << VIRTIO_COMPRESSCHED_F_NSP_SHARING | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
         let allow_features = init_features
             | 1u64 << crate::virtio::VIRTIO_F_VERSION_1
             | 1 << VIRTIO_RING_F_EVENT_IDX;
+
       // Support Virtio device configuration.
         let allow_protocol_features = VhostUserProtocolFeatures::CONFIG;
 
-        let mut handler = VhostUserHandler::new_from_stream(
+        let mut handler = match VhostUserHandler::new_from_stream(
             socket,
             2, /* queues_num */
             allow_features,
             init_features,
             allow_protocol_features,
-        )?;
-        let queue_sizes = handler.queue_sizes(QUEUE_SIZE, 2)?;
+        ) {
+            Ok(h) => {
+                h
+            }
+            Err(e) => {
+                error!("Compressched::new() - Failed to create VhostUserHandler: {}", e);
+                return Err(e);
+            }
+        };
 
-        Ok(Frpc {
+        let queue_sizes = match handler.queue_sizes(QUEUE_SIZE, 2) {
+            Ok(sizes) => {
+                sizes
+            }
+            Err(e) => {
+                error!("Compressched::new() - Failed to query queue sizes: {}", e);
+                return Err(e);
+            }
+        };
+
+        Ok(Compressched {
             kill_evt: None,
             worker_thread: None,
             handler: RefCell::new(handler),
@@ -95,7 +108,7 @@ impl Frpc {
     }
 }
 
-impl Drop for Frpc {
+impl Drop for Compressched {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
@@ -108,7 +121,7 @@ impl Drop for Frpc {
     }
 }
 
-impl VirtioDevice for Frpc {
+impl VirtioDevice for Compressched {
     fn keep_rds(&self) -> Vec<RawDescriptor> {
         Vec::new()
     }
@@ -124,7 +137,7 @@ impl VirtioDevice for Frpc {
     }
 
     fn device_type(&self) -> u32 {
-        TYPE_QCOM_FRPC
+        TYPE_QCOM_COMPRESSCHED
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
@@ -163,7 +176,7 @@ impl VirtioDevice for Frpc {
         self.kill_evt = Some(self_kill_evt);
 
         let worker_result = thread::Builder::new()
-            .name("vhost_user_frpc".to_string())
+            .name("vhost_user_compressched".to_string())
             .spawn(move || {
                 let mut worker = Worker {
                     queues,
@@ -179,7 +192,7 @@ impl VirtioDevice for Frpc {
 
         match worker_result {
             Err(e) => {
-                error!("failed to spawn vhost-user-Frpc worker: {}", e);
+                error!("failed to spawn vhost-user-Compressched worker: {}", e);
             }
             Ok(join_handle) => {
                 self.worker_thread = Some(join_handle);
@@ -189,11 +202,10 @@ impl VirtioDevice for Frpc {
 
     fn reset(&mut self) -> bool {
         if let Err(e) = self.handler.borrow_mut().reset(self.queue_sizes.len()) {
-            error!("Failed to reset Frpc device: {}", e);
+            error!("Failed to reset Compressched device: {}", e);
             false
         } else {
             true
         }
     }
-
 }

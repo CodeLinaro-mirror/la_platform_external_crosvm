@@ -305,6 +305,7 @@ impl VirtioDevice for GenericDevice {
         } else {
             return;
         };
+	let len = len.min(data.len());
         if let Err(e) = get_config(
             &mut self.socket.borrow_mut(),
             offset.try_into().unwrap(),
@@ -323,7 +324,7 @@ impl VirtioDevice for GenericDevice {
         if let Err(e) = set_config(
             &mut self.socket.borrow_mut(),
             offset.try_into().unwrap(),
-            &data[..len],
+            &data[..len.min(data.len())],
         ) {
             error!("failed to write config: {}", e);
             eprintln!("failed to write config: {}", e);
