@@ -209,6 +209,7 @@ pub async fn process_one_chain<I: SignalableInterrupt>(
     flush_timer_armed: Rc<RefCell<bool>>,
 ) {
     let descriptor_index = avail_desc.index;
+    let avail_desc_for_err = avail_desc.clone();
     let len =
         match process_one_request(avail_desc, disk_state, flush_timer, flush_timer_armed, &mem)
             .await
@@ -216,6 +217,24 @@ pub async fn process_one_chain<I: SignalableInterrupt>(
             Ok(len) => len,
             Err(e) => {
                 error!("block: failed to handle request: {}", e);
+                // The virtio spec requires the device to set the
+                // status byte before notifying the driver that the request has
+                // completed.
+                if let Some(status_desc) = avail_desc_for_err
+                    .into_iter()
+                    .writable()
+                    .last()
+                {
+                    if let Err(err) = mem.write_obj_at_addr(
+                        VIRTIO_BLK_S_IOERR,
+                        status_desc.addr,
+                    ) {
+                        error!(
+                            "block: failed to write IOERR status to {}: {}",
+                            status_desc.addr, err
+                        );
+                    }
+                }
                 0
             }
         };
