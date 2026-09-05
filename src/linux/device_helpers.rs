@@ -141,6 +141,7 @@ pub fn create_block_device(
                 disk.block_size,
                 disk.id,
                 Some(disk_device_tube),
+                None, // num_queues: use default (NUM_QUEUES=1)
             )
             .context("failed to create block device")?,
         ) as Box<dyn VirtioDevice>

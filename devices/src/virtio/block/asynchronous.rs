@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::mem::size_of;
 use std::rc::Rc;
@@ -12,9 +13,12 @@ use std::thread;
 use std::time::Duration;
 use std::u32;
 
+use futures::channel::{mpsc, oneshot};
 use futures::pin_mut;
 use futures::stream::{FuturesUnordered, StreamExt};
+use futures::FutureExt;
 use remain::sorted;
+use sync::Mutex;
 use thiserror::Error as ThisError;
 
 use base::Error as SysError;
@@ -36,8 +40,7 @@ use crate::virtio::{
 };
 
 const QUEUE_SIZE: u16 = 256;
-const NUM_QUEUES: u16 = 16;
-const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES as usize];
+const NUM_QUEUES: u16 = 1;
 
 #[sorted]
 #[derive(ThisError, Debug)]
@@ -154,6 +157,28 @@ impl DiskState {
     }
 }
 
+/// Commands sent to a worker thread via mpsc channel.
+/// Each worker thread runs a `run_worker_dynamic` loop that processes these commands.
+enum WorkerCmd {
+    /// Start handling a new virtqueue.
+    StartQueue {
+        index: usize,
+        queue: Queue,   // raw Queue (Send), wrapped into Rc<RefCell<>> inside worker
+        evt: Event,     // raw Event (Send), converted to EventAsync inside worker
+        mem: GuestMemory,
+        interrupt: Arc<Mutex<Interrupt>>,  // Arc<Mutex<>> allows Clone + Send
+    },
+    /// Stop handling a virtqueue and signal completion.
+    StopQueue {
+        index: usize,
+        response_tx: oneshot::Sender<()>,
+    },
+    /// Abort all queues and exit the worker loop.
+    AbortQueues {
+        response_tx: oneshot::Sender<()>,
+    },
+}
+
 async fn process_one_request(
     avail_desc: DescriptorChain,
     disk_state: Rc<AsyncMutex<DiskState>>,
@@ -247,6 +272,10 @@ pub async fn process_one_chain<I: SignalableInterrupt>(
 // There is one async task running `handle_queue` per virtio queue in use.
 // Receives messages from the guest and queues a task to complete the operations with the async
 // executor.
+//
+// NOTE: We use a pinned future for `evt.next_val()` to avoid creating a new future each iteration.
+// In completion-based async backends like io_uring, creating a new future each time would submit
+// a new syscall each time, causing a race condition on the eventfd.
 pub async fn handle_queue<I: SignalableInterrupt + Clone + 'static>(
     ex: Executor,
     mem: GuestMemory,
@@ -256,33 +285,47 @@ pub async fn handle_queue<I: SignalableInterrupt + Clone + 'static>(
     interrupt: I,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
+    mut stop_rx: oneshot::Receiver<()>,
 ) {
+    // Pin the event future to avoid re-creating it each loop iteration (io_uring race fix).
+    let evt_future = evt.next_val().fuse();
+    pin_mut!(evt_future);
     loop {
-        if let Err(e) = evt.next_val().await {
-            error!("Failed to read the next queue event: {}", e);
-            continue;
-        }
-        while let Some(descriptor_chain) = queue.borrow_mut().pop(&mem) {
-            let queue = Rc::clone(&queue);
-            let disk_state = Rc::clone(&disk_state);
-            let mem = mem.clone();
-            let interrupt = interrupt.clone();
-            let flush_timer = Rc::clone(&flush_timer);
-            let flush_timer_armed = Rc::clone(&flush_timer_armed);
+        futures::select! {
+            res = evt_future => {
+                // Reset the pinned future for the next iteration.
+                evt_future.set(evt.next_val().fuse());
+                if let Err(e) = res {
+                    error!("Failed to read the next queue event: {}", e);
+                    continue;
+                }
+                while let Some(descriptor_chain) = queue.borrow_mut().pop(&mem) {
+                    let queue = Rc::clone(&queue);
+                    let disk_state = Rc::clone(&disk_state);
+                    let mem = mem.clone();
+                    let interrupt = interrupt.clone();
+                    let flush_timer = Rc::clone(&flush_timer);
+                    let flush_timer_armed = Rc::clone(&flush_timer_armed);
 
-            ex.spawn_local(async move {
-                process_one_chain(
-                    queue,
-                    descriptor_chain,
-                    disk_state,
-                    mem,
-                    &interrupt,
-                    flush_timer,
-                    flush_timer_armed,
-                )
-                .await
-            })
-            .detach();
+                    ex.spawn_local(async move {
+                        process_one_chain(
+                            queue,
+                            descriptor_chain,
+                            disk_state,
+                            mem,
+                            &interrupt,
+                            flush_timer,
+                            flush_timer_armed,
+                        )
+                        .await
+                    })
+                    .detach();
+                }
+            }
+            _ = stop_rx => {
+                // Received stop signal — exit the queue handler.
+                return;
+            }
         }
     }
 }
@@ -379,12 +422,104 @@ pub async fn flush_disk(
     }
 }
 
-// The main worker thread. Initialized the asynchronous worker tasks and passes them to the executor
-// to be processed.
-//
-// `disk_state` is wrapped by `AsyncMutex`, which provides both shared and exclusive locks. It's
-// because the state can be read from the virtqueue task while the control task is processing
-// a resizing command.
+// The dynamic worker loop. Processes WorkerCmd messages to start/stop queue handlers.
+// Each worker thread runs this loop. In worker_per_queue mode, each thread handles one queue.
+// In single-worker mode, one thread handles all queues.
+async fn run_worker_dynamic(
+    ex: &Executor,
+    disk_state: &Rc<AsyncMutex<DiskState>>,
+    mut worker_rx: mpsc::UnboundedReceiver<WorkerCmd>,
+    kill_evt: Event,
+) -> Result<(), String> {
+    let kill_evt_async = EventAsync::new(kill_evt.0, ex)
+        .map_err(|e| format!("failed to create kill EventAsync: {}", e))?;
+
+    // One flush timer per worker (shared across all queues in this worker).
+    let timer = Timer::new().map_err(|e| format!("Failed to create a timer: {}", e))?;
+    let flush_timer_armed = Rc::new(RefCell::new(false));
+    let flush_timer_write = Rc::new(RefCell::new(
+        TimerAsync::new(
+            timer.0.try_clone().map_err(|e| format!("Failed to clone flush_timer: {}", e))?,
+            ex,
+        )
+        .map_err(|e| format!("Failed to create async timer: {}", e))?,
+    ));
+    let flush_timer_read = TimerAsync::new(timer.0, ex)
+        .map_err(|e| format!("Failed to create async timer: {}", e))?;
+
+    // Spawn the flush_disk task.
+    let disk_flush = flush_disk(disk_state.clone(), flush_timer_read, Rc::clone(&flush_timer_armed)).fuse();
+    pin_mut!(disk_flush);
+
+    // Map from queue index to stop sender.
+    let mut queue_stop_txs: BTreeMap<usize, oneshot::Sender<()>> = BTreeMap::new();
+
+    // Kill event future.
+    let kill_future = kill_evt_async.next_val().fuse();
+    pin_mut!(kill_future);
+
+    loop {
+        futures::select! {
+            cmd = worker_rx.next() => {
+                match cmd {
+                    Some(WorkerCmd::StartQueue { index, queue, evt, mem, interrupt: intr }) => {
+                        // Convert raw Event to EventAsync inside the worker thread.
+                        let evt_async = match EventAsync::new(evt.0, ex) {
+                            Ok(e) => e,
+                            Err(e) => {
+                                error!("Failed to create EventAsync for queue {}: {}", index, e);
+                                continue;
+                            }
+                        };
+
+                        // Wrap Queue in Rc<RefCell<>> for async use (safe: single-threaded executor).
+                        let queue_rc = Rc::new(RefCell::new(queue));
+
+                        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+                        queue_stop_txs.insert(index, stop_tx);
+
+                        // Arc<Mutex<Interrupt>> implements SignalableInterrupt, use directly.
+                        ex.spawn_local(handle_queue(
+                            ex.clone(),
+                            mem,
+                            Rc::clone(disk_state),
+                            queue_rc,
+                            evt_async,
+                            intr,  // Arc<Mutex<Interrupt>> implements SignalableInterrupt + Clone
+                            Rc::clone(&flush_timer_write),
+                            Rc::clone(&flush_timer_armed),
+                            stop_rx,
+                        ))
+                        .detach();
+                    }
+                    Some(WorkerCmd::StopQueue { index, response_tx }) => {
+                        if let Some(stop_tx) = queue_stop_txs.remove(&index) {
+                            let _ = stop_tx.send(());
+                        }
+                        let _ = response_tx.send(());
+                    }
+                    Some(WorkerCmd::AbortQueues { response_tx }) => {
+                        // Signal all queue handlers to stop.
+                        for (_, stop_tx) in std::mem::take(&mut queue_stop_txs) {
+                            let _ = stop_tx.send(());
+                        }
+                        let _ = response_tx.send(());
+                        return Ok(());
+                    }
+                    None => return Ok(()),
+                }
+            }
+            _ = kill_future => return Ok(()),
+            res = disk_flush => {
+                if let Err(e) = res {
+                    return Err(format!("failed to flush a disk: {}", e));
+                }
+            }
+        }
+    }
+}
+
+// The original single-worker run_worker (kept for compatibility with reset path).
 fn run_worker(
     ex: Executor,
     interrupt: Interrupt,
@@ -423,6 +558,11 @@ fn run_worker(
         .expect("Failed to create an async timer"),
     ));
 
+    let (stop_txs, stop_rxs): (Vec<_>, Vec<_>) = queues
+        .iter()
+        .map(|_| oneshot::channel::<()>())
+        .unzip();
+
     let queue_handlers =
         queues
             .into_iter()
@@ -430,7 +570,8 @@ fn run_worker(
             .zip(queue_evts.into_iter().map(|e| {
                 EventAsync::new(e.0, &ex).expect("Failed to create async event for queue")
             }))
-            .map(|(queue, event)| {
+            .zip(stop_rxs.into_iter())
+            .map(|((queue, event), stop_rx)| {
                 handle_queue(
                     ex.clone(),
                     mem.clone(),
@@ -440,6 +581,7 @@ fn run_worker(
                     Rc::clone(&interrupt),
                     Rc::clone(&flush_timer),
                     Rc::clone(&flush_timer_armed),
+                    stop_rx,
                 )
             })
             .collect::<FuturesUnordered<_>>()
@@ -453,6 +595,9 @@ fn run_worker(
     // Exit if the kill event is triggered.
     let kill = async_utils::await_and_exit(&ex, kill_evt);
     pin_mut!(kill);
+
+    // Drop stop_txs when done (signals all queue handlers to stop).
+    let _stop_txs = stop_txs;
 
     match ex.run_until(select5(queue_handlers, disk_flush, control, resample, kill)) {
         Ok((_, flush_res, control_res, resample_res, _)) => {
@@ -474,6 +619,7 @@ fn run_worker(
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct BlockAsync {
     kill_evt: Option<Event>,
+    // Used in single-worker mode (worker_per_queue=false).
     worker_thread: Option<thread::JoinHandle<(Box<dyn ToAsyncDisk>, Option<Tube>)>>,
     disk_image: Option<Box<dyn ToAsyncDisk>>,
     disk_size: Arc<AtomicU64>,
@@ -484,6 +630,12 @@ pub struct BlockAsync {
     block_size: u32,
     id: Option<BlockId>,
     control_tube: Option<Tube>,
+    // Dynamic queue management fields.
+    queue_sizes: Vec<u16>,
+    worker_per_queue: bool,
+    // Map from worker key (queue index if worker_per_queue, else 0) to (thread, sender).
+    worker_threads: BTreeMap<usize, (thread::JoinHandle<()>, mpsc::UnboundedSender<WorkerCmd>)>,
+    activated_queues: BTreeSet<usize>,
 }
 
 impl BlockAsync {
@@ -496,6 +648,7 @@ impl BlockAsync {
         block_size: u32,
         id: Option<BlockId>,
         control_tube: Option<Tube>,
+        num_queues: Option<u16>,
     ) -> SysResult<BlockAsync> {
         if block_size % SECTOR_SIZE as u32 != 0 {
             error!(
@@ -513,7 +666,13 @@ impl BlockAsync {
             );
         }
 
-        let avail_features = build_avail_features(base_features, read_only, sparse, true);
+        let q_num = num_queues.unwrap_or(NUM_QUEUES);
+        let queue_sizes = vec![QUEUE_SIZE; q_num as usize];
+
+        // Enable worker_per_queue when multiple queues are requested and disk supports try_clone.
+        let worker_per_queue = q_num > 1 && disk_image.try_clone().is_ok();
+
+        let avail_features = build_avail_features(base_features, read_only, sparse, q_num > 1);
 
         let seg_max = get_seg_max(QUEUE_SIZE);
 
@@ -529,7 +688,86 @@ impl BlockAsync {
             block_size,
             id,
             control_tube,
+            queue_sizes,
+            worker_per_queue,
+            worker_threads: BTreeMap::new(),
+            activated_queues: BTreeSet::new(),
         })
+    }
+
+    /// Start (or reuse) a worker thread for the given queue index.
+    /// Returns the mpsc sender to communicate with the worker.
+    fn start_worker(
+        &mut self,
+        idx: usize,
+    ) -> Result<mpsc::UnboundedSender<WorkerCmd>, String> {
+        // In single-worker mode all queues share worker at key 0.
+        let key = if self.worker_per_queue { idx } else { 0 };
+
+        if let Some((_, tx)) = self.worker_threads.get(&key) {
+            return Ok(tx.clone());
+        }
+
+        // Get disk image: clone for per-queue workers, take for single worker.
+        let disk_image = if self.worker_per_queue {
+            self.disk_image
+                .as_ref()
+                .ok_or_else(|| "disk_image is None".to_string())?
+                .try_clone()
+                .map_err(|e| format!("try_clone failed: {}", e))?
+        } else {
+            self.disk_image
+                .take()
+                .ok_or_else(|| "disk_image is None".to_string())?
+        };
+
+        let (worker_tx, worker_rx) = mpsc::unbounded::<WorkerCmd>();
+        let read_only = self.read_only;
+        let sparse = self.sparse;
+        // Only the first worker (key=0) gets the id and control_tube.
+        let id = if key == 0 { self.id.take() } else { self.id.clone() };
+        let disk_size = self.disk_size.clone();
+        let control_tube = if key == 0 { self.control_tube.take() } else { None };
+        let kill_evt = self
+            .kill_evt
+            .as_ref()
+            .ok_or_else(|| "kill_evt is None".to_string())?
+            .try_clone()
+            .map_err(|e| format!("kill_evt clone failed: {}", e))?;
+
+        let worker_tx_clone = worker_tx.clone();
+        let handle = thread::Builder::new()
+            .name(format!("virtio_blk_{}", key))
+            .spawn(move || {
+                let ex = Executor::new().expect("Failed to create an executor");
+
+                let async_control = control_tube
+                    .map(|c| AsyncTube::new(&ex, c).expect("failed to create async tube"));
+                let async_image = match disk_image.to_async_disk(&ex) {
+                    Ok(d) => d,
+                    Err(e) => panic!("Failed to create async disk {}", e),
+                };
+                let disk_state = Rc::new(AsyncMutex::new(DiskState {
+                    disk_image: async_image,
+                    disk_size,
+                    read_only,
+                    sparse,
+                    id,
+                }));
+
+                if let Err(e) = ex.run_until(run_worker_dynamic(
+                    &ex,
+                    &disk_state,
+                    worker_rx,
+                    kill_evt,
+                )) {
+                    error!("virtio_blk worker {} error: {}", key, e);
+                }
+            })
+            .map_err(|e| format!("Failed to spawn virtio_blk worker {}: {}", key, e))?;
+
+        self.worker_threads.insert(key, (handle, worker_tx_clone.clone()));
+        Ok(worker_tx_clone)
     }
 
     // Execute a single block device request.
@@ -706,8 +944,14 @@ impl Drop for BlockAsync {
             let _ = kill_evt.write(1);
         }
 
+        // Join single-worker thread.
         if let Some(worker_thread) = self.worker_thread.take() {
             let _ = worker_thread.join();
+        }
+
+        // Join per-queue worker threads.
+        for (_, (handle, _)) in std::mem::take(&mut self.worker_threads) {
+            let _ = handle.join();
         }
     }
 }
@@ -736,13 +980,18 @@ impl VirtioDevice for BlockAsync {
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
-        QUEUE_SIZES
+        &self.queue_sizes
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let config_space = {
             let disk_size = self.disk_size.load(Ordering::Acquire);
-            build_config_space(disk_size, self.seg_max, self.block_size, NUM_QUEUES)
+            build_config_space(
+                disk_size,
+                self.seg_max,
+                self.block_size,
+                self.queue_sizes.len() as u16,
+            )
         };
         copy_config(data, 0, config_space.as_slice(), offset);
     }
@@ -754,6 +1003,12 @@ impl VirtioDevice for BlockAsync {
         queues: Vec<Queue>,
         queue_evts: Vec<Event>,
     ) {
+        if queues.len() != queue_evts.len() {
+            error!("virtio_blk: queues and queue_evts length mismatch");
+            return;
+        }
+
+        // Create kill event pair (used by both single-worker and per-queue paths).
         let (self_kill_evt, kill_evt) = match Event::new().and_then(|e| Ok((e.try_clone()?, e))) {
             Ok(v) => v,
             Err(e) => {
@@ -763,14 +1018,42 @@ impl VirtioDevice for BlockAsync {
         };
         self.kill_evt = Some(self_kill_evt);
 
-        let read_only = self.read_only;
-        let sparse = self.sparse;
-        let disk_size = self.disk_size.clone();
-        let id = self.id.take();
-        if let Some(disk_image) = self.disk_image.take() {
-            let control_tube = self.control_tube.take();
-            let worker_result =
-                thread::Builder::new()
+        if self.worker_per_queue {
+            // Per-queue worker mode: each queue gets its own worker thread.
+            // Wrap interrupt in Arc<Mutex<>> so it can be cloned across threads.
+            let interrupt_shared = Arc::new(Mutex::new(interrupt));
+            for (idx, (queue, evt)) in queues.into_iter().zip(queue_evts.into_iter()).enumerate() {
+                let worker_tx = match self.start_worker(idx) {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        error!("Failed to start worker for queue {}: {}", idx, e);
+                        return;
+                    }
+                };
+
+                // Clone the Arc (cheap) for each queue.
+                let intr_clone = Arc::clone(&interrupt_shared);
+
+                worker_tx
+                    .unbounded_send(WorkerCmd::StartQueue {
+                        index: idx,
+                        queue,
+                        evt,
+                        mem: mem.clone(),
+                        interrupt: intr_clone,
+                    })
+                    .expect("worker channel closed early");
+                self.activated_queues.insert(idx);
+            }
+        } else {
+            // Single-worker mode: all queues handled by one thread (original behavior).
+            let read_only = self.read_only;
+            let sparse = self.sparse;
+            let disk_size = self.disk_size.clone();
+            let id = self.id.take();
+            if let Some(disk_image) = self.disk_image.take() {
+                let control_tube = self.control_tube.take();
+                let worker_result = thread::Builder::new()
                     .name("virtio_blk".to_string())
                     .spawn(move || {
                         let ex = Executor::new().expect("Failed to create an executor");
@@ -811,19 +1094,21 @@ impl VirtioDevice for BlockAsync {
                         )
                     });
 
-            match worker_result {
-                Err(e) => {
-                    error!("failed to spawn virtio_blk worker: {}", e);
-                    return;
-                }
-                Ok(join_handle) => {
-                    self.worker_thread = Some(join_handle);
+                match worker_result {
+                    Err(e) => {
+                        error!("failed to spawn virtio_blk worker: {}", e);
+                        return;
+                    }
+                    Ok(join_handle) => {
+                        self.worker_thread = Some(join_handle);
+                    }
                 }
             }
         }
     }
 
     fn reset(&mut self) -> bool {
+        // Signal all workers to stop via kill_evt.
         if let Some(kill_evt) = self.kill_evt.take() {
             if kill_evt.write(1).is_err() {
                 error!("{}: failed to notify the kill event", self.debug_label());
@@ -831,6 +1116,13 @@ impl VirtioDevice for BlockAsync {
             }
         }
 
+        // Join per-queue worker threads.
+        for (_, (handle, _)) in std::mem::take(&mut self.worker_threads) {
+            let _ = handle.join();
+        }
+        self.activated_queues.clear();
+
+        // Join single-worker thread and recover resources.
         if let Some(worker_thread) = self.worker_thread.take() {
             match worker_thread.join() {
                 Err(_) => {
@@ -844,7 +1136,8 @@ impl VirtioDevice for BlockAsync {
                 }
             }
         }
-        false
+
+        true
     }
 }
 
@@ -875,7 +1168,7 @@ mod tests {
         f.set_len(0x1000).unwrap();
 
         let features = base_features(ProtectionType::Unprotected);
-        let b = BlockAsync::new(features, Box::new(f), true, false, 512, None, None).unwrap();
+        let b = BlockAsync::new(features, Box::new(f), true, false, 512, None, None, None).unwrap();
         let mut num_sectors = [0u8; 4];
         b.read_config(0, &mut num_sectors);
         // size is 0x1000, so num_sectors is 8 (4096/512).
@@ -895,7 +1188,7 @@ mod tests {
         f.set_len(0x1000).unwrap();
 
         let features = base_features(ProtectionType::Unprotected);
-        let b = BlockAsync::new(features, Box::new(f), true, false, 4096, None, None).unwrap();
+        let b = BlockAsync::new(features, Box::new(f), true, false, 4096, None, None, None).unwrap();
         let mut blk_size = [0u8; 4];
         b.read_config(20, &mut blk_size);
         // blk_size should be 4096 (0x1000).
@@ -912,7 +1205,7 @@ mod tests {
         {
             let f = File::create(&path).unwrap();
             let features = base_features(ProtectionType::Unprotected);
-            let b = BlockAsync::new(features, Box::new(f), false, true, 512, None, None).unwrap();
+            let b = BlockAsync::new(features, Box::new(f), false, true, 512, None, None, None).unwrap();
             // writable device should set VIRTIO_BLK_F_FLUSH + VIRTIO_BLK_F_DISCARD
             // + VIRTIO_BLK_F_WRITE_ZEROES + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE
             // + VIRTIO_BLK_F_SEG_MAX + VIRTIO_BLK_F_MQ + VIRTIO_RING_F_EVENT_IDX
@@ -923,10 +1216,7 @@ mod tests {
         {
             let f = File::create(&path).unwrap();
             let features = base_features(ProtectionType::Unprotected);
-            let b = BlockAsync::new(features, Box::new(f), false, false, 512, None, None).unwrap();
-            // read-only device should set VIRTIO_BLK_F_FLUSH and VIRTIO_BLK_F_RO
-            // + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE + VIRTIO_BLK_F_SEG_MAX
-            // + VIRTIO_BLK_F_MQ + VIRTIO_RING_F_EVENT_IDX
+            let b = BlockAsync::new(features, Box::new(f), false, false, 512, None, None, None).unwrap();
             assert_eq!(0x120005244, b.features());
         }
 
@@ -934,10 +1224,7 @@ mod tests {
         {
             let f = File::create(&path).unwrap();
             let features = base_features(ProtectionType::Unprotected);
-            let b = BlockAsync::new(features, Box::new(f), true, true, 512, None, None).unwrap();
-            // read-only device should set VIRTIO_BLK_F_FLUSH and VIRTIO_BLK_F_RO
-            // + VIRTIO_F_VERSION_1 + VIRTIO_BLK_F_BLK_SIZE + VIRTIO_BLK_F_SEG_MAX
-            // + VIRTIO_BLK_F_MQ + VIRTIO_RING_F_EVENT_IDX
+            let b = BlockAsync::new(features, Box::new(f), true, true, 512, None, None, None).unwrap();
             assert_eq!(0x120001264, b.features());
         }
     }

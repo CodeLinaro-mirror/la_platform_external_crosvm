@@ -142,11 +142,22 @@ pub trait ToAsyncDisk: DiskFile {
     /// converted to a non-`Send` AsyncDisk. The AsyncDisk can then be converted back and returned
     /// to the main device thread if the block device is destroyed or reset.
     fn to_async_disk(self: Box<Self>, ex: &Executor) -> Result<Box<dyn AsyncDisk>>;
+
+    /// Create a new `ToAsyncDisk` instance that shares the same underlying disk image.
+    /// Used for `worker_per_queue` mode where each worker thread needs its own file descriptor.
+    /// Returns `Err` by default; only `File`-backed disks support this.
+    fn try_clone(&self) -> Result<Box<dyn ToAsyncDisk>> {
+        Err(Error::ConversionNotSupported)
+    }
 }
 
 impl ToAsyncDisk for File {
     fn to_async_disk(self: Box<Self>, ex: &Executor) -> Result<Box<dyn AsyncDisk>> {
         Ok(Box::new(SingleFileDisk::new(*self, ex)?))
+    }
+
+    fn try_clone(&self) -> Result<Box<dyn ToAsyncDisk>> {
+        Ok(Box::new(File::try_clone(self).map_err(Error::ReadingData)?))
     }
 }
 

@@ -607,6 +607,39 @@ impl URingContext {
                 // Release store synchronizes with acquire load above.
                 self.in_flight.fetch_add(added, Ordering::Release);
             }
+            Err(libc::EINTR) => {
+                // io_uring_enter() was interrupted by a signal (e.g. the kernel process
+                // freezer suspending this thread while it blocks here waiting for
+                // completions, such as during PVM host-level suspend/resume). Per
+                // io_uring semantics, any sqes pointed to by the sq_tail we published
+                // were already submitted to the kernel before the signal arrived, so
+                // treat this the same as a successful submission rather than a fatal
+                // error. Failing to do so causes the worker thread driving this
+                // executor to exit (see run_worker_dynamic()/run_worker() callers),
+                // permanently orphaning any virtqueues it was servicing.
+                self.submit_ring.lock().complete_submit(added);
+                self.stats
+                    .total_ops
+                    .fetch_add(added as u64, Ordering::Relaxed);
+                self.in_flight.fetch_add(added, Ordering::Release);
+
+                if wait_nr != 0 {
+                    // We were interrupted while waiting for completions. Retry the wait
+                    // (without resubmitting any sqes) until a non-EINTR result is
+                    // returned.
+                    loop {
+                        let res = unsafe {
+                            // Safe because the only memory modified is in the completion queue.
+                            io_uring_enter(self.ring_file.as_raw_fd(), 0, wait_nr, flags)
+                        };
+                        match res {
+                            Ok(_) => break,
+                            Err(libc::EINTR) => continue,
+                            Err(e) => return Err(Error::RingEnter(e)),
+                        }
+                    }
+                }
+            }
             Err(e) => {
                 self.submit_ring.lock().fail_submit(added);
 

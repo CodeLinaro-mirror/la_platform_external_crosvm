@@ -9,7 +9,7 @@ use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
 
 use anyhow::{anyhow, bail, Context};
 use argh::FromArgs;
-use futures::future::{AbortHandle, Abortable};
+use futures::channel::oneshot;
 use sync::Mutex;
 use vmm_vhost::message::*;
 
@@ -42,7 +42,7 @@ pub(crate) struct BlockBackend {
     acked_protocol_features: VhostUserProtocolFeatures,
     flush_timer: Rc<RefCell<TimerAsync>>,
     flush_timer_armed: Rc<RefCell<bool>>,
-    workers: [Option<AbortHandle>; Self::MAX_QUEUE_NUM],
+    workers: [Option<oneshot::Sender<()>>; Self::MAX_QUEUE_NUM],
 }
 
 impl BlockBackend {
@@ -202,9 +202,9 @@ impl VhostUserBackend for BlockBackend {
         doorbell: Arc<Mutex<Doorbell>>,
         kick_evt: Event,
     ) -> anyhow::Result<()> {
-        if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
+        if let Some(stop_tx) = self.workers.get_mut(idx).and_then(Option::take) {
             warn!("Starting new queue handler without stopping old handler");
-            handle.abort();
+            let _ = stop_tx.send(());
         }
 
         // Enable any virtqueue features that were negotiated (like VIRTIO_RING_F_EVENT_IDX).
@@ -212,34 +212,32 @@ impl VhostUserBackend for BlockBackend {
 
         let kick_evt = EventAsync::new(kick_evt.0, &self.ex)
             .context("failed to create EventAsync for kick_evt")?;
-        let (handle, registration) = AbortHandle::new_pair();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
 
         let disk_state = Rc::clone(&self.disk_state);
         let timer = Rc::clone(&self.flush_timer);
         let timer_armed = Rc::clone(&self.flush_timer_armed);
         self.ex
-            .spawn_local(Abortable::new(
-                handle_queue(
-                    self.ex.clone(),
-                    mem,
-                    disk_state,
-                    Rc::new(RefCell::new(queue)),
-                    kick_evt,
-                    doorbell,
-                    timer,
-                    timer_armed,
-                ),
-                registration,
+            .spawn_local(handle_queue(
+                self.ex.clone(),
+                mem,
+                disk_state,
+                Rc::new(RefCell::new(queue)),
+                kick_evt,
+                doorbell,
+                timer,
+                timer_armed,
+                stop_rx,
             ))
             .detach();
 
-        self.workers[idx] = Some(handle);
+        self.workers[idx] = Some(stop_tx);
         Ok(())
     }
 
     fn stop_queue(&mut self, idx: usize) {
-        if let Some(handle) = self.workers.get_mut(idx).and_then(Option::take) {
-            handle.abort();
+        if let Some(stop_tx) = self.workers.get_mut(idx).and_then(Option::take) {
+            let _ = stop_tx.send(());
         }
     }
 }
