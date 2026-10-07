@@ -25,8 +25,8 @@ use base::Error as SysError;
 use base::Result as SysResult;
 use base::{error, info, warn, AsRawDescriptor, Event, RawDescriptor, Timer, Tube, TubeError};
 use cros_async::{
-    select5, sync::Mutex as AsyncMutex, AsyncError, AsyncTube, EventAsync, Executor, SelectResult,
-    TimerAsync,
+    block_on, select5, sync::Mutex as AsyncMutex, AsyncError, AsyncTube, EventAsync, Executor,
+    SelectResult, TimerAsync,
 };
 use data_model::DataInit;
 use disk::{AsyncDisk, ToAsyncDisk};
@@ -941,6 +941,8 @@ impl Drop for BlockAsync {
     fn drop(&mut self) {
         if let Some(kill_evt) = self.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
+            // Kept as a backstop for single-worker mode / in case a worker
+            // is still waiting on kill_evt instead of a WorkerCmd.
             let _ = kill_evt.write(1);
         }
 
@@ -949,8 +951,28 @@ impl Drop for BlockAsync {
             let _ = worker_thread.join();
         }
 
-        // Join per-queue worker threads.
-        for (_, (handle, _)) in std::mem::take(&mut self.worker_threads) {
+        // Ask each per-queue worker to abort its queues and exit its event
+        // loop, then synchronously wait for its acknowledgment before
+        // joining the thread. A single write(1) to a shared kill_evt can
+        // only wake ONE of the N worker threads polling the same underlying
+        // eventfd (non-EFD_SEMAPHORE semantics), so we signal each worker
+        // individually via its own WorkerCmd channel instead.
+        for (_key, (handle, worker_tx)) in std::mem::take(&mut self.worker_threads) {
+            let (response_tx, response_rx) = oneshot::channel::<()>();
+            // unbounded_send can fail if the worker already exited (e.g.
+            // due to a disk I/O error) and dropped its receiver. That's
+            // fine: skip waiting on the response and go straight to
+            // join(), which returns immediately for an already-terminated
+            // thread.
+            if worker_tx
+                .unbounded_send(WorkerCmd::AbortQueues { response_tx })
+                .is_ok()
+            {
+                // If the worker exits/panics before replying, response_tx
+                // is dropped and block_on resolves immediately with
+                // Err(Canceled) rather than hanging.
+                let _ = block_on(response_rx);
+            }
             let _ = handle.join();
         }
     }
@@ -1108,7 +1130,9 @@ impl VirtioDevice for BlockAsync {
     }
 
     fn reset(&mut self) -> bool {
-        // Signal all workers to stop via kill_evt.
+        // Signal all workers to stop via kill_evt. Kept as a backstop for
+        // single-worker mode / in case a worker is still waiting on
+        // kill_evt instead of a WorkerCmd.
         if let Some(kill_evt) = self.kill_evt.take() {
             if kill_evt.write(1).is_err() {
                 error!("{}: failed to notify the kill event", self.debug_label());
@@ -1116,8 +1140,30 @@ impl VirtioDevice for BlockAsync {
             }
         }
 
-        // Join per-queue worker threads.
-        for (_, (handle, _)) in std::mem::take(&mut self.worker_threads) {
+        // Ask each per-queue worker to abort its queues and exit its event
+        // loop, then synchronously wait (reset() is not async) for its
+        // acknowledgment before joining the thread. A single write(1) to a
+        // shared kill_evt can only wake ONE of the N worker threads polling
+        // the same underlying eventfd (non-EFD_SEMAPHORE semantics), so we
+        // signal each worker individually via its own WorkerCmd channel
+        // instead; this avoids reset() hanging in handle.join() when
+        // worker_per_queue is enabled (num_queues > 1).
+        for (_key, (handle, worker_tx)) in std::mem::take(&mut self.worker_threads) {
+            let (response_tx, response_rx) = oneshot::channel::<()>();
+            // unbounded_send can fail if the worker already exited (e.g.
+            // due to a disk I/O error) and dropped its receiver. That's
+            // fine: skip waiting on the response and go straight to
+            // join(), which returns immediately for an already-terminated
+            // thread.
+            if worker_tx
+                .unbounded_send(WorkerCmd::AbortQueues { response_tx })
+                .is_ok()
+            {
+                // If the worker exits/panics before replying, response_tx
+                // is dropped and block_on resolves immediately with
+                // Err(Canceled) rather than hanging.
+                let _ = block_on(response_rx);
+            }
             let _ = handle.join();
         }
         self.activated_queues.clear();
