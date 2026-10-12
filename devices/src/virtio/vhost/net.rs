@@ -18,7 +18,9 @@ use super::control_socket::*;
 use super::worker::Worker;
 use super::{Error, Result};
 use crate::pci::MsixStatus;
-use crate::virtio::{Interrupt, Queue, VirtioDevice, TYPE_NET};
+use crate::virtio::net::build_config_with_mac;
+use crate::virtio::{copy_config, Interrupt, Queue, VirtioDevice, TYPE_NET};
+use data_model::DataInit;
 
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 2;
@@ -29,6 +31,7 @@ pub struct Net<T: TapT, U: VhostNetT<T>> {
     kill_evt: Event,
     worker_thread: Option<thread::JoinHandle<(Worker<U>, T)>>,
     tap: Option<T>,
+    guest_mac: Option<[u8; 6]>,
     vhost_net_handle: Option<U>,
     vhost_interrupt: Option<Vec<Event>>,
     avail_features: u64,
@@ -50,6 +53,27 @@ where
         ip_addr: Ipv4Addr,
         netmask: Ipv4Addr,
         mac_addr: MacAddress,
+    ) -> Result<Net<T, U>> {
+        Self::new_with_mac(
+            vhost_net_device_path,
+            base_features,
+            ip_addr,
+            netmask,
+            mac_addr,
+            None,
+        )
+    }
+
+    /// Create a new virtio network device with the given IP address, netmask,
+    /// and an optional VM-advertised MAC address (sets VIRTIO_NET_F_MAC when
+    /// `vm_mac` is `Some`).
+    pub fn new_with_mac(
+        vhost_net_device_path: &Path,
+        base_features: u64,
+        ip_addr: Ipv4Addr,
+        netmask: Ipv4Addr,
+        mac_addr: MacAddress,
+        vm_mac: Option<MacAddress>,
     ) -> Result<Net<T, U>> {
         let kill_evt = Event::new().map_err(Error::CreateKillEvent)?;
 
@@ -73,7 +97,7 @@ where
         tap.enable().map_err(Error::TapEnable)?;
         let vhost_net_handle = U::new(vhost_net_device_path).map_err(Error::VhostOpen)?;
 
-        let avail_features = base_features
+        let mut avail_features = base_features
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO4
@@ -87,6 +111,10 @@ where
             | 1 << virtio_sys::vhost::VIRTIO_RING_F_EVENT_IDX
             | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY;
 
+        if vm_mac.is_some() {
+            avail_features |= 1 << virtio_net::VIRTIO_NET_F_MAC;
+        }
+
         let mut vhost_interrupt = Vec::new();
         for _ in 0..NUM_QUEUES {
             vhost_interrupt.push(Event::new().map_err(Error::VhostIrqCreate)?);
@@ -99,6 +127,7 @@ where
             kill_evt,
             worker_thread: None,
             tap: Some(tap),
+            guest_mac: vm_mac.map(|m| m.octets()),
             vhost_net_handle: Some(vhost_net_handle),
             vhost_interrupt: Some(vhost_interrupt),
             avail_features,
@@ -114,6 +143,29 @@ where
         ip_addr: Ipv4Addr,
         netmask: Ipv4Addr,
         mac_addr: MacAddress,
+        name: &[u8],
+    ) -> Result<Net<T, U>> {
+        Self::new_with_name_and_mac(
+            vhost_net_device_path,
+            base_features,
+            ip_addr,
+            netmask,
+            mac_addr,
+            None,
+            name,
+        )
+    }
+
+    /// Create a new virtio network device backed by a named tap device, with
+    /// an optional VM-advertised MAC address (sets VIRTIO_NET_F_MAC when
+    /// `vm_mac` is `Some`).
+    pub fn new_with_name_and_mac(
+        vhost_net_device_path: &Path,
+        base_features: u64,
+        ip_addr: Ipv4Addr,
+        netmask: Ipv4Addr,
+        mac_addr: MacAddress,
+        vm_mac: Option<MacAddress>,
         name: &[u8]
     ) -> Result<Net<T, U>> {
         let kill_evt = Event::new().map_err(Error::CreateKillEvent)?;
@@ -138,7 +190,7 @@ where
         tap.enable().map_err(Error::TapEnable)?;
         let vhost_net_handle = U::new(vhost_net_device_path).map_err(Error::VhostOpen)?;
 
-        let avail_features = base_features
+        let mut avail_features = base_features
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_CSUM
             | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO4
@@ -152,6 +204,10 @@ where
             | 1 << virtio_sys::vhost::VIRTIO_RING_F_EVENT_IDX
             | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY;
 
+        if vm_mac.is_some() {
+            avail_features |= 1 << virtio_net::VIRTIO_NET_F_MAC;
+        }
+
         let mut vhost_interrupt = Vec::new();
         for _ in 0..NUM_QUEUES {
             vhost_interrupt.push(Event::new().map_err(Error::VhostIrqCreate)?);
@@ -164,6 +220,70 @@ where
             kill_evt,
             worker_thread: None,
             tap: Some(tap),
+            guest_mac: vm_mac.map(|m| m.octets()),
+            vhost_net_handle: Some(vhost_net_handle),
+            vhost_interrupt: Some(vhost_interrupt),
+            avail_features,
+            acked_features: 0u64,
+            request_tube,
+            response_tube: Some(response_tube),
+        })
+    }
+
+    /// Creates a new virtio network device from a tap device that has already been
+    /// configured.
+    pub fn new_from_tap(
+        vhost_net_device_path: &Path,
+        base_features: u64,
+        tap: T,
+        mac_addr: Option<MacAddress>,
+    ) -> Result<Net<T, U>> {
+        let kill_evt = Event::new().map_err(Error::CreateKillEvent)?;
+
+        // Set offload flags to match the virtio features below.
+        tap.set_offload(
+            net_sys::TUN_F_CSUM | net_sys::TUN_F_UFO | net_sys::TUN_F_TSO4 | net_sys::TUN_F_TSO6,
+        )
+        .map_err(Error::TapSetOffload)?;
+
+        // We declare VIRTIO_NET_F_MRG_RXBUF, so set the vnet hdr size to match.
+        let vnet_hdr_size = mem::size_of::<virtio_net::virtio_net_hdr_mrg_rxbuf>() as i32;
+        tap.set_vnet_hdr_size(vnet_hdr_size)
+            .map_err(Error::TapSetVnetHdrSize)?;
+
+        let vhost_net_handle = U::new(vhost_net_device_path).map_err(Error::VhostOpen)?;
+
+        let mut avail_features = base_features
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
+            | 1 << virtio_net::VIRTIO_NET_F_CSUM
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_TSO6
+            | 1 << virtio_net::VIRTIO_NET_F_GUEST_UFO
+            | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO4
+            | 1 << virtio_net::VIRTIO_NET_F_HOST_TSO6
+            | 1 << virtio_net::VIRTIO_NET_F_HOST_UFO
+            | 1 << virtio_net::VIRTIO_NET_F_MRG_RXBUF
+            | 1 << virtio_sys::vhost::VIRTIO_RING_F_INDIRECT_DESC
+            | 1 << virtio_sys::vhost::VIRTIO_RING_F_EVENT_IDX
+            | 1 << virtio_sys::vhost::VIRTIO_F_NOTIFY_ON_EMPTY;
+
+        if mac_addr.is_some() {
+            avail_features |= 1 << virtio_net::VIRTIO_NET_F_MAC;
+        }
+
+        let mut vhost_interrupt = Vec::new();
+        for _ in 0..NUM_QUEUES {
+            vhost_interrupt.push(Event::new().map_err(Error::VhostIrqCreate)?);
+        }
+
+        let (request_tube, response_tube) = Tube::pair().map_err(Error::CreateTube)?;
+
+        Ok(Net {
+            workers_kill_evt: Some(kill_evt.try_clone().map_err(Error::CloneKillEvent)?),
+            kill_evt,
+            worker_thread: None,
+            tap: Some(tap),
+            guest_mac: mac_addr.map(|mac| mac.octets()),
             vhost_net_handle: Some(vhost_net_handle),
             vhost_interrupt: Some(vhost_interrupt),
             avail_features,
@@ -253,6 +373,13 @@ where
             v &= !unrequested_features;
         }
         self.acked_features |= v;
+    }
+
+    fn read_config(&self, offset: u64, data: &mut [u8]) {
+        let vq_pairs = QUEUE_SIZES.len() / 2;
+        // VIRTIO_NET_F_MTU is not set, so mtu=0.
+        let config_space = build_config_with_mac(vq_pairs as u16, /* mtu= */ 0, self.guest_mac);
+        copy_config(data, 0, config_space.as_slice(), offset);
     }
 
     fn activate(
@@ -466,7 +593,7 @@ pub mod tests {
     #[test]
     fn features() {
         let net = create_net_common();
-        assert_eq!(net.features(), 5117103235);
+        assert_eq!(net.features(), 5117103267);
     }
 
     #[test]
