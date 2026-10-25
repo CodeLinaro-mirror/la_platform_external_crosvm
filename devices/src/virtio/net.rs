@@ -469,7 +469,12 @@ where
 }
 
 pub fn build_config(vq_pairs: u16, mtu: u16) -> VirtioNetConfig {
+    build_config_with_mac(vq_pairs, mtu, None)
+}
+
+pub fn build_config_with_mac(vq_pairs: u16, mtu: u16, mac: Option<[u8; 6]>) -> VirtioNetConfig {
     VirtioNetConfig {
+        mac: mac.unwrap_or_default(),
         max_vq_pairs: Le16::from(vq_pairs),
         mtu: Le16::from(mtu),
         // Other field has meaningful value when the corresponding feature
